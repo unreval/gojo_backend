@@ -135,7 +135,7 @@ async def chat_text(data: dict):
     messages.append({"role": "user", "content": user_text})
 
     result = None
-    for attempt in range(3):
+    for attempt in range(5):  # 从3次增加到5次
         try:
             response = ds_client.chat.completions.create(
                 model="deepseek-chat",
@@ -146,9 +146,16 @@ async def chat_text(data: dict):
             raw = response.choices[0].message.content.strip()
             print(f"DeepSeek 原始返回（第{attempt+1}次）：{raw}")
             if raw:
-                result = json.loads(raw)
-                if result.get("jp"):
+                parsed = json.loads(raw)
+                jp = parsed.get("jp", "").strip()
+                zh = parsed.get("zh", "").strip()
+                emotion = parsed.get("emotion", "").strip()
+                # 三个字段都必须有内容才算成功
+                if jp and zh and emotion in EMOTIONS:
+                    result = parsed
                     break
+                else:
+                    print(f"第{attempt+1}次返回不完整，重试...")
         except Exception as e:
             print(f"第{attempt+1}次尝试失败：{e}")
 
