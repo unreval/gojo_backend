@@ -4,6 +4,9 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
+
+RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY Requirements.txt .
 RUN pip install -r Requirements.txt
 
