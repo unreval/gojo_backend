@@ -1,11 +1,14 @@
-import React, { useState, useRef } from 'react';
-import {
-  View, Text, TextInput, TouchableOpacity,
-  ScrollView, StyleSheet, ActivityIndicator,
-  KeyboardAvoidingView, Platform, Alert,
-} from 'react-native';
 import axios from 'axios';
 import { Audio } from 'expo-av';
+import React, { useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView, Platform,
+  ScrollView, StyleSheet,
+  Text, TextInput, TouchableOpacity,
+  View,
+} from 'react-native';
 
 const SERVER_URL = 'https://gojobackend-production-819d.up.railway.app';
 
@@ -69,9 +72,7 @@ export default function App() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={80}>
       <View style={[styles.header, { backgroundColor: EMOTION_COLORS[currentEmotion] || '#3A7CA5' }]}>
         <Text style={styles.headerTitle}>五条悟</Text>
         <Text style={styles.headerEmotion}>{EMOTION_LABELS[currentEmotion] || '😐 平静'}</Text>
