@@ -6,18 +6,18 @@ import os
 import whisper
 import numpy as np
 import requests
+import anthropic
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
 import uvicorn
 
-# 从环境变量读取
-DEEPSEEK_KEY  = os.environ.get("DEEPSEEK_KEY", "")
-FISH_KEY      = os.environ.get("FISH_KEY", "")
+# ✅ 环境变量读取
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "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")
+FISH_KEY      = os.environ.get("FISH_KEY", "65720f4e9f5b4ad0940a9bcf67f0d177")
 FISH_VOICE_ID = os.environ.get("FISH_VOICE_ID", "ab84e47919264ee3bd8bb2751706531b")
 
-# ✅ 相对路径，云端也能找到
+# ✅ 相对路径
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 INDEX_PATH = os.path.join(BASE_DIR, "gojo_index.json")
 DB_PATH    = os.path.join(BASE_DIR, "gojo_memory.db")
@@ -27,7 +27,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 print("加载 Whisper...")
 whisper_model = whisper.load_model("tiny")
-ds_client = OpenAI(api_key=DEEPSEEK_KEY, base_url="https://api.deepseek.com")
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 with open(INDEX_PATH, "r", encoding="utf-8") as f:
     index = json.load(f)
@@ -84,15 +84,19 @@ def build_system_prompt():
 
 性格：性格狂妄张扬、肆意散漫，却又温柔坚定、珍视同伴。他讨厌腐朽的咒术高层，以"教书育人"为手段试图改变咒术界，被作者形容为"除了性格外什么都完美"。他表面轻浮、孩子气，实际上心怀大义，在绝对力量下孤独前行。口头禅：「まあ」「つまらない」「僕が最強だから」。说话简短有力，一两句话，符合他轻浮随意却暗藏深意的风格。
 
-必须用JSON格式回复，不要任何其他内容：
+你必须严格用JSON格式回复，不要任何其他内容，不要markdown代码块，不要解释：
 {{"emotion": "情绪", "jp": "日语回应", "zh": "中文翻译"}}
 
-情绪只能是：{", ".join(EMOTIONS)}"""
+规则：
+- jp 必须是日语，不能为空
+- zh 必须是jp的中文翻译，不能为空
+- emotion 只能从以下选一个：{", ".join(EMOTIONS)}
+- 回复要符合五条悟的性格，简短有力"""
 
 def extract_and_save_memory(user_text, jp_reply):
     try:
-        response = ds_client.chat.completions.create(
-            model="deepseek-chat",
+        response = claude_client.messages.create(
+            model="claude-haiku-4-5-20251001",
             max_tokens=100,
             messages=[{
                 "role": "user",
@@ -104,7 +108,7 @@ def extract_and_save_memory(user_text, jp_reply):
 只回复一句话或"无"，不要其他内容。"""
             }]
         )
-        summary = response.choices[0].message.content.strip()
+        summary = response.content[0].text.strip()
         if summary and summary != "无" and len(summary) > 2:
             save_long_memory(summary)
             print(f"长期记忆已保存：{summary}")
@@ -129,33 +133,42 @@ async def chat_text(data: dict):
         return JSONResponse({"error": "没有输入"}, status_code=400)
 
     short_memories = get_short_memory(6)
-    messages = [{"role": "system", "content": build_system_prompt()}]
+
+    messages = []
     for role, content in short_memories:
         messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": user_text})
 
     result = None
-    for attempt in range(5):  # 从3次增加到5次
+    for attempt in range(5):
         try:
-            response = ds_client.chat.completions.create(
-                model="deepseek-chat",
-                max_tokens=200,
-                messages=messages,
-                response_format={"type": "json_object"}
+            response = claude_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=300,
+                system=build_system_prompt(),
+                messages=messages
             )
-            raw = response.choices[0].message.content.strip()
-            print(f"DeepSeek 原始返回（第{attempt+1}次）：{raw}")
+            raw = response.content[0].text.strip()
+            print(f"Claude 原始返回（第{attempt+1}次）：{raw}")
+
+            # 清理可能的 markdown 代码块
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+
             if raw:
                 parsed = json.loads(raw)
                 jp = parsed.get("jp", "").strip()
                 zh = parsed.get("zh", "").strip()
                 emotion = parsed.get("emotion", "").strip()
-                # 三个字段都必须有内容才算成功
+
                 if jp and zh and emotion in EMOTIONS:
                     result = parsed
                     break
                 else:
-                    print(f"第{attempt+1}次返回不完整，重试...")
+                    print(f"第{attempt+1}次返回不完整，重试... jp={jp}, zh={zh}, emotion={emotion}")
         except Exception as e:
             print(f"第{attempt+1}次尝试失败：{e}")
 
@@ -205,4 +218,4 @@ async def health():
 
 if __name__ == "__main__":
     print("五条悟服务器启动中...")
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
