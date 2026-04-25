@@ -41,3 +41,12 @@ app-example
 # generated native folders
 /ios
 /android
+
+.env
+gojo_memory.db
+node_modules/
+__pycache__/
+*.pyc
+temp_*.wav
+test_output.wav
+
