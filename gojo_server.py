@@ -188,7 +188,7 @@ async def chat_text(data: dict):
         try:
             response = claude_client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=300,
+                max_tokens=800,
                 system=build_system_prompt(user_id),
                 messages=messages
             )
