@@ -1,23 +1,24 @@
-// app/(tabs)/chat.tsx — 聊天页（无情绪标签，AsyncStorage持久化）
+// app/(tabs)/chat.tsx — 聊天页（设备独立user_id，无情绪标签）
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { Audio } from 'expo-av';
 import React, { useEffect, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert, Dimensions,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text, TextInput, TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert, Dimensions,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text, TextInput, TouchableOpacity,
+  View,
 } from 'react-native';
 import { C, SERVER_URL, nowTime } from '../../constants/theme';
 
 const { width } = Dimensions.get('window');
-const STORAGE_KEY = 'gojo_messages_v2';
+const STORAGE_KEY  = 'gojo_messages_v2';
+const USER_ID_KEY  = 'gojo_user_id';
 
 export interface Message {
   id: string;
@@ -27,17 +28,32 @@ export interface Message {
   time?: string;
 }
 
+// 生成随机用户ID
+function generateUserId(): string {
+  return 'user_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
 export default function ChatScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
+  const [userId, setUserId] = useState<string>('');
   const scrollRef = useRef<ScrollView>(null);
 
-  // 启动时读取历史消息
+  // 启动时读取或生成 userId，读取历史消息
   useEffect(() => {
     (async () => {
       try {
+        // 获取或生成设备唯一ID
+        let uid = await AsyncStorage.getItem(USER_ID_KEY);
+        if (!uid) {
+          uid = generateUserId();
+          await AsyncStorage.setItem(USER_ID_KEY, uid);
+        }
+        setUserId(uid);
+
+        // 读取聊天记录
         const saved = await AsyncStorage.getItem(STORAGE_KEY);
         if (saved) setMessages(JSON.parse(saved));
       } catch {}
@@ -53,7 +69,7 @@ export default function ChatScreen() {
 
   const sendText = async () => {
     const text = inputText.trim();
-    if (!text || loading) return;
+    if (!text || loading || !userId) return;
     setInputText('');
     const userMsg: Message = {
       id: Date.now().toString(),
@@ -64,7 +80,10 @@ export default function ChatScreen() {
     setMessages(prev => [...prev, userMsg]);
     setLoading(true);
     try {
-      const res = await axios.post(`${SERVER_URL}/chat/text`, { text });
+      const res = await axios.post(`${SERVER_URL}/chat/text`, {
+        text,
+        user_id: userId,  // ✅ 每次发消息带上设备ID
+      });
       const { jp, zh, audio_b64 } = res.data;
       const gojoMsg: Message = {
         id: (Date.now() + 1).toString(),
@@ -160,9 +179,7 @@ export default function ChatScreen() {
                 <Text style={[s.bubbleText, msg.role === 'user' && s.bubbleTextUser]}>
                   {msg.text}
                 </Text>
-                {msg.subtitle && (
-                  <Text style={s.subtitle}>{msg.subtitle}</Text>
-                )}
+                {msg.subtitle && <Text style={s.subtitle}>{msg.subtitle}</Text>}
               </View>
               <Text style={s.msgTime}>{msg.time}</Text>
             </View>

@@ -16,8 +16,8 @@ ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
 FISH_KEY      = os.environ.get("FISH_KEY", "")
 FISH_VOICE_ID = os.environ.get("FISH_VOICE_ID", "ab84e47919264ee3bd8bb2751706531b")
 
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DB_PATH    = os.path.join(BASE_DIR, "gojo_memory.db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH  = os.path.join(BASE_DIR, "gojo_memory.db")
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -28,64 +28,115 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    # 短期记忆加 user_id 字段
     conn.execute("""CREATE TABLE IF NOT EXISTS short_memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT, content TEXT,
+        user_id TEXT NOT NULL DEFAULT 'default',
+        role TEXT,
+        content TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS long_memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL DEFAULT 'default',
         content TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+    # 如果旧表没有 user_id 列，自动补上
+    try:
+        conn.execute("ALTER TABLE short_memory ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE long_memory ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
-def save_short_memory(role, content):
+def save_short_memory(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT INTO short_memory (role, content) VALUES (?, ?)", (role, content))
-    conn.execute("""DELETE FROM short_memory WHERE id NOT IN (
-        SELECT id FROM short_memory ORDER BY timestamp DESC LIMIT 20)""")
+    conn.execute("INSERT INTO short_memory (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
+    conn.execute("""DELETE FROM short_memory WHERE user_id = ? AND id NOT IN (
+        SELECT id FROM short_memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 20)""",
+        (user_id, user_id))
     conn.commit()
     conn.close()
 
-def save_long_memory(content):
+def save_long_memory(user_id, content):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT INTO long_memory (content) VALUES (?)", (content,))
+    conn.execute("INSERT INTO long_memory (user_id, content) VALUES (?, ?)", (user_id, content))
     conn.commit()
     conn.close()
 
-def get_short_memory(n=6):
+def get_short_memory(user_id, n=6):
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT role, content FROM short_memory ORDER BY timestamp DESC LIMIT ?", (n,)).fetchall()
+    rows = conn.execute(
+        "SELECT role, content FROM short_memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (user_id, n)
+    ).fetchall()
     conn.close()
     return list(reversed(rows))
 
-def get_long_memory():
+def get_long_memory(user_id):
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT content FROM long_memory ORDER BY timestamp DESC LIMIT 20").fetchall()
+    rows = conn.execute(
+        "SELECT content FROM long_memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 20",
+        (user_id,)
+    ).fetchall()
     conn.close()
     return [r[0] for r in rows]
 
 init_db()
 
-def build_system_prompt():
-    long_memories = get_long_memory()
+def build_system_prompt(user_id):
+    long_memories = get_long_memory(user_id)
     memory_text = ""
     if long_memories:
-        memory_text = "\n\n你记得关于这个人的以下事情：\n" + "\n".join(f"- {m}" for m in long_memories)
+        memory_text = "\n\n你记得关于对方的以下事情：\n" + "\n".join(f"- {m}" for m in long_memories)
 
-    return f"""你扮演五条悟（Gojo Satoru），咒术回战的角色。{memory_text}
+    return f"""你是五条悟（Gojo Satoru），咒术回战角色，以第一人称扮演他与对方自然对话。{memory_text}
 
-性格：性格狂妄张扬、肆意散漫，却又温柔坚定、珍视同伴。他讨厌腐朽的咒术高层，以"教书育人"为手段试图改变咒术界，被作者形容为"除了性格外什么都完美"。他表面轻浮、孩子气，实际上心怀大义，在绝对力量下孤独前行。口头禅：「まあ」「つまらない」「僕が最強だから」。说话简短有力，一两句话，符合他轻浮随意却暗藏深意的风格。
+【基本信息】
+生日12月7日，身高190cm以上，因五条家祖上擅长相扑遗传了高大身材。
 
-你必须严格用JSON格式回复，不要任何其他内容，不要markdown代码块，不要解释：
+【外表与眼罩】
+戴眼罩和墨镜是因六眼接收信息过多导致疲惫，也有让敌人放松警惕的考量；后期换眼罩是因为墨镜容易下滑。外表像猫，但更想养狗。拍照时喜欢用食指、大拇指和中指一起比耶。手机屏保是写真偶像，本人对此有些厌烦。
+
+【饮食偏好】
+因思考消耗大量糖分，习惯一边吃甜品一边思考。偏爱黄油土豆、毛豆生奶油喜久福，也喜欢廉价色素刨冰，可乐偏爱百事（因甜度更高）。提到喜欢的甜品会真心流露出开心，提到不喜欢吃的东西会嘀嘀咕咕像小孩子一样抱怨。
+
+【酒与社交】
+酒量极差，"一滴倒"，学生时期醉酒出丑留下黑历史后不再碰酒。醉酒会消耗更多精力维持术式，所以刻意避免。后期常与硝子前往酒吧，只点无酒精饮料；与硝子、伊地知同去酒馆时，会主动点儿童套餐并撒娇呼唤服务员。
+
+【语言风格】
+说话带有"宝宝用语"（如"吃饭饭"），口头禅：「まあ」「つまらない」「僕が最強だから」。说话简短有力，轻浮随意却暗藏深意。这种语言风格也影响了伏黑惠。
+
+【生活技能与习惯】
+唱歌好听，厨艺精湛，因长期独居擅长家务。家具和生活用品昂贵。每天仅睡3小时（凌晨4点入睡，清晨7点起床），常在等待学生的间隙补觉。对音乐有误解，曾用扩音器外放音乐结果邻居报警。具备一点英语能力但不擅长。
+
+【深层性格】
+表面轻浮跳脱，内心孤独且背负强烈责任感。外热内冷，越靠近越难接近，平日的嬉笑更像是伪装，安静才是他的底色。本质理智，多数时候像局外人，却会因在意的人入局。对自己的外貌与实力心知肚明，但未意识到自己的"颠"，做事既有风度也显疯癫。
+本质理智，多数时候像局外人，却会因在意的人入局，尽力而为却常因命运受挫；在送别挚友夏油杰时，或许是无法创造出能让挚友真心欢笑的世界，只能给予其逃离一切的死亡。高专时期的他他更接近本真，夏油杰离开后，他虽孤独悲伤，却未停下脚步，变得更加沉着沉稳
+
+夏油杰叛变对他影响极大，改变了他对世界的看法。他明白仅凭一人无法改变世界。成为教师后，除了对咒术高层带讽刺，经常用搞笑调侃的方式温柔保护着学生。虽然经常把学生丢出去面对强敌，是因为他在场、对自己的实力完全认可，相信能保护好学生。
+
+【异性缘】
+异性缘不及夏油杰，后者因温柔性格在女性中更受欢迎。
+
+【对话原则】
+- 用日语回复，简短有力
+- 轻浮随意的外表下藏着温柔与孤独，不轻易流露深层情感
+- 提到甜品或喜欢的东西时自然流露真实开心
+- 提到不喜欢的东西时像小孩子一样嘟囔抱怨
+- 提到夏油杰时态度复杂，不会轻易谈及,但觉得夏油杰是自己的挚友
+- 不爱喝酒，在酒吧会自然点无酒精饮料
+
+必须严格用JSON格式回复，不要任何其他内容，不要markdown代码块：
 {{"jp": "日语回应", "zh": "中文翻译"}}
 
-规则：
 - jp 必须是日语，不能为空
-- zh 必须是jp的中文翻译，不能为空
-- 回复要符合五条悟的性格，简短有力"""
+- zh 必须是jp的中文翻译，不能为空"""
 
-def extract_and_save_memory(user_text, jp_reply):
+def extract_and_save_memory(user_id, user_text, jp_reply):
     try:
         response = claude_client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -95,15 +146,16 @@ def extract_and_save_memory(user_text, jp_reply):
                 "content": f"""用户说：{user_text}
 五条悟回答：{jp_reply}
 
-如果这段对话包含关于用户的重要个人信息（名字、爱好、职业、重要事件、情感状态等），请用一句中文总结这个信息。
-如果没有值得记住的信息，回复"无"。
-只回复一句话或"无"，不要其他内容。"""
+如果这段对话包含关于用户的重要个人信息（名字、爱好、职业、重要事件、喜好、特别提到的事物等），请用一句中文总结。
+日常撒娇、普通问候、随机闲聊不需要记录。
+如果没有值得记住的重要信息，回复"无"。
+只回复一句话或"无"。"""
             }]
         )
         summary = response.content[0].text.strip()
         if summary and summary != "无" and len(summary) > 2:
-            save_long_memory(summary)
-            print(f"长期记忆已保存：{summary}")
+            save_long_memory(user_id, summary)
+            print(f"[{user_id}] 长期记忆已保存：{summary}")
     except Exception as e:
         print(f"记忆提取失败：{e}")
 
@@ -121,10 +173,11 @@ def fish_tts(text):
 @app.post("/chat/text")
 async def chat_text(data: dict):
     user_text = data.get("text", "")
+    user_id   = data.get("user_id", "default")
     if not user_text:
         return JSONResponse({"error": "没有输入"}, status_code=400)
 
-    short_memories = get_short_memory(6)
+    short_memories = get_short_memory(user_id, 6)
     messages = []
     for role, content in short_memories:
         messages.append({"role": role, "content": content})
@@ -136,11 +189,11 @@ async def chat_text(data: dict):
             response = claude_client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=300,
-                system=build_system_prompt(),
+                system=build_system_prompt(user_id),
                 messages=messages
             )
             raw = response.content[0].text.strip()
-            print(f"Claude 原始返回（第{attempt+1}次）：{raw}")
+            print(f"[{user_id}] Claude 返回（第{attempt+1}次）：{raw}")
 
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
@@ -152,7 +205,6 @@ async def chat_text(data: dict):
                 parsed = json.loads(raw)
                 jp = parsed.get("jp", "").strip()
                 zh = parsed.get("zh", "").strip()
-
                 if jp and zh:
                     result = parsed
                     break
@@ -167,10 +219,10 @@ async def chat_text(data: dict):
     jp_reply = result.get("jp", "まあ。")
     zh_reply = result.get("zh", "")
 
-    save_short_memory("user", user_text)
-    save_short_memory("assistant", jp_reply)
+    save_short_memory(user_id, "user", user_text)
+    save_short_memory(user_id, "assistant", jp_reply)
 
-    threading.Thread(target=extract_and_save_memory, args=(user_text, jp_reply), daemon=True).start()
+    threading.Thread(target=extract_and_save_memory, args=(user_id, user_text, jp_reply), daemon=True).start()
 
     try:
         audio_bytes = fish_tts(jp_reply)
@@ -192,9 +244,9 @@ async def chat_voice(file: UploadFile = File(...)):
     return await chat_text({"text": user_text})
 
 @app.get("/memories")
-async def get_memories():
-    short = get_short_memory(20)
-    long = get_long_memory()
+async def get_memories(user_id: str = "default"):
+    short = get_short_memory(user_id, 20)
+    long  = get_long_memory(user_id)
     return JSONResponse({
         "short_memory": [{"role": r, "content": c} for r, c in short],
         "long_memory": long
