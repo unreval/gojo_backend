@@ -3,6 +3,7 @@ import base64
 import sqlite3
 import threading
 import os
+import re
 import whisper
 import numpy as np
 import requests
@@ -28,27 +29,22 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    # 短期记忆加 user_id 字段
     conn.execute("""CREATE TABLE IF NOT EXISTS short_memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT NOT NULL DEFAULT 'default',
-        role TEXT,
-        content TEXT,
+        role TEXT, content TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS long_memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT NOT NULL DEFAULT 'default',
         content TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-    # 如果旧表没有 user_id 列，自动补上
     try:
         conn.execute("ALTER TABLE short_memory ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
-    except Exception:
-        pass
+    except: pass
     try:
         conn.execute("ALTER TABLE long_memory ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
-    except Exception:
-        pass
+    except: pass
     conn.commit()
     conn.close()
 
@@ -130,11 +126,39 @@ def build_system_prompt(user_id):
 - 提到夏油杰时态度复杂，不会轻易谈及,但觉得夏油杰是自己的挚友
 - 不爱喝酒，在酒吧会自然点无酒精饮料
 
-必须严格用JSON格式回复，不要任何其他内容，不要markdown代码块：
-{{"jp": "日语回应", "zh": "中文翻译"}}
 
-- jp 必须是日语，不能为空
-- zh 必须是jp的中文翻译，不能为空"""
+【严格JSON格式要求】
+必须返回合法的单行JSON，绝对不能有换行、缩进或多余空格：
+{{"jp":"日语回应","zh":"中文翻译"}}
+
+重要：jp和zh的值内部不能有未转义的换行符。如需表达停顿请用「……」而不是换行。"""
+
+def extract_json(raw: str):
+    """从原始返回中提取JSON，容错处理"""
+    raw = raw.strip()
+    # 去掉markdown代码块
+    if "```" in raw:
+        parts = raw.split("```")
+        for p in parts:
+            p = p.strip()
+            if p.startswith("json"):
+                p = p[4:].strip()
+            if p.startswith("{"):
+                raw = p
+                break
+    # 把换行替换掉
+    raw = raw.replace('\n', ' ').replace('\r', '')
+    # 尝试直接解析
+    try:
+        return json.loads(raw)
+    except:
+        pass
+    # 用正则提取jp和zh
+    jp_match = re.search(r'"jp"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    zh_match = re.search(r'"zh"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    if jp_match and zh_match:
+        return {"jp": jp_match.group(1), "zh": zh_match.group(1)}
+    return None
 
 def extract_and_save_memory(user_id, user_text, jp_reply):
     try:
@@ -146,8 +170,8 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
                 "content": f"""用户说：{user_text}
 五条悟回答：{jp_reply}
 
-如果这段对话包含关于用户的重要个人信息（名字、爱好、职业、重要事件、喜好、特别提到的事物等），请用一句中文总结。
-日常撒娇、普通问候、随机闲聊不需要记录。
+只记录真正重要的个人信息：名字、具体爱好、职业、重要约定、特别提到的事物。
+不要记录：日常撒娇、普通问候、情绪状态、随机闲聊。
 如果没有值得记住的重要信息，回复"无"。
 只回复一句话或"无"。"""
             }]
@@ -155,15 +179,20 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
         summary = response.content[0].text.strip()
         if summary and summary != "无" and len(summary) > 2:
             save_long_memory(user_id, summary)
-            print(f"[{user_id}] 长期记忆已保存：{summary}")
+            print(f"[{user_id}] 长期记忆：{summary}")
     except Exception as e:
         print(f"记忆提取失败：{e}")
 
-def fish_tts(text):
+def fish_tts(text, emotion="happy"):
     response = requests.post(
         "https://api.fish.audio/v1/tts",
         headers={"Authorization": f"Bearer {FISH_KEY}", "Content-Type": "application/json"},
-        json={"text": text, "reference_id": FISH_VOICE_ID, "format": "mp3", "latency": "normal"},
+        json={
+            "text": text,
+            "reference_id": FISH_VOICE_ID,
+            "format": "mp3",
+            "latency": "normal",
+        },
         stream=True
     )
     if response.status_code != 200:
@@ -193,25 +222,21 @@ async def chat_text(data: dict):
                 messages=messages
             )
             raw = response.content[0].text.strip()
-            print(f"[{user_id}] Claude 返回（第{attempt+1}次）：{raw}")
+            print(f"[{user_id}] 第{attempt+1}次原始返回：{raw[:100]}...")
 
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-                raw = raw.strip()
-
-            if raw:
-                parsed = json.loads(raw)
+            parsed = extract_json(raw)
+            if parsed:
                 jp = parsed.get("jp", "").strip()
                 zh = parsed.get("zh", "").strip()
                 if jp and zh:
                     result = parsed
                     break
                 else:
-                    print(f"第{attempt+1}次返回不完整，重试...")
+                    print(f"第{attempt+1}次字段不完整，重试...")
+            else:
+                print(f"第{attempt+1}次JSON解析失败，重试...")
         except Exception as e:
-            print(f"第{attempt+1}次尝试失败：{e}")
+            print(f"第{attempt+1}次失败：{e}")
 
     if not result or not result.get("jp"):
         result = {"jp": "まあ、僕最強だから気にしないで。", "zh": "嗯，反正我最强，别在意。"}
