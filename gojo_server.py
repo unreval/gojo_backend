@@ -12,14 +12,11 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-# ✅ 环境变量读取
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "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")
-FISH_KEY      = os.environ.get("FISH_KEY", "65720f4e9f5b4ad0940a9bcf67f0d177")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
+FISH_KEY      = os.environ.get("FISH_KEY", "")
 FISH_VOICE_ID = os.environ.get("FISH_VOICE_ID", "ab84e47919264ee3bd8bb2751706531b")
 
-# ✅ 相对路径
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-INDEX_PATH = os.path.join(BASE_DIR, "gojo_index.json")
 DB_PATH    = os.path.join(BASE_DIR, "gojo_memory.db")
 
 app = FastAPI()
@@ -28,10 +25,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 print("加载 Whisper...")
 whisper_model = whisper.load_model("tiny")
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-with open(INDEX_PATH, "r", encoding="utf-8") as f:
-    index = json.load(f)
-EMOTIONS = list(index.keys())
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -85,12 +78,11 @@ def build_system_prompt():
 性格：性格狂妄张扬、肆意散漫，却又温柔坚定、珍视同伴。他讨厌腐朽的咒术高层，以"教书育人"为手段试图改变咒术界，被作者形容为"除了性格外什么都完美"。他表面轻浮、孩子气，实际上心怀大义，在绝对力量下孤独前行。口头禅：「まあ」「つまらない」「僕が最強だから」。说话简短有力，一两句话，符合他轻浮随意却暗藏深意的风格。
 
 你必须严格用JSON格式回复，不要任何其他内容，不要markdown代码块，不要解释：
-{{"emotion": "情绪", "jp": "日语回应", "zh": "中文翻译"}}
+{{"jp": "日语回应", "zh": "中文翻译"}}
 
 规则：
 - jp 必须是日语，不能为空
 - zh 必须是jp的中文翻译，不能为空
-- emotion 只能从以下选一个：{", ".join(EMOTIONS)}
 - 回复要符合五条悟的性格，简短有力"""
 
 def extract_and_save_memory(user_text, jp_reply):
@@ -133,7 +125,6 @@ async def chat_text(data: dict):
         return JSONResponse({"error": "没有输入"}, status_code=400)
 
     short_memories = get_short_memory(6)
-
     messages = []
     for role, content in short_memories:
         messages.append({"role": role, "content": content})
@@ -151,7 +142,6 @@ async def chat_text(data: dict):
             raw = response.content[0].text.strip()
             print(f"Claude 原始返回（第{attempt+1}次）：{raw}")
 
-            # 清理可能的 markdown 代码块
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
@@ -162,20 +152,18 @@ async def chat_text(data: dict):
                 parsed = json.loads(raw)
                 jp = parsed.get("jp", "").strip()
                 zh = parsed.get("zh", "").strip()
-                emotion = parsed.get("emotion", "").strip()
 
-                if jp and zh and emotion in EMOTIONS:
+                if jp and zh:
                     result = parsed
                     break
                 else:
-                    print(f"第{attempt+1}次返回不完整，重试... jp={jp}, zh={zh}, emotion={emotion}")
+                    print(f"第{attempt+1}次返回不完整，重试...")
         except Exception as e:
             print(f"第{attempt+1}次尝试失败：{e}")
 
     if not result or not result.get("jp"):
-        result = {"emotion": "调皮", "jp": "まあ、僕最強だから気にしないで。", "zh": "嗯，反正我最强，别在意。"}
+        result = {"jp": "まあ、僕最強だから気にしないで。", "zh": "嗯，反正我最强，别在意。"}
 
-    emotion = result.get("emotion", "调皮")
     jp_reply = result.get("jp", "まあ。")
     zh_reply = result.get("zh", "")
 
@@ -191,7 +179,7 @@ async def chat_text(data: dict):
         print(f"TTS 错误: {e}")
         audio_b64 = ""
 
-    return JSONResponse({"emotion": emotion, "jp": jp_reply, "zh": zh_reply, "audio_b64": audio_b64})
+    return JSONResponse({"jp": jp_reply, "zh": zh_reply, "audio_b64": audio_b64})
 
 @app.post("/chat/voice")
 async def chat_voice(file: UploadFile = File(...)):
