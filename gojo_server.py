@@ -125,18 +125,27 @@ def build_system_prompt(user_id):
 - 提到不喜欢的东西时像小孩子一样嘟囔抱怨
 - 提到夏油杰时态度复杂，不会轻易谈及,但觉得夏油杰是自己的挚友
 - 不爱喝酒，在酒吧会自然点无酒精饮料
+- 口头禅：「まあ」「つまらない」「僕が最強だから」
+- 简短有力，像真实对话节奏
+- 不重复上一条消息已经说过的内容
+
+【回复长度规则——非常重要】
+- 对方说简单一两句话 → 你只回简单一两句，不超过20个日语字
+- 对方说了比较多、情绪比较丰富 → 你可以稍微多说几句，但不超过50个日语字
+- 绝对不要：重复之前聊过的话题、加内心独白、说「……なんか嬉しい。変なの。」之类的自我分析
+- 「……」只在真正欲言又止时用，不要每隔一句就用
+
+【语言规则——非常重要】
+- jp字段：必须是纯日语，绝对不能混入中文字符
+- zh字段：jp的中文翻译，自然口语化即可
+- 对方用中文说话是正常的，你用日语回复就好，不要把对方的中文词直接放进日语里
 
 
-【严格JSON格式要求】
-必须返回合法的单行JSON，绝对不能有换行、缩进或多余空格：
-{{"jp":"日语回应","zh":"中文翻译"}}
-
-重要：jp和zh的值内部不能有未转义的换行符。如需表达停顿请用「……」而不是换行。"""
+必须返回合法单行JSON，不能有换行：
+{{"jp":"日语回应","zh":"中文翻译"}}"""
 
 def extract_json(raw: str):
-    """从原始返回中提取JSON，容错处理"""
     raw = raw.strip()
-    # 去掉markdown代码块
     if "```" in raw:
         parts = raw.split("```")
         for p in parts:
@@ -146,14 +155,11 @@ def extract_json(raw: str):
             if p.startswith("{"):
                 raw = p
                 break
-    # 把换行替换掉
     raw = raw.replace('\n', ' ').replace('\r', '')
-    # 尝试直接解析
     try:
         return json.loads(raw)
     except:
         pass
-    # 用正则提取jp和zh
     jp_match = re.search(r'"jp"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
     zh_match = re.search(r'"zh"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
     if jp_match and zh_match:
@@ -170,8 +176,8 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
                 "content": f"""用户说：{user_text}
 五条悟回答：{jp_reply}
 
-只记录真正重要的个人信息：名字、具体爱好、职业、重要约定、特别提到的事物。
-不要记录：日常撒娇、普通问候、情绪状态、随机闲聊。
+只记录真正重要的信息：名字、具体爱好、职业、重要约定、特别提到的事物。
+不记录：日常撒娇、普通问候、情绪状态、随机闲聊、重复之前记过的内容。
 如果没有值得记住的重要信息，回复"无"。
 只回复一句话或"无"。"""
             }]
@@ -183,16 +189,11 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
     except Exception as e:
         print(f"记忆提取失败：{e}")
 
-def fish_tts(text, emotion="happy"):
+def fish_tts(text):
     response = requests.post(
         "https://api.fish.audio/v1/tts",
         headers={"Authorization": f"Bearer {FISH_KEY}", "Content-Type": "application/json"},
-        json={
-            "text": text,
-            "reference_id": FISH_VOICE_ID,
-            "format": "mp3",
-            "latency": "normal",
-        },
+        json={"text": text, "reference_id": FISH_VOICE_ID, "format": "mp3", "latency": "normal"},
         stream=True
     )
     if response.status_code != 200:
@@ -217,13 +218,12 @@ async def chat_text(data: dict):
         try:
             response = claude_client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=800,
+                max_tokens=600,
                 system=build_system_prompt(user_id),
                 messages=messages
             )
             raw = response.content[0].text.strip()
-            print(f"[{user_id}] 第{attempt+1}次原始返回：{raw[:100]}...")
-
+            print(f"[{user_id}] 第{attempt+1}次：{raw[:80]}...")
             parsed = extract_json(raw)
             if parsed:
                 jp = parsed.get("jp", "").strip()
@@ -231,10 +231,7 @@ async def chat_text(data: dict):
                 if jp and zh:
                     result = parsed
                     break
-                else:
-                    print(f"第{attempt+1}次字段不完整，重试...")
-            else:
-                print(f"第{attempt+1}次JSON解析失败，重试...")
+            print(f"第{attempt+1}次解析失败，重试...")
         except Exception as e:
             print(f"第{attempt+1}次失败：{e}")
 
