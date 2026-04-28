@@ -40,12 +40,21 @@ export default function ChatScreen() {
   const [ready, setReady] = useState(false);
   const [userId, setUserId] = useState<string>('');
   const scrollRef = useRef<ScrollView>(null);
+  const currentSoundRef = useRef<Audio.Sound | null>(null);
 
-  // 启动时读取或生成 userId，读取历史消息
+  // 启动时配置音频模式 + 读取/生成 userId + 读取历史消息
   useEffect(() => {
     (async () => {
       try {
-        // 获取或生成设备唯一ID
+        // ✅ 关键：配置音频模式，否则部分手机静音键开着或后台时播不出来
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false,
+        });
+
         let uid = await AsyncStorage.getItem(USER_ID_KEY);
         if (!uid) {
           uid = generateUserId();
@@ -53,19 +62,54 @@ export default function ChatScreen() {
         }
         setUserId(uid);
 
-        // 读取聊天记录
         const saved = await AsyncStorage.getItem(STORAGE_KEY);
         if (saved) setMessages(JSON.parse(saved));
-      } catch {}
+      } catch (e) {
+        console.warn('init error', e);
+      }
       setReady(true);
     })();
+
+    // 卸载时清理音频
+    return () => {
+      currentSoundRef.current?.unloadAsync().catch(() => {});
+    };
   }, []);
 
-  // 消息变化时保存
   useEffect(() => {
     if (!ready) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
   }, [messages, ready]);
+
+  const playAudio = async (audio_b64: string) => {
+    // 释放上一段音频，避免叠播或资源泄漏
+    try {
+      if (currentSoundRef.current) {
+        await currentSoundRef.current.unloadAsync();
+        currentSoundRef.current = null;
+      }
+    } catch {}
+
+    try {
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: `data:audio/mp3;base64,${audio_b64}` },
+        { shouldPlay: true, volume: 1.0 }
+      );
+      currentSoundRef.current = sound;
+
+      // 播完自动卸载
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          sound.unloadAsync().catch(() => {});
+          if (currentSoundRef.current === sound) currentSoundRef.current = null;
+        }
+      });
+    } catch (e: any) {
+      // ✅ 不再静默吞错误：弹个 toast 让用户能看到
+      console.error('播放失败', e);
+      Alert.alert('语音播放失败', e?.message ?? '未知错误');
+    }
+  };
 
   const sendText = async () => {
     const text = inputText.trim();
@@ -82,7 +126,7 @@ export default function ChatScreen() {
     try {
       const res = await axios.post(`${SERVER_URL}/chat/text`, {
         text,
-        user_id: userId,  // ✅ 每次发消息带上设备ID
+        user_id: userId,
       });
       const { jp, zh, audio_b64 } = res.data;
       const gojoMsg: Message = {
@@ -93,16 +137,14 @@ export default function ChatScreen() {
         time: nowTime(),
       };
       setMessages(prev => [...prev, gojoMsg]);
-      if (audio_b64) {
-        try {
-          const { sound } = await Audio.Sound.createAsync({
-            uri: `data:audio/mp3;base64,${audio_b64}`,
-          });
-          await sound.playAsync();
-        } catch {}
+      if (audio_b64 && audio_b64.length > 100) {
+        await playAudio(audio_b64);
+      } else {
+        console.warn('audio_b64 缺失或异常', { len: audio_b64?.length });
       }
-    } catch {
-      Alert.alert('连接失败', '请确认服务器正常运行');
+    } catch (e: any) {
+      console.error('请求失败', e);
+      Alert.alert('连接失败', e?.message ?? '请确认服务器正常运行');
     } finally {
       setLoading(false);
     }
