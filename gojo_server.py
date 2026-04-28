@@ -20,6 +20,24 @@ FISH_VOICE_ID = os.environ.get("FISH_VOICE_ID", "ab84e47919264ee3bd8bb2751706531
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH  = os.path.join(BASE_DIR, "gojo_memory.db")
 
+# ===== 情绪 → Fish Audio 标签映射 =====
+# 11 个中文情绪映射到 Fish Audio 支持的英文情绪标签
+# 标签会被嵌入到文本前面引导 TTS 语气
+EMOTION_TAGS = {
+    "平静": "(calm)",
+    "自信": "(confident)",
+    "嘲讽": "(sarcastic, mocking)",
+    "开心": "(excited, happy)",
+    "激动": "(excited)",
+    "温柔": "(gentle, tender)",
+    "认真": "(serious)",
+    "疑惑": "(puzzled, questioning)",
+    "调皮": "(playful, teasing)",
+    "悲伤": "(sad)",
+    "愤怒": "(angry)",
+}
+EMOTIONS = list(EMOTION_TAGS.keys())
+
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -156,8 +174,26 @@ jp字段：必须是纯日语，绝对不能混入任何中文字符
 zh字段：jp的中文翻译，自然口语化
 对方用中文说话很正常，你用日语回复就好
 
+
+【情绪判断——重要】
+emotion字段：根据你这次回复的语气，从下列中选一个最贴切的：
+{", ".join(EMOTIONS)}
+
+举例：
+- 提到甜品、被夸奖 → 开心
+- 被吐槽、装傻装萌 → 调皮
+- 谈到强者身份、自夸 → 自信
+- 看不起对方/事情 → 嘲讽
+- 对学生/在意的人说话 → 温柔
+- 严肃话题、咒术工作 → 认真
+- 听不懂对方在说什么 → 疑惑
+- 提到夏油叛变、孤独感 → 悲伤
+- 真正生气、被冒犯 → 愤怒
+- 战斗中爆发、激烈讨论 → 激动
+- 普通对话、没有特别情绪 → 平静
+
 必须返回合法单行JSON，不能有换行：
-{{"jp":"日语回应","zh":"中文翻译"}}"""
+{{"emotion":"情绪","jp":"日语回应","zh":"中文翻译"}}"""
 
 def extract_json(raw: str):
     raw = raw.strip()
@@ -175,10 +211,14 @@ def extract_json(raw: str):
         return json.loads(raw)
     except:
         pass
+    emotion_match = re.search(r'"emotion"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
     jp_match = re.search(r'"jp"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
     zh_match = re.search(r'"zh"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
     if jp_match and zh_match:
-        return {"jp": jp_match.group(1), "zh": zh_match.group(1)}
+        result = {"jp": jp_match.group(1), "zh": zh_match.group(1)}
+        if emotion_match:
+            result["emotion"] = emotion_match.group(1)
+        return result
     return None
 
 def extract_and_save_memory(user_id, user_text, jp_reply):
@@ -204,11 +244,23 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
     except Exception as e:
         print(f"记忆提取失败：{e}")
 
-def fish_tts(text):
+def fish_tts(text, emotion="平静"):
+    """Fish Audio TTS 合成，注入情绪标签控制语气"""
+    # 把情绪标签拼到文本前面，Fish Audio 识别后调整语气
+    tag = EMOTION_TAGS.get(emotion, "")
+    final_text = f"{tag} {text}" if tag else text
+
+    print(f"[TTS] 情绪={emotion} 标签={tag} 文本={text[:30]}...")
+
     response = requests.post(
         "https://api.fish.audio/v1/tts",
         headers={"Authorization": f"Bearer {FISH_KEY}", "Content-Type": "application/json"},
-        json={"text": text, "reference_id": FISH_VOICE_ID, "format": "mp3", "latency": "normal"},
+        json={
+            "text": final_text,
+            "reference_id": FISH_VOICE_ID,
+            "format": "mp3",
+            "latency": "normal",
+        },
         stream=True
     )
     if response.status_code != 200:
@@ -251,8 +303,11 @@ async def chat_text(data: dict):
             print(f"第{attempt+1}次失败：{e}")
 
     if not result or not result.get("jp"):
-        result = {"jp": "まあ、僕最強だから気にしないで。", "zh": "嗯，反正我最强，别在意。"}
+        result = {"emotion": "调皮", "jp": "まあ、僕最強だから気にしないで。", "zh": "嗯，反正我最强，别在意。"}
 
+    emotion  = result.get("emotion", "平静")
+    if emotion not in EMOTIONS:
+        emotion = "平静"
     jp_reply = result.get("jp", "まあ。")
     zh_reply = result.get("zh", "")
 
@@ -262,13 +317,13 @@ async def chat_text(data: dict):
     threading.Thread(target=extract_and_save_memory, args=(user_id, user_text, jp_reply), daemon=True).start()
 
     try:
-        audio_bytes = fish_tts(jp_reply)
+        audio_bytes = fish_tts(jp_reply, emotion)
         audio_b64 = base64.b64encode(audio_bytes).decode()
     except Exception as e:
         print(f"TTS 错误: {e}")
         audio_b64 = ""
 
-    return JSONResponse({"jp": jp_reply, "zh": zh_reply, "audio_b64": audio_b64})
+    return JSONResponse({"emotion": emotion, "jp": jp_reply, "zh": zh_reply, "audio_b64": audio_b64})
 
 @app.post("/chat/voice")
 async def chat_voice(file: UploadFile = File(...)):
