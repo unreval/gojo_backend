@@ -1,4 +1,4 @@
-// app/(tabs)/chat.tsx — 聊天页（设备独立user_id，无情绪标签）
+// app/(tabs)/chat.tsx — 聊天页（多段连续气泡 + 顺序播放音频）
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { Audio } from 'expo-av';
@@ -20,6 +20,9 @@ const { width } = Dimensions.get('window');
 const STORAGE_KEY  = 'gojo_messages_v2';
 const USER_ID_KEY  = 'gojo_user_id';
 
+// 每条 Gojo 消息之间的延迟（毫秒），模拟"连续打字"
+const MSG_DELAY_MS = 800;
+
 export interface Message {
   id: string;
   role: 'user' | 'gojo';
@@ -28,9 +31,18 @@ export interface Message {
   time?: string;
 }
 
-// 生成随机用户ID
+interface GojoSegment {
+  jp: string;
+  zh: string;
+  audio_b64: string;
+}
+
 function generateUserId(): string {
   return 'user_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function sleep(ms: number) {
+  return new Promise<void>(resolve => setTimeout(resolve, ms));
 }
 
 export default function ChatScreen() {
@@ -42,11 +54,9 @@ export default function ChatScreen() {
   const scrollRef = useRef<ScrollView>(null);
   const currentSoundRef = useRef<Audio.Sound | null>(null);
 
-  // 启动时配置音频模式 + 读取/生成 userId + 读取历史消息
   useEffect(() => {
     (async () => {
       try {
-        // ✅ 关键：配置音频模式，否则部分手机静音键开着或后台时播不出来
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
           playsInSilentModeIOS: true,
@@ -70,7 +80,6 @@ export default function ChatScreen() {
       setReady(true);
     })();
 
-    // 卸载时清理音频
     return () => {
       currentSoundRef.current?.unloadAsync().catch(() => {});
     };
@@ -81,8 +90,8 @@ export default function ChatScreen() {
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
   }, [messages, ready]);
 
-  const playAudio = async (audio_b64: string) => {
-    // 释放上一段音频，避免叠播或资源泄漏
+  // 播放一段音频，等播放完成后 resolve
+  const playAudioAndWait = async (audio_b64: string): Promise<void> => {
     try {
       if (currentSoundRef.current) {
         await currentSoundRef.current.unloadAsync();
@@ -90,25 +99,26 @@ export default function ChatScreen() {
       }
     } catch {}
 
-    try {
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: `data:audio/mp3;base64,${audio_b64}` },
-        { shouldPlay: true, volume: 1.0 }
-      );
-      currentSoundRef.current = sound;
+    return new Promise<void>(async (resolve) => {
+      try {
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: `data:audio/mp3;base64,${audio_b64}` },
+          { shouldPlay: true, volume: 1.0 }
+        );
+        currentSoundRef.current = sound;
 
-      // 播完自动卸载
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
-          sound.unloadAsync().catch(() => {});
-          if (currentSoundRef.current === sound) currentSoundRef.current = null;
-        }
-      });
-    } catch (e: any) {
-      // ✅ 不再静默吞错误：弹个 toast 让用户能看到
-      console.error('播放失败', e);
-      Alert.alert('语音播放失败', e?.message ?? '未知错误');
-    }
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            sound.unloadAsync().catch(() => {});
+            if (currentSoundRef.current === sound) currentSoundRef.current = null;
+            resolve();
+          }
+        });
+      } catch (e: any) {
+        console.error('播放失败', e);
+        resolve(); // 失败也继续，不卡住后续消息
+      }
+    });
   };
 
   const sendText = async () => {
@@ -123,24 +133,54 @@ export default function ChatScreen() {
     };
     setMessages(prev => [...prev, userMsg]);
     setLoading(true);
+
     try {
       const res = await axios.post(`${SERVER_URL}/chat/text`, {
         text,
         user_id: userId,
       });
-      const { jp, zh, audio_b64 } = res.data;
-      const gojoMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'gojo',
-        text: jp,
-        subtitle: zh,
-        time: nowTime(),
-      };
-      setMessages(prev => [...prev, gojoMsg]);
-      if (audio_b64 && audio_b64.length > 100) {
-        await playAudio(audio_b64);
-      } else {
-        console.warn('audio_b64 缺失或异常', { len: audio_b64?.length });
+
+      // 兼容两种返回格式：新版 messages 数组 / 老版单条
+      let segments: GojoSegment[] = [];
+      if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
+        segments = res.data.messages;
+      } else if (res.data?.jp) {
+        segments = [{
+          jp: res.data.jp,
+          zh: res.data.zh ?? '',
+          audio_b64: res.data.audio_b64 ?? '',
+        }];
+      }
+
+      if (segments.length === 0) {
+        Alert.alert('回复异常', '没有收到有效回复');
+        return;
+      }
+
+      // 思考动画在第一条到达前先关掉
+      setLoading(false);
+
+      // 按顺序：插入气泡 → 播放音频 → 等延迟 → 下一条
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const gojoMsg: Message = {
+          id: `${Date.now()}_${i}`,
+          role: 'gojo',
+          text: seg.jp,
+          subtitle: seg.zh,
+          time: nowTime(),
+        };
+        setMessages(prev => [...prev, gojoMsg]);
+
+        // 播放音频，等播完
+        if (seg.audio_b64 && seg.audio_b64.length > 100) {
+          await playAudioAndWait(seg.audio_b64);
+        }
+
+        // 不是最后一条，加个停顿模拟打字
+        if (i < segments.length - 1) {
+          await sleep(MSG_DELAY_MS);
+        }
       }
     } catch (e: any) {
       console.error('请求失败', e);
@@ -178,7 +218,6 @@ export default function ChatScreen() {
     >
       <StatusBar barStyle="light-content" backgroundColor={C.card} />
 
-      {/* 头部 */}
       <View style={s.header}>
         <View style={s.avatarSmall}>
           <Text style={s.avatarSmallText}>悟</Text>
@@ -192,7 +231,6 @@ export default function ChatScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* 消息列表 */}
       <ScrollView
         ref={scrollRef}
         style={s.chatArea}
@@ -240,7 +278,6 @@ export default function ChatScreen() {
         )}
       </ScrollView>
 
-      {/* 输入栏 */}
       <View style={s.inputBar}>
         <TextInput
           style={s.input}
