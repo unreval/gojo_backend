@@ -304,6 +304,11 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
         print(f"记忆提取失败：{e}")
 
 def fish_tts(text, emotion="平静"):
+    """
+    Fish Audio TTS
+    - latency=balanced：比 normal 快，质量略低但更紧凑
+    - prosody.speed=1.15：语速加快 15%，符合 Gojo 慵懒但干脆的说话节奏
+    """
     tag = EMOTION_TAGS.get(emotion, "")
     final_text = f"{tag} {text}" if tag else text
 
@@ -322,9 +327,13 @@ def fish_tts(text, emotion="平静"):
             "text": final_text,
             "reference_id": FISH_VOICE_ID,
             "format": "mp3",
-            "latency": "normal",
+            "latency": "balanced",      # ← 改：normal → balanced，更紧凑
             "chunk_length": chunk_length,
             "normalize": True,
+            "prosody": {
+                "speed": 1.15,           # ← 新增：语速 1.15 倍（默认 1.0）
+                "volume": 0,             # 音量保持默认
+            },
         },
         stream=True
     )
@@ -409,7 +418,6 @@ async def chat_text(data: dict):
 
 @app.post("/chat/voice")
 async def chat_voice(file: UploadFile = File(...)):
-    """语音输入暂未启用（Railway 内存有限，无法跑 Whisper）"""
     return JSONResponse({"error": "语音输入暂未启用，请用文字输入"}, status_code=501)
 
 
