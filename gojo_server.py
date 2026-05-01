@@ -4,12 +4,8 @@ import sqlite3
 import threading
 import os
 import re
-import numpy as np
-import soundfile as sf
-import io
 import requests
 import anthropic
-from faster_whisper import WhisperModel
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -40,9 +36,6 @@ EMOTIONS = list(EMOTION_TAGS.keys())
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-print("加载 faster-whisper（medium）...")
-whisper_model = WhisperModel("medium", device="cpu", compute_type="int8")
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 tts_executor = ThreadPoolExecutor(max_workers=4)
@@ -257,12 +250,9 @@ def extract_json(raw: str):
 
 def sanitize_jp(jp: str) -> str:
     """清理 + 笑声替换"""
-    # 替换女性化笑声
     jp = jp.replace("ふふ", "へへ")
-    # 替换少年漫傻笑——把「あはは」「あははは」替换成「ふっ」
     jp = re.sub(r'あはは+', 'ふっ', jp)
     jp = re.sub(r'ハハハ+', 'はは', jp)
-    # 去除拖音
     jp = re.sub(r'〜+(?=[。！？、\s]|$)', '', jp)
     jp = re.sub(r'…+〜+', '…', jp)
     return jp
@@ -314,13 +304,9 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
         print(f"记忆提取失败：{e}")
 
 def fish_tts(text, emotion="平静"):
-    """
-    短句紧凑、不拖沓
-    """
     tag = EMOTION_TAGS.get(emotion, "")
     final_text = f"{tag} {text}" if tag else text
 
-    # 短气泡用更紧凑的 chunk，让 TTS 节奏紧凑
     text_len = len(text)
     if text_len < 15:
         chunk_length = 100
@@ -353,27 +339,6 @@ def tts_to_b64(text, emotion):
     except Exception as e:
         print(f"[TTS 失败] {text[:30]} | {e}")
         return ""
-
-def transcribe_audio(audio_bytes: bytes) -> str:
-    audio_buf = io.BytesIO(audio_bytes)
-    try:
-        audio_array, _ = sf.read(audio_buf, dtype="float32", always_2d=False)
-    except Exception:
-        audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
-
-    if audio_array.ndim == 2:
-        audio_array = audio_array.mean(axis=1)
-
-    segments, _ = whisper_model.transcribe(
-        audio_array,
-        language="ja",
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 400, "threshold": 0.35},
-        beam_size=5,
-        temperature=0.0,
-        no_speech_threshold=0.6,
-    )
-    return " ".join(seg.text.strip() for seg in segments).strip()
 
 @app.post("/chat/text")
 async def chat_text(data: dict):
@@ -444,12 +409,8 @@ async def chat_text(data: dict):
 
 @app.post("/chat/voice")
 async def chat_voice(file: UploadFile = File(...)):
-    audio_bytes = await file.read()
-    user_text = transcribe_audio(audio_bytes)
-    print(f"ASR 识别结果：{user_text}")
-    if not user_text:
-        return JSONResponse({"error": "没听清"}, status_code=400)
-    return await chat_text({"text": user_text})
+    """语音输入暂未启用（Railway 内存有限，无法跑 Whisper）"""
+    return JSONResponse({"error": "语音输入暂未启用，请用文字输入"}, status_code=501)
 
 
 @app.get("/memories")
