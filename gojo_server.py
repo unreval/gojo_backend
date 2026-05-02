@@ -392,8 +392,8 @@ def fish_tts(text, emotion="平静"):
             "latency": "balanced",
             "chunk_length": chunk_length,
             "normalize": True,
-            "temperature": 0.3,       # ← 关键：降低随机性（默认0.7）
-            "top_p": 0.5,             # ← 关键：更稳定的采样（默认0.8）
+            "temperature": 0.5,       # ← 关键：降低随机性（默认0.7）
+            "top_p": 0.7,             # ← 关键：更稳定的采样（默认0.8）
             "prosody": {
                 "speed": 1.15,
                 "volume": 0,
