@@ -150,29 +150,29 @@ def get_recent_openings(user_id, n=5):
 def get_time_context():
     now = datetime.now(CN_TZ)
     hour = now.hour
-    weekday_jp = ["月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日"][now.weekday()]
+    weekday_jp = ['月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日', '日曜日'][now.weekday()]
 
     if 5 <= hour < 11:
-        period = "早晨/上午（朝・午前）"
-        greeting_hint = "如果是问候，应该是「おはよう」"
+        period = '早晨/上午（朝・午前）'
+        greeting_hint = '如果是问候，应该是「おはよう」'
     elif 11 <= hour < 14:
-        period = "中午（昼）"
-        greeting_hint = "如果是问候，应该是「お昼だね」「こんにちは」"
+        period = '中午（昼）'
+        greeting_hint = '如果是问候，应该是「お昼だね」「こんにちは」'
     elif 14 <= hour < 18:
-        period = "下午（午後）"
-        greeting_hint = "如果是问候，应该是「こんにちは」"
+        period = '下午（午後）'
+        greeting_hint = '如果是问候，应该是「こんにちは」'
     elif 18 <= hour < 22:
-        period = "傍晚/晚上（夕方・夜）"
-        greeting_hint = "如果是问候，应该是「こんばんは」「お疲れ様」"
+        period = '傍晚/晚上（夕方・夜）'
+        greeting_hint = '如果是问候，应该是「こんばんは」「お疲れ様」'
     else:
-        period = "深夜（深夜・夜中）"
-        greeting_hint = "如果是问候，可以提"こんな時間に？"或「まだ起きてるの？」，深夜不要说おはよう"
+        period = '深夜（深夜・夜中）'
+        greeting_hint = '如果是问候，可以提「こんな時間に？」或「まだ起きてるの？」，深夜不要说おはよう'
 
-    return f"""【现在的时间——必须遵守】
-当前时间：{now.strftime('%Y年%m月%d日 %H:%M')}（{weekday_jp}）
+    return f'''【现在的时间——必须遵守】
+当前时间：{now.strftime("%Y年%m月%d日 %H:%M")}（{weekday_jp}）
 时段：{period}
 {greeting_hint}
-绝对不要根据自己的想象发"早安/晚安"，必须根据真实时段。"""
+绝对不要根据自己的想象发早安/晚安，必须根据真实时段。'''
 
 def build_system_prompt(user_id, recent_openings=None):
     long_memories = get_long_memory(user_id)
