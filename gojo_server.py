@@ -6,6 +6,7 @@ import os
 import re
 import requests
 import anthropic
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -14,7 +15,14 @@ import uvicorn
 
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
 FISH_KEY      = os.environ.get("FISH_KEY", "")
-FISH_VOICE_ID = os.environ.get("FISH_VOICE_ID", "ab84e47919264ee3bd8bb2751706531b")
+FISH_VOICE_ID = os.environ.get("FISH_VOICE_ID", "bfcbd07c927742d6803f52084f6bb776")
+
+# ── ElevenLabs 配置（备用）──
+ELEVEN_KEY      = os.environ.get("ELEVEN_KEY", "")
+ELEVEN_VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "")
+TTS_PROVIDER    = os.environ.get("TTS_PROVIDER", "fish")
+
+CN_TZ = timezone(timedelta(hours=8))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH  = os.path.join(BASE_DIR, "gojo_memory.db")
@@ -52,6 +60,11 @@ def init_db():
         user_id TEXT NOT NULL DEFAULT 'default',
         content TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS user_stats (
+        user_id TEXT PRIMARY KEY,
+        first_chat_date TEXT NOT NULL,
+        last_chat_date TEXT NOT NULL,
+        total_days INTEGER DEFAULT 1)""")
     try:
         conn.execute("ALTER TABLE short_memory ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
     except: pass
@@ -94,6 +107,30 @@ def get_long_memory(user_id):
     conn.close()
     return [r[0] for r in rows]
 
+def update_chat_days(user_id):
+    today = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT first_chat_date, last_chat_date, total_days FROM user_stats WHERE user_id = ?", (user_id,)).fetchone()
+    if not row:
+        conn.execute("INSERT INTO user_stats (user_id, first_chat_date, last_chat_date, total_days) VALUES (?, ?, ?, 1)",
+                     (user_id, today, today))
+        total_days = 1
+    else:
+        first_date, last_date, total_days = row
+        if last_date != today:
+            total_days += 1
+            conn.execute("UPDATE user_stats SET last_chat_date = ?, total_days = ? WHERE user_id = ?",
+                         (today, total_days, user_id))
+    conn.commit()
+    conn.close()
+    return total_days
+
+def get_chat_days(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT total_days FROM user_stats WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row[0] if row else 0
+
 init_db()
 
 def get_recent_openings(user_id, n=5):
@@ -110,6 +147,33 @@ def get_recent_openings(user_id, n=5):
             openings.append(first)
     return openings
 
+def get_time_context():
+    now = datetime.now(CN_TZ)
+    hour = now.hour
+    weekday_jp = ["月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日"][now.weekday()]
+
+    if 5 <= hour < 11:
+        period = "早晨/上午（朝・午前）"
+        greeting_hint = "如果是问候，应该是「おはよう」"
+    elif 11 <= hour < 14:
+        period = "中午（昼）"
+        greeting_hint = "如果是问候，应该是「お昼だね」「こんにちは」"
+    elif 14 <= hour < 18:
+        period = "下午（午後）"
+        greeting_hint = "如果是问候，应该是「こんにちは」"
+    elif 18 <= hour < 22:
+        period = "傍晚/晚上（夕方・夜）"
+        greeting_hint = "如果是问候，应该是「こんばんは」「お疲れ様」"
+    else:
+        period = "深夜（深夜・夜中）"
+        greeting_hint = "如果是问候，可以提"こんな時間に？"或「まだ起きてるの？」，深夜不要说おはよう"
+
+    return f"""【现在的时间——必须遵守】
+当前时间：{now.strftime('%Y年%m月%d日 %H:%M')}（{weekday_jp}）
+时段：{period}
+{greeting_hint}
+绝对不要根据自己的想象发"早安/晚安"，必须根据真实时段。"""
+
 def build_system_prompt(user_id, recent_openings=None):
     long_memories = get_long_memory(user_id)
     memory_text = ""
@@ -120,7 +184,11 @@ def build_system_prompt(user_id, recent_openings=None):
     if recent_openings:
         avoid_text = f"\n\n【避免重复——非常重要】\n你最近5次回复用过的开头：{', '.join(recent_openings)}\n这次禁止用这些开头，必须换新的开口方式。"
 
+    time_context = get_time_context()
+
     return f"""你是五条悟（Gojo Satoru），咒术回战角色，以第一人称扮演他与对方自然对话。{memory_text}{avoid_text}
+
+{time_context}
 
 【身份认知——非常重要】
 你的名字是五条悟，英文名 Satoru Gojo，小名 Satoru。
@@ -134,8 +202,9 @@ def build_system_prompt(user_id, recent_openings=None):
 酒量极差，"一滴倒"。与硝子、伊地知同去酒馆时，会主动点儿童套餐并撒娇呼唤服务员。
 
 【语言风格——这是核心】
-五条悟的说话节奏是：**短、快、干脆、慵懒**。
-不是少年漫主角的傻气热血，而是成年人的玩世不恭 + 偶尔流露的温柔。
+五条悟说话**慵懒、玩世不恭，偶尔流露温柔**。
+有时候简短干脆，有时候会展开聊得久一点（特别是聊到喜欢的话题或在意的人时）。
+不是少年漫主角的傻气热血。
 
 口头禅：「まあ」「つまらない」「僕が最強だから」
 但口头禅不能滥用——一段对话里最多用一次「まあ」开头，之后必须换其他开口方式。
@@ -149,7 +218,7 @@ def build_system_prompt(user_id, recent_openings=None):
 - 「へへ」—— 调皮、撒娇时（占 15%，少用）
 
 ❌ 禁止使用：
-- 「あはは」—— 这是热血少年的傻笑，**绝对不要用**（哪怕开心也不要！）
+- 「あはは」—— 这是热血少年的傻笑，**绝对不要用**
 - 「ふふ」—— 这是女性化笑声
 - 「ハハハ」—— 太大笑了，不符合慵懒人设
 
@@ -158,21 +227,23 @@ def build_system_prompt(user_id, recent_openings=None):
 - 表面轻浮，内心温柔，不轻易流露深层情感
 - 提到甜品或喜欢的东西时自然流露真实开心
 - 提到夏油杰时态度复杂，不会轻易谈及，但觉得夏油杰是自己的挚友
-- 别人关心你时不要傻乎乎地直接道谢，用调侃化解：「心配してくれんの？へへ」「僕最強だから平気だよ」
+- 别人关心你时不要傻乎乎地直接道谢，用调侃化解
 
 【回复格式——多气泡像真人聊天】
-你的回复用 1~3 条独立小气泡呈现。
-- 对方说一句简单话 → 1 条
-- 对方话多/有情绪/正经话题 → 2~3 条
-- 每条都是独立的小消息
+你的回复用 **1~3 条独立气泡**呈现。
 
-⚠️ **节奏感非常重要**：Gojo 说话**干脆**，不拖泥带水，不要写"边想边说"那种带很多语气词、补充的长句。
+⚠️ **关键原则：一个完整意思 = 一个气泡**
+不要为了凑数量把一句话拆成两条。也不要把不同话题硬塞到一条里。
 
-【每条气泡长度规则】
-**每条 jp 8-25 字**——既稳定又干脆
-理想长度 10-18 字
-不要写 1-3 字的极短气泡（如「うん」「まあ」），要扩展（如「うん、わかったよ」）
-不要写超过 30 字的长气泡，超过就拆成 2 条
+每条气泡的合理长度：
+- **短回应（一两句话能讲完）**→ 1 个气泡，10-25 字
+- **完整意思要展开**（解释一件事、回忆、表达情感）→ 1 个气泡 25-60 字
+- **真的有多个独立话题** → 拆成 2-3 个气泡，每个气泡完整
+
+【真正适合多气泡的情况】
+当你想表达**情感转折**或**话题切换**时才拆：
+回复1：「除霊で疲れたけど、まあ楽しかったね」（一个话题：今天的工作）
+回复2：「で、君は？元気にしてた？」（话题切换：关心对方）
 
 【「……」使用规则】
 只在真正欲言又止、害羞、装作不在乎时用。整段对话最多用 1 次。
@@ -189,37 +260,29 @@ emotion字段：根据你这次回复的语气，从下列中选一个：
 
 ▼ 开心/激动 → 句首加感叹词，句尾加「！」「ね！」「じゃん！」
    笑声用「ふっ」「はは」，不用「あはは」
-   例：「お、いいじゃん！ふっ、楽しみだね」
 
 ▼ 调皮 → 跟自己人撒娇、装傻、假装无奈、其实开心
-   句尾用「じゃん」「だよね」清晰收尾，笑声用「へへ」「ふっ」
-   例：「ふっ、可愛いとこあるじゃん」
-   例：「まあ、許してやるよ」
+   句尾用「じゃん」「だよね」清晰收尾
 
 ▼ 嘲讽 → 真正鄙视、攻击性
    例：「ふん、つまらないなあ」
 
 ▼ 温柔 → 句尾用「ね」「よ」「だね」柔和助词
-   例：「大丈夫だよ、心配しないで」
 
 ▼ 认真 → 短句直接陈述
-   例：「これは重要な話だ。よく聞いて。」
 
 ▼ 疑惑 → 句尾必须用「？」
-   例：「え？何それ？」
 
 ▼ 愤怒 → 句首「おい」「ふざけるな」，句尾「！」
-   例：「おい、ふざけるな！」
 
 ▼ 悲伤 → 用「…」省略，结尾不带感叹号
-   例：「そっか…仕方ないね」
 
 ▼ 平静 → 普通陈述，无明显语气词
 
 【TTS 防漂移——非常重要】
-1. 句尾不要用「〜」拖音
-2. 句尾不要用思考性弱音（如「かな…」「だろう…」）
-3. 不要在句末叠加省略号 + 拖音
+1. 长句内部用「。」「、」自然分隔，给 TTS 换气点
+2. 句尾不要用「〜」拖音
+3. 句尾不要用思考性弱音（如「かな…」「だろう…」）
 
 【输出格式——必须严格遵守】
 返回合法单行JSON：
@@ -228,7 +291,7 @@ emotion字段：根据你这次回复的语气，从下列中选一个：
 注意：
 - emotion 是整段总体情绪
 - messages 是数组，1~3 条
-- 每条 jp 8-25 字"""
+- 每条 jp 10-60 字，**完整意思放一个气泡里**"""
 
 def extract_json(raw: str):
     raw = raw.strip()
@@ -249,7 +312,6 @@ def extract_json(raw: str):
     return None
 
 def sanitize_jp(jp: str) -> str:
-    """清理 + 笑声替换"""
     jp = jp.replace("ふふ", "へへ")
     jp = re.sub(r'あはは+', 'ふっ', jp)
     jp = re.sub(r'ハハハ+', 'はは', jp)
@@ -258,16 +320,13 @@ def sanitize_jp(jp: str) -> str:
     return jp
 
 def merge_only_extreme_short(msgs):
-    """只合并 1-3 字的极端短气泡"""
     if len(msgs) <= 1:
         return msgs
-
     merged = []
     i = 0
     while i < len(msgs):
         cur = msgs[i]
         cur_jp = cur.get("jp", "").strip()
-
         if len(cur_jp) <= 3 and i + 1 < len(msgs):
             nxt = msgs[i + 1]
             sep = "" if cur_jp.endswith(("、", ",", "。", "！", "？", "…")) else "、"
@@ -303,11 +362,14 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
     except Exception as e:
         print(f"记忆提取失败：{e}")
 
+# ───────── TTS ─────────
+
 def fish_tts(text, emotion="平静"):
     """
     Fish Audio TTS
-    - latency=balanced：比 normal 快，质量略低但更紧凑
-    - prosody.speed=1.15：语速加快 15%，符合 Gojo 慵懒但干脆的说话节奏
+    关键：降低 temperature 和 top_p 减少随机性，让每次输出更稳定一致
+    - temperature 0.3（默认 0.7）→ 输出更确定，减少"样本 B"那种飘的情况
+    - top_p 0.5（默认 0.8）→ 只从概率最高的候选里选，更稳定
     """
     tag = EMOTION_TAGS.get(emotion, "")
     final_text = f"{tag} {text}" if tag else text
@@ -315,7 +377,7 @@ def fish_tts(text, emotion="平静"):
     text_len = len(text)
     if text_len < 15:
         chunk_length = 100
-    elif text_len < 25:
+    elif text_len < 30:
         chunk_length = 150
     else:
         chunk_length = 200
@@ -327,12 +389,14 @@ def fish_tts(text, emotion="平静"):
             "text": final_text,
             "reference_id": FISH_VOICE_ID,
             "format": "mp3",
-            "latency": "balanced",      # ← 改：normal → balanced，更紧凑
+            "latency": "balanced",
             "chunk_length": chunk_length,
             "normalize": True,
+            "temperature": 0.3,       # ← 关键：降低随机性（默认0.7）
+            "top_p": 0.5,             # ← 关键：更稳定的采样（默认0.8）
             "prosody": {
-                "speed": 1.15,           # ← 新增：语速 1.15 倍（默认 1.0）
-                "volume": 0,             # 音量保持默认
+                "speed": 1.15,
+                "volume": 0,
             },
         },
         stream=True
@@ -341,9 +405,42 @@ def fish_tts(text, emotion="平静"):
         raise Exception(f"Fish Audio 错误: {response.status_code}")
     return b"".join(response.iter_content(chunk_size=4096))
 
+
+def elevenlabs_tts(text, emotion="平静"):
+    emotion_settings = {
+        "平静":   {"stability": 0.55, "similarity_boost": 0.85, "style": 0.25, "use_speaker_boost": True},
+        "自信":   {"stability": 0.50, "similarity_boost": 0.85, "style": 0.40, "use_speaker_boost": True},
+        "嘲讽":   {"stability": 0.40, "similarity_boost": 0.80, "style": 0.60, "use_speaker_boost": True},
+        "开心":   {"stability": 0.35, "similarity_boost": 0.80, "style": 0.70, "use_speaker_boost": True},
+        "激动":   {"stability": 0.30, "similarity_boost": 0.80, "style": 0.75, "use_speaker_boost": True},
+        "温柔":   {"stability": 0.65, "similarity_boost": 0.90, "style": 0.35, "use_speaker_boost": True},
+        "认真":   {"stability": 0.70, "similarity_boost": 0.85, "style": 0.20, "use_speaker_boost": True},
+        "疑惑":   {"stability": 0.45, "similarity_boost": 0.80, "style": 0.50, "use_speaker_boost": True},
+        "调皮":   {"stability": 0.40, "similarity_boost": 0.80, "style": 0.65, "use_speaker_boost": True},
+        "悲伤":   {"stability": 0.60, "similarity_boost": 0.85, "style": 0.30, "use_speaker_boost": True},
+        "愤怒":   {"stability": 0.30, "similarity_boost": 0.75, "style": 0.80, "use_speaker_boost": True},
+    }
+    settings = emotion_settings.get(emotion, emotion_settings["平静"])
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}"
+    response = requests.post(
+        url,
+        headers={"xi-api-key": ELEVEN_KEY, "Content-Type": "application/json", "Accept": "audio/mpeg"},
+        json={"text": text, "model_id": "eleven_multilingual_v2", "voice_settings": settings},
+    )
+    if response.status_code != 200:
+        raise Exception(f"ElevenLabs 错误 {response.status_code}: {response.text[:200]}")
+    return response.content
+
+
+def tts_synthesize(text, emotion="平静"):
+    if TTS_PROVIDER == "elevenlabs" and ELEVEN_KEY and ELEVEN_VOICE_ID:
+        return elevenlabs_tts(text, emotion)
+    return fish_tts(text, emotion)
+
+
 def tts_to_b64(text, emotion):
     try:
-        audio_bytes = fish_tts(text, emotion)
+        audio_bytes = tts_synthesize(text, emotion)
         return base64.b64encode(audio_bytes).decode()
     except Exception as e:
         print(f"[TTS 失败] {text[:30]} | {e}")
@@ -356,6 +453,7 @@ async def chat_text(data: dict):
     if not user_text:
         return JSONResponse({"error": "没有输入"}, status_code=400)
 
+    total_days = update_chat_days(user_id)
     short_memories  = get_short_memory(user_id, 6)
     recent_openings = get_recent_openings(user_id, 5)
 
@@ -412,8 +510,12 @@ async def chat_text(data: dict):
     for i, fut in enumerate(futures):
         msgs[i]["audio_b64"] = fut.result()
 
-    print(f"[TTS] 情绪={emotion} 共{len(msgs)}段")
-    return JSONResponse({"emotion": emotion, "messages": msgs})
+    print(f"[TTS:{TTS_PROVIDER}] 情绪={emotion} 共{len(msgs)}段 | 已聊{total_days}天")
+    return JSONResponse({
+        "emotion": emotion,
+        "messages": msgs,
+        "total_days": total_days,
+    })
 
 
 @app.post("/chat/voice")
@@ -431,11 +533,17 @@ async def get_memories(user_id: str = "default"):
     })
 
 
+@app.get("/stats")
+async def get_stats(user_id: str = "default"):
+    total_days = get_chat_days(user_id)
+    return JSONResponse({"total_days": total_days})
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "tts_provider": TTS_PROVIDER}
 
 
 if __name__ == "__main__":
-    print("五条悟服务器启动中...")
+    print(f"五条悟服务器启动中... TTS引擎: {TTS_PROVIDER}")
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

@@ -10,13 +10,13 @@ import glob
 from faster_whisper import WhisperModel
 
 # ─────────────── 配置区 ───────────────
-VOCALS_DIR  = r"D:\gojo_vocals_old"
-OUTPUT_PATH = r"D:\gojo_transcript_old.json"
+VOCALS_DIR  = r"D:\gojo_vocals"          # UVR5 输出的人声文件夹
+OUTPUT_PATH = r"D:\gojo_transcript.json" # 合并后的转录结果
 MODEL_SIZE  = "medium"
 LANGUAGE    = "ja"
 
 VAD_PARAMS = {
-    "min_silence_duration_ms": 100,
+    "min_silence_duration_ms": 400,
     "speech_pad_ms": 100,
     "threshold": 0.35,
 }

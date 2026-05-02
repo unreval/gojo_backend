@@ -1,11 +1,23 @@
 // app/(tabs)/index.tsx — 首页
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import { ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { C } from '../../constants/theme';
 
 export default function HomeScreen() {
   const router = useRouter();
+  const [chatDays, setChatDays] = useState(1);
+
+  // 每次回到首页时读取最新天数
+  useFocusEffect(
+    useCallback(() => {
+      AsyncStorage.getItem('gojo_chat_days').then(val => {
+        if (val) setChatDays(Number(val));
+      });
+    }, [])
+  );
 
   const cards = [
     { icon:'💬', label:'与悟聊天',  desc:'随时开口，他在等你',   path:'/chat',       color:'#1d4ed8' },
@@ -24,7 +36,7 @@ export default function HomeScreen() {
           <View style={s.avatarGlow}/>
         </View>
         <Text style={s.name}>五 条 悟</Text>
-        <View style={s.streak}><Text style={s.streakText}>❤️ 已连续聊天 1 天</Text></View>
+        <View style={s.streak}><Text style={s.streakText}>❤️ 已连续聊天 {chatDays} 天</Text></View>
         <Text style={s.quote}>「まあ、僕が最強だから」</Text>
       </View>
 

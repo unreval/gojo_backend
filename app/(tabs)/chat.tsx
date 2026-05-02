@@ -140,6 +140,11 @@ export default function ChatScreen() {
         user_id: userId,
       });
 
+      // 保存聊天天数到 AsyncStorage，首页可以读取
+      if (res.data?.total_days) {
+        AsyncStorage.setItem('gojo_chat_days', String(res.data.total_days));
+      }
+
       // 兼容两种返回格式：新版 messages 数组 / 老版单条
       let segments: GojoSegment[] = [];
       if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {

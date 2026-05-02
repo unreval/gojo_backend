@@ -2,6 +2,4 @@ fastapi
 uvicorn
 anthropic
 requests
-numpy
-openai-whisper
 python-multipart
