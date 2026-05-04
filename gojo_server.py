@@ -83,9 +83,18 @@ def save_short_memory(user_id, role, content):
 
 def save_long_memory(user_id, content):
     conn = sqlite3.connect(DB_PATH)
+    # 防重复：如果已经有相似的记忆就不再存
+    existing = conn.execute(
+        'SELECT content FROM long_memory WHERE user_id = ?', (user_id,)
+    ).fetchall()
+    for (e,) in existing:
+        if content in e or e in content:
+            conn.close()
+            return False
     conn.execute('INSERT INTO long_memory (user_id, content) VALUES (?, ?)', (user_id, content))
     conn.commit()
     conn.close()
+    return True
 
 def get_short_memory(user_id, n=6):
     conn = sqlite3.connect(DB_PATH)
@@ -185,7 +194,7 @@ def build_system_prompt(user_id, recent_openings=None, last_reply=''):
     long_memories = get_long_memory(user_id)
     memory_text = ''
     if long_memories:
-        memory_text = '\n\n你记得关于对方的以下事情：\n' + '\n'.join(f'- {m}' for m in long_memories)
+        memory_text = '\n\n你记得关于对方的以下事情（必须自然融入回复，不要刻意提及）：\n' + '\n'.join(f'- {m}' for m in long_memories)
 
     avoid_text = ''
     if recent_openings:
@@ -249,7 +258,7 @@ def build_system_prompt(user_id, recent_openings=None, last_reply=''):
 - 提到甜品或喜欢的东西时自然流露真实开心
 - 提到夏油杰时态度复杂，不会轻易谈及，但觉得夏油杰是自己的挚友
 - 别人关心你时不要傻乎乎地直接道谢，用调侃化解
-- **直接回答对方的新问题，不要重新提之前已经说过的事**
+- 直接回答对方的新问题，不要重新提之前已经说过的事
 
 【回复格式——多气泡像真人聊天】
 你的回复用 1~3 条独立气泡呈现。
@@ -365,25 +374,64 @@ def merge_only_extreme_short(msgs):
     return merged
 
 def extract_and_save_memory(user_id, user_text, jp_reply):
+    """
+    自动提取并保存长期记忆。
+    放宽提取标准：聊天中提到的任何关于用户自己的事实都尝试记下来。
+    """
     try:
+        existing = get_long_memory(user_id)
+        existing_text = '\n'.join(f'- {m}' for m in existing) if existing else '（暂无）'
+
         response = claude_client.messages.create(
             model='claude-haiku-4-5-20251001',
-            max_tokens=100,
+            max_tokens=200,
             messages=[{
                 'role': 'user',
-                'content': f'''用户说：{user_text}
-五条悟回答：{jp_reply}
+                'content': f'''你是一个事实抽取助手。从下面的对话中找出用户透露的关于自己的事实信息。
 
-只记录真正重要的信息：名字、具体爱好、职业、重要约定、特别提到的事物。
-不记录：日常撒娇、普通问候、情绪状态、随机闲聊、重复之前记过的内容。
-如果没有值得记住的重要信息，回复「无」。
-只回复一句话或「无」。'''
+【已记录的事实】
+{existing_text}
+
+【这次对话】
+用户：{user_text}
+对方回应：{jp_reply}
+
+【提取规则】
+1. 提取用户主动透露的关于自己的具体事实，包括但不限于：
+   - 喜好（喜欢的食物、颜色、动物、音乐、活动、人、动漫等）
+   - 厌恶（不喜欢的东西）
+   - 身份（名字、年龄、生日、职业、学校、专业）
+   - 状态（在做什么、最近在忙什么、计划做什么）
+   - 经历（去过哪里、做过什么）
+   - 关系（家人、朋友、宠物的存在）
+
+2. 用户撒娇/调侃/抱怨/情绪宣泄不算事实，不要提取。
+   ✗ "我心情不好" → 不记
+   ✗ "你真讨厌" → 不记
+   ✓ "我最近压力很大因为要考研" → 记"用户在准备考研"
+
+3. 如果用户说的事实在【已记录的事实】里已有相同或重复的内容，回复"无"，不要重复记录。
+
+4. 用一句简短中文陈述句记录，以"用户"开头。
+   例：「用户喜欢吃草莓蛋糕」「用户养了一只猫叫小花」「用户是大学生」
+
+【输出】
+只输出一行：
+- 如果有新事实：直接写一句"用户XXX"，不加引号、不加解释
+- 如果没有新事实：写"无"'''
             }]
         )
         summary = response.content[0].text.strip()
-        if summary and summary != '无' and len(summary) > 2:
-            save_long_memory(user_id, summary)
-            print(f'[{user_id}] 长期记忆：{summary}')
+        # 清理可能的引号、句号
+        summary = summary.strip('「」"\'').strip()
+        summary = summary.rstrip('。.')
+
+        if summary and summary != '无' and len(summary) > 4 and summary.startswith('用户'):
+            saved = save_long_memory(user_id, summary)
+            if saved:
+                print(f'[{user_id}] 新长期记忆：{summary}')
+            else:
+                print(f'[{user_id}] 长期记忆已存在，跳过：{summary}')
     except Exception as e:
         print(f'记忆提取失败：{e}')
 
@@ -391,9 +439,6 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
 
 def fish_tts(text, emotion='平静'):
     tag = EMOTION_TAGS.get(emotion, '')
-    # 关键修复：在每段最前面加一个独立的句号 + 空格 + 静音标记
-    # 让 Fish Audio 把这段当成"全新的开始"，不要受上一段影响
-    # 这样可以避免开头复读上一段的内容
     prefix = '。 '
     final_text = f'{prefix}{tag} {text}' if tag else f'{prefix}{text}'
 
@@ -530,8 +575,7 @@ async def chat_text(data: dict):
     save_short_memory(user_id, 'assistant', full_jp)
     threading.Thread(target=extract_and_save_memory, args=(user_id, user_text, full_jp), daemon=True).start()
 
-    # 关键修复：串行合成而非并行
-    # 并行可能导致 Fish Audio 服务端把多个请求当成连续段，串到一起出现复读
+    # 串行合成防 TTS 复读
     for m in msgs:
         m['audio_b64'] = tts_to_b64(m['jp'], emotion)
 
