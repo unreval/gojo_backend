@@ -146,6 +146,16 @@ def get_recent_openings(user_id, n=5):
             openings.append(first)
     return openings
 
+def get_last_assistant_reply(user_id):
+    """获取上一条 assistant 的完整回复，用于反复读"""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        'SELECT content FROM short_memory WHERE user_id = ? AND role = ? ORDER BY timestamp DESC LIMIT 1',
+        (user_id, 'assistant')
+    ).fetchone()
+    conn.close()
+    return row[0] if row else ''
+
 def get_time_context():
     now = datetime.now(CN_TZ)
     hour = now.hour
@@ -173,7 +183,7 @@ def get_time_context():
 {greeting_hint}
 绝对不要根据自己的想象发早安/晚安，必须根据真实时段。'''
 
-def build_system_prompt(user_id, recent_openings=None):
+def build_system_prompt(user_id, recent_openings=None, last_reply=''):
     long_memories = get_long_memory(user_id)
     memory_text = ''
     if long_memories:
@@ -183,10 +193,24 @@ def build_system_prompt(user_id, recent_openings=None):
     if recent_openings:
         avoid_text = f'\n\n【避免重复——非常重要】\n你最近5次回复用过的开头：{", ".join(recent_openings)}\n这次禁止用这些开头，必须换新的开口方式。'
 
+    # 反复读：把上一条回复完整告诉 Claude，明确要求不要重复内容
+    no_repeat_text = ''
+    if last_reply:
+        no_repeat_text = f'''
+
+【严禁复读上一条回复——非常重要】
+你上一条回复的完整内容：「{last_reply}」
+本次回复必须和上面这条**内容完全不同**：
+- 不要重复其中的话题
+- 不要重复其中的句式
+- 不要把同样的意思换种说法再说一遍
+- 不要在回答新问题前，先重新回答一遍之前的问题
+直接回答用户**这次**说的话，不要扯回上次说过的内容。'''
+
     time_context = get_time_context()
     emotion_list = ', '.join(EMOTIONS)
 
-    return f'''你是五条悟（Gojo Satoru），咒术回战角色，以第一人称扮演他与对方自然对话。{memory_text}{avoid_text}
+    return f'''你是五条悟（Gojo Satoru），咒术回战角色，以第一人称扮演他与对方自然对话。{memory_text}{avoid_text}{no_repeat_text}
 
 {time_context}
 
@@ -228,6 +252,7 @@ def build_system_prompt(user_id, recent_openings=None):
 - 提到甜品或喜欢的东西时自然流露真实开心
 - 提到夏油杰时态度复杂，不会轻易谈及，但觉得夏油杰是自己的挚友
 - 别人关心你时不要傻乎乎地直接道谢，用调侃化解
+- **直接回答对方的新问题，不要重新提之前已经说过的事**
 
 【回复格式——多气泡像真人聊天】
 你的回复用 1~3 条独立气泡呈现。
@@ -283,6 +308,7 @@ emotion字段：根据你这次回复的语气，从下列中选一个：
 1. 长句内部用「。」「、」自然分隔，给 TTS 换气点
 2. 句尾不要用「〜」拖音
 3. 句尾不要用思考性弱音
+4. **每条气泡都是独立完整的句子，不要在气泡末尾留拖音或省略号让 TTS 误以为没说完**
 
 【输出格式——必须严格遵守】
 返回合法单行JSON：
@@ -317,6 +343,9 @@ def sanitize_jp(jp: str) -> str:
     jp = re.sub(r'ハハハ+', 'はは', jp)
     jp = re.sub(r'〜+(?=[。！？、\s]|$)', '', jp)
     jp = re.sub(r'…+〜+', '…', jp)
+    # 确保气泡末尾有完整句号，避免 TTS 把这段当成"未完待续"导致下一段开头复读
+    if jp and jp[-1] not in '。！？…':
+        jp = jp + '。'
     return jp
 
 def merge_only_extreme_short(msgs):
@@ -387,6 +416,7 @@ def fish_tts(text, emotion='平静'):
             'chunk_length': chunk_length,
             'temperature': 0.5,
             'top_p': 0.7,
+            'mp3_bitrate': 128,
             'prosody': {
                 'speed': 1.15,
                 'volume': 0,
@@ -449,6 +479,7 @@ async def chat_text(data: dict):
     total_days = update_chat_days(user_id)
     short_memories  = get_short_memory(user_id, 6)
     recent_openings = get_recent_openings(user_id, 5)
+    last_reply      = get_last_assistant_reply(user_id)  # 反复读：拿上一条回复
 
     messages = []
     for role, content in short_memories:
@@ -461,7 +492,7 @@ async def chat_text(data: dict):
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
                 max_tokens=800,
-                system=build_system_prompt(user_id, recent_openings),
+                system=build_system_prompt(user_id, recent_openings, last_reply),
                 messages=messages
             )
             raw = response.content[0].text.strip()
