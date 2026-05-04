@@ -45,7 +45,6 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-tts_executor = ThreadPoolExecutor(max_workers=4)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -147,7 +146,6 @@ def get_recent_openings(user_id, n=5):
     return openings
 
 def get_last_assistant_reply(user_id):
-    """获取上一条 assistant 的完整回复，用于反复读"""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
         'SELECT content FROM short_memory WHERE user_id = ? AND role = ? ORDER BY timestamp DESC LIMIT 1',
@@ -193,19 +191,18 @@ def build_system_prompt(user_id, recent_openings=None, last_reply=''):
     if recent_openings:
         avoid_text = f'\n\n【避免重复——非常重要】\n你最近5次回复用过的开头：{", ".join(recent_openings)}\n这次禁止用这些开头，必须换新的开口方式。'
 
-    # 反复读：把上一条回复完整告诉 Claude，明确要求不要重复内容
     no_repeat_text = ''
     if last_reply:
         no_repeat_text = f'''
 
 【严禁复读上一条回复——非常重要】
 你上一条回复的完整内容：「{last_reply}」
-本次回复必须和上面这条**内容完全不同**：
+本次回复必须和上面这条内容完全不同：
 - 不要重复其中的话题
 - 不要重复其中的句式
 - 不要把同样的意思换种说法再说一遍
 - 不要在回答新问题前，先重新回答一遍之前的问题
-直接回答用户**这次**说的话，不要扯回上次说过的内容。'''
+直接回答用户这次说的话，不要扯回上次说过的内容。'''
 
     time_context = get_time_context()
     emotion_list = ', '.join(EMOTIONS)
@@ -305,10 +302,10 @@ emotion字段：根据你这次回复的语气，从下列中选一个：
 平静 → 普通陈述，无明显语气词
 
 【TTS 防漂移——非常重要】
-1. 长句内部用「。」「、」自然分隔，给 TTS 换气点
+1. 长句内部用「。」「、」自然分隔
 2. 句尾不要用「〜」拖音
 3. 句尾不要用思考性弱音
-4. **每条气泡都是独立完整的句子，不要在气泡末尾留拖音或省略号让 TTS 误以为没说完**
+4. 每条气泡都是独立完整的句子，不要在气泡末尾留拖音或省略号
 
 【输出格式——必须严格遵守】
 返回合法单行JSON：
@@ -341,9 +338,8 @@ def sanitize_jp(jp: str) -> str:
     jp = jp.replace('ふふ', 'へへ')
     jp = re.sub(r'あはは+', 'ふっ', jp)
     jp = re.sub(r'ハハハ+', 'はは', jp)
-    jp = re.sub(r'〜+(?=[。！？、\s]|$)', '', jp)
+    jp = re.sub(r'〜+(?=[。！?、\s]|$)', '', jp)
     jp = re.sub(r'…+〜+', '…', jp)
-    # 确保气泡末尾有完整句号，避免 TTS 把这段当成"未完待续"导致下一段开头复读
     if jp and jp[-1] not in '。！？…':
         jp = jp + '。'
     return jp
@@ -395,7 +391,11 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
 
 def fish_tts(text, emotion='平静'):
     tag = EMOTION_TAGS.get(emotion, '')
-    final_text = f'{tag} {text}' if tag else text
+    # 关键修复：在每段最前面加一个独立的句号 + 空格 + 静音标记
+    # 让 Fish Audio 把这段当成"全新的开始"，不要受上一段影响
+    # 这样可以避免开头复读上一段的内容
+    prefix = '。 '
+    final_text = f'{prefix}{tag} {text}' if tag else f'{prefix}{text}'
 
     text_len = len(text)
     if text_len < 15:
@@ -479,7 +479,7 @@ async def chat_text(data: dict):
     total_days = update_chat_days(user_id)
     short_memories  = get_short_memory(user_id, 6)
     recent_openings = get_recent_openings(user_id, 5)
-    last_reply      = get_last_assistant_reply(user_id)  # 反复读：拿上一条回复
+    last_reply      = get_last_assistant_reply(user_id)
 
     messages = []
     for role, content in short_memories:
@@ -530,9 +530,10 @@ async def chat_text(data: dict):
     save_short_memory(user_id, 'assistant', full_jp)
     threading.Thread(target=extract_and_save_memory, args=(user_id, user_text, full_jp), daemon=True).start()
 
-    futures = [tts_executor.submit(tts_to_b64, m['jp'], emotion) for m in msgs]
-    for i, fut in enumerate(futures):
-        msgs[i]['audio_b64'] = fut.result()
+    # 关键修复：串行合成而非并行
+    # 并行可能导致 Fish Audio 服务端把多个请求当成连续段，串到一起出现复读
+    for m in msgs:
+        m['audio_b64'] = tts_to_b64(m['jp'], emotion)
 
     print(f'[TTS:{TTS_PROVIDER}] emotion={emotion} segments={len(msgs)} | days={total_days}')
     return JSONResponse({
