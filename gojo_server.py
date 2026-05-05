@@ -1,13 +1,12 @@
 import json
 import base64
-import sqlite3
 import threading
 import os
 import re
 import requests
 import anthropic
+import psycopg2
 from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,15 +15,10 @@ import uvicorn
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_KEY', '')
 FISH_KEY      = os.environ.get('FISH_KEY', '')
 FISH_VOICE_ID = os.environ.get('FISH_VOICE_ID', 'bfcbd07c927742d6803f52084f6bb776')
-
-ELEVEN_KEY      = os.environ.get('ELEVEN_KEY', '')
-ELEVEN_VOICE_ID = os.environ.get('ELEVEN_VOICE_ID', '')
-TTS_PROVIDER    = os.environ.get('TTS_PROVIDER', 'fish')
+TTS_PROVIDER  = os.environ.get('TTS_PROVIDER', 'fish')
+DATABASE_URL  = os.environ.get('DATABASE_URL', '')
 
 CN_TZ = timezone(timedelta(hours=8))
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH  = os.path.join(BASE_DIR, 'gojo_memory.db')
 
 EMOTION_TAGS = {
     '平静': '(calm)',
@@ -46,106 +40,126 @@ app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], all
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
+# ───────── PostgreSQL 数据库 ─────────
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('''CREATE TABLE IF NOT EXISTS short_memory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''CREATE TABLE IF NOT EXISTS short_memory (
+        id SERIAL PRIMARY KEY,
         user_id TEXT NOT NULL DEFAULT 'default',
-        role TEXT, content TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS long_memory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT,
+        content TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS long_memory (
+        id SERIAL PRIMARY KEY,
         user_id TEXT NOT NULL DEFAULT 'default',
         content TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS user_stats (
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS user_stats (
         user_id TEXT PRIMARY KEY,
         first_chat_date TEXT NOT NULL,
         last_chat_date TEXT NOT NULL,
         total_days INTEGER DEFAULT 1)''')
-    try:
-        conn.execute("ALTER TABLE short_memory ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
-    except: pass
-    try:
-        conn.execute("ALTER TABLE long_memory ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
-    except: pass
     conn.commit()
+    cur.close()
     conn.close()
 
 def save_short_memory(user_id, role, content):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('INSERT INTO short_memory (user_id, role, content) VALUES (?, ?, ?)', (user_id, role, content))
-    conn.execute('''DELETE FROM short_memory WHERE user_id = ? AND id NOT IN (
-        SELECT id FROM short_memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 20)''',
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('INSERT INTO short_memory (user_id, role, content) VALUES (%s, %s, %s)', (user_id, role, content))
+    cur.execute('''DELETE FROM short_memory WHERE user_id = %s AND id NOT IN (
+        SELECT id FROM short_memory WHERE user_id = %s ORDER BY timestamp DESC LIMIT 20)''',
         (user_id, user_id))
     conn.commit()
+    cur.close()
     conn.close()
 
 def save_long_memory(user_id, content):
-    conn = sqlite3.connect(DB_PATH)
-    # 防重复：如果已经有相似的记忆就不再存
-    existing = conn.execute(
-        'SELECT content FROM long_memory WHERE user_id = ?', (user_id,)
-    ).fetchall()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT content FROM long_memory WHERE user_id = %s', (user_id,))
+    existing = cur.fetchall()
     for (e,) in existing:
         if content in e or e in content:
+            cur.close()
             conn.close()
             return False
-    conn.execute('INSERT INTO long_memory (user_id, content) VALUES (?, ?)', (user_id, content))
+    cur.execute('INSERT INTO long_memory (user_id, content) VALUES (%s, %s)', (user_id, content))
     conn.commit()
+    cur.close()
     conn.close()
     return True
 
 def get_short_memory(user_id, n=6):
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        'SELECT role, content FROM short_memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?',
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT role, content FROM short_memory WHERE user_id = %s ORDER BY timestamp DESC LIMIT %s',
         (user_id, n)
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return list(reversed(rows))
 
 def get_long_memory(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        'SELECT content FROM long_memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 20',
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT content FROM long_memory WHERE user_id = %s ORDER BY timestamp DESC LIMIT 20',
         (user_id,)
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return [r[0] for r in rows]
 
 def update_chat_days(user_id):
     today = datetime.now(CN_TZ).strftime('%Y-%m-%d')
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute('SELECT first_chat_date, last_chat_date, total_days FROM user_stats WHERE user_id = ?', (user_id,)).fetchone()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT first_chat_date, last_chat_date, total_days FROM user_stats WHERE user_id = %s', (user_id,))
+    row = cur.fetchone()
     if not row:
-        conn.execute('INSERT INTO user_stats (user_id, first_chat_date, last_chat_date, total_days) VALUES (?, ?, ?, 1)',
+        cur.execute('INSERT INTO user_stats (user_id, first_chat_date, last_chat_date, total_days) VALUES (%s, %s, %s, 1)',
                      (user_id, today, today))
         total_days = 1
     else:
         first_date, last_date, total_days = row
         if last_date != today:
             total_days += 1
-            conn.execute('UPDATE user_stats SET last_chat_date = ?, total_days = ? WHERE user_id = ?',
+            cur.execute('UPDATE user_stats SET last_chat_date = %s, total_days = %s WHERE user_id = %s',
                          (today, total_days, user_id))
     conn.commit()
+    cur.close()
     conn.close()
     return total_days
 
 def get_chat_days(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute('SELECT total_days FROM user_stats WHERE user_id = ?', (user_id,)).fetchone()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT total_days FROM user_stats WHERE user_id = %s', (user_id,))
+    row = cur.fetchone()
+    cur.close()
     conn.close()
     return row[0] if row else 0
 
 init_db()
 
 def get_recent_openings(user_id, n=5):
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        'SELECT content FROM short_memory WHERE user_id = ? AND role = ? ORDER BY timestamp DESC LIMIT ?',
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT content FROM short_memory WHERE user_id = %s AND role = %s ORDER BY timestamp DESC LIMIT %s',
         (user_id, 'assistant', n)
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     openings = []
     for (content,) in rows:
@@ -155,13 +169,18 @@ def get_recent_openings(user_id, n=5):
     return openings
 
 def get_last_assistant_reply(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        'SELECT content FROM short_memory WHERE user_id = ? AND role = ? ORDER BY timestamp DESC LIMIT 1',
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT content FROM short_memory WHERE user_id = %s AND role = %s ORDER BY timestamp DESC LIMIT 1',
         (user_id, 'assistant')
-    ).fetchone()
+    )
+    row = cur.fetchone()
+    cur.close()
     conn.close()
     return row[0] if row else ''
+
+# ───────── 时间 & Prompt ─────────
 
 def get_time_context():
     now = datetime.now(CN_TZ)
@@ -209,7 +228,7 @@ def build_system_prompt(user_id, recent_openings=None, last_reply=''):
 
 严格规则（每条都必须遵守）：
 1. 不要用任何方式重复上面这条回复的内容，哪怕换了说法也不行
-2. 不要在第一个气泡里"承接"或"回应"上一条自己说的话
+2. 不要在第一个气泡里承接或回应上一条自己说的话
 3. 不要总结、复述、补充上一条回复
 4. 第一个气泡的第一句话必须直接针对用户这次发的消息
 5. 假装上一条回复不存在，从零开始回应用户'''
@@ -286,6 +305,19 @@ def build_system_prompt(user_id, recent_openings=None, last_reply=''):
 回复1：「除霊で疲れたけど、まあ楽しかったね」（一个话题：今天的工作）
 回复2：「で、君は？元気にしてた？」（话题切换：关心对方）
 
+【只围绕用户最新一条消息回复——严格执行】
+你的所有气泡都必须围绕用户刚刚发的这条消息来回应。
+
+禁止翻旧账：
+- 不要翻出这次对话中用户几条消息前说过的某句话来吐槽或点评
+- 不要把用户之前说的话和当前说的话做对比（如「さっきはXXって言ったのに」）
+- 对话历史只用来理解上下文，不要主动翻出旧消息来评论
+
+鼓励回忆：
+- 上方【你记得关于对方的以下事情】里的内容是长期记忆，可以在合适的时候自然提到
+- 例如对方说"好饿"，你记得对方喜欢草莓蛋糕，就可以自然地提「イチゴケーキでも食べる？」
+- 回忆要自然融入，不要刻意说"我记得你说过XX"
+
 【省略号使用规则】
 只在真正欲言又止、害羞、装作不在乎时用。整段对话最多用 1 次。
 
@@ -334,6 +366,8 @@ emotion字段：根据你这次回复的语气，从下列中选一个：
 - emotion 是整段总体情绪
 - messages 是数组，1~3 条
 - 每条 jp 10-60 字，完整意思放一个气泡里'''
+
+# ───────── 工具函数 ─────────
 
 def extract_json(raw: str):
     raw = raw.strip()
@@ -384,10 +418,6 @@ def merge_only_extreme_short(msgs):
     return merged
 
 def extract_and_save_memory(user_id, user_text, jp_reply):
-    """
-    自动提取并保存长期记忆。
-    放宽提取标准：聊天中提到的任何关于用户自己的事实都尝试记下来。
-    """
     try:
         existing = get_long_memory(user_id)
         existing_text = '\n'.join(f'- {m}' for m in existing) if existing else '（暂无）'
@@ -416,23 +446,18 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
    - 关系（家人、朋友、宠物的存在）
 
 2. 用户撒娇/调侃/抱怨/情绪宣泄不算事实，不要提取。
-   ✗ "我心情不好" → 不记
-   ✗ "你真讨厌" → 不记
-   ✓ "我最近压力很大因为要考研" → 记"用户在准备考研"
 
-3. 如果用户说的事实在【已记录的事实】里已有相同或重复的内容，回复"无"，不要重复记录。
+3. 如果用户说的事实在【已记录的事实】里已有相同或重复的内容，回复"无"。
 
-4. 用一句简短中文陈述句记录，以"用户"开头。
-   例：「用户喜欢吃草莓蛋糕」「用户养了一只猫叫小花」「用户是大学生」
+4. 用一句简短中文陈述句记录。
 
 【输出】
 只输出一行：
-- 如果有新事实：直接写一句"用户XXX"，不加引号、不加解释
+- 如果有新事实：直接写一句"用户XXX"，不加引号不加解释
 - 如果没有新事实：写"无"'''
             }]
         )
         summary = response.content[0].text.strip()
-        # 清理可能的引号、句号
         summary = summary.strip('「」"\'').strip()
         summary = summary.rstrip('。.')
 
@@ -441,7 +466,7 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
             if saved:
                 print(f'[{user_id}] 新长期记忆：{summary}')
             else:
-                print(f'[{user_id}] 长期记忆已存在，跳过：{summary}')
+                print(f'[{user_id}] 记忆已存在，跳过：{summary}')
     except Exception as e:
         print(f'记忆提取失败：{e}')
 
@@ -484,45 +509,15 @@ def fish_tts(text, emotion='平静'):
     return b''.join(response.iter_content(chunk_size=4096))
 
 
-def elevenlabs_tts(text, emotion='平静'):
-    emotion_settings = {
-        '平静':   {'stability': 0.55, 'similarity_boost': 0.85, 'style': 0.25, 'use_speaker_boost': True},
-        '自信':   {'stability': 0.50, 'similarity_boost': 0.85, 'style': 0.40, 'use_speaker_boost': True},
-        '嘲讽':   {'stability': 0.40, 'similarity_boost': 0.80, 'style': 0.60, 'use_speaker_boost': True},
-        '开心':   {'stability': 0.35, 'similarity_boost': 0.80, 'style': 0.70, 'use_speaker_boost': True},
-        '激动':   {'stability': 0.30, 'similarity_boost': 0.80, 'style': 0.75, 'use_speaker_boost': True},
-        '温柔':   {'stability': 0.65, 'similarity_boost': 0.90, 'style': 0.35, 'use_speaker_boost': True},
-        '认真':   {'stability': 0.70, 'similarity_boost': 0.85, 'style': 0.20, 'use_speaker_boost': True},
-        '疑惑':   {'stability': 0.45, 'similarity_boost': 0.80, 'style': 0.50, 'use_speaker_boost': True},
-        '调皮':   {'stability': 0.40, 'similarity_boost': 0.80, 'style': 0.65, 'use_speaker_boost': True},
-        '悲伤':   {'stability': 0.60, 'similarity_boost': 0.85, 'style': 0.30, 'use_speaker_boost': True},
-        '愤怒':   {'stability': 0.30, 'similarity_boost': 0.75, 'style': 0.80, 'use_speaker_boost': True},
-    }
-    settings = emotion_settings.get(emotion, emotion_settings['平静'])
-    url = f'https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}'
-    response = requests.post(
-        url,
-        headers={'xi-api-key': ELEVEN_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg'},
-        json={'text': text, 'model_id': 'eleven_multilingual_v2', 'voice_settings': settings},
-    )
-    if response.status_code != 200:
-        raise Exception(f'ElevenLabs error {response.status_code}: {response.text[:200]}')
-    return response.content
-
-
-def tts_synthesize(text, emotion='平静'):
-    if TTS_PROVIDER == 'elevenlabs' and ELEVEN_KEY and ELEVEN_VOICE_ID:
-        return elevenlabs_tts(text, emotion)
-    return fish_tts(text, emotion)
-
-
 def tts_to_b64(text, emotion):
     try:
-        audio_bytes = tts_synthesize(text, emotion)
+        audio_bytes = fish_tts(text, emotion)
         return base64.b64encode(audio_bytes).decode()
     except Exception as e:
         print(f'[TTS fail] {text[:30]} | {e}')
         return ''
+
+# ───────── API 路由 ─────────
 
 @app.post('/chat/text')
 async def chat_text(data: dict):
@@ -566,7 +561,7 @@ async def chat_text(data: dict):
         result = {
             'emotion': '调皮',
             'messages': [
-                {'jp': 'まあ、僕最強だから気にしないで', 'zh': '嗯，反正我最强，别在意'}
+                {'jp': 'まあ、僕最強だから気にしないで。', 'zh': '嗯，反正我最强，别在意。'}
             ]
         }
 
@@ -620,9 +615,9 @@ async def get_stats(user_id: str = 'default'):
 
 @app.get('/health')
 async def health():
-    return {'status': 'ok', 'tts_provider': TTS_PROVIDER}
+    return {'status': 'ok', 'tts_provider': TTS_PROVIDER, 'db': 'postgresql'}
 
 
 if __name__ == '__main__':
-    print(f'Gojo server starting... TTS: {TTS_PROVIDER}')
+    print(f'Gojo server starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL')
     uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
