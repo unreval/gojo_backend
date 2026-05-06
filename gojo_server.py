@@ -64,6 +64,16 @@ def init_db():
         first_chat_date TEXT NOT NULL,
         last_chat_date TEXT NOT NULL,
         total_days INTEGER DEFAULT 1)''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS tasks (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL DEFAULT 'default',
+        title TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT '个人',
+        due_date TEXT,
+        due_time TEXT,
+        reminder_minutes INTEGER,
+        completed BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     cur.close()
     conn.close()
@@ -616,6 +626,86 @@ async def get_stats(user_id: str = 'default'):
 @app.get('/health')
 async def health():
     return {'status': 'ok', 'tts_provider': TTS_PROVIDER, 'db': 'postgresql'}
+
+
+# ───────── 日程任务 API ─────────
+
+@app.get('/tasks')
+async def get_tasks(user_id: str = 'default'):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT id, title, category, due_date, due_time, reminder_minutes, completed, created_at FROM tasks WHERE user_id = %s ORDER BY completed ASC, due_date ASC NULLS LAST, created_at DESC',
+        (user_id,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    tasks = []
+    for r in rows:
+        tasks.append({
+            'id': r[0], 'title': r[1], 'category': r[2],
+            'due_date': r[3], 'due_time': r[4],
+            'reminder_minutes': r[5], 'completed': r[6],
+            'created_at': str(r[7]) if r[7] else None,
+        })
+    return JSONResponse({'tasks': tasks})
+
+
+@app.post('/tasks')
+async def create_task(data: dict):
+    user_id = data.get('user_id', 'default')
+    title = data.get('title', '').strip()
+    if not title:
+        return JSONResponse({'error': 'no title'}, status_code=400)
+    category = data.get('category', '个人')
+    due_date = data.get('due_date')  # YYYY-MM-DD or null
+    due_time = data.get('due_time')  # HH:MM or null
+    reminder_minutes = data.get('reminder_minutes')  # int or null
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
+        (user_id, title, category, due_date, due_time, reminder_minutes)
+    )
+    task_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return JSONResponse({'ok': True, 'id': task_id})
+
+
+@app.put('/tasks/{task_id}')
+async def update_task(task_id: int, data: dict):
+    fields = []
+    values = []
+    for key in ['title', 'category', 'due_date', 'due_time', 'reminder_minutes', 'completed']:
+        if key in data:
+            fields.append(f'{key} = %s')
+            values.append(data[key])
+    if not fields:
+        return JSONResponse({'error': 'nothing to update'}, status_code=400)
+    values.append(task_id)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f'UPDATE tasks SET {", ".join(fields)} WHERE id = %s', values)
+    conn.commit()
+    cur.close()
+    conn.close()
+    return JSONResponse({'ok': True})
+
+
+@app.delete('/tasks/{task_id}')
+async def delete_task(task_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM tasks WHERE id = %s', (task_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return JSONResponse({'ok': True})
 
 
 if __name__ == '__main__':
