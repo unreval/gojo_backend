@@ -1,7 +1,8 @@
-// app/(tabs)/chat.tsx — 聊天页（多段连续气泡 + 顺序播放音频）
+// app/(tabs)/chat.tsx — 聊天页（多段连续气泡 + 顺序播放音频 + 提醒通知）
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { Audio } from 'expo-av';
+import * as Notifications from 'expo-notifications';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -16,11 +17,19 @@ import {
 } from 'react-native';
 import { C, SERVER_URL, nowTime } from '../../constants/theme';
 
+// 通知显示配置：前台也弹通知
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
 const { width } = Dimensions.get('window');
 const STORAGE_KEY  = 'gojo_messages_v2';
 const USER_ID_KEY  = 'gojo_user_id';
 
-// 每条 Gojo 消息之间的延迟（毫秒），模拟"连续打字"
 const MSG_DELAY_MS = 800;
 
 export interface Message {
@@ -65,6 +74,12 @@ export default function ChatScreen() {
           playThroughEarpieceAndroid: false,
         });
 
+        // 请求通知权限
+        const { status } = await Notifications.requestPermissionsAsync();
+        if (status !== 'granted') {
+          console.warn('通知权限未授予');
+        }
+
         let uid = await AsyncStorage.getItem(USER_ID_KEY);
         if (!uid) {
           uid = generateUserId();
@@ -89,6 +104,43 @@ export default function ChatScreen() {
     if (!ready) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
   }, [messages, ready]);
+
+  // 设置提醒通知
+  const scheduleReminder = async (reminder: { date: string; time: string; content: string }) => {
+    try {
+      const [hour, minute] = (reminder.time || '00:00').split(':').map(Number);
+      const [year, month, day] = (reminder.date || formatToday()).split('-').map(Number);
+      const triggerDate = new Date(year, month - 1, day, hour, minute, 0);
+      const now = new Date();
+
+      if (triggerDate <= now) {
+        console.warn('提醒时间已过');
+        return;
+      }
+
+      const secondsUntil = Math.floor((triggerDate.getTime() - now.getTime()) / 1000);
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '五条悟',
+          body: `おい、${reminder.content}の時間だよ。\n（喂，该${reminder.content}了。）`,
+          sound: true,
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+          seconds: secondsUntil,
+        },
+      });
+      console.log(`提醒已设置：${secondsUntil}秒后 - ${reminder.content}`);
+    } catch (e) {
+      console.warn('设置提醒失败', e);
+    }
+  };
+
+  function formatToday(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
 
   // 播放一段音频，等播放完成后 resolve
   const playAudioAndWait = async (audio_b64: string): Promise<void> => {
@@ -116,7 +168,7 @@ export default function ChatScreen() {
         });
       } catch (e: any) {
         console.error('播放失败', e);
-        resolve(); // 失败也继续，不卡住后续消息
+        resolve();
       }
     });
   };
@@ -140,12 +192,19 @@ export default function ChatScreen() {
         user_id: userId,
       });
 
-      // 保存聊天天数到 AsyncStorage，首页可以读取
+      // 保存聊天天数
       if (res.data?.total_days) {
         AsyncStorage.setItem('gojo_chat_days', String(res.data.total_days));
       }
 
-      // 兼容两种返回格式：新版 messages 数组 / 老版单条
+      // 处理提醒：静默设置本地通知，不在聊天里显示系统提示
+      if (res.data?.reminder) {
+        const rem = res.data.reminder;
+        if (rem.date && rem.time && rem.content) {
+          await scheduleReminder(rem);
+        }
+      }
+
       let segments: GojoSegment[] = [];
       if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
         segments = res.data.messages;
@@ -162,10 +221,9 @@ export default function ChatScreen() {
         return;
       }
 
-      // 思考动画在第一条到达前先关掉
-      setLoading(false);
+      // 关键：不在这里 setLoading(false)
+      // 让 loading 状态保持到所有气泡都播完，禁止用户中途发新消息
 
-      // 按顺序：插入气泡 → 播放音频 → 等延迟 → 下一条
       for (let i = 0; i < segments.length; i++) {
         const seg = segments[i];
         const gojoMsg: Message = {
@@ -177,12 +235,10 @@ export default function ChatScreen() {
         };
         setMessages(prev => [...prev, gojoMsg]);
 
-        // 播放音频，等播完
         if (seg.audio_b64 && seg.audio_b64.length > 100) {
           await playAudioAndWait(seg.audio_b64);
         }
 
-        // 不是最后一条，加个停顿模拟打字
         if (i < segments.length - 1) {
           await sleep(MSG_DELAY_MS);
         }
@@ -191,6 +247,7 @@ export default function ChatScreen() {
       console.error('请求失败', e);
       Alert.alert('连接失败', e?.message ?? '请确认服务器正常运行');
     } finally {
+      // 所有气泡播完才解锁
       setLoading(false);
     }
   };
@@ -288,9 +345,10 @@ export default function ChatScreen() {
           style={s.input}
           value={inputText}
           onChangeText={setInputText}
-          placeholder="跟五条悟说点什么..."
+          placeholder={loading ? '五条悟正在回复中...' : '跟五条悟说点什么...'}
           placeholderTextColor={C.textMute}
           multiline
+          editable={!loading}
         />
         <TouchableOpacity
           style={[s.sendBtn, { backgroundColor: loading ? C.textMute : C.accent }]}
