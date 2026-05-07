@@ -118,33 +118,47 @@ export default function ChatScreen() {
   // 设置提醒通知
   const scheduleReminder = async (reminder: { date: string; time: string; content: string }) => {
     try {
+      // 检查权限
+      const { status } = await Notifications.getPermissionsAsync();
+      if (status !== 'granted') {
+        const newStatus = await Notifications.requestPermissionsAsync();
+        if (newStatus.status !== 'granted') {
+          Alert.alert('通知权限未授予', '请到手机设置 → 应用 → GojoAssistant → 通知，开启通知权限');
+          return;
+        }
+      }
+
       const [hour, minute] = (reminder.time || '00:00').split(':').map(Number);
       const [year, month, day] = (reminder.date || formatToday()).split('-').map(Number);
       const triggerDate = new Date(year, month - 1, day, hour, minute, 0);
       const now = new Date();
 
       if (triggerDate <= now) {
-        console.warn('提醒时间已过');
+        Alert.alert('提醒时间已过', `${reminder.date} ${reminder.time} 已经过了，无法设置`);
         return;
       }
 
       const secondsUntil = Math.floor((triggerDate.getTime() - now.getTime()) / 1000);
 
-      await Notifications.scheduleNotificationAsync({
+      const id = await Notifications.scheduleNotificationAsync({
         content: {
           title: '五条悟',
           body: `おい、${reminder.content}の時間だよ。\n（喂，该${reminder.content}了。）`,
-          sound: true,
+          sound: 'default',
           ...(Platform.OS === 'android' ? { channelId: 'gojo-reminders' } : {}),
         },
         trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-          seconds: secondsUntil,
-        },
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: triggerDate,
+        } as any,
       });
-      console.log(`提醒已设置：${secondsUntil}秒后 - ${reminder.content}`);
-    } catch (e) {
-      console.warn('设置提醒失败', e);
+
+      Alert.alert(
+        '✅ 提醒已设置',
+        `时间：${reminder.date} ${reminder.time}\n内容：${reminder.content}\n剩余：${Math.floor(secondsUntil / 60)}分${secondsUntil % 60}秒\n\nID: ${id.slice(0, 8)}`
+      );
+    } catch (e: any) {
+      Alert.alert('设置提醒失败', String(e?.message || e));
     }
   };
 

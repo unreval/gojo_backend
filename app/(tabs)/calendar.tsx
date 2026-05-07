@@ -188,6 +188,22 @@ export default function CalendarScreen() {
       // 设置本地通知提醒
       if (newDueDate && newDueTime && newReminder !== null) {
         try {
+          // 检查权限
+          const { status } = await Notifications.getPermissionsAsync();
+          if (status !== 'granted') {
+            const newStatus = await Notifications.requestPermissionsAsync();
+            if (newStatus.status !== 'granted') {
+              Alert.alert('通知权限未授予', '任务已添加，但无法设置通知。请到手机设置 → 应用 → GojoAssistant → 通知，开启权限。');
+              setNewTitle('');
+              setNewDueDate(null);
+              setNewDueTime(null);
+              setNewReminder(null);
+              setShowAddModal(false);
+              await fetchTasks(userId);
+              return;
+            }
+          }
+
           const [hour, minute] = newDueTime.split(':').map(Number);
           const [year, month, day] = newDueDate.split('-').map(Number);
           const dueDate = new Date(year, month - 1, day, hour, minute, 0);
@@ -196,21 +212,27 @@ export default function CalendarScreen() {
           const secondsUntil = Math.floor((triggerDate.getTime() - now.getTime()) / 1000);
 
           if (secondsUntil > 0) {
-            await Notifications.scheduleNotificationAsync({
+            const id = await Notifications.scheduleNotificationAsync({
               content: {
                 title: '五条悟提醒你',
                 body: title,
-                sound: true,
+                sound: 'default',
                 ...(Platform.OS === 'android' ? { channelId: 'gojo-reminders' } : {}),
               },
               trigger: {
-                type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-                seconds: secondsUntil,
-              },
+                type: Notifications.SchedulableTriggerInputTypes.DATE,
+                date: triggerDate,
+              } as any,
             });
+            Alert.alert(
+              '✅ 提醒已设置',
+              `${triggerDate.toLocaleString('zh-CN')}\n剩余：${Math.floor(secondsUntil / 60)}分${secondsUntil % 60}秒`
+            );
+          } else {
+            Alert.alert('提醒时间已过', '设置的提醒时间已经过了');
           }
-        } catch (notifErr) {
-          console.warn('设置通知失败', notifErr);
+        } catch (notifErr: any) {
+          Alert.alert('设置通知失败', String(notifErr?.message || notifErr));
         }
       }
 
