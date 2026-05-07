@@ -2,6 +2,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import axios from 'axios';
+import * as Notifications from 'expo-notifications';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -22,6 +23,15 @@ import { C, SERVER_URL } from '../../constants/theme';
 
 const { width } = Dimensions.get('window');
 const USER_ID_KEY = 'gojo_user_id';
+
+// 通知配置：即使 app 在前台也弹通知
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 // ───────── 类型 ─────────
 
@@ -122,6 +132,9 @@ export default function CalendarScreen() {
   // 初始化
   useEffect(() => {
     (async () => {
+      // 请求通知权限
+      await Notifications.requestPermissionsAsync();
+
       const uid = await AsyncStorage.getItem(USER_ID_KEY);
       if (uid) {
         setUserId(uid);
@@ -161,6 +174,35 @@ export default function CalendarScreen() {
         due_time: newDueTime,
         reminder_minutes: newReminder,
       });
+
+      // 设置本地通知提醒
+      if (newDueDate && newDueTime && newReminder !== null) {
+        try {
+          const [hour, minute] = newDueTime.split(':').map(Number);
+          const [year, month, day] = newDueDate.split('-').map(Number);
+          const dueDate = new Date(year, month - 1, day, hour, minute, 0);
+          const triggerDate = new Date(dueDate.getTime() - (newReminder || 0) * 60 * 1000);
+          const now = new Date();
+          const secondsUntil = Math.floor((triggerDate.getTime() - now.getTime()) / 1000);
+
+          if (secondsUntil > 0) {
+            await Notifications.scheduleNotificationAsync({
+              content: {
+                title: '五条悟提醒你',
+                body: title,
+                sound: true,
+              },
+              trigger: {
+                type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+                seconds: secondsUntil,
+              },
+            });
+          }
+        } catch (notifErr) {
+          console.warn('设置通知失败', notifErr);
+        }
+      }
+
       setNewTitle('');
       setNewDueDate(null);
       setNewDueTime(null);
