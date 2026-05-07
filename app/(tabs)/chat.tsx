@@ -80,6 +80,16 @@ export default function ChatScreen() {
           console.warn('通知权限未授予');
         }
 
+        // Android 8+ 必须创建通知频道
+        if (Platform.OS === 'android') {
+          await Notifications.setNotificationChannelAsync('gojo-reminders', {
+            name: '五条悟提醒',
+            importance: Notifications.AndroidImportance.HIGH,
+            sound: 'default',
+            vibrationPattern: [0, 250, 250, 250],
+          });
+        }
+
         let uid = await AsyncStorage.getItem(USER_ID_KEY);
         if (!uid) {
           uid = generateUserId();
@@ -125,6 +135,7 @@ export default function ChatScreen() {
           title: '五条悟',
           body: `おい、${reminder.content}の時間だよ。\n（喂，该${reminder.content}了。）`,
           sound: true,
+          ...(Platform.OS === 'android' ? { channelId: 'gojo-reminders' } : {}),
         },
         trigger: {
           type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,

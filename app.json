@@ -40,7 +40,14 @@
           }
         }
       ],
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      [
+        "expo-notifications",
+        {
+          "androidMode": "default",
+          "androidCollapsedTitle": "五条悟"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

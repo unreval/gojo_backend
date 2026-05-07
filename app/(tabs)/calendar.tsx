@@ -135,6 +135,16 @@ export default function CalendarScreen() {
       // 请求通知权限
       await Notifications.requestPermissionsAsync();
 
+      // Android 8+ 必须创建通知频道，否则通知会被静默丢弃
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('gojo-reminders', {
+          name: '五条悟提醒',
+          importance: Notifications.AndroidImportance.HIGH,
+          sound: 'default',
+          vibrationPattern: [0, 250, 250, 250],
+        });
+      }
+
       const uid = await AsyncStorage.getItem(USER_ID_KEY);
       if (uid) {
         setUserId(uid);
@@ -191,6 +201,7 @@ export default function CalendarScreen() {
                 title: '五条悟提醒你',
                 body: title,
                 sound: true,
+                ...(Platform.OS === 'android' ? { channelId: 'gojo-reminders' } : {}),
               },
               trigger: {
                 type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
