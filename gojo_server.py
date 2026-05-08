@@ -375,7 +375,48 @@ emotion字段：根据你这次回复的语气，从下列中选一个：
 注意：
 - emotion 是整段总体情绪
 - messages 是数组，1~3 条
-- 每条 jp 10-60 字，完整意思放一个气泡里'''
+- 每条 jp 10-60 字，完整意思放一个气泡里
+
+【提醒功能——非常重要！必须严格执行】
+如果用户在消息中**任何形式**地请求你提醒他/她、叫他/她、或者在某个时间做某事，
+**必须**在 JSON 中额外添加 reminder 字段。
+
+触发关键词（用户说出这些就一定要加 reminder 字段）：
+- "提醒我XXX"
+- "叫我起床"
+- "九点半叫我"
+- "到时候叫/喊/提醒我"
+- "记得提醒我"
+- "XX点喊我"
+- "XX点叫我"
+- "別忘了提醒"
+- 任何类似的请求
+
+JSON 格式（必须严格按这个格式）：
+{{"emotion":"情绪","messages":[...],"reminder":{{"date":"YYYY-MM-DD","time":"HH:MM","content":"提醒内容"}}}}
+
+时间解析规则：
+- "今天九点半" → date 填今天日期，time 填 "09:30" 或 "21:30"（根据上下文判断早上还是晚上）
+- "明天早上" → date 填明天，time 通常是 "07:00"-"09:00"
+- "下午三点" → time 填 "15:00"
+- "晚上十点" → time 填 "22:00"
+- 如果用户说不清具体几点（如"等会儿提醒我"），默认设当前时间 +30 分钟
+- date 永远是 YYYY-MM-DD，time 永远是 HH:MM 24小时制
+
+content 规则：
+- 简短中文，5-15字
+- 描述要做的事（如"起床""去代课""吃药""开会"）
+
+回复规则：
+- 你照常用五条悟的语气回复（可以嫌麻烦、撒娇、答应）
+- **但 reminder 字段必须出现在 JSON 里**，否则提醒功能会失效
+
+**反例（这些都必须加 reminder 字段，不要漏）：**
+- 用户："今天九点半叫我起床" → 必须加 reminder
+- 用户："提醒我下午三点开会" → 必须加 reminder
+- 用户："等等帮我喊一下" → 必须加 reminder（默认30分钟后）
+
+只有用户**完全没提**任何提醒请求时才不加 reminder 字段。'''
 
 # ───────── 工具函数 ─────────
 
@@ -595,11 +636,45 @@ async def chat_text(data: dict):
         m['audio_b64'] = tts_to_b64(m['jp'], emotion)
 
     print(f'[TTS:{TTS_PROVIDER}] emotion={emotion} segments={len(msgs)} | days={total_days}')
-    return JSONResponse({
+
+    # 处理提醒请求
+    reminder_data = None
+    if result.get('reminder'):
+        rem = result['reminder']
+        reminder_data = {
+            'date': rem.get('date'),
+            'time': rem.get('time'),
+            'content': rem.get('content', ''),
+        }
+        # 自动保存到任务表
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                'INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes) VALUES (%s, %s, %s, %s, %s, %s)',
+                (user_id, reminder_data['content'], '个人', reminder_data['date'], reminder_data['time'], 0)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f'[{user_id}] ✅ 提醒已设置：{reminder_data["date"]} {reminder_data["time"]} - {reminder_data["content"]}')
+        except Exception as e:
+            print(f'❌ 提醒保存失败：{e}')
+    else:
+        # 调试：检查用户消息中是否包含提醒关键词，但 LLM 没识别
+        reminder_keywords = ['提醒我', '叫我', '喊我', '记得提醒', '别忘', '到时候叫', '点叫', '点喊', '点提醒']
+        if any(kw in user_text for kw in reminder_keywords):
+            print(f'⚠️ [{user_id}] 用户消息疑似含提醒请求但 LLM 未识别: "{user_text}"')
+
+    resp = {
         'emotion': emotion,
         'messages': msgs,
         'total_days': total_days,
-    })
+    }
+    if reminder_data:
+        resp['reminder'] = reminder_data
+
+    return JSONResponse(resp)
 
 
 @app.post('/chat/voice')
