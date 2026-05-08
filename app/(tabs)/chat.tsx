@@ -116,7 +116,7 @@ export default function ChatScreen() {
   }, [messages, ready]);
 
   // 设置提醒通知
-  const scheduleReminder = async (reminder: { date: string; time: string; content: string }) => {
+  const scheduleReminder = async (reminder: { date: string; time: string; content: string; notification?: string }) => {
     try {
       // 检查权限
       const { status } = await Notifications.getPermissionsAsync();
@@ -143,7 +143,7 @@ export default function ChatScreen() {
       const id = await Notifications.scheduleNotificationAsync({
         content: {
           title: '五条悟',
-          body: `おい、${reminder.content}の時間だよ。\n（喂，该${reminder.content}了。）`,
+          body: (reminder as any).notification || `おい、${reminder.content}の時間だよ。\n（喂，该${reminder.content}了。）`,
           sound: 'default',
           ...(Platform.OS === 'android' ? { channelId: 'gojo-reminders' } : {}),
         },
