@@ -1,7 +1,10 @@
-// app/(tabs)/accounting.tsx — 记账页
+// app/(tabs)/accounting.tsx — 记账页（加了Q版悟趴在余额卡上）
+// ⚠️ 跟之前的代码完全一样，只加了两处改动（标记了 ★NEW）
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useEffect, useState } from 'react';
 import { Alert, Modal, Platform, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import ChibiSprite from '../../components/ChibiSprite'; // ★NEW
 import { C, CATEGORIES, todayStr, uid } from '../../constants/theme';
 
 const STORAGE_KEY = 'gojo_accounting';
@@ -56,27 +59,33 @@ export default function AccountingScreen() {
       <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
         <Text style={s.pageTitle}>💰 记账本</Text>
 
-        {/* 余额卡 */}
-        <View style={s.balanceCard}>
-          <Text style={s.balanceLabel}>本月结余</Text>
-          <Text style={[s.balanceAmount, { color: balance>=0 ? C.income : C.expense }]}>
-            {balance>=0?'+':''}{balance.toFixed(2)}
-            <Text style={{ fontSize:14 }}> 元</Text>
-          </Text>
-          <View style={s.balanceRow}>
-            <View style={s.balanceItem}>
-              <Text style={s.balanceItemLabel}>收入</Text>
-              <Text style={[s.balanceItemVal, { color:C.income }]}>+¥{totalIn.toFixed(2)}</Text>
-            </View>
-            <View style={s.balanceDivider}/>
-            <View style={s.balanceItem}>
-              <Text style={s.balanceItemLabel}>支出</Text>
-              <Text style={[s.balanceItemVal, { color:C.expense }]}>-¥{totalOut.toFixed(2)}</Text>
+        {/* 余额卡 + ★NEW 精灵趴在上面 */}
+        <View style={{ position: 'relative' }}>
+          {/* 精灵趴在余额卡右上角 */}
+          <View style={{ position: 'absolute', top: -20, right: 8, zIndex: 10 }}>
+            <ChibiSprite pose="lie" size={80} />
+          </View>
+
+          <View style={s.balanceCard}>
+            <Text style={s.balanceLabel}>本月结余</Text>
+            <Text style={[s.balanceAmount, { color: balance>=0 ? C.income : C.expense }]}>
+              {balance>=0?'+':''}{balance.toFixed(2)}
+              <Text style={{ fontSize:14 }}> 元</Text>
+            </Text>
+            <View style={s.balanceRow}>
+              <View style={s.balanceItem}>
+                <Text style={s.balanceItemLabel}>收入</Text>
+                <Text style={[s.balanceItemVal, { color:C.income }]}>+¥{totalIn.toFixed(2)}</Text>
+              </View>
+              <View style={s.balanceDivider}/>
+              <View style={s.balanceItem}>
+                <Text style={s.balanceItemLabel}>支出</Text>
+                <Text style={[s.balanceItemVal, { color:C.expense }]}>-¥{totalOut.toFixed(2)}</Text>
+              </View>
             </View>
           </View>
         </View>
 
-        {/* 支出分类 */}
         {catList.length > 0 && (
           <>
             <Text style={s.sectionLabel}>支出分类</Text>
@@ -84,9 +93,7 @@ export default function AccountingScreen() {
               {catList.map(([cat, amt]) => (
                 <View key={cat} style={s.catRow}>
                   <Text style={s.catLabel}>{cat}</Text>
-                  <View style={s.catBarWrap}>
-                    <View style={[s.catBar, { width: `${Math.min((amt/totalOut)*100, 100)}%` as any }]}/>
-                  </View>
+                  <View style={s.catBarWrap}><View style={[s.catBar, { width: `${Math.min((amt/totalOut)*100, 100)}%` as any }]}/></View>
                   <Text style={s.catAmt}>¥{amt.toFixed(0)}</Text>
                 </View>
               ))}
@@ -94,66 +101,45 @@ export default function AccountingScreen() {
           </>
         )}
 
-        {/* 明细记录 */}
         <View style={s.recordHeader}>
           <Text style={s.sectionLabel}>明细记录</Text>
-          <TouchableOpacity style={s.addMiniBtn} onPress={() => setShowModal(true)}>
-            <Text style={s.addMiniBtnText}>＋ 添加</Text>
-          </TouchableOpacity>
+          <TouchableOpacity style={s.addMiniBtn} onPress={() => setShowModal(true)}><Text style={s.addMiniBtnText}>＋ 添加</Text></TouchableOpacity>
         </View>
         {records.length===0 && <Text style={s.emptyText}>还没有记录，快来记一笔吧～</Text>}
         {records.map(r => (
           <View key={r.id} style={s.recordRow}>
-            <View style={[s.recordIcon, { backgroundColor:r.type==='in' ? C.income+'22' : C.expense+'22' }]}>
-              <Text style={{ fontSize:18 }}>{r.type==='in' ? '📥' : '📤'}</Text>
-            </View>
-            <View style={{ flex:1 }}>
-              <Text style={s.recordDesc}>{r.desc}</Text>
-              <Text style={s.recordCat}>{r.category} · {r.date}</Text>
-            </View>
-            <Text style={[s.recordAmt, { color:r.type==='in' ? C.income : C.expense }]}>
-              {r.type==='in' ? '+' : '-'}¥{r.amount.toFixed(2)}
-            </Text>
-            <TouchableOpacity onPress={() => delRecord(r.id)} style={s.delBtn}>
-              <Text style={s.delBtnText}>×</Text>
-            </TouchableOpacity>
+            <View style={[s.recordIcon, { backgroundColor:r.type==='in' ? C.income+'22' : C.expense+'22' }]}><Text style={{ fontSize:18 }}>{r.type==='in' ? '📥' : '📤'}</Text></View>
+            <View style={{ flex:1 }}><Text style={s.recordDesc}>{r.desc}</Text><Text style={s.recordCat}>{r.category} · {r.date}</Text></View>
+            <Text style={[s.recordAmt, { color:r.type==='in' ? C.income : C.expense }]}>{r.type==='in' ? '+' : '-'}¥{r.amount.toFixed(2)}</Text>
+            <TouchableOpacity onPress={() => delRecord(r.id)} style={s.delBtn}><Text style={s.delBtnText}>×</Text></TouchableOpacity>
           </View>
         ))}
       </ScrollView>
 
-      {/* 添加弹窗 */}
       <Modal visible={showModal} transparent animationType="slide">
         <View style={s.overlay}>
           <View style={s.modalBox}>
             <Text style={s.modalTitle}>添加记录</Text>
             <View style={s.typeSwitch}>
               {(['out','in'] as const).map(t => (
-                <TouchableOpacity key={t} style={[s.typeSwitchBtn, form.type===t && { backgroundColor:t==='in' ? C.income : C.expense }]}
-                  onPress={() => setForm(f => ({ ...f, type:t }))}>
+                <TouchableOpacity key={t} style={[s.typeSwitchBtn, form.type===t && { backgroundColor:t==='in' ? C.income : C.expense }]} onPress={() => setForm(f => ({ ...f, type:t }))}>
                   <Text style={[s.typeSwitchText, form.type===t && { color:'#fff' }]}>{t==='in' ? '收入' : '支出'}</Text>
                 </TouchableOpacity>
               ))}
             </View>
-            <TextInput style={s.modalInput} placeholder="描述（如：奶茶）" placeholderTextColor={C.textMute}
-              value={form.desc} onChangeText={v => setForm(f => ({ ...f, desc:v }))}/>
-            <TextInput style={s.modalInput} placeholder="金额（如：18）" placeholderTextColor={C.textMute}
-              value={form.amount} onChangeText={v => setForm(f => ({ ...f, amount:v }))} keyboardType="decimal-pad"/>
+            <TextInput style={s.modalInput} placeholder="描述（如：奶茶）" placeholderTextColor={C.textMute} value={form.desc} onChangeText={v => setForm(f => ({ ...f, desc:v }))}/>
+            <TextInput style={s.modalInput} placeholder="金额（如：18）" placeholderTextColor={C.textMute} value={form.amount} onChangeText={v => setForm(f => ({ ...f, amount:v }))} keyboardType="decimal-pad"/>
             <Text style={s.modalLabel}>分类</Text>
             <View style={s.tagRow}>
               {CATEGORIES.map(c => (
-                <TouchableOpacity key={c} style={[s.tagChip, form.category===c && { backgroundColor:C.accent+'44', borderColor:C.accent }]}
-                  onPress={() => setForm(f => ({ ...f, category:c }))}>
+                <TouchableOpacity key={c} style={[s.tagChip, form.category===c && { backgroundColor:C.accent+'44', borderColor:C.accent }]} onPress={() => setForm(f => ({ ...f, category:c }))}>
                   <Text style={[s.tagChipText, form.category===c && { color:C.accent2 }]}>{c}</Text>
                 </TouchableOpacity>
               ))}
             </View>
             <View style={s.btnRow}>
-              <TouchableOpacity style={s.cancelBtn} onPress={() => setShowModal(false)}>
-                <Text style={s.cancelText}>取消</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={s.confirmBtn} onPress={addRecord}>
-                <Text style={s.confirmText}>确定</Text>
-              </TouchableOpacity>
+              <TouchableOpacity style={s.cancelBtn} onPress={() => setShowModal(false)}><Text style={s.cancelText}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={s.confirmBtn} onPress={addRecord}><Text style={s.confirmText}>确定</Text></TouchableOpacity>
             </View>
           </View>
         </View>

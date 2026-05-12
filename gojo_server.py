@@ -847,3 +847,71 @@ async def delete_task(task_id: int):
 if __name__ == '__main__':
     print(f'Gojo server starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL')
     uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+# ─── 以下代码添加到 gojo_server.py 的末尾（health 接口之后） ───
+# 记忆管理 API：让前端可以查看、修改、删除长期记忆
+
+
+@app.get('/long_memory')
+async def get_long_memory_api(user_id: str = 'default'):
+    """获取某个用户的所有长期记忆，按分类分组返回"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT id, content, category, timestamp FROM long_memory WHERE user_id = %s ORDER BY timestamp DESC',
+        (user_id,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    memories = []
+    for r in rows:
+        memories.append({
+            'id': r[0],
+            'content': r[1],
+            'category': r[2] or '其他',
+            'timestamp': str(r[3]) if r[3] else None,
+        })
+    return JSONResponse({'memories': memories})
+
+
+@app.put('/long_memory/{memory_id}')
+async def update_long_memory(memory_id: int, data: dict):
+    """修改一条长期记忆的内容和/或分类"""
+    content = data.get('content', '').strip()
+    category = data.get('category')
+
+    if not content:
+        return JSONResponse({'error': '内容不能为空'}, status_code=400)
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if category:
+        cur.execute(
+            'UPDATE long_memory SET content = %s, category = %s WHERE id = %s',
+            (content, category, memory_id)
+        )
+    else:
+        cur.execute(
+            'UPDATE long_memory SET content = %s WHERE id = %s',
+            (content, memory_id)
+        )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return JSONResponse({'ok': True, 'id': memory_id})
+
+
+@app.delete('/long_memory/{memory_id}')
+async def delete_long_memory(memory_id: int):
+    """删除一条长期记忆"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM long_memory WHERE id = %s', (memory_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return JSONResponse({'ok': True, 'id': memory_id})

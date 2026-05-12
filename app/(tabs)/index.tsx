@@ -1,93 +1,60 @@
-// app/(tabs)/index.tsx — 首页
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useFocusEffect } from '@react-navigation/native';
+// app/(tabs)/index.tsx — 主页
 import { useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
-import { ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React from 'react';
+import { StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import ChibiSprite from '../../components/ChibiSprite';
 import { C } from '../../constants/theme';
+
+const TILES = [
+  { route: '/chat',       icon: '💬', label: '聊天', sub: '跟悟说话', color: '#5BC4FF' },
+  { route: '/calendar',   icon: '📅', label: '日历', sub: '行程提醒', color: '#A78BFA' },
+  { route: '/accounting', icon: '💰', label: '记账', sub: '收支记录', color: '#34D399' },
+  { route: '/memory',     icon: '🧠', label: '记忆', sub: '悟记得的', color: '#F59E0B' },
+];
 
 export default function HomeScreen() {
   const router = useRouter();
-  const [chatDays, setChatDays] = useState(1);
-
-  // 每次回到首页时读取最新天数
-  useFocusEffect(
-    useCallback(() => {
-      AsyncStorage.getItem('gojo_chat_days').then(val => {
-        if (val) setChatDays(Number(val));
-      });
-    }, [])
-  );
-
-  const cards = [
-    { icon:'💬', label:'与悟聊天',  desc:'随时开口，他在等你',   path:'/chat',       color:'#1d4ed8' },
-    { icon:'📅', label:'日程安排',  desc:'记录你的每一天',       path:'/calendar',   color:'#0e7490' },
-    { icon:'💰', label:'记账本',    desc:'掌握收支，不再迷糊',   path:'/accounting', color:'#065f46' },
-  ];
 
   return (
-    <ScrollView style={s.scroll} contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
-      <StatusBar barStyle="light-content" backgroundColor={C.bg}/>
+    <View style={s.container}>
+      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
 
-      {/* 头部 */}
-      <View style={s.header}>
-        <View style={s.avatarWrap}>
-          <View style={s.avatar}><Text style={s.avatarText}>悟</Text></View>
-          <View style={s.avatarGlow}/>
-        </View>
-        <Text style={s.name}>五 条 悟</Text>
-        <View style={s.streak}><Text style={s.streakText}>❤️ 已连续聊天 {chatDays} 天</Text></View>
-        <Text style={s.quote}>「まあ、僕が最強だから」</Text>
+      {/* Q版悟 */}
+      <View style={s.spriteWrap}>
+        <ChibiSprite pose="sit" size={160} />
       </View>
 
-      {/* 功能卡片 */}
-      <Text style={s.sectionLabel}>功能入口</Text>
-      {cards.map(c => (
-        <TouchableOpacity key={c.path} style={[s.card, { borderLeftColor: c.color }]}
-          onPress={() => router.push(c.path as any)} activeOpacity={0.75}>
-          <View style={[s.cardIcon, { backgroundColor: c.color + '22' }]}>
-            <Text style={s.cardIconText}>{c.icon}</Text>
-          </View>
-          <View style={s.cardInfo}>
-            <Text style={s.cardLabel}>{c.label}</Text>
-            <Text style={s.cardDesc}>{c.desc}</Text>
-          </View>
-          <Text style={s.cardArrow}>›</Text>
-        </TouchableOpacity>
-      ))}
+      {/* 标题 */}
+      <Text style={s.title}>五条悟</Text>
+      <Text style={s.subtitle}>僕が最強だから</Text>
 
-      {/* 今日语录 */}
-      <View style={s.daily}>
-        <Text style={s.dailyTitle}>今日·五条语录</Text>
-        <Text style={s.dailyQuote}>「つまらない…もっと楽しいことしようよ。」</Text>
-        <Text style={s.dailyTrans}>好无聊…来做点更有意思的事嘛。</Text>
+      {/* 四宫格入口 */}
+      <View style={s.grid}>
+        {TILES.map(tile => (
+          <TouchableOpacity
+            key={tile.route}
+            style={s.tile}
+            activeOpacity={0.7}
+            onPress={() => router.push(tile.route as any)}
+          >
+            <Text style={s.tileIcon}>{tile.icon}</Text>
+            <Text style={s.tileLabel}>{tile.label}</Text>
+            <Text style={s.tileSub}>{tile.sub}</Text>
+          </TouchableOpacity>
+        ))}
       </View>
-    </ScrollView>
+    </View>
   );
 }
 
 const s = StyleSheet.create({
-  scroll:       { flex:1, backgroundColor:C.bg },
-  content:      { paddingBottom:32 },
-  header:       { alignItems:'center', paddingTop:60, paddingBottom:32, paddingHorizontal:24 },
-  avatarWrap:   { position:'relative', marginBottom:16 },
-  avatar:       { width:90, height:90, borderRadius:45, backgroundColor:C.accentDim, alignItems:'center', justifyContent:'center', borderWidth:2, borderColor:C.accent },
-  avatarGlow:   { position:'absolute', top:-6, left:-6, right:-6, bottom:-6, borderRadius:51, borderWidth:1, borderColor:C.accent+'44' },
-  avatarText:   { fontSize:36, color:'#fff', fontWeight:'700' },
-  name:         { fontSize:26, color:C.text, fontWeight:'300', letterSpacing:8, marginBottom:10 },
-  streak:       { backgroundColor:C.accent+'22', borderWidth:1, borderColor:C.accent+'55', borderRadius:20, paddingHorizontal:16, paddingVertical:6, marginBottom:12 },
-  streakText:   { color:C.accent2, fontSize:13 },
-  quote:        { color:C.textDim, fontSize:13, fontStyle:'italic' },
-  sectionLabel: { color:C.textMute, fontSize:11, letterSpacing:2, marginLeft:20, marginBottom:8, marginTop:8 },
-  card:         { flexDirection:'row', alignItems:'center', backgroundColor:C.card, marginHorizontal:16, marginBottom:12, borderRadius:16, padding:16, borderLeftWidth:3 },
-  cardIcon:     { width:48, height:48, borderRadius:12, alignItems:'center', justifyContent:'center', marginRight:14 },
-  cardIconText: { fontSize:22 },
-  cardInfo:     { flex:1 },
-  cardLabel:    { color:C.text, fontSize:15, fontWeight:'600', marginBottom:3 },
-  cardDesc:     { color:C.textDim, fontSize:12 },
-  cardArrow:    { color:C.textMute, fontSize:24 },
-  daily:        { margin:16, backgroundColor:C.card2, borderRadius:16, padding:20, borderWidth:1, borderColor:C.border },
-  dailyTitle:   { color:C.accent2, fontSize:12, marginBottom:10, letterSpacing:1 },
-  dailyQuote:   { color:C.text, fontSize:15, marginBottom:6, fontStyle:'italic' },
-  dailyTrans:   { color:C.textDim, fontSize:12 },
+  container:  { flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  spriteWrap: { marginBottom: 20 },
+  title:      { color: C.text, fontSize: 28, fontWeight: '700', letterSpacing: -0.5 },
+  subtitle:   { color: C.textMute, fontSize: 13, letterSpacing: 1, marginTop: 6, marginBottom: 32 },
+  grid:       { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 12, width: '100%', maxWidth: 300 },
+  tile:       { width: '47%', backgroundColor: C.card, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: C.border },
+  tileIcon:   { fontSize: 28, marginBottom: 8 },
+  tileLabel:  { color: C.text, fontSize: 16, fontWeight: '600', marginBottom: 4 },
+  tileSub:    { color: C.textMute, fontSize: 11 },
 });
