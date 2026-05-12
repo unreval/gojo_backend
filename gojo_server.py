@@ -121,13 +121,13 @@ def get_long_memory(user_id):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        'SELECT content FROM long_memory WHERE user_id = %s ORDER BY timestamp DESC LIMIT 20',
+        'SELECT content, timestamp FROM long_memory WHERE user_id = %s ORDER BY timestamp DESC LIMIT 20',
         (user_id,)
     )
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [r[0] for r in rows]
+    return [(r[0], r[1]) for r in rows]
 
 def update_chat_days(user_id):
     today = datetime.now(CN_TZ).strftime('%Y-%m-%d')
@@ -223,7 +223,12 @@ def build_system_prompt(user_id, recent_openings=None, last_reply=''):
     long_memories = get_long_memory(user_id)
     memory_text = ''
     if long_memories:
-        memory_text = '\n\n你记得关于对方的以下事情（必须自然融入回复，不要刻意提及）：\n' + '\n'.join(f'- {m}' for m in long_memories)
+        # 把记忆和记录日期一起显示，让 Claude 知道这条记忆是什么时候记下的
+        memory_lines = []
+        for content, ts in long_memories:
+            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
+            memory_lines.append(f'- [记录于{date_str}] {content}')
+        memory_text = '\n\n你记得关于对方的以下事情（必须自然融入回复，不要刻意提及）：\n' + '\n'.join(memory_lines) + '\n\n注意：如果记忆里有相对时间（如"还有3天考试"），结合记录日期推算现在的实际情况。'
 
     avoid_text = ''
     if recent_openings:
@@ -495,7 +500,11 @@ def merge_only_extreme_short(msgs):
 def extract_and_save_memory(user_id, user_text, jp_reply):
     try:
         existing = get_long_memory(user_id)
-        existing_text = '\n'.join(f'- {m}' for m in existing) if existing else '（暂无）'
+        existing_text = '\n'.join(f'- {m[0]}' for m in existing) if existing else '（暂无）'
+
+        now = datetime.now(CN_TZ)
+        today_str = now.strftime('%Y-%m-%d')
+        weekday_cn = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][now.weekday()]
 
         response = claude_client.messages.create(
             model='claude-haiku-4-5-20251001',
@@ -503,6 +512,8 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
             messages=[{
                 'role': 'user',
                 'content': f'''你是一个事实抽取助手。从下面的对话中找出用户透露的关于自己的事实信息。
+
+【今天日期】{today_str}（{weekday_cn}）
 
 【已记录的事实】
 {existing_text}
@@ -524,7 +535,15 @@ def extract_and_save_memory(user_id, user_text, jp_reply):
 
 3. 如果用户说的事实在【已记录的事实】里已有相同或重复的内容，回复"无"。
 
-4. 用一句简短中文陈述句记录，以"用户"开头。
+4. **时间日期必须用绝对日期，不要用相对日期！**
+   今天是 {today_str}。请把所有相对时间转换为绝对日期：
+   - "考试还有3天" → 转换为 "用户的考试在 {(now + timedelta(days=3)).strftime('%Y-%m-%d')}"
+   - "下周一去面试" → 转换为具体日期
+   - "明天交作业" → 转换为 "用户在 {(now + timedelta(days=1)).strftime('%Y-%m-%d')} 要交作业"
+   - 绝对禁止记录 "还有X天" "下周" "明天" 这种相对表述！
+   - 用户说"昨天去了XX" → 记录为 "用户在 {(now - timedelta(days=1)).strftime('%Y-%m-%d')} 去了XX"
+
+5. 用一句简短中文陈述句记录，以"用户"开头。
 
 【输出】
 只输出一行：
@@ -710,10 +729,10 @@ async def chat_voice(file: UploadFile = File(...)):
 @app.get('/memories')
 async def get_memories(user_id: str = 'default'):
     short = get_short_memory(user_id, 20)
-    long  = get_long_memory(user_id)
+    long_mems = get_long_memory(user_id)
     return JSONResponse({
         'short_memory': [{'role': r, 'content': c} for r, c in short],
-        'long_memory': long
+        'long_memory': [{'content': c, 'date': ts.strftime('%Y-%m-%d') if ts else None} for c, ts in long_mems]
     })
 
 
