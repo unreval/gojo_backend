@@ -79,6 +79,8 @@ def init_db():
     # 旧表自动补列
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS notification_id VARCHAR(255) DEFAULT NULL")
     cur.execute("ALTER TABLE long_memory ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT NULL")
+    # 把旧记忆里的"用户"全部改成"她"
+    cur.execute("UPDATE long_memory SET content = REPLACE(content, '用户', '她') WHERE content LIKE '用户%'")
     conn.commit()
     cur.close()
     conn.close()
@@ -520,11 +522,11 @@ AI回复：{assistant_text}
 - 只提取用户说的关于自己的具体事实（喜好、身份、经历、状态、关系、习惯等）
 - 必须是新信息，不是泛泛的感受
 - 不提取AI说的话，不提取用户的问题本身
-- 用一句简短中文陈述句记录。
+- 用一句简短中文陈述句记录，以"她"开头。
 
 【输出】
 只输出一行：
-- 如果有新事实：直接写一句"用户XXX"，不加引号不加解释
+- 如果有新事实：直接写一句"她XXX"，不加引号不加解释
 - 如果没有新事实：写"无"'''
             }]
         )
@@ -532,7 +534,7 @@ AI回复：{assistant_text}
         summary = summary.strip('「」"\'').strip()
         summary = summary.rstrip('。.')
 
-        if summary and summary != '无' and len(summary) > 4 and summary.startswith('用户'):
+        if summary and summary != '无' and len(summary) > 4 and summary.startswith('她'):
             saved = save_long_memory(user_id, summary)
             if saved:
                 print(f'[{user_id}] 新长期记忆：{summary}')
