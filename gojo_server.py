@@ -78,6 +78,7 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     # 旧表自动补列
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS notification_id VARCHAR(255) DEFAULT NULL")
+    cur.execute("ALTER TABLE long_memory ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT NULL")
     conn.commit()
     cur.close()
     conn.close()
