@@ -754,7 +754,7 @@ async def get_memories(user_id: str = 'default'):
     long_mems = get_long_memory(user_id)
     return JSONResponse({
         'short_memory': [{'role': r, 'content': c} for r, c in short],
-        'long_memory': [{'content': c, 'date': ts.strftime('%Y-%m-%d') if ts else None} for c, ts in long_mems]
+        'long_memory': [f'[{ts.strftime("%Y-%m-%d")}] {c}' if ts else c for c, ts in long_mems]
     })
 
 
