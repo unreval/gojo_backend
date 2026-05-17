@@ -844,10 +844,6 @@ async def delete_task(task_id: int):
     return JSONResponse({'ok': True})
  
  
-if __name__ == '__main__':
-    print(f'Gojo server starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL')
-    uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
- 
 
 
 # ───────── 记忆管理 API ─────────
