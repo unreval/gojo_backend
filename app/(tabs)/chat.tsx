@@ -1,23 +1,28 @@
-// app/(tabs)/chat.tsx — 聊天页（多段连续气泡 + 顺序播放音频 + 提醒通知）
+// app/(tabs)/chat.tsx — 聊天页
+// 新增：🔍 搜索聊天记录 + 长按气泡复制文字
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { Audio } from 'expo-av';
+import * as Clipboard from 'expo-clipboard';
 import * as Notifications from 'expo-notifications';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert, Dimensions,
+  Alert,
+  Dimensions,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
-  Text, TextInput, TouchableOpacity,
+  Text,
+  TextInput,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import { C, SERVER_URL, nowTime } from '../../constants/theme';
 
-// 通知显示配置：前台也弹通知
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -27,9 +32,8 @@ Notifications.setNotificationHandler({
 });
 
 const { width } = Dimensions.get('window');
-const STORAGE_KEY  = 'gojo_messages_v2';
-const USER_ID_KEY  = 'gojo_user_id';
-
+const STORAGE_KEY = 'gojo_messages_v2';
+const USER_ID_KEY = 'gojo_user_id';
 const MSG_DELAY_MS = 800;
 
 export interface Message {
@@ -54,13 +58,24 @@ function sleep(ms: number) {
   return new Promise<void>(resolve => setTimeout(resolve, ms));
 }
 
+function formatToday(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export default function ChatScreen() {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [inputText, setInputText] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [ready, setReady] = useState(false);
-  const [userId, setUserId] = useState<string>('');
-  const scrollRef = useRef<ScrollView>(null);
+  const [messages, setMessages]     = useState<Message[]>([]);
+  const [inputText, setInputText]   = useState('');
+  const [loading, setLoading]       = useState(false);
+  const [ready, setReady]           = useState(false);
+  const [userId, setUserId]         = useState<string>('');
+
+  // ── 搜索状态 ──
+  const [searchMode, setSearchMode]   = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const scrollRef    = useRef<ScrollView>(null);
+  const searchRef    = useRef<TextInput>(null);
   const currentSoundRef = useRef<Audio.Sound | null>(null);
 
   useEffect(() => {
@@ -74,13 +89,9 @@ export default function ChatScreen() {
           playThroughEarpieceAndroid: false,
         });
 
-        // 请求通知权限
         const { status } = await Notifications.requestPermissionsAsync();
-        if (status !== 'granted') {
-          console.warn('通知权限未授予');
-        }
+        if (status !== 'granted') console.warn('通知权限未授予');
 
-        // Android 8+ 必须创建通知频道
         if (Platform.OS === 'android') {
           await Notifications.setNotificationChannelAsync('gojo-reminders', {
             name: '五条悟提醒',
@@ -115,14 +126,42 @@ export default function ChatScreen() {
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
   }, [messages, ready]);
 
-  // 设置提醒通知
-  const scheduleReminder = async (reminder: { date: string; time: string; content: string; notification?: string }) => {
+  // ── 搜索开关 ──
+  const toggleSearch = () => {
+    if (searchMode) {
+      setSearchMode(false);
+      setSearchQuery('');
+    } else {
+      setSearchMode(true);
+      setTimeout(() => searchRef.current?.focus(), 100);
+    }
+  };
+
+  // ── 长按复制 ──
+  const copyMessage = async (msg: Message) => {
+    const text = msg.subtitle ? `${msg.text}\n${msg.subtitle}` : msg.text;
+    await Clipboard.setStringAsync(text);
+    Alert.alert('已复制', '', [{ text: '好', style: 'cancel' }], { cancelable: true });
+  };
+
+  // ── 过滤消息（搜索模式） ──
+  const displayMessages = searchMode && searchQuery.trim()
+    ? messages.filter(m =>
+        m.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (m.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : messages;
+
+  // ── 设置提醒 ──
+  const scheduleReminder = async (reminder: {
+    date: string; time: string; content: string;
+    notification?: string; task_id?: number;
+  }) => {
     try {
-      // 检查权限
       const { status } = await Notifications.getPermissionsAsync();
       if (status !== 'granted') {
-        const newStatus = await Notifications.requestPermissionsAsync();
-        if (newStatus.status !== 'granted') {
+        const ns = await Notifications.requestPermissionsAsync();
+        if (ns.status !== 'granted') {
           Alert.alert('通知权限未授予', '请到手机设置 → 应用 → GojoAssistant → 通知，开启通知权限');
           return;
         }
@@ -131,19 +170,16 @@ export default function ChatScreen() {
       const [hour, minute] = (reminder.time || '00:00').split(':').map(Number);
       const [year, month, day] = (reminder.date || formatToday()).split('-').map(Number);
       const triggerDate = new Date(year, month - 1, day, hour, minute, 0);
-      const now = new Date();
 
-      if (triggerDate <= now) {
+      if (triggerDate <= new Date()) {
         Alert.alert('提醒时间已过', `${reminder.date} ${reminder.time} 已经过了，无法设置`);
         return;
       }
 
-      const secondsUntil = Math.floor((triggerDate.getTime() - now.getTime()) / 1000);
-
-      const id = await Notifications.scheduleNotificationAsync({
+      const notifId = await Notifications.scheduleNotificationAsync({
         content: {
           title: '五条悟',
-          body: (reminder as any).notification || `おい、${reminder.content}の時間だよ。\n（喂，该${reminder.content}了。）`,
+          body: reminder.notification || `おい、${reminder.content}の時間だよ。\n（喂，该${reminder.content}了。）`,
           sound: 'default',
           ...(Platform.OS === 'android' ? { channelId: 'gojo-reminders' } : {}),
         },
@@ -153,21 +189,18 @@ export default function ChatScreen() {
         } as any,
       });
 
-      Alert.alert(
-        '✅ 提醒已设置',
-        `时间：${reminder.date} ${reminder.time}\n内容：${reminder.content}\n剩余：${Math.floor(secondsUntil / 60)}分${secondsUntil % 60}秒\n\nID: ${id.slice(0, 8)}`
-      );
+      // 把 notification_id 存回任务表
+      if (reminder.task_id && notifId) {
+        try {
+          await axios.put(`${SERVER_URL}/tasks/${reminder.task_id}`, { notification_id: notifId });
+        } catch {}
+      }
     } catch (e: any) {
       Alert.alert('设置提醒失败', String(e?.message || e));
     }
   };
 
-  function formatToday(): string {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-
-  // 播放一段音频，等播放完成后 resolve
+  // ── 播放音频 ──
   const playAudioAndWait = async (audio_b64: string): Promise<void> => {
     try {
       if (currentSoundRef.current) {
@@ -183,7 +216,6 @@ export default function ChatScreen() {
           { shouldPlay: true, volume: 1.0 }
         );
         currentSoundRef.current = sound;
-
         sound.setOnPlaybackStatusUpdate((status) => {
           if (status.isLoaded && status.didJustFinish) {
             sound.unloadAsync().catch(() => {});
@@ -198,10 +230,18 @@ export default function ChatScreen() {
     });
   };
 
+  // ── 发送消息 ──
   const sendText = async () => {
     const text = inputText.trim();
     if (!text || loading || !userId) return;
     setInputText('');
+
+    // 如果在搜索模式，退出搜索
+    if (searchMode) {
+      setSearchMode(false);
+      setSearchQuery('');
+    }
+
     const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
@@ -212,17 +252,12 @@ export default function ChatScreen() {
     setLoading(true);
 
     try {
-      const res = await axios.post(`${SERVER_URL}/chat/text`, {
-        text,
-        user_id: userId,
-      });
+      const res = await axios.post(`${SERVER_URL}/chat/text`, { text, user_id: userId });
 
-      // 保存聊天天数
       if (res.data?.total_days) {
         AsyncStorage.setItem('gojo_chat_days', String(res.data.total_days));
       }
 
-      // 处理提醒：静默设置本地通知，不在聊天里显示系统提示
       if (res.data?.reminder) {
         const rem = res.data.reminder;
         if (rem.date && rem.time && rem.content) {
@@ -234,20 +269,13 @@ export default function ChatScreen() {
       if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
         segments = res.data.messages;
       } else if (res.data?.jp) {
-        segments = [{
-          jp: res.data.jp,
-          zh: res.data.zh ?? '',
-          audio_b64: res.data.audio_b64 ?? '',
-        }];
+        segments = [{ jp: res.data.jp, zh: res.data.zh ?? '', audio_b64: res.data.audio_b64 ?? '' }];
       }
 
       if (segments.length === 0) {
         Alert.alert('回复异常', '没有收到有效回复');
         return;
       }
-
-      // 关键：不在这里 setLoading(false)
-      // 让 loading 状态保持到所有气泡都播完，禁止用户中途发新消息
 
       for (let i = 0; i < segments.length; i++) {
         const seg = segments[i];
@@ -272,7 +300,6 @@ export default function ChatScreen() {
       console.error('请求失败', e);
       Alert.alert('连接失败', e?.message ?? '请确认服务器正常运行');
     } finally {
-      // 所有气泡播完才解锁
       setLoading(false);
     }
   };
@@ -281,8 +308,7 @@ export default function ChatScreen() {
     Alert.alert('清空记录', '确认清空所有聊天记录？', [
       { text: '取消', style: 'cancel' },
       {
-        text: '清空',
-        style: 'destructive',
+        text: '清空', style: 'destructive',
         onPress: async () => {
           setMessages([]);
           await AsyncStorage.removeItem(STORAGE_KEY);
@@ -305,53 +331,127 @@ export default function ChatScreen() {
     >
       <StatusBar barStyle="light-content" backgroundColor={C.card} />
 
+      {/* ── 顶部栏 ── */}
       <View style={s.header}>
-        <View style={s.avatarSmall}>
-          <Text style={s.avatarSmallText}>悟</Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={s.headerName}>五条悟</Text>
-          <Text style={s.headerSub}>最强的男人</Text>
-        </View>
-        <TouchableOpacity onPress={clearHistory} style={s.clearBtn}>
-          <Text style={s.clearBtnText}>清空</Text>
-        </TouchableOpacity>
+        {!searchMode ? (
+          <>
+            <View style={s.avatarSmall}>
+              <Text style={s.avatarSmallText}>悟</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={s.headerName}>五条悟</Text>
+              <Text style={s.headerSub}>最强的男人</Text>
+            </View>
+            {/* 搜索按钮 */}
+            <TouchableOpacity onPress={toggleSearch} style={s.iconBtn}>
+              <Text style={s.iconBtnText}>🔍</Text>
+            </TouchableOpacity>
+            {/* 清空按钮 */}
+            <TouchableOpacity onPress={clearHistory} style={s.clearBtn}>
+              <Text style={s.clearBtnText}>清空</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          /* 搜索模式：搜索框展开 */
+          <>
+            <TextInput
+              ref={searchRef}
+              style={s.searchInput}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              placeholder="搜索聊天记录..."
+              placeholderTextColor={C.textMute}
+              returnKeyType="search"
+            />
+            <TouchableOpacity onPress={toggleSearch} style={s.cancelSearchBtn}>
+              <Text style={s.cancelSearchText}>取消</Text>
+            </TouchableOpacity>
+          </>
+        )}
       </View>
 
+      {/* 搜索结果提示 */}
+      {searchMode && searchQuery.trim() && (
+        <View style={s.searchResultBar}>
+          <Text style={s.searchResultText}>
+            找到 {displayMessages.length} 条结果
+          </Text>
+        </View>
+      )}
+
+      {/* ── 消息列表 ── */}
       <ScrollView
         ref={scrollRef}
         style={s.chatArea}
         contentContainerStyle={s.chatContent}
-        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        onContentSizeChange={() => {
+          if (!searchMode) scrollRef.current?.scrollToEnd({ animated: true });
+        }}
       >
-        {messages.length === 0 && (
+        {displayMessages.length === 0 && (
           <View style={s.emptyWrap}>
-            <Text style={s.emptyEmoji}>👋</Text>
-            <Text style={s.emptyText}>跟五条悟说点什么吧</Text>
+            {searchMode && searchQuery.trim() ? (
+              <>
+                <Text style={s.emptyEmoji}>🔍</Text>
+                <Text style={s.emptyText}>没找到「{searchQuery}」相关记录</Text>
+              </>
+            ) : (
+              <>
+                <Text style={s.emptyEmoji}>👋</Text>
+                <Text style={s.emptyText}>跟五条悟说点什么吧</Text>
+              </>
+            )}
           </View>
         )}
-        {messages.map(msg => (
-          <View
-            key={msg.id}
-            style={[s.msgRow, msg.role === 'user' ? s.msgRowUser : s.msgRowGojo]}
-          >
-            {msg.role === 'gojo' && (
-              <View style={s.msgAvatar}>
-                <Text style={s.msgAvatarText}>悟</Text>
+
+        {displayMessages.map(msg => {
+          // 搜索高亮（简单实现：找出匹配片段）
+          const isHighlighted = searchMode && searchQuery.trim() &&
+            (msg.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
+             (msg.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase()));
+
+          return (
+            <View
+              key={msg.id}
+              style={[s.msgRow, msg.role === 'user' ? s.msgRowUser : s.msgRowGojo]}
+            >
+              {msg.role === 'gojo' && (
+                <View style={s.msgAvatar}>
+                  <Text style={s.msgAvatarText}>悟</Text>
+                </View>
+              )}
+              <View style={[s.msgMain, msg.role === 'user' && { alignItems: 'flex-end' }]}>
+                {msg.role === 'gojo' && <Text style={s.msgSender}>五条悟</Text>}
+
+                {/* 长按复制 */}
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  onLongPress={() => copyMessage(msg)}
+                  delayLongPress={400}
+                >
+                  <View style={[
+                    s.bubble,
+                    msg.role === 'user' ? s.bubbleUser : s.bubbleGojo,
+                    isHighlighted && s.bubbleHighlight,
+                  ]}>
+                    <Text style={[s.bubbleText, msg.role === 'user' && s.bubbleTextUser]}>
+                      {msg.text}
+                    </Text>
+                    {msg.subtitle && (
+                      <Text style={s.subtitle}>{msg.subtitle}</Text>
+                    )}
+                  </View>
+                </TouchableOpacity>
+
+                <View style={s.msgBottom}>
+                  <Text style={s.msgTime}>{msg.time}</Text>
+                  {/* 长按提示（仅首次引导，可选） */}
+                </View>
               </View>
-            )}
-            <View style={[s.msgMain, msg.role === 'user' && { alignItems: 'flex-end' }]}>
-              {msg.role === 'gojo' && <Text style={s.msgSender}>五条悟</Text>}
-              <View style={[s.bubble, msg.role === 'user' ? s.bubbleUser : s.bubbleGojo]}>
-                <Text style={[s.bubbleText, msg.role === 'user' && s.bubbleTextUser]}>
-                  {msg.text}
-                </Text>
-                {msg.subtitle && <Text style={s.subtitle}>{msg.subtitle}</Text>}
-              </View>
-              <Text style={s.msgTime}>{msg.time}</Text>
             </View>
-          </View>
-        ))}
+          );
+        })}
+
         {loading && (
           <View style={s.msgRow}>
             <View style={s.msgAvatar}>
@@ -365,6 +465,7 @@ export default function ChatScreen() {
         )}
       </ScrollView>
 
+      {/* ── 输入栏 ── */}
       <View style={s.inputBar}>
         <TextInput
           style={s.input}
@@ -388,34 +489,100 @@ export default function ChatScreen() {
 }
 
 const s = StyleSheet.create({
-  header:          { flexDirection:'row', alignItems:'center', backgroundColor:C.card, paddingHorizontal:20, paddingTop:Platform.OS==='ios'?50:40, paddingBottom:14, borderBottomWidth:1, borderBottomColor:C.border },
-  avatarSmall:     { width:40, height:40, borderRadius:20, backgroundColor:C.accentDim, alignItems:'center', justifyContent:'center', marginRight:12, borderWidth:1, borderColor:C.accent },
-  avatarSmallText: { color:'#fff', fontWeight:'700', fontSize:16 },
-  headerName:      { color:C.text, fontSize:16, fontWeight:'600' },
-  headerSub:       { color:C.textMute, fontSize:11, marginTop:2 },
-  clearBtn:        { paddingHorizontal:10, paddingVertical:6, borderRadius:10, borderWidth:1, borderColor:C.border },
-  clearBtnText:    { color:C.textMute, fontSize:12 },
-  chatArea:        { flex:1, backgroundColor:C.bg },
-  chatContent:     { padding:16, paddingBottom:8, flexGrow:1 },
-  emptyWrap:       { flex:1, alignItems:'center', justifyContent:'center', paddingTop:120 },
-  emptyEmoji:      { fontSize:48, marginBottom:16 },
-  emptyText:       { color:C.textMute, fontSize:15 },
-  msgRow:          { flexDirection:'row', marginBottom:16, alignItems:'flex-start' },
-  msgRowUser:      { flexDirection:'row-reverse' },
-  msgRowGojo:      {},
-  msgAvatar:       { width:34, height:34, borderRadius:17, backgroundColor:C.accentDim+'55', alignItems:'center', justifyContent:'center', marginRight:8, borderWidth:1, borderColor:C.border },
-  msgAvatarText:   { color:C.accent2, fontSize:13, fontWeight:'700' },
-  msgMain:         { maxWidth:width*0.72 },
-  msgSender:       { color:C.textMute, fontSize:11, marginBottom:4, marginLeft:2 },
-  bubble:          { borderRadius:16, padding:12 },
-  bubbleGojo:      { backgroundColor:C.card, borderTopLeftRadius:4, borderLeftWidth:2, borderLeftColor:C.accent },
-  bubbleUser:      { backgroundColor:C.userBubble, borderRadius:16, borderTopRightRadius:4 },
-  bubbleText:      { color:C.text, fontSize:15, lineHeight:22 },
-  bubbleTextUser:  { color:'#fff' },
-  subtitle:        { color:C.textDim, fontSize:12, marginTop:6, lineHeight:18, fontStyle:'italic' },
-  msgTime:         { color:C.textMute, fontSize:10, marginTop:4, marginHorizontal:2 },
-  inputBar:        { flexDirection:'row', alignItems:'flex-end', backgroundColor:C.card, paddingHorizontal:12, paddingVertical:10, borderTopWidth:1, borderTopColor:C.border },
-  input:           { flex:1, backgroundColor:C.bg, borderRadius:20, paddingHorizontal:16, paddingVertical:10, color:C.text, fontSize:14, maxHeight:100, borderWidth:1, borderColor:C.border, marginRight:8 },
-  sendBtn:         { borderRadius:20, paddingHorizontal:18, paddingVertical:10 },
-  sendBtnText:     { color:'#fff', fontWeight:'600', fontSize:14 },
+  // 顶栏
+  header: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: C.card,
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'ios' ? 50 : 40,
+    paddingBottom: 12,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+    gap: 8,
+  },
+  avatarSmall: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: C.accentDim,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: C.accent,
+  },
+  avatarSmallText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  headerName: { color: C.text, fontSize: 16, fontWeight: '600' },
+  headerSub:  { color: C.textMute, fontSize: 11, marginTop: 2 },
+  iconBtn:    { padding: 8 },
+  iconBtnText:{ fontSize: 18 },
+  clearBtn:   { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: C.border },
+  clearBtnText: { color: C.textMute, fontSize: 12 },
+
+  // 搜索模式
+  searchInput: {
+    flex: 1, backgroundColor: C.bg,
+    borderRadius: 12, borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 14, paddingVertical: 8,
+    color: C.text, fontSize: 14,
+  },
+  cancelSearchBtn:  { paddingHorizontal: 8, paddingVertical: 6 },
+  cancelSearchText: { color: C.accent2 || '#5BC4FF', fontSize: 14 },
+  searchResultBar:  {
+    backgroundColor: C.card,
+    paddingHorizontal: 16, paddingVertical: 6,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  searchResultText: { color: C.textMute, fontSize: 12 },
+
+  // 消息区
+  chatArea:    { flex: 1, backgroundColor: C.bg },
+  chatContent: { padding: 16, paddingBottom: 8, flexGrow: 1 },
+  emptyWrap:   { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 120 },
+  emptyEmoji:  { fontSize: 48, marginBottom: 16 },
+  emptyText:   { color: C.textMute, fontSize: 15 },
+
+  msgRow:     { flexDirection: 'row', marginBottom: 16, alignItems: 'flex-start' },
+  msgRowUser: { flexDirection: 'row-reverse' },
+  msgRowGojo: {},
+  msgAvatar:  {
+    width: 34, height: 34, borderRadius: 17,
+    backgroundColor: (C.accentDim || '#1e3a4a') + '55',
+    alignItems: 'center', justifyContent: 'center',
+    marginRight: 8, borderWidth: 1, borderColor: C.border,
+  },
+  msgAvatarText: { color: C.accent2 || '#5BC4FF', fontSize: 13, fontWeight: '700' },
+  msgMain:       { maxWidth: width * 0.72 },
+  msgSender:     { color: C.textMute, fontSize: 11, marginBottom: 4, marginLeft: 2 },
+
+  bubble: { borderRadius: 16, padding: 12 },
+  bubbleGojo: {
+    backgroundColor: C.card,
+    borderTopLeftRadius: 4,
+    borderLeftWidth: 2, borderLeftColor: C.accent,
+  },
+  bubbleUser: {
+    backgroundColor: C.userBubble || C.accent,
+    borderRadius: 16, borderTopRightRadius: 4,
+  },
+  bubbleHighlight: {
+    borderWidth: 1.5,
+    borderColor: C.accent2 || '#5BC4FF',
+  },
+  bubbleText:     { color: C.text, fontSize: 15, lineHeight: 22 },
+  bubbleTextUser: { color: '#fff' },
+  subtitle:       { color: C.textDim || C.textMute, fontSize: 12, marginTop: 6, lineHeight: 18, fontStyle: 'italic' },
+
+  msgBottom: { flexDirection: 'row', alignItems: 'center', marginTop: 4, marginHorizontal: 2 },
+  msgTime:   { color: C.textMute, fontSize: 10 },
+
+  // 输入栏
+  inputBar: {
+    flexDirection: 'row', alignItems: 'flex-end',
+    backgroundColor: C.card,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderTopWidth: 1, borderTopColor: C.border,
+  },
+  input: {
+    flex: 1, backgroundColor: C.bg,
+    borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10,
+    color: C.text, fontSize: 14, maxHeight: 100,
+    borderWidth: 1, borderColor: C.border, marginRight: 8,
+  },
+  sendBtn:     { borderRadius: 20, paddingHorizontal: 18, paddingVertical: 10 },
+  sendBtnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
 });
