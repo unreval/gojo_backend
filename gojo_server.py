@@ -14,7 +14,7 @@ import uvicorn
 
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_KEY', '')
 FISH_KEY      = os.environ.get('FISH_KEY', '')
-FISH_VOICE_ID = os.environ.get('FISH_VOICE_ID', '')
+FISH_VOICE_ID = os.environ.get('FISH_VOICE_ID', 'bfcbd07c927742d6803f52084f6bb776')
 TTS_PROVIDER  = os.environ.get('TTS_PROVIDER', 'fish')
 DATABASE_URL  = os.environ.get('DATABASE_URL', '')
 
@@ -58,7 +58,6 @@ def init_db():
         id SERIAL PRIMARY KEY,
         user_id TEXT NOT NULL DEFAULT 'default',
         content TEXT,
-        category TEXT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     cur.execute('''CREATE TABLE IF NOT EXISTS user_stats (
         user_id TEXT PRIMARY KEY,
@@ -74,13 +73,12 @@ def init_db():
         due_time TEXT,
         reminder_minutes INTEGER,
         completed BOOLEAN DEFAULT FALSE,
-        notification_id VARCHAR(255) DEFAULT NULL,
+        repeat_type TEXT DEFAULT 'none',
+        last_completed_date TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # 旧表自动补列
-    cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS notification_id VARCHAR(255) DEFAULT NULL")
-    cur.execute("ALTER TABLE long_memory ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT NULL")
-    # 把旧记忆里的"用户"全部改成"她"
-    cur.execute("UPDATE long_memory SET content = REPLACE(content, '用户', '她') WHERE content LIKE '用户%'")
+    # 兼容已存在的表：补字段（如果不存在）
+    cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repeat_type TEXT DEFAULT 'none'")
+    cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_completed_date TEXT")
     conn.commit()
     cur.close()
     conn.close()
@@ -418,7 +416,7 @@ emotion字段：根据你这次回复的语气，从下列中选一个：
 - "记得提醒我"
 - "XX点喊我"
 - "XX点叫我"
-- "别忘了提醒"
+- "別忘了提醒"
 - 任何类似的请求
 
 JSON 格式（必须严格按这个格式）：
@@ -428,6 +426,8 @@ JSON 格式（必须严格按这个格式）：
 - date/time/content：见下文规则
 - notification：到点时手机弹出的通知文本，**用五条悟的日语语气写一句**（带括号附中文翻译）
   - 例："おい、起きる時間だよ。サボるなよ。\n（喂，该起床了。别偷懒哦。）"
+  - 例："時間だよ、ちゃんと代課行ってきな。\n（时间到了，乖乖去代课吧。）"
+  - 例："薬飲む時間だぞ。忘れないでよ。\n（该吃药了，别忘了。）"
   - 风格：慵懒+关心，可以用「おい」「ね」「よ」「ちゃんと」等口头禅
 
 时间解析规则：
@@ -441,15 +441,31 @@ JSON 格式（必须严格按这个格式）：
 content 规则——非常重要！
 content 必须是**用户要做的具体事情**，而不是"提醒用户"这种 meta 描述。
 - 简短中文动词短语，2-10字
+- 直接描述要做的事
 
 ✅ 正确示例：
 - 用户："今天九点半叫我起床" → content: "起床"
 - 用户："三点提醒我去代课" → content: "去代课"
 - 用户："明早提醒我吃药" → content: "吃药"
+- 用户："等等叫我去开会" → content: "开会"
+- 用户："半小时后提醒我洗澡" → content: "洗澡"
 
 ❌ 绝对禁止：
-- content: "提醒用户"
-- content: "用户的事"
+- content: "提醒用户" ← 这是 meta 描述，不是具体事情
+- content: "用户的事" ← 不知道是什么事
+- content: "需要做的事" ← 没有具体内容
+- content: "事项" ← 模糊
+
+如果用户没说清楚要做什么具体的事（比如只说"等会儿叫我"），content 填 "起来" 或 "看消息"。
+
+回复规则：
+- 你照常用五条悟的语气回复（可以嫌麻烦、撒娇、答应）
+- **reminder 字段必须出现在 JSON 里**，否则提醒功能会失效
+
+**反例（这些都必须加 reminder 字段，不要漏）：**
+- 用户："今天九点半叫我起床" → 必须加 reminder, content="起床"
+- 用户："提醒我下午三点开会" → 必须加 reminder, content="开会"
+- 用户："等等帮我喊一下复习" → 必须加 reminder, content="复习"
 
 只有用户**完全没提**任何提醒请求时才不加 reminder 字段。'''
 
@@ -486,47 +502,74 @@ def sanitize_jp(jp: str) -> str:
 def merge_only_extreme_short(msgs):
     if len(msgs) <= 1:
         return msgs
-    result = []
+    merged = []
     i = 0
     while i < len(msgs):
         cur = msgs[i]
-        if len(cur.get('jp', '')) < 6 and i + 1 < len(msgs):
+        cur_jp = cur.get('jp', '').strip()
+        if len(cur_jp) <= 3 and i + 1 < len(msgs):
             nxt = msgs[i + 1]
-            merged = {
-                'jp': cur['jp'].rstrip('。') + '。' + nxt['jp'],
-                'zh': cur['zh'] + nxt['zh'],
-                'audio_b64': ''
-            }
-            result.append(merged)
+            sep = '' if cur_jp.endswith(('、', ',', '。', '！', '？', '…')) else '、'
+            nxt['jp'] = cur_jp + sep + nxt.get('jp', '')
+            nxt['zh'] = cur.get('zh', '') + ' ' + nxt.get('zh', '')
+            merged.append(nxt)
             i += 2
         else:
-            result.append(cur)
+            merged.append(cur)
             i += 1
-    return result
+    return merged
 
-# ───────── 记忆提取 ─────────
-
-def extract_and_save_memory(user_id, user_text, assistant_text):
+def extract_and_save_memory(user_id, user_text, jp_reply):
     try:
+        existing = get_long_memory(user_id)
+        existing_text = '\n'.join(f'- {m[0]}' for m in existing) if existing else '（暂无）'
+
+        now = datetime.now(CN_TZ)
+        today_str = now.strftime('%Y-%m-%d')
+        weekday_cn = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][now.weekday()]
+
         response = claude_client.messages.create(
             model='claude-haiku-4-5-20251001',
-            max_tokens=100,
+            max_tokens=200,
             messages=[{
                 'role': 'user',
-                'content': f'''从下面这段对话中，提取关于"用户"的新的、具体的、有价值的事实。
+                'content': f'''你是一个事实抽取助手。从下面的对话中找出用户透露的关于自己的事实信息。
 
-用户说：{user_text}
-AI回复：{assistant_text}
+【今天日期】{today_str}（{weekday_cn}）
 
-提取规则：
-- 只提取用户说的关于自己的具体事实（喜好、身份、经历、状态、关系、习惯等）
-- 必须是新信息，不是泛泛的感受
-- 不提取AI说的话，不提取用户的问题本身
-- 用一句简短中文陈述句记录，以"她"开头。
+【已记录的事实】
+{existing_text}
+
+【这次对话】
+用户：{user_text}
+对方回应：{jp_reply}
+
+【提取规则】
+1. 提取用户主动透露的关于自己的具体事实，包括但不限于：
+   - 喜好（喜欢的食物、颜色、动物、音乐、活动、人、动漫等）
+   - 厌恶（不喜欢的东西）
+   - 身份（名字、年龄、生日、职业、学校、专业）
+   - 状态（在做什么、最近在忙什么、计划做什么）
+   - 经历（去过哪里、做过什么）
+   - 关系（家人、朋友、宠物的存在）
+
+2. 用户撒娇/调侃/抱怨/情绪宣泄不算事实，不要提取。
+
+3. 如果用户说的事实在【已记录的事实】里已有相同或重复的内容，回复"无"。
+
+4. **时间日期必须用绝对日期，不要用相对日期！**
+   今天是 {today_str}。请把所有相对时间转换为绝对日期：
+   - "考试还有3天" → 转换为 "用户的考试在 {(now + timedelta(days=3)).strftime('%Y-%m-%d')}"
+   - "下周一去面试" → 转换为具体日期
+   - "明天交作业" → 转换为 "用户在 {(now + timedelta(days=1)).strftime('%Y-%m-%d')} 要交作业"
+   - 绝对禁止记录 "还有X天" "下周" "明天" 这种相对表述！
+   - 用户说"昨天去了XX" → 记录为 "用户在 {(now - timedelta(days=1)).strftime('%Y-%m-%d')} 去了XX"
+
+5. 用一句简短中文陈述句记录，以"用户"开头。
 
 【输出】
 只输出一行：
-- 如果有新事实：直接写一句"她XXX"，不加引号不加解释
+- 如果有新事实：直接写一句"用户XXX"，不加引号不加解释
 - 如果没有新事实：写"无"'''
             }]
         )
@@ -534,7 +577,7 @@ AI回复：{assistant_text}
         summary = summary.strip('「」"\'').strip()
         summary = summary.rstrip('。.')
 
-        if summary and summary != '无' and len(summary) > 4 and summary.startswith('她'):
+        if summary and summary != '无' and len(summary) > 4 and summary.startswith('用户'):
             saved = save_long_memory(user_id, summary)
             if saved:
                 print(f'[{user_id}] 新长期记忆：{summary}')
@@ -580,6 +623,7 @@ def fish_tts(text, emotion='平静'):
     if response.status_code != 200:
         raise Exception(f'Fish Audio error: {response.status_code}')
     return b''.join(response.iter_content(chunk_size=4096))
+
 
 def tts_to_b64(text, emotion):
     try:
@@ -668,23 +712,22 @@ async def chat_text(data: dict):
             'content': rem.get('content', ''),
             'notification': rem.get('notification', ''),
         }
-        # 自动保存到任务表，返回 task_id 供前端保存 notification_id
+        # 自动保存到任务表
         try:
             conn = get_conn()
             cur = conn.cursor()
             cur.execute(
-                'INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
+                'INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes) VALUES (%s, %s, %s, %s, %s, %s)',
                 (user_id, reminder_data['content'], '个人', reminder_data['date'], reminder_data['time'], 0)
             )
-            task_id = cur.fetchone()[0]
             conn.commit()
             cur.close()
             conn.close()
-            reminder_data['task_id'] = task_id  # 返回给前端，用于保存 notification_id
-            print(f'[{user_id}] 提醒已保存 task_id={task_id}：{reminder_data["date"]} {reminder_data["time"]} - {reminder_data["content"]}')
+            print(f'[{user_id}] ✅ 提醒已设置：{reminder_data["date"]} {reminder_data["time"]} - {reminder_data["content"]}')
         except Exception as e:
-            print(f'提醒保存失败：{e}')
+            print(f'❌ 提醒保存失败：{e}')
     else:
+        # 调试：检查用户消息中是否包含提醒关键词，但 LLM 没识别
         reminder_keywords = ['提醒我', '叫我', '喊我', '记得提醒', '别忘', '到时候叫', '点叫', '点喊', '点提醒']
         if any(kw in user_text for kw in reminder_keywords):
             print(f'⚠️ [{user_id}] 用户消息疑似含提醒请求但 LLM 未识别: "{user_text}"')
@@ -733,7 +776,10 @@ async def get_tasks(user_id: str = 'default'):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        'SELECT id, title, category, due_date, due_time, reminder_minutes, completed, notification_id, created_at FROM tasks WHERE user_id = %s ORDER BY completed ASC, due_date ASC NULLS LAST, created_at DESC',
+        '''SELECT id, title, category, due_date, due_time, reminder_minutes, completed,
+                  repeat_type, last_completed_date, created_at
+           FROM tasks WHERE user_id = %s
+           ORDER BY completed ASC, due_date ASC NULLS LAST, created_at DESC''',
         (user_id,)
     )
     rows = cur.fetchall()
@@ -745,8 +791,9 @@ async def get_tasks(user_id: str = 'default'):
             'id': r[0], 'title': r[1], 'category': r[2],
             'due_date': r[3], 'due_time': r[4],
             'reminder_minutes': r[5], 'completed': r[6],
-            'notification_id': r[7],
-            'created_at': str(r[8]) if r[8] else None,
+            'repeat_type': r[7] or 'none',
+            'last_completed_date': r[8],
+            'created_at': str(r[9]) if r[9] else None,
         })
     return JSONResponse({'tasks': tasks})
 
@@ -757,17 +804,18 @@ async def create_task(data: dict):
     title = data.get('title', '').strip()
     if not title:
         return JSONResponse({'error': 'no title'}, status_code=400)
-    category        = data.get('category', '个人')
-    due_date        = data.get('due_date')
-    due_time        = data.get('due_time')
-    reminder_minutes= data.get('reminder_minutes')
-    notification_id = data.get('notification_id')
+    category = data.get('category', '个人')
+    due_date = data.get('due_date')
+    due_time = data.get('due_time')
+    reminder_minutes = data.get('reminder_minutes')
+    repeat_type = data.get('repeat_type', 'none')
 
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        'INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes, notification_id) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id',
-        (user_id, title, category, due_date, due_time, reminder_minutes, notification_id)
+        '''INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes, repeat_type)
+           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+        (user_id, title, category, due_date, due_time, reminder_minutes, repeat_type)
     )
     task_id = cur.fetchone()[0]
     conn.commit()
@@ -780,13 +828,14 @@ async def create_task(data: dict):
 async def update_task(task_id: int, data: dict):
     fields = []
     values = []
-    for key in ['title', 'category', 'due_date', 'due_time', 'reminder_minutes', 'completed', 'notification_id']:
+    for key in ['title', 'category', 'due_date', 'due_time', 'reminder_minutes', 'completed', 'repeat_type', 'last_completed_date']:
         if key in data:
             fields.append(f'{key} = %s')
             values.append(data[key])
     if not fields:
         return JSONResponse({'error': 'nothing to update'}, status_code=400)
     values.append(task_id)
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(f'UPDATE tasks SET {", ".join(fields)} WHERE id = %s', values)
@@ -805,59 +854,6 @@ async def delete_task(task_id: int):
     cur.close()
     conn.close()
     return JSONResponse({'ok': True})
-
-
-# ───────── 记忆管理 API ─────────
-
-@app.get('/long_memory')
-async def get_long_memory_api(user_id: str = 'default'):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        'SELECT id, content, category, timestamp FROM long_memory WHERE user_id = %s ORDER BY timestamp DESC',
-        (user_id,)
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    memories = []
-    for r in rows:
-        memories.append({
-            'id': r[0],
-            'content': r[1],
-            'category': r[2] or '其他',
-            'timestamp': str(r[3]) if r[3] else None,
-        })
-    return JSONResponse({'memories': memories})
-
-
-@app.put('/long_memory/{memory_id}')
-async def update_long_memory(memory_id: int, data: dict):
-    content  = data.get('content', '').strip()
-    category = data.get('category')
-    if not content:
-        return JSONResponse({'error': '内容不能为空'}, status_code=400)
-    conn = get_conn()
-    cur = conn.cursor()
-    if category:
-        cur.execute('UPDATE long_memory SET content = %s, category = %s WHERE id = %s', (content, category, memory_id))
-    else:
-        cur.execute('UPDATE long_memory SET content = %s WHERE id = %s', (content, memory_id))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return JSONResponse({'ok': True, 'id': memory_id})
-
-
-@app.delete('/long_memory/{memory_id}')
-async def delete_long_memory(memory_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM long_memory WHERE id = %s', (memory_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return JSONResponse({'ok': True, 'id': memory_id})
 
 
 if __name__ == '__main__':
