@@ -875,22 +875,22 @@ if __name__ == '__main__':
 
 @app.post('/transcribe')
 async def transcribe_audio(data: dict):
-    """接收 base64 编码的音频，用 OpenAI Whisper 转文字"""
+    """接收 base64 编码的音频，用 Groq Whisper 转文字（免费）"""
     audio_b64 = data.get('audio_base64', '')
     if not audio_b64:
         return JSONResponse({'error': 'no audio'}, status_code=400)
 
-    openai_key = os.environ.get('OPENAI_KEY', '')
-    if not openai_key:
-        print('[transcribe] OPENAI_KEY 未配置，语音识别不可用')
-        return JSONResponse({'error': 'OPENAI_KEY not configured', 'text': ''})
+    groq_key = os.environ.get('GROQ_KEY', '')
+    if not groq_key:
+        print('[transcribe] GROQ_KEY 未配置')
+        return JSONResponse({'error': 'GROQ_KEY not configured', 'text': ''})
 
     try:
-        import openai as _openai
+        from groq import Groq as _Groq
         import tempfile
         import base64 as _b64
 
-        client = _openai.OpenAI(api_key=openai_key)
+        client = _Groq(api_key=groq_key)
         audio_bytes = _b64.b64decode(audio_b64)
 
         with tempfile.NamedTemporaryFile(suffix='.m4a', delete=False) as f:
@@ -900,12 +900,14 @@ async def transcribe_audio(data: dict):
         try:
             with open(temp_path, 'rb') as f:
                 transcript = client.audio.transcriptions.create(
-                    model='whisper-1',
+                    model='whisper-large-v3-turbo',
                     file=f,
                     language='zh',
+                    response_format='text',
                 )
-            print(f'[transcribe] 识别结果：{transcript.text}')
-            return JSONResponse({'text': transcript.text})
+            text = transcript if isinstance(transcript, str) else transcript.text
+            print(f'[transcribe] 识别结果：{text}')
+            return JSONResponse({'text': text})
         finally:
             try: os.unlink(temp_path)
             except: pass
