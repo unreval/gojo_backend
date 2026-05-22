@@ -871,3 +871,45 @@ async def delete_long_memory(memory_id: int):
 if __name__ == '__main__':
     print(f'Gojo server starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL')
     uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+
+@app.post('/transcribe')
+async def transcribe_audio(data: dict):
+    """接收 base64 编码的音频，用 OpenAI Whisper 转文字"""
+    audio_b64 = data.get('audio_base64', '')
+    if not audio_b64:
+        return JSONResponse({'error': 'no audio'}, status_code=400)
+
+    openai_key = os.environ.get('OPENAI_KEY', '')
+    if not openai_key:
+        print('[transcribe] OPENAI_KEY 未配置，语音识别不可用')
+        return JSONResponse({'error': 'OPENAI_KEY not configured', 'text': ''})
+
+    try:
+        import openai as _openai
+        import tempfile
+        import base64 as _b64
+
+        client = _openai.OpenAI(api_key=openai_key)
+        audio_bytes = _b64.b64decode(audio_b64)
+
+        with tempfile.NamedTemporaryFile(suffix='.m4a', delete=False) as f:
+            f.write(audio_bytes)
+            temp_path = f.name
+
+        try:
+            with open(temp_path, 'rb') as f:
+                transcript = client.audio.transcriptions.create(
+                    model='whisper-1',
+                    file=f,
+                    language='zh',
+                )
+            print(f'[transcribe] 识别结果：{transcript.text}')
+            return JSONResponse({'text': transcript.text})
+        finally:
+            try: os.unlink(temp_path)
+            except: pass
+
+    except Exception as e:
+        print(f'转录失败：{e}')
+        return JSONResponse({'error': str(e), 'text': ''})
