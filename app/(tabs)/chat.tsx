@@ -11,7 +11,6 @@ import {
   Dimensions,
   KeyboardAvoidingView,
   Platform,
-  Pressable,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -22,10 +21,6 @@ import {
 } from 'react-native';
 import VoiceCallModal from '../../components/VoiceCallModal';
 import { C, SERVER_URL, nowTime } from '../../constants/theme';
-
-// 动态引入语音识别（避免模拟器/未安装时报错）
-let Voice: any = null;
-try { Voice = require('@react-native-voice/voice').default; } catch {}
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -73,22 +68,14 @@ export default function ChatScreen() {
   const [loading, setLoading]     = useState(false);
   const [ready, setReady]         = useState(false);
   const [userId, setUserId]       = useState('');
-
-  // 语音输入相关
-  const [voiceMode, setVoiceMode]     = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [partialText, setPartialText] = useState('');
-
-  // 音频缓存（内存，用于重播）
-  const audioCacheRef = useRef<Record<string, string>>({});
-
-  // 语音通话
-  const [showCall, setShowCall] = useState(false);
+  const [showCall, setShowCall]   = useState(false);
 
   // 搜索
   const [searchMode, setSearchMode]   = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
+  // 音频缓存（内存，用于重播）
+  const audioCacheRef   = useRef<Record<string, string>>({});
   const scrollRef       = useRef<ScrollView>(null);
   const searchRef       = useRef<TextInput>(null);
   const currentSoundRef = useRef<Audio.Sound | null>(null);
@@ -122,50 +109,13 @@ export default function ChatScreen() {
       } catch (e) { console.warn('init error', e); }
       setReady(true);
     })();
-
-    // 语音识别事件绑定
-    if (Voice) {
-      Voice.onSpeechStart = () => setIsListening(true);
-      Voice.onSpeechEnd   = () => setIsListening(false);
-      Voice.onSpeechPartialResults = (e: any) => setPartialText(e.value?.[0] || '');
-      Voice.onSpeechResults = (e: any) => {
-        const text = e.value?.[0] || '';
-        setInputText(text);
-        setPartialText('');
-        setIsListening(false);
-      };
-      Voice.onSpeechError = (e: any) => {
-        console.warn('Voice error:', e);
-        setIsListening(false);
-        setPartialText('');
-      };
-    }
-
-    return () => {
-      currentSoundRef.current?.unloadAsync().catch(() => {});
-      if (Voice) Voice.destroy().then(() => Voice?.removeAllListeners?.());
-    };
+    return () => { currentSoundRef.current?.unloadAsync().catch(() => {}); };
   }, []);
 
   useEffect(() => {
     if (!ready) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
   }, [messages, ready]);
-
-  // ── 语音识别 ──
-  const startVoiceInput = async () => {
-    if (!Voice) { Alert.alert('提示', '请先安装 @react-native-voice/voice 并重新 build'); return; }
-    try {
-      setInputText('');
-      setPartialText('');
-      await Voice.start('zh-CN');
-    } catch (e) { console.warn('start voice error', e); }
-  };
-
-  const stopVoiceInput = async () => {
-    if (!Voice) return;
-    try { await Voice.stop(); } catch {}
-  };
 
   // ── 音频重播 ──
   const replayAudio = async (msgId: string) => {
@@ -196,7 +146,7 @@ export default function ChatScreen() {
             resolve();
           }
         });
-      } catch (e) { resolve(); }
+      } catch { resolve(); }
     });
   };
 
@@ -208,7 +158,7 @@ export default function ChatScreen() {
       const { status } = await Notifications.getPermissionsAsync();
       if (status !== 'granted') {
         const ns = await Notifications.requestPermissionsAsync();
-        if (ns.status !== 'granted') { Alert.alert('通知权限未授予'); return; }
+        if (ns.status !== 'granted') return;
       }
       const [hour, minute] = (reminder.time || '00:00').split(':').map(Number);
       const [year, month, day] = (reminder.date || formatToday()).split('-').map(Number);
@@ -226,7 +176,7 @@ export default function ChatScreen() {
       if (reminder.task_id && notifId) {
         await axios.put(`${SERVER_URL}/tasks/${reminder.task_id}`, { notification_id: notifId }).catch(() => {});
       }
-    } catch (e: any) { console.warn('reminder error', e); }
+    } catch (e) { console.warn('reminder error', e); }
   };
 
   // ── 发送消息 ──
@@ -234,7 +184,6 @@ export default function ChatScreen() {
     const text = (textOverride ?? inputText).trim();
     if (!text || loading || !userId) return;
     setInputText('');
-    setPartialText('');
     if (searchMode) { setSearchMode(false); setSearchQuery(''); }
 
     const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime() };
@@ -258,7 +207,6 @@ export default function ChatScreen() {
       for (let i = 0; i < segments.length; i++) {
         const seg = segments[i];
         const msgId = `${Date.now()}_${i}`;
-        // 缓存音频（用于重播）
         if (seg.audio_b64 && seg.audio_b64.length > 100) {
           audioCacheRef.current[msgId] = seg.audio_b64;
         }
@@ -360,11 +308,10 @@ export default function ChatScreen() {
       >
         {displayMessages.length === 0 && (
           <View style={s.emptyWrap}>
-            {searchMode && searchQuery.trim() ? (
-              <><Text style={s.emptyEmoji}>🔍</Text><Text style={s.emptyText}>没找到「{searchQuery}」</Text></>
-            ) : (
-              <><Text style={s.emptyEmoji}>👋</Text><Text style={s.emptyText}>跟五条悟说点什么吧</Text></>
-            )}
+            {searchMode && searchQuery.trim()
+              ? <><Text style={s.emptyEmoji}>🔍</Text><Text style={s.emptyText}>没找到「{searchQuery}」</Text></>
+              : <><Text style={s.emptyEmoji}>👋</Text><Text style={s.emptyText}>跟五条悟说点什么吧</Text></>
+            }
           </View>
         )}
 
@@ -373,7 +320,6 @@ export default function ChatScreen() {
           const isHighlighted = searchMode && searchQuery.trim() &&
             (msg.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
              (msg.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase()));
-
           return (
             <View key={msg.id} style={[s.msgRow, msg.role === 'user' ? s.msgRowUser : s.msgRowGojo]}>
               {msg.role === 'gojo' && (
@@ -397,7 +343,7 @@ export default function ChatScreen() {
                     </Text>
                     {msg.subtitle && <Text style={s.subtitle}>{msg.subtitle}</Text>}
                     {msg.role === 'gojo' && hasAudio && (
-                      <Text style={s.replayIcon}>🔊 点击重播</Text>
+                      <Text style={s.replayHint}>🔊 点击重播</Text>
                     )}
                   </View>
                 </TouchableOpacity>
@@ -420,77 +366,31 @@ export default function ChatScreen() {
         )}
       </ScrollView>
 
-      {/* 语音实时预览 */}
-      {isListening && partialText !== '' && (
-        <View style={s.partialBar}>
-          <Text style={s.partialText}>{partialText}</Text>
-        </View>
-      )}
-
       {/* 输入栏 */}
       <View style={s.inputBar}>
-        {/* 左按钮：切换文字/语音消息模式 */}
+        <TextInput
+          style={s.input}
+          value={inputText}
+          onChangeText={setInputText}
+          placeholder={loading ? '五条悟正在回复中...' : '跟五条悟说点什么...'}
+          placeholderTextColor={C.textMute}
+          multiline
+          editable={!loading}
+          returnKeyType="send"
+          onSubmitEditing={() => sendText()}
+          blurOnSubmit={false}
+        />
+        {/* 有文字→发送；没文字→禁用发送（灰色） */}
         <TouchableOpacity
-          style={s.modeBtn}
-          onPress={() => { setVoiceMode(v => !v); if (isListening) stopVoiceInput(); }}
+          style={[
+            s.sendBtn,
+            { backgroundColor: (!loading && inputText.trim()) ? C.accent : C.textMute + '55' }
+          ]}
+          onPress={() => sendText()}
+          disabled={loading || !inputText.trim()}
         >
-          <Text style={s.modeBtnText}>{voiceMode ? '⌨️' : '🎙'}</Text>
+          <Text style={[s.sendBtnText, { opacity: inputText.trim() ? 1 : 0.5 }]}>发送</Text>
         </TouchableOpacity>
-
-        {/* 中间区域 */}
-        {!voiceMode ? (
-          <TextInput
-            style={s.input}
-            value={inputText}
-            onChangeText={setInputText}
-            placeholder={loading ? '五条悟正在回复中...' : isListening ? '正在聆听...' : '跟五条悟说点什么...'}
-            placeholderTextColor={isListening ? C.accent : C.textMute}
-            multiline
-            editable={!loading}
-          />
-        ) : (
-          /* 按住说话按钮 */
-          <Pressable
-            style={[s.voiceHoldBtn, isListening && s.voiceHoldBtnActive]}
-            onPressIn={startVoiceInput}
-            onPressOut={async () => {
-              await stopVoiceInput();
-              setTimeout(() => {
-                if (inputText.trim()) { sendText(); setVoiceMode(false); }
-              }, 700);
-            }}
-          >
-            <Text style={s.voiceHoldText}>
-              {isListening ? '🔴  松开 发送' : '🎙  按住 说话'}
-            </Text>
-          </Pressable>
-        )}
-
-        {/* 右按钮：有文字→发送；无文字+文字模式→🎤语音填充；语音模式不显示 */}
-        {!voiceMode && (
-          inputText.trim().length > 0 ? (
-            <TouchableOpacity
-              style={[s.sendBtn, { backgroundColor: loading ? C.textMute : C.accent }]}
-              onPress={() => sendText()}
-              disabled={loading}
-            >
-              <Text style={s.sendBtnText}>发送</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={[s.sendBtn, {
-                backgroundColor: isListening ? C.accent : C.card,
-                borderWidth: 1, borderColor: isListening ? C.accent : C.border,
-              }]}
-              onPress={isListening ? stopVoiceInput : startVoiceInput}
-              disabled={loading}
-            >
-              <Text style={{ color: isListening ? '#fff' : C.textMute, fontSize: 18 }}>
-                {isListening ? '✓' : '🎤'}
-              </Text>
-            </TouchableOpacity>
-          )
-        )}
       </View>
 
       {/* 语音通话弹窗 */}
@@ -506,15 +406,7 @@ export default function ChatScreen() {
 }
 
 const s = StyleSheet.create({
-  header: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: C.card,
-    paddingHorizontal: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 40,
-    paddingBottom: 12,
-    borderBottomWidth: 1, borderBottomColor: C.border,
-    gap: 8,
-  },
+  header:          { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, paddingHorizontal: 16, paddingTop: Platform.OS === 'ios' ? 50 : 40, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: C.border, gap: 8 },
   avatarSmall:     { width: 40, height: 40, borderRadius: 20, backgroundColor: C.accentDim, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.accent },
   avatarSmallText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   headerName:      { color: C.text, fontSize: 16, fontWeight: '600' },
@@ -547,18 +439,11 @@ const s = StyleSheet.create({
   bubbleText:      { color: C.text, fontSize: 15, lineHeight: 22 },
   bubbleTextUser:  { color: '#fff' },
   subtitle:        { color: C.textDim || C.textMute, fontSize: 12, marginTop: 6, lineHeight: 18, fontStyle: 'italic' },
-  replayIcon:      { color: C.accent, fontSize: 11, marginTop: 6, opacity: 0.7 },
+  replayHint:      { color: C.accent, fontSize: 11, marginTop: 6, opacity: 0.7 },
   msgBottom:       { flexDirection: 'row', alignItems: 'center', marginTop: 4, marginHorizontal: 2 },
   msgTime:         { color: C.textMute, fontSize: 10 },
-  partialBar:      { backgroundColor: C.card + 'ee', paddingHorizontal: 16, paddingVertical: 8, borderTopWidth: 1, borderTopColor: C.border },
-  partialText:     { color: C.accent, fontSize: 13, fontStyle: 'italic' },
-  inputBar:        { flexDirection: 'row', alignItems: 'flex-end', backgroundColor: C.card, paddingHorizontal: 10, paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.border, gap: 8 },
-  modeBtn:         { width: 38, height: 38, borderRadius: 19, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.border },
-  modeBtnText:     { fontSize: 18 },
-  input:           { flex: 1, backgroundColor: C.bg, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 9, color: C.text, fontSize: 14, maxHeight: 100, borderWidth: 1, borderColor: C.border },
-  voiceHoldBtn:    { flex: 1, height: 42, borderRadius: 21, backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
-  voiceHoldBtnActive: { backgroundColor: C.accent + '22', borderColor: C.accent },
-  voiceHoldText:   { color: C.text, fontSize: 14, fontWeight: '500' },
-  sendBtn:         { minWidth: 60, height: 38, borderRadius: 20, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
+  inputBar:        { flexDirection: 'row', alignItems: 'flex-end', backgroundColor: C.card, paddingHorizontal: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.border, gap: 8 },
+  input:           { flex: 1, backgroundColor: C.bg, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, color: C.text, fontSize: 14, maxHeight: 100, borderWidth: 1, borderColor: C.border },
+  sendBtn:         { borderRadius: 20, paddingHorizontal: 18, paddingVertical: 10, minWidth: 60, alignItems: 'center' },
   sendBtnText:     { color: '#fff', fontWeight: '600', fontSize: 14 },
 });
