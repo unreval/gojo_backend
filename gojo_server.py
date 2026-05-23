@@ -868,11 +868,6 @@ async def delete_long_memory(memory_id: int):
     return JSONResponse({'ok': True, 'id': memory_id})
 
 
-if __name__ == '__main__':
-    print(f'Gojo server starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL')
-    uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
-
 @app.post('/transcribe')
 async def transcribe_audio(data: dict):
     """接收 base64 编码的音频，用 Groq Whisper 转文字（免费）"""
@@ -915,3 +910,8 @@ async def transcribe_audio(data: dict):
     except Exception as e:
         print(f'转录失败：{e}')
         return JSONResponse({'error': str(e), 'text': ''})
+    
+
+if __name__ == '__main__':
+    print(f'Gojo server starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL')
+    uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
