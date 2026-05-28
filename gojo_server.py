@@ -502,6 +502,18 @@ AI回复：{assistant_text}
     except Exception as e:
         print(f'记忆提取失败：{e}')
 
+
+@app.get('/debug/users')
+async def debug_users():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT user_id, COUNT(*) FROM long_memory GROUP BY user_id')
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return JSONResponse({'users': [{'user_id': r[0], 'count': r[1]} for r in rows]})
+
+
 # ───────── TTS ─────────
 
 def fish_tts(text, emotion='平静'):
