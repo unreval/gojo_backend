@@ -78,12 +78,10 @@ def init_db():
         repeat_type TEXT DEFAULT 'none',
         last_completed_date TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # 旧表自动补列
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS notification_id VARCHAR(255) DEFAULT NULL")
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repeat_type TEXT DEFAULT 'none'")
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_completed_date TEXT")
     cur.execute("ALTER TABLE long_memory ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT NULL")
-    # 把旧记忆里的"用户"全部改成"她"
     cur.execute("UPDATE long_memory SET content = REPLACE(content, '用户', '她') WHERE content LIKE '用户%'")
     conn.commit()
     cur.close()
@@ -100,8 +98,8 @@ def save_short_memory(user_id, role, content):
     cur.close()
     conn.close()
 
-def save_long_memory(user_id, content):
-    """放宽的去重：只拒绝完全一致或几乎一字不差的"""
+def save_long_memory(user_id, content, category=None):
+    """支持保存分类；放宽去重"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('SELECT content FROM long_memory WHERE user_id = %s', (user_id,))
@@ -112,13 +110,13 @@ def save_long_memory(user_id, content):
             conn.close()
             print(f'[{user_id}] 记忆完全重复，跳过：{content}')
             return False
-        # 只在长度差<5字且互相包含时拒绝
         if abs(len(content) - len(e)) < 5 and (content in e or e in content):
             cur.close()
             conn.close()
             print(f'[{user_id}] 记忆高度重复，跳过：{content}（已有：{e}）')
             return False
-    cur.execute('INSERT INTO long_memory (user_id, content) VALUES (%s, %s)', (user_id, content))
+    cur.execute('INSERT INTO long_memory (user_id, content, category) VALUES (%s, %s, %s)',
+                (user_id, content, category))
     conn.commit()
     cur.close()
     conn.close()
@@ -365,9 +363,8 @@ JSON 格式：
 字段说明：
 - date：YYYY-MM-DD
 - time：HH:MM 24小时制
-- content：具体要做的事（如"起床"/"去代课"/"吃药"），不要写"提醒用户"
+- content：具体要做的事
 - notification：到点时手机弹出的通知文本，用五条悟的日语语气写一句（带括号附中文）
-  - 例："おい、起きる時間だよ。サボるなよ。\\n（喂，该起床了。别偷懒哦。）"
 
 只有用户**完全没提**任何提醒请求时才不加 reminder 字段。'''
 
@@ -395,9 +392,9 @@ def sanitize_jp(jp: str) -> str:
     jp = jp.replace('ふふ', 'へへ')
     jp = re.sub(r'あはは+', 'ふっ', jp)
     jp = re.sub(r'ハハハ+', 'はは', jp)
-    jp = re.sub(r'〜+(?=[。！?、\s]|$)', '', jp)
+    jp = re.sub(r'〜+(?=[。!?、\s]|$)', '', jp)
     jp = re.sub(r'…+〜+', '…', jp)
-    if jp and jp[-1] not in '。！？…':
+    if jp and jp[-1] not in '。!?…':
         jp = jp + '。'
     return jp
 
@@ -422,28 +419,26 @@ def merge_only_extreme_short(msgs):
             i += 1
     return result
 
-# ───────── 记忆提取 ─────────
+# ───────── 记忆提取（带分类）─────────
 
 def extract_and_save_memory(user_id, user_text, assistant_text):
-    """从一段对话里抽取关于用户的事实，存到 long_memory。"""
+    """从一段对话里抽取关于用户的事实，存到 long_memory，同时自动分类。"""
     try:
-        # 计算当前时间相关变量
         now = datetime.now(CN_TZ)
         today_str = now.strftime('%Y-%m-%d')
         weekday_cn = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][now.weekday()]
         tomorrow_str = (now + timedelta(days=1)).strftime('%Y-%m-%d')
         yesterday_str = (now - timedelta(days=1)).strftime('%Y-%m-%d')
 
-        # 取现有记忆作为去重参考
         existing = get_long_memory(user_id)
         existing_text = '\n'.join(f'- {m[0]}' for m in existing) if existing else '（暂无）'
 
         response = claude_client.messages.create(
             model='claude-haiku-4-5-20251001',
-            max_tokens=200,
+            max_tokens=250,
             messages=[{
                 'role': 'user',
-                'content': f'''你是事实抽取助手。从下面这段对话中提取关于"她"（用户）的新事实。
+                'content': f'''你是事实抽取助手。从下面对话中提取关于"她"（用户）的新事实，并分类。
 
 【今天日期】{today_str}（{weekday_cn}）
 
@@ -455,64 +450,61 @@ def extract_and_save_memory(user_id, user_text, assistant_text):
 AI回复：{assistant_text}
 
 提取规则：
-1. 提取她主动透露的关于自己的具体事实：
-   - 喜好（食物、颜色、动物、音乐、活动、人、动漫等）
-   - 厌恶（不喜欢的东西）
-   - 身份（名字、年龄、生日、职业、学校、专业）
-   - 状态（在做什么、最近在忙什么、计划做什么）
-   - 经历（去过哪里、做过什么）
-   - 关系（家人、朋友、宠物的存在）
-   - 承诺/约定/计划（"答应做X""决定做Y""周末打算去Z"都要记！）
+1. 只提取她主动透露的具体事实，撒娇/调侃/情绪宣泄不算事实。
+2. 时间必须用绝对日期：
+   - "明天" → {tomorrow_str}
+   - "昨天" → {yesterday_str}
+   - "还有3天" → {(now + timedelta(days=3)).strftime('%Y-%m-%d')}
+3. 用第三人称中文陈述句，以"她"开头。
+4. 去重：只在已有列表里有完全一样或几乎一字不差时才回复"无"。
 
-2. 撒娇/调侃/单纯情绪宣泄不算事实。
+分类（必须选一个）：
+- 喜好：喜欢的食物/颜色/动物/音乐/动漫/人
+- 厌恶：不喜欢的东西
+- 身份：名字/年龄/生日/职业/学校/专业
+- 状态：在做什么/最近忙什么/计划做什么
+- 经历：去过哪里/做过什么
+- 关系：家人/朋友/宠物的存在
+- 其他：以上都不是
 
-3. 去重：只在【已记录的事实】中有**完全一样**或**几乎一字不差**的条目时才回复"无"。
-   补充细节、新角度、新时间都算新事实，要记！
-
-4. **时间必须用绝对日期，不要用相对日期！**
-   - "考试还有3天" → "她的考试在 {(now + timedelta(days=3)).strftime('%Y-%m-%d')}"
-   - "明天交作业" → "她在 {tomorrow_str} 要交作业"
-   - "昨天去了X" → "她在 {yesterday_str} 去了X"
-   - 绝对禁止 "明天""下周""还有X天" 这种相对表述
-
-5. 用第三人称简短中文陈述句记录，以"她"开头。
-
-【输出】只输出一行：
-- 有新事实：直接写"她XXX"，不加引号不加解释
-- 没有新事实：写"无"'''
+【输出格式——严格 JSON，只输出一行】
+有新事实：{{"content":"她XXX","category":"喜好"}}
+没有新事实：{{"content":"无","category":""}}'''
             }]
         )
-        summary = response.content[0].text.strip()
-        summary = summary.strip('「」"\'').strip()
-        summary = summary.rstrip('。.')
+        raw = response.content[0].text.strip()
+        print(f'[{user_id}] Haiku 原始输出：{raw[:100]}')
 
-        # 调试日志
-        print(f'[{user_id}] Haiku 原始输出："{summary}" | 用户原话："{user_text[:50]}"')
+        parsed = extract_json(raw)
+        if not parsed:
+            summary = raw.strip('「」"\'').strip().rstrip('。.')
+            if summary and summary != '无' and summary.startswith(('她', '他', '用户', '对方')) and len(summary) > 4:
+                saved = save_long_memory(user_id, summary, '其他')
+                if saved:
+                    print(f'[{user_id}] ✅ 新长期记忆（兼容模式）：{summary}')
+            return
 
-        # 接受多种主语开头
-        valid_prefixes = ('她', '他', '用户', '对方')
-        if summary and summary != '无' and len(summary) > 4 and summary.startswith(valid_prefixes):
-            saved = save_long_memory(user_id, summary)
-            if saved:
-                print(f'[{user_id}] ✅ 新长期记忆：{summary}')
-            else:
-                print(f'[{user_id}] ⚠️ 记忆已存在，跳过：{summary}')
-        elif summary and summary != '无':
-            print(f'[{user_id}] ❌ 格式不符（不以她/他/用户开头）："{summary}"')
+        content = parsed.get('content', '').strip().strip('「」"\'').rstrip('。.')
+        category = parsed.get('category', '').strip() or '其他'
+
+        if not content or content == '无' or len(content) < 4:
+            return
+        if not content.startswith(('她', '他', '用户', '对方')):
+            print(f'[{user_id}] ❌ 格式不符："{content}"')
+            return
+
+        valid_cats = ('喜好', '厌恶', '身份', '状态', '经历', '关系', '其他')
+        if category not in valid_cats:
+            category = '其他'
+
+        saved = save_long_memory(user_id, content, category)
+        if saved:
+            print(f'[{user_id}] ✅ 新长期记忆 [{category}]：{content}')
+        else:
+            print(f'[{user_id}] ⚠️ 记忆已存在，跳过：{content}')
+
     except Exception as e:
         print(f'记忆提取失败：{e}')
-
-
-@app.get('/debug/users')
-async def debug_users():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute('SELECT user_id, COUNT(*) FROM long_memory GROUP BY user_id')
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return JSONResponse({'users': [{'user_id': r[0], 'count': r[1]} for r in rows]})
-
 
 # ───────── TTS ─────────
 
@@ -623,13 +615,11 @@ async def chat_text(data: dict):
     save_short_memory(user_id, 'assistant', full_jp)
     threading.Thread(target=extract_and_save_memory, args=(user_id, user_text, full_jp), daemon=True).start()
 
-    # 串行合成防 TTS 复读
     for m in msgs:
         m['audio_b64'] = tts_to_b64(m['jp'], emotion)
 
     print(f'[TTS:{TTS_PROVIDER}] emotion={emotion} segments={len(msgs)} | days={total_days}')
 
-    # 处理提醒请求
     reminder_data = None
     if result.get('reminder'):
         rem = result['reminder']
@@ -670,6 +660,68 @@ async def chat_text(data: dict):
     return JSONResponse(resp)
 
 
+# ★ 主动消息：到点提醒 / 超时追问
+@app.post('/chat/proactive')
+async def chat_proactive(data: dict):
+    user_id    = data.get('user_id', 'default')
+    task_title = data.get('task_title', '')
+    mode       = data.get('mode', 'remind')  # remind / overdue
+    if not task_title:
+        return JSONResponse({'error': 'no task'}, status_code=400)
+
+    if mode == 'remind':
+        trigger = f'【系统触发：到提醒时间了】现在该主动提醒对方去做这件事："{task_title}"。你要主动开口，语气慵懒又带点关心，别太啰嗦，1条气泡就好。'
+    else:
+        trigger = f'【系统触发：超时未完成】对方之前要做"{task_title}"，但已经过了时间还没动静。你主动问她做完了没，带点调侃或假装不在意的关心，1条气泡就好。'
+
+    short_memories = get_short_memory(user_id, 4)
+    messages = []
+    for role, content in short_memories:
+        messages.append({'role': role, 'content': content})
+    messages.append({'role': 'user', 'content': trigger})
+
+    result = None
+    for attempt in range(3):
+        try:
+            response = claude_client.messages.create(
+                model='claude-sonnet-4-6',
+                max_tokens=400,
+                system=build_system_prompt(user_id),
+                messages=messages
+            )
+            raw = response.content[0].text.strip()
+            parsed = extract_json(raw)
+            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
+                result = parsed
+                break
+        except Exception as e:
+            print(f'[proactive] attempt {attempt+1} error: {e}')
+
+    if not result:
+        if mode == 'remind':
+            result = {'emotion': '调皮', 'messages': [{'jp': f'おい、{task_title}の時間だよ。', 'zh': f'喂，该{task_title}了哦。'}]}
+        else:
+            result = {'emotion': '疑惑', 'messages': [{'jp': f'{task_title}、ちゃんとやった？', 'zh': f'{task_title}，好好做了吗？'}]}
+
+    emotion = result.get('emotion', '平静')
+    if emotion not in EMOTIONS:
+        emotion = '平静'
+
+    msgs = result.get('messages', [])
+    for m in msgs:
+        m['jp'] = sanitize_jp(m.get('jp', ''))
+    msgs = merge_only_extreme_short(msgs)
+
+    full_jp = ' '.join(m['jp'] for m in msgs)
+    save_short_memory(user_id, 'assistant', full_jp)
+
+    for m in msgs:
+        m['audio_b64'] = tts_to_b64(m['jp'], emotion)
+
+    print(f'[proactive] mode={mode} task={task_title} emotion={emotion}')
+    return JSONResponse({'emotion': emotion, 'messages': msgs})
+
+
 @app.post('/chat/voice')
 async def chat_voice(file: UploadFile = File(...)):
     return JSONResponse({'error': 'voice input not available'}, status_code=501)
@@ -696,15 +748,11 @@ async def health():
     return {'status': 'ok', 'tts_provider': TTS_PROVIDER, 'db': 'postgresql'}
 
 
-# ───────── 批量记忆提取（一键补齐过去聊天）─────────
-
 @app.post('/extract_memory_batch')
 async def extract_memory_batch(data: dict):
-    """从短期记忆里批量提取长期记忆。处理还没被删的最近 100 条消息。"""
     user_id = data.get('user_id', 'default')
     short = get_short_memory(user_id, 100)
 
-    # 把消息按 user → assistant 配对
     pairs = []
     i = 0
     while i < len(short) - 1:
@@ -718,14 +766,11 @@ async def extract_memory_batch(data: dict):
         return JSONResponse({'ok': False, 'message': '没有对话可以处理', 'processed': 0})
 
     before_count = len(get_long_memory(user_id))
-
-    # 同步处理（要等结果）
     for user_text, jp_reply in pairs:
         try:
             extract_and_save_memory(user_id, user_text, jp_reply)
         except Exception as e:
             print(f'批量提取出错：{e}')
-
     after_count = len(get_long_memory(user_id))
     new_count = after_count - before_count
 
@@ -736,6 +781,84 @@ async def extract_memory_batch(data: dict):
         'new_memories': new_count,
         'total_memories': after_count,
     })
+
+
+# ★ 一键给老记忆补分类（没分类或归在"其他"的）
+@app.post('/reclassify_memories')
+async def reclassify_memories(data: dict):
+    user_id = data.get('user_id', 'default')
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, content FROM long_memory WHERE user_id = %s AND (category IS NULL OR category = '其他' OR category = '')",
+        (user_id,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return JSONResponse({'ok': True, 'message': '没有需要重新分类的记忆', 'processed': 0})
+
+    updated = 0
+    valid_cats = ('喜好', '厌恶', '身份', '状态', '经历', '关系', '其他')
+
+    for mem_id, content in rows:
+        try:
+            response = claude_client.messages.create(
+                model='claude-haiku-4-5-20251001',
+                max_tokens=30,
+                messages=[{
+                    'role': 'user',
+                    'content': f'''把下面这条事实归类到一个脑区（只输出分类名，不要其他字）。
+
+事实：{content}
+
+可选分类：
+- 喜好：喜欢的食物/颜色/动物/音乐/动漫/人
+- 厌恶：不喜欢的东西
+- 身份：名字/年龄/生日/职业/学校/专业
+- 状态：在做什么/最近忙什么/计划做什么
+- 经历：去过哪里/做过什么
+- 关系：家人/朋友/宠物
+- 其他：都不符合
+
+只输出分类名，例如：喜好'''
+                }]
+            )
+            cat = response.content[0].text.strip()
+            if cat not in valid_cats:
+                cat = '其他'
+
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute('UPDATE long_memory SET category = %s WHERE id = %s', (cat, mem_id))
+            conn.commit()
+            cur.close()
+            conn.close()
+            updated += 1
+            print(f'[{user_id}] 重分类 #{mem_id} → [{cat}]：{content[:30]}')
+        except Exception as e:
+            print(f'重分类失败 #{mem_id}：{e}')
+
+    return JSONResponse({
+        'ok': True,
+        'message': f'已重新分类 {updated} 条记忆',
+        'processed': updated,
+        'total': len(rows),
+    })
+
+
+@app.get('/debug/users')
+async def debug_users():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT user_id, COUNT(*) FROM long_memory GROUP BY user_id')
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return JSONResponse({'users': [{'user_id': r[0], 'count': r[1]} for r in rows]})
 
 
 # ───────── 日程任务 API ─────────
@@ -922,7 +1045,7 @@ async def transcribe_audio(data: dict):
     except Exception as e:
         print(f'转录失败：{e}')
         return JSONResponse({'error': str(e), 'text': ''})
-    
+
 
 if __name__ == '__main__':
     print(f'Gojo server starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL')
