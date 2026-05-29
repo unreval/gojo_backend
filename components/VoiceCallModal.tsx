@@ -1,5 +1,5 @@
 // app/components/VoiceCallModal.tsx
-// 改进版：WAV无损 + 置信度 + 严格VAD + 沉默检测（含静音状态）
+// 改进版：动态VAD + 短语音重置 + 繁转简 + 沉默检测（含静音触发）
 import axios from 'axios';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -21,13 +21,12 @@ const { width } = Dimensions.get('window');
 
 // ───── VAD 参数 ─────
 const SPEECH_THRESHOLD     = -32;
-const SPEECH_MIN_MS        = 500;
-const SILENCE_TRIGGER_MS   = 2200;   // ★ 从1800→2200，给更长停顿避免截断
+const SPEECH_MIN_MS        = 400;
 const POLL_INTERVAL_MS     = 120;
-const MIN_AUDIO_SIZE       = 10000;  // ★ WAV格式更大，提到10KB
+const MIN_AUDIO_SIZE       = 10000;
 const CONSECUTIVE_FRAMES   = 3;
 
-// ───── 沉默主动开口 ─────
+// ───── 沉默主动开口参数 ─────
 const IDLE_CHECK_INTERVAL  = 5000;
 const IDLE_FIRST_MS        = 25000;
 const IDLE_SECOND_MS       = 50000;
@@ -74,25 +73,28 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
   const scrollRef       = useRef<ScrollView>(null);
   const activeRef       = useRef(true);
 
-  const phaseRef             = useRef<Phase>('connecting');
-  const speechStartRef       = useRef<number | null>(null);
-  const silenceStartRef      = useRef<number | null>(null);
+  const phaseRef            = useRef<Phase>('connecting');
+  const speechStartRef      = useRef<number | null>(null);
+  const silenceStartRef     = useRef<number | null>(null);
   const consecutiveSpeechRef = useRef(0);
-  const speechConfirmedRef   = useRef(false);
+  const speechConfirmedRef  = useRef(false);
+  const recordingStartTimeRef = useRef<number>(0);
 
-  const lastActiveTimeRef = useRef<number>(Date.now());
-  const proactiveCountRef = useRef(0);
+  const lastActiveTimeRef   = useRef<number>(Date.now());
+  const proactiveCountRef   = useRef(0);
 
   const setPhaseSync = (p: Phase) => {
     phaseRef.current = p;
     setPhase(p);
   };
 
+  // ───── 通话计时器 ─────
   useEffect(() => {
     callTimerRef.current = setInterval(() => setDuration(d => d + 1), 1000);
     return () => { if (callTimerRef.current) clearInterval(callTimerRef.current); };
   }, []);
 
+  // ───── 初始化 ─────
   useEffect(() => {
     const init = async () => {
       try {
@@ -116,14 +118,18 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     return () => { cleanup(); };
   }, []);
 
+  // ───── 扬声器切换 ─────
   useEffect(() => {
     Audio.setAudioModeAsync({
-      allowsRecordingIOS: true, playsInSilentModeIOS: true,
-      staysActiveInBackground: false, shouldDuckAndroid: true,
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
       playThroughEarpieceAndroid: !isSpeaker,
     }).catch(() => {});
   }, [isSpeaker]);
 
+  // ───── 清理 ─────
   const cleanup = async () => {
     activeRef.current = false;
     stopPolling();
@@ -134,12 +140,18 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     currentSoundRef.current = null;
     if (callTimerRef.current) clearInterval(callTimerRef.current);
     await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false, playsInSilentModeIOS: true,
-      staysActiveInBackground: false, shouldDuckAndroid: true, playThroughEarpieceAndroid: false,
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
     }).catch(() => {});
   };
 
-  // ───── 沉默检测（★ 支持 listening + paused 两种状态）─────
+  // ═══════════════════════════════════════
+  //  沉默检测（含 paused 状态）
+  // ═══════════════════════════════════════
+
   const startIdleDetection = () => {
     stopIdleDetection();
     lastActiveTimeRef.current = Date.now();
@@ -148,12 +160,12 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     idleTimerRef.current = setInterval(async () => {
       if (!activeRef.current) return;
 
-      // ★ 关键：paused（静音）状态也检测沉默
       const currentPhase = phaseRef.current;
       if (currentPhase !== 'listening' && currentPhase !== 'paused') return;
 
       const silenceMs = Date.now() - lastActiveTimeRef.current;
       const count = proactiveCountRef.current;
+
       if (count >= MAX_PROACTIVE_TIMES) return;
 
       let shouldTrigger = false;
@@ -183,14 +195,12 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
-  // ★ 主动消息：处理 paused 状态下的触发
   const triggerProactiveMessage = async (mode: 'idle' | 'missed', silenceSeconds: number) => {
     if (!activeRef.current) return;
 
     const wasPaused = phaseRef.current === 'paused';
 
     try {
-      // 只在非 paused 状态才停录音（paused 时没有录音对象）
       if (!wasPaused) {
         stopPolling();
         try { await recordingRef.current?.stopAndUnloadAsync(); } catch {}
@@ -200,7 +210,9 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       setPhaseSync('responding');
 
       const res = await axios.post(`${SERVER_URL}/chat/voice/proactive`, {
-        user_id: userId, mode, silence_seconds: silenceSeconds,
+        user_id: userId,
+        mode,
+        silence_seconds: silenceSeconds,
       });
       if (!activeRef.current) return;
 
@@ -223,9 +235,8 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       console.warn('proactive error', e);
     } finally {
       setSubtitle('');
-      lastActiveTimeRef.current = Date.now();  // ★ 悟说完话刷新时间
+      lastActiveTimeRef.current = Date.now();
       if (activeRef.current) {
-        // ★ 恢复到之前的状态
         if (wasPaused) {
           setPhaseSync('paused');
         } else {
@@ -235,26 +246,33 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
-  // ───── 开始录音（★ WAV 无损格式，提高识别准确度）─────
+  // ═══════════════════════════════════════
+  //  录音
+  // ═══════════════════════════════════════
+
   const startRecording = async () => {
     if (!activeRef.current) return;
     try {
       await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true, playsInSilentModeIOS: true,
-        staysActiveInBackground: false, shouldDuckAndroid: false, playThroughEarpieceAndroid: false,
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
       });
+
       const { recording } = await Audio.Recording.createAsync({
         android: {
-          extension: '.wav',                                // ★ WAV 无损
+          extension: '.wav',
           outputFormat: Audio.AndroidOutputFormat.DEFAULT,
           audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
           sampleRate: 16000,
           numberOfChannels: 1,
-          bitRate: 256000,                                  // ★ 提高码率
+          bitRate: 256000,
         },
         ios: {
-          extension: '.wav',                                // ★ WAV 无损
-          audioQuality: Audio.IOSAudioQuality.HIGH,         // ★ 高质量
+          extension: '.wav',
+          audioQuality: Audio.IOSAudioQuality.HIGH,
           sampleRate: 16000,
           numberOfChannels: 1,
           bitRate: 256000,
@@ -265,11 +283,13 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
         web: {},
         isMeteringEnabled: true,
       });
+
       recordingRef.current = recording;
       speechStartRef.current = null;
       silenceStartRef.current = null;
       consecutiveSpeechRef.current = 0;
       speechConfirmedRef.current = false;
+      recordingStartTimeRef.current = Date.now();
       startPolling();
     } catch (e) {
       console.warn('startRecording failed', e);
@@ -278,7 +298,10 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
-  // ───── VAD 轮询（连续帧确认）─────
+  // ═══════════════════════════════════════
+  //  VAD 轮询（连续帧确认 + 动态阈值 + 短语音重置）
+  // ═══════════════════════════════════════
+
   const startPolling = () => {
     stopPolling();
     pollTimerRef.current = setInterval(async () => {
@@ -297,27 +320,48 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
 
         if (isTalking) {
           consecutiveSpeechRef.current++;
+
           if (consecutiveSpeechRef.current >= CONSECUTIVE_FRAMES) {
             silenceStartRef.current = null;
             if (!speechConfirmedRef.current) {
               speechConfirmedRef.current = true;
               speechStartRef.current = now;
+              recordingStartTimeRef.current = now;
               setPhaseSync('speaking');
             }
           }
         } else {
           consecutiveSpeechRef.current = 0;
+
           if (speechConfirmedRef.current && currentPhase === 'speaking') {
             if (!silenceStartRef.current) silenceStartRef.current = now;
             const silenceDuration = now - silenceStartRef.current;
             const speechDuration = speechStartRef.current ? now - speechStartRef.current : 0;
+            const recordingDuration = now - recordingStartTimeRef.current;
 
-            if (silenceDuration >= SILENCE_TRIGGER_MS && speechDuration >= SPEECH_MIN_MS) {
-              stopPolling();
-              setPhaseSync('processing');
-              speechConfirmedRef.current = false;
-              consecutiveSpeechRef.current = 0;
-              await processRecording();
+            // ★ 动态沉默阈值：
+            //   录音 < 3秒 → 2.5秒沉默才算结束
+            //   录音 > 3秒 → 3.5秒沉默才算结束（给长句更多停顿空间）
+            const dynamicSilenceMs = recordingDuration > 3000 ? 3500 : 2500;
+
+            if (silenceDuration >= dynamicSilenceMs) {
+              if (speechDuration >= SPEECH_MIN_MS) {
+                // 正常：说够了，处理录音
+                stopPolling();
+                setPhaseSync('processing');
+                speechConfirmedRef.current = false;
+                consecutiveSpeechRef.current = 0;
+                await processRecording();
+              } else {
+                // ★ 关键修复：说得太短，重置状态而不是继续累积
+                speechConfirmedRef.current = false;
+                speechStartRef.current = null;
+                silenceStartRef.current = null;
+                consecutiveSpeechRef.current = 0;
+                setDebugText('⚠️ 太短，忽略');
+                setTimeout(() => setDebugText(''), 1500);
+                // 不停止录音，回到聆听状态继续等
+              }
             }
           }
         }
@@ -332,9 +376,13 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
-  // ───── 处理录音 ─────
+  // ═══════════════════════════════════════
+  //  处理录音 → STT → 发送
+  // ═══════════════════════════════════════
+
   const processRecording = async () => {
     if (!activeRef.current) return;
+
     const rec = recordingRef.current;
     recordingRef.current = null;
 
@@ -351,14 +399,14 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
         await rec.stopAndUnloadAsync();
         uri = rec.getURI();
       } catch (stopErr) {
-        setDebugText(`❌ stop：${stopErr}`);
+        setDebugText(`❌ 录音停止失败：${stopErr}`);
         setTimeout(() => setDebugText(''), 4000);
         await resumeListening();
         return;
       }
 
       if (!uri) {
-        setDebugText('❌ URI 为空');
+        setDebugText('❌ 录音URI为空');
         setTimeout(() => setDebugText(''), 3000);
         await resumeListening();
         return;
@@ -368,13 +416,13 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       const fileSize = info.exists && 'size' in info ? info.size : 0;
 
       if (fileSize < MIN_AUDIO_SIZE) {
-        setDebugText(`⚠️ 音频太小(${fileSize}B)`);
+        setDebugText(`⚠️ 音频太小(${fileSize}B)，忽略`);
         setTimeout(() => setDebugText(''), 1500);
         await resumeListening();
         return;
       }
 
-      setDebugText(`📁 ${Math.round(fileSize / 1000)}KB 发送中...`);
+      setDebugText(`📁 ${Math.round(fileSize / 1024)}KB 发送中...`);
 
       let base64 = '';
       try {
@@ -391,7 +439,8 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       let sttRes: any;
       try {
         sttRes = await axios.post(`${SERVER_URL}/transcribe`, {
-          audio_base64: base64, user_id: userId,
+          audio_base64: base64,
+          user_id: userId,
         }, { timeout: 30000 });
       } catch (netErr: any) {
         setDebugText(`❌ 网络：${netErr?.message}`);
@@ -402,10 +451,10 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
 
       const text = sttRes.data?.text?.trim();
       const filtered = sttRes.data?.filtered;
-      const lowConfidence = sttRes.data?.low_confidence;
+      const reason = sttRes.data?.reason || '';
 
       if (filtered) {
-        setDebugText(`⚠️ 过滤 (${sttRes.data?.reason || ''})`);
+        setDebugText(`⚠️ 过滤(${reason})`);
         setTimeout(() => setDebugText(''), 1500);
         if (activeRef.current) await resumeListening();
         return;
@@ -418,19 +467,17 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
         return;
       }
 
-      // ★ 低置信度标记（仍发送，但显示提示）
-      if (lowConfidence) {
-        setDebugText(`🤔 可能听错：${text}`);
-      } else {
-        setDebugText(`✅ ${text}`);
-      }
-
-      // 真正识别到了——刷新沉默计时
+      // 用户真的说话了——刷新沉默计时
       lastActiveTimeRef.current = Date.now();
       proactiveCountRef.current = 0;
 
+      setDebugText(`✅ ${text}`);
+
       const userMsg: CallMsg = {
-        id: Date.now().toString(), role: 'user', zh: text, time: nowTime(),
+        id: Date.now().toString(),
+        role: 'user',
+        zh: text,
+        time: nowTime(),
       };
       setCallMsgs(prev => [...prev, userMsg]);
       scrollRef.current?.scrollToEnd({ animated: true });
@@ -444,10 +491,17 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
+  // ═══════════════════════════════════════
+  //  发给角色
+  // ═══════════════════════════════════════
+
   const sendToGojo = async (text: string) => {
     if (!activeRef.current) return;
     try {
-      const res = await axios.post(`${SERVER_URL}/chat/voice_text`, { text, user_id: userId });
+      const res = await axios.post(`${SERVER_URL}/chat/voice_text`, {
+        text,
+        user_id: userId,
+      });
       if (!activeRef.current) return;
 
       setPhaseSync('responding');
@@ -475,7 +529,11 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           await sleep(800);
         }
       }
+
+      // 悟说完话刷新计时
       lastActiveTimeRef.current = Date.now();
+      proactiveCountRef.current = 0;
+
     } catch (e) {
       console.warn('sendToGojo error', e);
     } finally {
@@ -485,15 +543,27 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
+  // ═══════════════════════════════════════
+  //  恢复聆听
+  // ═══════════════════════════════════════
+
   const resumeListening = async () => {
     if (!activeRef.current) return;
     setPhaseSync('listening');
+    lastActiveTimeRef.current = Date.now();
     await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true, playsInSilentModeIOS: true,
-      staysActiveInBackground: false, shouldDuckAndroid: false, playThroughEarpieceAndroid: false,
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: false,
+      playThroughEarpieceAndroid: false,
     }).catch(() => {});
     await startRecording();
   };
+
+  // ═══════════════════════════════════════
+  //  播放音频
+  // ═══════════════════════════════════════
 
   const playAudio = (b64: string): Promise<void> =>
     new Promise(async (resolve) => {
@@ -503,8 +573,10 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           currentSoundRef.current = null;
         }
         await Audio.setAudioModeAsync({
-          allowsRecordingIOS: false, playsInSilentModeIOS: true,
-          staysActiveInBackground: false, shouldDuckAndroid: true,
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
           playThroughEarpieceAndroid: !isSpeaker,
         });
         const { sound } = await Audio.Sound.createAsync(
@@ -522,18 +594,29 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       } catch { resolve(); }
     });
 
+  // ═══════════════════════════════════════
+  //  暂停 / 继续
+  // ═══════════════════════════════════════
+
   const togglePause = async () => {
     if (phase === 'paused') {
       setPhaseSync('listening');
       lastActiveTimeRef.current = Date.now();
+      proactiveCountRef.current = 0;
       await startRecording();
     } else if (phase === 'listening' || phase === 'speaking') {
       stopPolling();
       try { await recordingRef.current?.stopAndUnloadAsync(); } catch {}
       recordingRef.current = null;
       setPhaseSync('paused');
+      lastActiveTimeRef.current = Date.now();
+      proactiveCountRef.current = 0;
     }
   };
+
+  // ═══════════════════════════════════════
+  //  挂断
+  // ═══════════════════════════════════════
 
   const hangUp = async () => {
     activeRef.current = false;
@@ -549,14 +632,18 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     await sleep(2000);
 
     await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false, playsInSilentModeIOS: true,
-      staysActiveInBackground: false, shouldDuckAndroid: true, playThroughEarpieceAndroid: false,
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
     }).catch(() => {});
 
     if (callMsgs.length > 0) {
       const divider: Message = {
         id: `div_${Date.now()}`, role: 'gojo',
-        text: `── 通话记录（${formatDuration(duration)}）──`, time: nowTime(),
+        text: `── 通话记录（${formatDuration(duration)}）──`,
+        time: nowTime(),
       };
       const chatMsgs: Message[] = callMsgs.map(m => ({
         id: m.id, role: m.role,
@@ -569,8 +656,12 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     onClose();
   };
 
+  // ═══════════════════════════════════════
+  //  工具
+  // ═══════════════════════════════════════
+
   const formatDuration = (s: number) =>
-    `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
   const volumeBars = () => {
     const normalized = Math.max(0, Math.min(1, (dbLevel + 60) / 60));
@@ -587,6 +678,10 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     paused:     '已暂停',
     ended:      '',
   };
+
+  // ═══════════════════════════════════════
+  //  UI
+  // ═══════════════════════════════════════
 
   return (
     <Modal visible animationType="slide" statusBarTranslucent>
@@ -702,8 +797,8 @@ const s = StyleSheet.create({
 
   avatarArea:  { alignItems: 'center', marginTop: 20, marginBottom: 10 },
   avatarRing:  { width: 130, height: 130, borderRadius: 65, borderWidth: 2, borderColor: C.accent + '40', alignItems: 'center', justifyContent: 'center', marginBottom: 14 },
-  ringSpeak:   { borderColor: '#22c55e', shadowColor: '#22c55e', shadowOffset: { width:0, height:0 }, shadowOpacity: 0.7, shadowRadius: 16, elevation: 10 },
-  ringRespond: { borderColor: C.accent, shadowColor: C.accent, shadowOffset: { width:0, height:0 }, shadowOpacity: 0.8, shadowRadius: 16, elevation: 10 },
+  ringSpeak:   { borderColor: '#22c55e', shadowColor: '#22c55e', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.7, shadowRadius: 16, elevation: 10 },
+  ringRespond: { borderColor: C.accent, shadowColor: C.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 16, elevation: 10 },
   avatar:      { width: 110, height: 110, borderRadius: 55, backgroundColor: C.accentDim, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: C.accent },
   avatarText:  { color: '#fff', fontSize: 46, fontWeight: '700' },
   name:        { color: '#fff', fontSize: 20, fontWeight: '600', marginBottom: 6 },
@@ -732,7 +827,7 @@ const s = StyleSheet.create({
   ctrlActive:  { backgroundColor: 'rgba(255,255,255,0.12)' },
   ctrlIcon:    { fontSize: 26, marginBottom: 4 },
   ctrlLabel:   { color: '#64748b', fontSize: 11 },
-  hangupBtn:   { width: 66, height: 66, borderRadius: 33, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center', shadowColor: '#ef4444', shadowOffset: { width:0, height:4 }, shadowOpacity: 0.4, shadowRadius: 8, elevation: 8 },
+  hangupBtn:   { width: 66, height: 66, borderRadius: 33, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center', shadowColor: '#ef4444', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 8, elevation: 8 },
   hangupIcon:  { fontSize: 28 },
 
   endedOverlay:  { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#080e1a', alignItems: 'center', justifyContent: 'center', zIndex: 99 },

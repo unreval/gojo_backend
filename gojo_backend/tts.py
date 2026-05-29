@@ -1,12 +1,48 @@
-"""Fish Audio TTS + Groq Whisper STT（verbose_json + 置信度 + 噪声过滤）"""
+# tts.py
+"""TTS 合成 + STT 转录（含繁转简）"""
+import os
+import json
 import base64
 import requests
-import os
 import tempfile
+
 from config import FISH_KEY, FISH_VOICE_ID, GROQ_KEY, EMOTION_TAGS
 
 
-def fish_tts(text, emotion='平静', voice_id=None):
+# ═══════════════════════════════════════
+#  繁体转简体
+# ═══════════════════════════════════════
+
+def traditional_to_simplified(text: str) -> str:
+    """繁体中文转简体中文"""
+    try:
+        from opencc import OpenCC
+        cc = OpenCC('t2s')
+        return cc.convert(text)
+    except ImportError:
+        # opencc 未安装时，用简单替换处理常见繁体字
+        replacements = {
+            '騙': '骗', '說': '说', '話': '话', '過': '过', '後': '后',
+            '嗎': '吗', '爲': '为', '這': '这', '裡': '里', '點': '点',
+            '問': '问', '時': '时', '書': '书', '開': '开', '關': '关',
+            '還': '还', '對': '对', '從': '从', '個': '个', '們': '们',
+            '愛': '爱', '來': '来', '認': '认', '識': '识', '記': '记',
+            '覺得': '觉得', '應該': '应该', '覺得': '觉得', '為什麼': '为什么',
+            '什麼': '什么', '喜歡': '喜欢', '想要': '想要', '不知道': '不知道',
+            '沒關係': '没关系', '沒事': '没事', '對不起': '对不起', '謝謝': '谢谢',
+            '難道': '难道', '總是': '总是', '一直': '一直', '真的': '真的',
+            '腦子': '脑子', '陌生': '陌生', '難過': '难过', '開心': '开心',
+        }
+        for trad, simp in sorted(replacements.items(), key=lambda x: -len(x[0])):
+            text = text.replace(trad, simp)
+        return text
+
+
+# ═══════════════════════════════════════
+#  TTS: Fish Audio
+# ═══════════════════════════════════════
+
+def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
     tag = EMOTION_TAGS.get(emotion, '')
     prefix = '。 '
     final_text = f'{prefix}{tag} {text}' if tag else f'{prefix}{text}'
@@ -19,28 +55,36 @@ def fish_tts(text, emotion='平静', voice_id=None):
     else:
         chunk_length = 200
 
+    actual_voice_id = voice_id or FISH_VOICE_ID
+
     response = requests.post(
         'https://api.fish.audio/v1/tts',
-        headers={'Authorization': f'Bearer {FISH_KEY}', 'Content-Type': 'application/json'},
+        headers={
+            'Authorization': f'Bearer {FISH_KEY}',
+            'Content-Type': 'application/json',
+        },
         json={
             'text': final_text,
-            'reference_id': voice_id or FISH_VOICE_ID,
+            'reference_id': actual_voice_id,
             'format': 'mp3',
             'latency': 'normal',
             'chunk_length': chunk_length,
             'temperature': 0.5,
             'top_p': 0.7,
             'mp3_bitrate': 128,
-            'prosody': {'speed': 1.15, 'volume': 0},
+            'prosody': {
+                'speed': 1.15,
+                'volume': 0,
+            },
         },
-        stream=True
+        stream=True,
     )
     if response.status_code != 200:
-        raise Exception(f'Fish Audio error: {response.status_code}')
+        raise Exception(f'Fish Audio error: {response.status_code} {response.text[:200]}')
     return b''.join(response.iter_content(chunk_size=4096))
 
 
-def tts_to_b64(text, emotion, voice_id=None):
+def tts_to_b64(text: str, emotion: str, voice_id: str = None) -> str:
     try:
         audio_bytes = fish_tts(text, emotion, voice_id)
         return base64.b64encode(audio_bytes).decode()
@@ -49,27 +93,28 @@ def tts_to_b64(text, emotion, voice_id=None):
         return ''
 
 
-NOISE_WORDS = {
-    '谢谢', '感谢', '请', '您好', '你好', '嗯', '啊',
-    '哦', '额', '这', '那', '这个', '那个', '什么',
-    '不知道', '对', '好的', 'OK', 'ok', '哈哈', '哈',
-    '是', '是的', '嗯嗯', '嗯哼',
-}
+# ═══════════════════════════════════════
+#  STT: Whisper via Groq（带繁转简）
+# ═══════════════════════════════════════
 
-
-def transcribe_audio_b64(audio_b64: str):
-    """Groq Whisper 转录：verbose_json + 置信度 + 噪声过滤"""
+def transcribe_audio_b64(audio_b64: str) -> dict:
+    """
+    接收 base64 音频，用 Groq Whisper 转文字。
+    返回: {"text": "..."} 或 {"text": "", "filtered": True, "reason": "..."}
+    """
     if not GROQ_KEY:
-        return {'error': 'GROQ_KEY not configured', 'text': ''}
+        print('[transcribe] GROQ_KEY 未配置')
+        return {'text': '', 'error': 'GROQ_KEY not configured'}
+
     try:
         from groq import Groq
+
         client = Groq(api_key=GROQ_KEY)
         audio_bytes = base64.b64decode(audio_b64)
 
-        # 过滤1：音频太小
         if len(audio_bytes) < 2000:
-            print(f'[transcribe] 音频太小({len(audio_bytes)}B)')
-            return {'text': '', 'filtered': True, 'reason': 'too_small'}
+            print(f'[transcribe] 音频太小({len(audio_bytes)}B)，疑似噪音')
+            return {'text': '', 'filtered': True, 'reason': 'audio_too_small'}
 
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
             f.write(audio_bytes)
@@ -77,7 +122,6 @@ def transcribe_audio_b64(audio_b64: str):
 
         try:
             with open(temp_path, 'rb') as f:
-                # ★ verbose_json + temperature=0 提高准确度
                 transcript = client.audio.transcriptions.create(
                     model='whisper-large-v3-turbo',
                     file=f,
@@ -86,48 +130,62 @@ def transcribe_audio_b64(audio_b64: str):
                     temperature=0.0,
                 )
 
-            text = transcript.text.strip() if hasattr(transcript, 'text') else ''
+            text = transcript.text.strip() if hasattr(transcript, 'text') else str(transcript).strip()
 
-            # ★ 获取平均置信度
-            avg_confidence = 0
+            # ★ 繁转简
+            text = traditional_to_simplified(text)
+
+            # 获取分段置信度
             segments = getattr(transcript, 'segments', [])
+            avg_confidence = 0
             if segments:
-                confidences = []
+                logprobs = []
                 for seg in segments:
                     if isinstance(seg, dict):
-                        confidences.append(seg.get('avg_logprob', -1))
-                    elif hasattr(seg, 'avg_logprob'):
-                        confidences.append(seg.avg_logprob)
-                if confidences:
-                    avg_confidence = sum(confidences) / len(confidences)
+                        lp = seg.get('avg_logprob')
+                        if lp is not None:
+                            logprobs.append(lp)
+                if logprobs:
+                    avg_confidence = sum(logprobs) / len(logprobs)
 
-            print(f'[transcribe] text="{text}" confidence={avg_confidence:.3f}')
+            print(f'[transcribe] text="{text}" confidence={avg_confidence:.3f} segs={len(segments)}')
 
-            # 过滤2：太短
+            # 低置信度标记
+            low_confidence = avg_confidence < -1.5 and len(text) < 6
+
+            # 过滤太短的
             if len(text) < 2:
+                print(f'[transcribe] 太短，丢弃')
                 return {'text': '', 'filtered': True, 'reason': 'too_short'}
 
-            text_clean = text.strip('。.，,！!？?…~ ').strip()
+            # 噪声常见误识别过滤
+            noise_words = {
+                '谢谢', '感谢', '请', '您好', '你好', '嗯', '啊',
+                '哦', '额', '这', '那', '这个', '那个', '什么',
+                '不知道', '对', '好的',
+            }
+            text_clean = text.strip('。.，,！!？? ')
 
-            # 过滤3：噪声词
-            if len(text_clean) <= 2 and text_clean in NOISE_WORDS:
-                print(f'[transcribe] 噪声词："{text}"')
+            if text_clean in noise_words and len(text_clean) <= 2:
+                print(f'[transcribe] 疑似噪声："{text}"')
                 return {'text': '', 'filtered': True, 'reason': 'noise_word'}
 
-            # 过滤4：重复字符
-            if len(text_clean) > 1 and len(set(text_clean)) <= 2 and len(text_clean) <= 4:
-                print(f'[transcribe] 重复噪声："{text}"')
-                return {'text': '', 'filtered': True, 'reason': 'repeated'}
+            # 重复字符过滤
+            if len(set(text_clean)) <= 2 and len(text_clean) > 3:
+                print(f'[transcribe] 疑似重复噪声："{text}"')
+                return {'text': '', 'filtered': True, 'reason': 'repetitive'}
 
-            # ★ 过滤5：置信度太低的短句标记
-            if avg_confidence < -1.8 and len(text_clean) < 6:
-                print(f'[transcribe] 低置信度短句："{text}" conf={avg_confidence:.3f}')
+            if low_confidence:
                 return {'text': text, 'low_confidence': True}
 
             return {'text': text}
+
         finally:
-            try: os.unlink(temp_path)
-            except: pass
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
     except Exception as e:
-        print(f'转录失败：{e}')
-        return {'error': str(e), 'text': ''}
+        print(f'[transcribe] error: {e}')
+        return {'text': '', 'error': str(e)}

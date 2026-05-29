@@ -6,3 +6,4 @@ python-multipart
 psycopg2-binary
 openai
 groq
+opencc-python-reimplemented
