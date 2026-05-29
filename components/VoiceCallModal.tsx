@@ -1,8 +1,8 @@
 // app/components/VoiceCallModal.tsx
-// 全自动语音通话：说话自动识别，静音后自动发送，Gojo 语音回复
+// 改进版：WAV无损 + 置信度 + 严格VAD + 沉默检测（含静音状态）
 import axios from 'axios';
 import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Dimensions,
@@ -19,11 +19,20 @@ import { C, SERVER_URL, nowTime } from '../constants/theme';
 
 const { width } = Dimensions.get('window');
 
-// ── VAD 参数（可根据环境调整）──
-const SPEECH_THRESHOLD   = -40;   // dBFS，高于此认为在说话
-const SPEECH_MIN_MS      = 400;   // 至少说这么久才算有效语音
-const SILENCE_TRIGGER_MS = 1500;  // 说完后静音这么久就触发识别
-const POLL_INTERVAL_MS   = 120;   // 检测频率
+// ───── VAD 参数 ─────
+const SPEECH_THRESHOLD     = -32;
+const SPEECH_MIN_MS        = 500;
+const SILENCE_TRIGGER_MS   = 2200;   // ★ 从1800→2200，给更长停顿避免截断
+const POLL_INTERVAL_MS     = 120;
+const MIN_AUDIO_SIZE       = 10000;  // ★ WAV格式更大，提到10KB
+const CONSECUTIVE_FRAMES   = 3;
+
+// ───── 沉默主动开口 ─────
+const IDLE_CHECK_INTERVAL  = 5000;
+const IDLE_FIRST_MS        = 25000;
+const IDLE_SECOND_MS       = 50000;
+const IDLE_THIRD_MS        = 90000;
+const MAX_PROACTIVE_TIMES  = 4;
 
 interface Props {
   userId: string;
@@ -40,13 +49,13 @@ interface CallMsg {
 }
 
 type Phase =
-  | 'connecting'   // 通话接通中
-  | 'listening'    // 聆听中（等用户说话）
-  | 'speaking'     // 检测到用户在说话
-  | 'processing'   // 识别 + Gojo 思考
-  | 'responding'   // Gojo 正在说话
-  | 'paused'       // 手动暂停
-  | 'ended';       // 通话结束
+  | 'connecting'
+  | 'listening'
+  | 'speaking'
+  | 'processing'
+  | 'responding'
+  | 'paused'
+  | 'ended';
 
 export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props) {
   const [phase, setPhase]         = useState<Phase>('connecting');
@@ -54,33 +63,36 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
   const [subtitle, setSubtitle]   = useState('');
   const [duration, setDuration]   = useState(0);
   const [isSpeaker, setIsSpeaker] = useState(true);
-  const [dbLevel, setDbLevel]     = useState(-160); // 用于显示音量条
+  const [dbLevel, setDbLevel]     = useState(-160);
+  const [debugText, setDebugText] = useState('');
 
   const recordingRef    = useRef<Audio.Recording | null>(null);
   const currentSoundRef = useRef<Audio.Sound | null>(null);
   const pollTimerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const callTimerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const idleTimerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const scrollRef       = useRef<ScrollView>(null);
   const activeRef       = useRef(true);
 
-  const [debugText, setDebugText] = useState(''); // 临时显示识别结果
+  const phaseRef             = useRef<Phase>('connecting');
+  const speechStartRef       = useRef<number | null>(null);
+  const silenceStartRef      = useRef<number | null>(null);
+  const consecutiveSpeechRef = useRef(0);
+  const speechConfirmedRef   = useRef(false);
 
-  const phaseRef          = useRef<Phase>('connecting');
-  const speechStartRef    = useRef<number | null>(null);
-  const silenceStartRef   = useRef<number | null>(null);
+  const lastActiveTimeRef = useRef<number>(Date.now());
+  const proactiveCountRef = useRef(0);
 
   const setPhaseSync = (p: Phase) => {
     phaseRef.current = p;
     setPhase(p);
   };
 
-  // ── 计时器 ──
   useEffect(() => {
     callTimerRef.current = setInterval(() => setDuration(d => d + 1), 1000);
     return () => { if (callTimerRef.current) clearInterval(callTimerRef.current); };
   }, []);
 
-  // ── 启动通话 ──
   useEffect(() => {
     const init = async () => {
       try {
@@ -90,25 +102,24 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           onClose();
           return;
         }
-        // 短暂延迟模拟"接通"
         await new Promise(r => setTimeout(r, 800));
         setPhaseSync('listening');
+        lastActiveTimeRef.current = Date.now();
         await startRecording();
+        startIdleDetection();
       } catch (e) {
         console.warn('通话初始化失败', e);
+        setDebugText(`⚠️ 初始化失败：${e}`);
       }
     };
     init();
     return () => { cleanup(); };
   }, []);
 
-  // ── 扬声器设置 ──
   useEffect(() => {
     Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-      shouldDuckAndroid: true,
+      allowsRecordingIOS: true, playsInSilentModeIOS: true,
+      staysActiveInBackground: false, shouldDuckAndroid: true,
       playThroughEarpieceAndroid: !isSpeaker,
     }).catch(() => {});
   }, [isSpeaker]);
@@ -116,6 +127,7 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
   const cleanup = async () => {
     activeRef.current = false;
     stopPolling();
+    stopIdleDetection();
     try { await recordingRef.current?.stopAndUnloadAsync(); } catch {}
     try { await currentSoundRef.current?.unloadAsync(); } catch {}
     recordingRef.current = null;
@@ -127,7 +139,103 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }).catch(() => {});
   };
 
-  // ── 开始录音 ──
+  // ───── 沉默检测（★ 支持 listening + paused 两种状态）─────
+  const startIdleDetection = () => {
+    stopIdleDetection();
+    lastActiveTimeRef.current = Date.now();
+    proactiveCountRef.current = 0;
+
+    idleTimerRef.current = setInterval(async () => {
+      if (!activeRef.current) return;
+
+      // ★ 关键：paused（静音）状态也检测沉默
+      const currentPhase = phaseRef.current;
+      if (currentPhase !== 'listening' && currentPhase !== 'paused') return;
+
+      const silenceMs = Date.now() - lastActiveTimeRef.current;
+      const count = proactiveCountRef.current;
+      if (count >= MAX_PROACTIVE_TIMES) return;
+
+      let shouldTrigger = false;
+      let mode: 'idle' | 'missed' = 'idle';
+
+      if (count === 0 && silenceMs >= IDLE_FIRST_MS) {
+        shouldTrigger = true; mode = 'idle';
+      } else if (count === 1 && silenceMs >= IDLE_SECOND_MS) {
+        shouldTrigger = true; mode = 'idle';
+      } else if (count === 2 && silenceMs >= IDLE_THIRD_MS) {
+        shouldTrigger = true; mode = 'missed';
+      } else if (count >= 3 && silenceMs >= IDLE_THIRD_MS + 60000 * (count - 2)) {
+        shouldTrigger = true; mode = 'missed';
+      }
+
+      if (shouldTrigger) {
+        proactiveCountRef.current = count + 1;
+        await triggerProactiveMessage(mode, Math.floor(silenceMs / 1000));
+      }
+    }, IDLE_CHECK_INTERVAL);
+  };
+
+  const stopIdleDetection = () => {
+    if (idleTimerRef.current) {
+      clearInterval(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+  };
+
+  // ★ 主动消息：处理 paused 状态下的触发
+  const triggerProactiveMessage = async (mode: 'idle' | 'missed', silenceSeconds: number) => {
+    if (!activeRef.current) return;
+
+    const wasPaused = phaseRef.current === 'paused';
+
+    try {
+      // 只在非 paused 状态才停录音（paused 时没有录音对象）
+      if (!wasPaused) {
+        stopPolling();
+        try { await recordingRef.current?.stopAndUnloadAsync(); } catch {}
+        recordingRef.current = null;
+      }
+
+      setPhaseSync('responding');
+
+      const res = await axios.post(`${SERVER_URL}/chat/voice/proactive`, {
+        user_id: userId, mode, silence_seconds: silenceSeconds,
+      });
+      if (!activeRef.current) return;
+
+      const segments = res.data?.messages || [];
+      for (const seg of segments) {
+        if (!activeRef.current) break;
+        const gojoMsg: CallMsg = {
+          id: `idle_${Date.now()}`, role: 'gojo',
+          jp: seg.jp, zh: seg.zh, time: nowTime(),
+        };
+        setCallMsgs(prev => [...prev, gojoMsg]);
+        setSubtitle(seg.zh || seg.jp || '');
+        scrollRef.current?.scrollToEnd({ animated: true });
+
+        if (seg.audio_b64 && seg.audio_b64.length > 100) {
+          await playAudio(seg.audio_b64);
+        }
+      }
+    } catch (e) {
+      console.warn('proactive error', e);
+    } finally {
+      setSubtitle('');
+      lastActiveTimeRef.current = Date.now();  // ★ 悟说完话刷新时间
+      if (activeRef.current) {
+        // ★ 恢复到之前的状态
+        if (wasPaused) {
+          setPhaseSync('paused');
+        } else {
+          await resumeListening();
+        }
+      }
+    }
+  };
+
+  // ───── 开始录音（★ WAV 无损格式，提高识别准确度）─────
   const startRecording = async () => {
     if (!activeRef.current) return;
     try {
@@ -137,19 +245,19 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       });
       const { recording } = await Audio.Recording.createAsync({
         android: {
-          extension: '.m4a',
-          outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-          audioEncoder: Audio.AndroidAudioEncoder.AAC,
+          extension: '.wav',                                // ★ WAV 无损
+          outputFormat: Audio.AndroidOutputFormat.DEFAULT,
+          audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
           sampleRate: 16000,
           numberOfChannels: 1,
-          bitRate: 48000,
+          bitRate: 256000,                                  // ★ 提高码率
         },
         ios: {
-          extension: '.m4a',
-          audioQuality: Audio.IOSAudioQuality.MEDIUM,
+          extension: '.wav',                                // ★ WAV 无损
+          audioQuality: Audio.IOSAudioQuality.HIGH,         // ★ 高质量
           sampleRate: 16000,
           numberOfChannels: 1,
-          bitRate: 48000,
+          bitRate: 256000,
           linearPCMBitDepth: 16,
           linearPCMIsBigEndian: false,
           linearPCMIsFloat: false,
@@ -160,13 +268,17 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       recordingRef.current = recording;
       speechStartRef.current = null;
       silenceStartRef.current = null;
+      consecutiveSpeechRef.current = 0;
+      speechConfirmedRef.current = false;
       startPolling();
     } catch (e) {
       console.warn('startRecording failed', e);
+      setDebugText(`❌ 录音启动失败：${e}`);
+      setTimeout(() => setDebugText(''), 4000);
     }
   };
 
-  // ── 开始轮询音量（VAD 核心）──
+  // ───── VAD 轮询（连续帧确认）─────
   const startPolling = () => {
     stopPolling();
     pollTimerRef.current = setInterval(async () => {
@@ -184,25 +296,27 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
         const isTalking = db > SPEECH_THRESHOLD;
 
         if (isTalking) {
-          // 用户在说话
-          silenceStartRef.current = null;
-          if (currentPhase === 'listening') {
-            speechStartRef.current = now;
-            setPhaseSync('speaking');
+          consecutiveSpeechRef.current++;
+          if (consecutiveSpeechRef.current >= CONSECUTIVE_FRAMES) {
+            silenceStartRef.current = null;
+            if (!speechConfirmedRef.current) {
+              speechConfirmedRef.current = true;
+              speechStartRef.current = now;
+              setPhaseSync('speaking');
+            }
           }
         } else {
-          // 静音
-          if (currentPhase === 'speaking') {
-            if (!silenceStartRef.current) {
-              silenceStartRef.current = now;
-            }
+          consecutiveSpeechRef.current = 0;
+          if (speechConfirmedRef.current && currentPhase === 'speaking') {
+            if (!silenceStartRef.current) silenceStartRef.current = now;
             const silenceDuration = now - silenceStartRef.current;
             const speechDuration = speechStartRef.current ? now - speechStartRef.current : 0;
 
             if (silenceDuration >= SILENCE_TRIGGER_MS && speechDuration >= SPEECH_MIN_MS) {
-              // 用户说完了，处理录音
               stopPolling();
               setPhaseSync('processing');
+              speechConfirmedRef.current = false;
+              consecutiveSpeechRef.current = 0;
               await processRecording();
             }
           }
@@ -218,85 +332,122 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
-  // ── 处理录音（识别 + 回复）──
+  // ───── 处理录音 ─────
   const processRecording = async () => {
     if (!activeRef.current) return;
-
     const rec = recordingRef.current;
     recordingRef.current = null;
 
+    if (!rec) {
+      setDebugText('❌ rec=null');
+      setTimeout(() => setDebugText(''), 3000);
+      await resumeListening();
+      return;
+    }
+
     try {
-      if (!rec) { await resumeListening(); return; }
-
-      await rec.stopAndUnloadAsync();
-      const uri = rec.getURI();
-      if (!uri) { setDebugText('❌ 录音文件为空'); await resumeListening(); return; }
-
-      // 检查文件大小
-      const info = await FileSystem.getInfoAsync(uri);
-      const fileSize = info.exists && 'size' in info ? info.size : 0;
-      setDebugText(`📁 文件大小：${fileSize} bytes，识别中...`);
-
-      if (fileSize < 2000) {
-        // 文件太小，可能只是背景噪音
-        setDebugText('⚠️ 录音太短，重新聆听');
+      let uri: string | null = null;
+      try {
+        await rec.stopAndUnloadAsync();
+        uri = rec.getURI();
+      } catch (stopErr) {
+        setDebugText(`❌ stop：${stopErr}`);
+        setTimeout(() => setDebugText(''), 4000);
         await resumeListening();
         return;
       }
 
-      // 读取音频转 base64
-      const base64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+      if (!uri) {
+        setDebugText('❌ URI 为空');
+        setTimeout(() => setDebugText(''), 3000);
+        await resumeListening();
+        return;
+      }
 
-      // 发给 Groq 识别
-      const sttRes = await axios.post(`${SERVER_URL}/transcribe`, {
-        audio_base64: base64,
-        user_id: userId,
-      });
+      const info = await FileSystem.getInfoAsync(uri);
+      const fileSize = info.exists && 'size' in info ? info.size : 0;
+
+      if (fileSize < MIN_AUDIO_SIZE) {
+        setDebugText(`⚠️ 音频太小(${fileSize}B)`);
+        setTimeout(() => setDebugText(''), 1500);
+        await resumeListening();
+        return;
+      }
+
+      setDebugText(`📁 ${Math.round(fileSize / 1000)}KB 发送中...`);
+
+      let base64 = '';
+      try {
+        base64 = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      } catch (readErr) {
+        setDebugText(`❌ 读取失败：${readErr}`);
+        setTimeout(() => setDebugText(''), 3000);
+        await resumeListening();
+        return;
+      }
+
+      let sttRes: any;
+      try {
+        sttRes = await axios.post(`${SERVER_URL}/transcribe`, {
+          audio_base64: base64, user_id: userId,
+        }, { timeout: 30000 });
+      } catch (netErr: any) {
+        setDebugText(`❌ 网络：${netErr?.message}`);
+        setTimeout(() => setDebugText(''), 4000);
+        if (activeRef.current) await resumeListening();
+        return;
+      }
 
       const text = sttRes.data?.text?.trim();
-      const errMsg = sttRes.data?.error || '';
+      const filtered = sttRes.data?.filtered;
+      const lowConfidence = sttRes.data?.low_confidence;
 
-      if (errMsg) {
-        setDebugText(`❌ 错误：${errMsg}`);
-        setTimeout(() => setDebugText(''), 3000);
+      if (filtered) {
+        setDebugText(`⚠️ 过滤 (${sttRes.data?.reason || ''})`);
+        setTimeout(() => setDebugText(''), 1500);
         if (activeRef.current) await resumeListening();
         return;
       }
 
       if (!text || text.length < 2) {
-        setDebugText('⚠️ 未识别到内容，重试');
-        setTimeout(() => setDebugText(''), 2000);
+        setDebugText('⚠️ 未识别');
+        setTimeout(() => setDebugText(''), 1500);
         if (activeRef.current) await resumeListening();
         return;
       }
 
-      setDebugText(`✅ 识别：${text}`);
+      // ★ 低置信度标记（仍发送，但显示提示）
+      if (lowConfidence) {
+        setDebugText(`🤔 可能听错：${text}`);
+      } else {
+        setDebugText(`✅ ${text}`);
+      }
 
-      // 添加用户消息
+      // 真正识别到了——刷新沉默计时
+      lastActiveTimeRef.current = Date.now();
+      proactiveCountRef.current = 0;
+
       const userMsg: CallMsg = {
         id: Date.now().toString(), role: 'user', zh: text, time: nowTime(),
       };
       setCallMsgs(prev => [...prev, userMsg]);
       scrollRef.current?.scrollToEnd({ animated: true });
 
-      // 发给 Gojo
       await sendToGojo(text);
 
     } catch (e: any) {
-      setDebugText(`❌ 请求失败：${e?.message || e}`);
-      setTimeout(() => setDebugText(''), 3000);
-      console.warn('processRecording error', e);
+      setDebugText(`❌ ${e?.message || e}`);
+      setTimeout(() => setDebugText(''), 4000);
       if (activeRef.current) await resumeListening();
     }
   };
 
-  // ── 发给 Gojo ──
   const sendToGojo = async (text: string) => {
     if (!activeRef.current) return;
     try {
-      const res = await axios.post(`${SERVER_URL}/chat/text`, { text, user_id: userId });
+      const res = await axios.post(`${SERVER_URL}/chat/voice_text`, { text, user_id: userId });
       if (!activeRef.current) return;
 
       setPhaseSync('responding');
@@ -324,19 +475,19 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           await sleep(800);
         }
       }
+      lastActiveTimeRef.current = Date.now();
     } catch (e) {
       console.warn('sendToGojo error', e);
     } finally {
       setSubtitle('');
+      setDebugText('');
       if (activeRef.current) await resumeListening();
     }
   };
 
-  // ── 恢复聆听 ──
   const resumeListening = async () => {
     if (!activeRef.current) return;
     setPhaseSync('listening');
-    // 切回录音模式
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true, playsInSilentModeIOS: true,
       staysActiveInBackground: false, shouldDuckAndroid: false, playThroughEarpieceAndroid: false,
@@ -344,7 +495,6 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     await startRecording();
   };
 
-  // ── 播放音频 ──
   const playAudio = (b64: string): Promise<void> =>
     new Promise(async (resolve) => {
       try {
@@ -352,7 +502,6 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           await currentSoundRef.current.unloadAsync();
           currentSoundRef.current = null;
         }
-        // 播放时切换到播放模式
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false, playsInSilentModeIOS: true,
           staysActiveInBackground: false, shouldDuckAndroid: true,
@@ -373,10 +522,10 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       } catch { resolve(); }
     });
 
-  // ── 手动暂停/继续 ──
   const togglePause = async () => {
     if (phase === 'paused') {
       setPhaseSync('listening');
+      lastActiveTimeRef.current = Date.now();
       await startRecording();
     } else if (phase === 'listening' || phase === 'speaking') {
       stopPolling();
@@ -386,10 +535,24 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
-  // ── 挂断 ──
   const hangUp = async () => {
-    await cleanup();
-    // 保存通话记录到聊天
+    activeRef.current = false;
+    stopPolling();
+    stopIdleDetection();
+    try { await recordingRef.current?.stopAndUnloadAsync(); } catch {}
+    try { await currentSoundRef.current?.unloadAsync(); } catch {}
+    recordingRef.current = null;
+    currentSoundRef.current = null;
+    if (callTimerRef.current) clearInterval(callTimerRef.current);
+
+    setPhaseSync('ended');
+    await sleep(2000);
+
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false, playsInSilentModeIOS: true,
+      staysActiveInBackground: false, shouldDuckAndroid: true, playThroughEarpieceAndroid: false,
+    }).catch(() => {});
+
     if (callMsgs.length > 0) {
       const divider: Message = {
         id: `div_${Date.now()}`, role: 'gojo',
@@ -409,7 +572,6 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
   const formatDuration = (s: number) =>
     `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
 
-  // ── 音量条（5格）──
   const volumeBars = () => {
     const normalized = Math.max(0, Math.min(1, (dbLevel + 60) / 60));
     const filled = Math.round(normalized * 5);
@@ -423,19 +585,26 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     processing: '识别中...',
     responding: '',
     paused:     '已暂停',
-    ended:      '通话结束',
+    ended:      '',
   };
 
   return (
     <Modal visible animationType="slide" statusBarTranslucent>
       <View style={s.screen}>
 
-        {/* 计时 */}
+        {phase === 'ended' && (
+          <View style={s.endedOverlay}>
+            <Text style={s.endedIcon}>📵</Text>
+            <Text style={s.endedTitle}>通话已结束</Text>
+            <Text style={s.endedDuration}>通话时长 {formatDuration(duration)}</Text>
+            <Text style={s.endedHint}>对话已保存到聊天记录</Text>
+          </View>
+        )}
+
         <View style={s.topBar}>
           <Text style={s.timer}>{formatDuration(duration)}</Text>
         </View>
 
-        {/* 头像 + 状态 */}
         <View style={s.avatarArea}>
           <View style={[
             s.avatarRing,
@@ -449,7 +618,6 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           <Text style={s.name}>五条悟</Text>
           <Text style={s.phaseLabel}>{phaseLabel[phase]}</Text>
 
-          {/* 音量条（说话时显示）*/}
           {(phase === 'listening' || phase === 'speaking') && (
             <View style={s.volRow}>
               {volumeBars().map((filled, i) => (
@@ -458,20 +626,19 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
             </View>
           )}
 
-          {/* 调试信息 */}
           {debugText !== '' && (
-            <Text style={s.debugText}>{debugText}</Text>
+            <View style={s.debugBox}>
+              <Text style={s.debugText}>{debugText}</Text>
+            </View>
           )}
         </View>
 
-        {/* 字幕 */}
         {phase === 'responding' && subtitle !== '' && (
           <View style={s.subtitleBox}>
             <Text style={s.subtitleText}>{subtitle}</Text>
           </View>
         )}
 
-        {/* 对话记录 */}
         <ScrollView
           ref={scrollRef}
           style={s.msgList}
@@ -496,9 +663,7 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           ))}
         </ScrollView>
 
-        {/* 控制按钮 */}
         <View style={s.controls}>
-          {/* 扬声器 */}
           <TouchableOpacity
             style={[s.ctrlBtn, isSpeaker && s.ctrlActive]}
             onPress={() => setIsSpeaker(v => !v)}
@@ -507,16 +672,14 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
             <Text style={s.ctrlLabel}>{isSpeaker ? '扬声器' : '听筒'}</Text>
           </TouchableOpacity>
 
-          {/* 挂断 */}
-          <TouchableOpacity style={s.hangupBtn} onPress={hangUp}>
+          <TouchableOpacity style={s.hangupBtn} onPress={hangUp} disabled={phase === 'ended'}>
             <Text style={s.hangupIcon}>📵</Text>
           </TouchableOpacity>
 
-          {/* 暂停/继续麦克风 */}
           <TouchableOpacity
             style={[s.ctrlBtn, phase === 'paused' && s.ctrlActive]}
             onPress={togglePause}
-            disabled={phase === 'processing' || phase === 'responding' || phase === 'connecting'}
+            disabled={phase === 'processing' || phase === 'responding' || phase === 'connecting' || phase === 'ended'}
           >
             <Text style={s.ctrlIcon}>{phase === 'paused' ? '🎙' : '🔇'}</Text>
             <Text style={s.ctrlLabel}>{phase === 'paused' ? '继续' : '静音'}</Text>
@@ -550,12 +713,14 @@ const s = StyleSheet.create({
   volBar:      { width: 6, height: 18, borderRadius: 3, backgroundColor: '#1e293b' },
   volBarFilled:{ backgroundColor: '#22c55e' },
 
+  debugBox:    { marginTop: 10, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 6, maxWidth: width - 60 },
+  debugText:   { color: '#94a3b8', fontSize: 12, textAlign: 'center' },
+
   subtitleBox: { marginHorizontal: 24, marginBottom: 8, backgroundColor: 'rgba(255,255,255,0.07)', borderRadius: 14, padding: 14, maxWidth: width - 48 },
   subtitleText:{ color: '#e2e8f0', fontSize: 14, textAlign: 'center', lineHeight: 22 },
 
   msgList:     { flex: 1, width: '100%' },
   hint:        { color: '#334155', fontSize: 13, textAlign: 'center', marginTop: 24, lineHeight: 22 },
-  debugText:   { color: '#94a3b8', fontSize: 11, marginTop: 8, paddingHorizontal: 20, textAlign: 'center' },
   callMsg:     { marginBottom: 10, maxWidth: width * 0.72, borderRadius: 14, padding: 11 },
   msgUser:     { alignSelf: 'flex-end', backgroundColor: C.accent },
   msgGojo:     { alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.07)', borderLeftWidth: 2, borderLeftColor: C.accent },
@@ -569,4 +734,10 @@ const s = StyleSheet.create({
   ctrlLabel:   { color: '#64748b', fontSize: 11 },
   hangupBtn:   { width: 66, height: 66, borderRadius: 33, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center', shadowColor: '#ef4444', shadowOffset: { width:0, height:4 }, shadowOpacity: 0.4, shadowRadius: 8, elevation: 8 },
   hangupIcon:  { fontSize: 28 },
+
+  endedOverlay:  { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#080e1a', alignItems: 'center', justifyContent: 'center', zIndex: 99 },
+  endedIcon:     { fontSize: 70, marginBottom: 24, opacity: 0.7 },
+  endedTitle:    { color: '#fff', fontSize: 26, fontWeight: '700', marginBottom: 12, letterSpacing: 1 },
+  endedDuration: { color: '#94a3b8', fontSize: 15, marginBottom: 8 },
+  endedHint:     { color: '#475569', fontSize: 12, marginTop: 20 },
 });

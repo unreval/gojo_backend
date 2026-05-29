@@ -4,7 +4,8 @@ import axios from 'axios';
 import { Audio } from 'expo-av';
 import * as Clipboard from 'expo-clipboard';
 import * as Notifications from 'expo-notifications';
-import React, { useEffect, useRef, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -31,9 +32,13 @@ Notifications.setNotificationHandler({
 });
 
 const { width } = Dimensions.get('window');
-const STORAGE_KEY  = 'gojo_messages_v2';
-const USER_ID_KEY  = 'gojo_user_id';
-const MSG_DELAY_MS = 800;
+const STORAGE_KEY   = 'gojo_messages_v2';
+const USER_ID_KEY   = 'gojo_user_id';
+const PROACTIVE_KEY = 'gojo_proactive_state';   // 记录哪些任务已经被主动提醒过
+const MSG_DELAY_MS  = 800;
+
+// ★ 固定 user_id，重装/换手机都不丢记忆
+const FIXED_USER_ID = 'user_mofpiyd7442ia7';
 
 export interface Message {
   id: string;
@@ -47,10 +52,6 @@ interface GojoSegment {
   jp: string;
   zh: string;
   audio_b64: string;
-}
-
-function generateUserId(): string {
-  return 'user_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
 function sleep(ms: number) {
@@ -79,6 +80,7 @@ export default function ChatScreen() {
   const scrollRef       = useRef<ScrollView>(null);
   const searchRef       = useRef<TextInput>(null);
   const currentSoundRef = useRef<Audio.Sound | null>(null);
+  const checkingProactiveRef = useRef(false);   // 防止并发检查
 
   // ── 初始化 ──
   useEffect(() => {
@@ -101,9 +103,11 @@ export default function ChatScreen() {
             vibrationPattern: [0, 250, 250, 250],
           });
         }
-        let uid = await AsyncStorage.getItem(USER_ID_KEY);
-        if (!uid) { uid = generateUserId(); await AsyncStorage.setItem(USER_ID_KEY, uid); }
-        setUserId(uid);
+
+        // ★ 固定 user_id，重装也不丢记忆
+        await AsyncStorage.setItem(USER_ID_KEY, FIXED_USER_ID);
+        setUserId(FIXED_USER_ID);
+
         const saved = await AsyncStorage.getItem(STORAGE_KEY);
         if (saved) setMessages(JSON.parse(saved));
       } catch (e) { console.warn('init error', e); }
@@ -116,6 +120,105 @@ export default function ChatScreen() {
     if (!ready) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
   }, [messages, ready]);
+
+  // ── 每次进入聊天页时，检查有没有要主动提醒的任务 ──
+  useFocusEffect(
+    useCallback(() => {
+      if (ready && userId) {
+        // 稍微延迟，等页面稳定
+        const t = setTimeout(() => { checkProactiveTasks(); }, 600);
+        return () => clearTimeout(t);
+      }
+    }, [ready, userId])
+  );
+
+  // ── 主动提醒核心逻辑 ──
+  const checkProactiveTasks = async () => {
+    if (!userId || loading || checkingProactiveRef.current) return;
+    checkingProactiveRef.current = true;
+
+    try {
+      const res = await axios.get(`${SERVER_URL}/tasks?user_id=${userId}`);
+      const tasks = res.data?.tasks || [];
+
+      const stateRaw = await AsyncStorage.getItem(PROACTIVE_KEY);
+      const state: Record<string, { reminded?: boolean; askedOverdue?: boolean }> =
+        stateRaw ? JSON.parse(stateRaw) : {};
+
+      const now = new Date();
+      const todayStr = formatToday();
+
+      for (const task of tasks) {
+        if (!task.due_time) continue;
+
+        const isDaily = task.repeat_type === 'daily';
+        // 完成状态
+        const isDone = isDaily ? (task.last_completed_date === todayStr) : task.completed;
+        if (isDone) continue;
+
+        // 计算"今天的截止时刻"
+        const dueDateStr = isDaily ? todayStr : task.due_date;
+        if (!dueDateStr) continue;
+
+        const [y, mo, d] = dueDateStr.split('-').map(Number);
+        const [h, mi]    = task.due_time.split(':').map(Number);
+        const dueMoment  = new Date(y, mo - 1, d, h, mi, 0);
+        const minsSince  = (now.getTime() - dueMoment.getTime()) / 60000;
+
+        const stateKey  = `${task.id}_${dueDateStr}`;
+        const taskState = state[stateKey] || {};
+
+        let mode: 'remind' | 'overdue' | null = null;
+
+        // 到点 ~ 1小时内：温柔提醒（只一次）
+        if (minsSince >= -3 && minsSince < 60 && !taskState.reminded) {
+          mode = 'remind';
+          taskState.reminded = true;
+        }
+        // 超时 1小时 ~ 24小时：追问做了没（只一次）
+        else if (minsSince >= 60 && minsSince < 1440 && !taskState.askedOverdue) {
+          mode = 'overdue';
+          taskState.askedOverdue = true;
+        }
+
+        if (mode) {
+          state[stateKey] = taskState;
+          await AsyncStorage.setItem(PROACTIVE_KEY, JSON.stringify(state));
+          await sendProactive(task.title, mode);
+          break;  // 一次只处理一个，避免刷屏
+        }
+      }
+    } catch (e) {
+      console.warn('proactive check error', e);
+    } finally {
+      checkingProactiveRef.current = false;
+    }
+  };
+
+  // ── 让悟发主动消息 ──
+  const sendProactive = async (taskTitle: string, mode: 'remind' | 'overdue') => {
+    try {
+      const res = await axios.post(`${SERVER_URL}/chat/proactive`, {
+        user_id: userId, task_title: taskTitle, mode,
+      });
+      const segments: GojoSegment[] = res.data?.messages || [];
+
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const msgId = `proactive_${Date.now()}_${i}`;
+        if (seg.audio_b64 && seg.audio_b64.length > 100) {
+          audioCacheRef.current[msgId] = seg.audio_b64;
+        }
+        const gojoMsg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime() };
+        setMessages(prev => [...prev, gojoMsg]);
+        scrollRef.current?.scrollToEnd({ animated: true });
+        if (seg.audio_b64 && seg.audio_b64.length > 100) await playAudioAndWait(seg.audio_b64);
+        if (i < segments.length - 1) await sleep(MSG_DELAY_MS);
+      }
+    } catch (e) {
+      console.warn('sendProactive error', e);
+    }
+  };
 
   // ── 音频重播 ──
   const replayAudio = async (msgId: string) => {

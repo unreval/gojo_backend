@@ -36,7 +36,7 @@ export const CATEGORIES = ['餐饮','购物','交通','娱乐','学习','医疗'
 export const WEEKDAYS = ['日','一','二','三','四','五','六'];
 export const MONTHS = ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
 
-export const SERVER_URL = 'https://gojobackend-production-819d.up.railway.app';
+export const SERVER_URL = 'https://gojosatoru.zeabur.app';
 
 export function uid() { return Math.random().toString(36).slice(2); }
 export function nowTime() {
