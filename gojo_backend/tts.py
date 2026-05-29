@@ -1,4 +1,4 @@
-"""Fish Audio TTS + Groq Whisper STT（带噪声过滤）"""
+"""Fish Audio TTS + Groq Whisper STT（verbose_json + 置信度 + 噪声过滤）"""
 import base64
 import requests
 import os
@@ -49,7 +49,6 @@ def tts_to_b64(text, emotion, voice_id=None):
         return ''
 
 
-# ★ 噪声词白名单：Whisper 在噪音情况下经常输出这些短词
 NOISE_WORDS = {
     '谢谢', '感谢', '请', '您好', '你好', '嗯', '啊',
     '哦', '额', '这', '那', '这个', '那个', '什么',
@@ -59,7 +58,7 @@ NOISE_WORDS = {
 
 
 def transcribe_audio_b64(audio_b64: str):
-    """Groq Whisper 中文转录 + 多层噪声过滤"""
+    """Groq Whisper 转录：verbose_json + 置信度 + 噪声过滤"""
     if not GROQ_KEY:
         return {'error': 'GROQ_KEY not configured', 'text': ''}
     try:
@@ -67,45 +66,64 @@ def transcribe_audio_b64(audio_b64: str):
         client = Groq(api_key=GROQ_KEY)
         audio_bytes = base64.b64decode(audio_b64)
 
-        # ★ 过滤1：音频太小直接跳过（噪声片段）
+        # 过滤1：音频太小
         if len(audio_bytes) < 2000:
-            print(f'[transcribe] 音频太小({len(audio_bytes)}B)，疑似噪音')
+            print(f'[transcribe] 音频太小({len(audio_bytes)}B)')
             return {'text': '', 'filtered': True, 'reason': 'too_small'}
 
-        with tempfile.NamedTemporaryFile(suffix='.m4a', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
             f.write(audio_bytes)
             temp_path = f.name
 
         try:
             with open(temp_path, 'rb') as f:
+                # ★ verbose_json + temperature=0 提高准确度
                 transcript = client.audio.transcriptions.create(
                     model='whisper-large-v3-turbo',
                     file=f,
                     language='zh',
-                    response_format='text',
+                    response_format='verbose_json',
+                    temperature=0.0,
                 )
-            text = transcript if isinstance(transcript, str) else transcript.text
-            text = text.strip()
 
-            # ★ 过滤2：太短直接丢弃
-            if len(text) < 3:
-                print(f'[transcribe] 太短丢弃："{text}"')
+            text = transcript.text.strip() if hasattr(transcript, 'text') else ''
+
+            # ★ 获取平均置信度
+            avg_confidence = 0
+            segments = getattr(transcript, 'segments', [])
+            if segments:
+                confidences = []
+                for seg in segments:
+                    if isinstance(seg, dict):
+                        confidences.append(seg.get('avg_logprob', -1))
+                    elif hasattr(seg, 'avg_logprob'):
+                        confidences.append(seg.avg_logprob)
+                if confidences:
+                    avg_confidence = sum(confidences) / len(confidences)
+
+            print(f'[transcribe] text="{text}" confidence={avg_confidence:.3f}')
+
+            # 过滤2：太短
+            if len(text) < 2:
                 return {'text': '', 'filtered': True, 'reason': 'too_short'}
 
-            # ★ 过滤3：清掉标点后的纯文本
             text_clean = text.strip('。.，,！!？?…~ ').strip()
 
-            # ★ 过滤4：清完只剩 1-2 字 + 在噪声词里 = 极可能是噪音误识别
+            # 过滤3：噪声词
             if len(text_clean) <= 2 and text_clean in NOISE_WORDS:
-                print(f'[transcribe] 噪声词误识别："{text}"')
+                print(f'[transcribe] 噪声词："{text}"')
                 return {'text': '', 'filtered': True, 'reason': 'noise_word'}
 
-            # ★ 过滤5：仅由 1-2 种字符组成的短重复（如"哦哦哦"）
+            # 过滤4：重复字符
             if len(text_clean) > 1 and len(set(text_clean)) <= 2 and len(text_clean) <= 4:
                 print(f'[transcribe] 重复噪声："{text}"')
                 return {'text': '', 'filtered': True, 'reason': 'repeated'}
 
-            print(f'[transcribe] {text}')
+            # ★ 过滤5：置信度太低的短句标记
+            if avg_confidence < -1.8 and len(text_clean) < 6:
+                print(f'[transcribe] 低置信度短句："{text}" conf={avg_confidence:.3f}')
+                return {'text': text, 'low_confidence': True}
+
             return {'text': text}
         finally:
             try: os.unlink(temp_path)
