@@ -14,6 +14,11 @@ from user_memory import (
     update_chat_days, extract_and_save_memory
 )
 from characters import get_character
+from tasks import (
+    find_duplicate_task,
+    find_and_delete_tasks_by_keyword,
+    delete_latest_task,
+)
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -59,7 +64,7 @@ async def chat_text(data: dict):
             print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
             parsed = extract_json(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(m.get('jp','').strip() and m.get('zh','').strip() for m in parsed['messages']):
+                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
                     result = parsed
                     break
         except Exception as e:
@@ -74,7 +79,7 @@ async def chat_text(data: dict):
 
     msgs = result.get('messages', [])
     for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp',''))
+        m['jp'] = sanitize_jp(m.get('jp', ''))
     msgs = merge_only_extreme_short(msgs)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
@@ -90,6 +95,26 @@ async def chat_text(data: dict):
 
     print(f'[TTS:{TTS_PROVIDER}] {character_id} emotion={emotion} segs={len(msgs)} days={total_days}')
 
+    # ─── 处理取消提醒（先取消再新增）───
+    cancelled_tasks = []
+    if result.get('cancel_reminder'):
+        cancel = result['cancel_reminder']
+        keyword = (cancel.get('keyword') or '').strip()
+        latest = cancel.get('latest', False)
+        try:
+            if keyword:
+                deleted = find_and_delete_tasks_by_keyword(user_id, keyword, latest_only=True)
+            elif latest:
+                deleted = delete_latest_task(user_id)
+            else:
+                deleted = []
+            for task_id, notif_id in deleted:
+                cancelled_tasks.append({'task_id': task_id, 'notification_id': notif_id})
+                print(f'[{user_id}] 🗑️ 已取消任务 id={task_id} keyword={keyword or "(latest)"}')
+        except Exception as e:
+            print(f'取消提醒失败：{e}')
+
+    # ─── 处理新增提醒（带去重）───
     reminder_data = None
     if result.get('reminder'):
         rem = result['reminder']
@@ -100,26 +125,41 @@ async def chat_text(data: dict):
             'notification': rem.get('notification', ''),
         }
         try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute(
-                '''INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes)
-                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id''',
-                (user_id, reminder_data['content'], '个人',
-                 reminder_data['date'], reminder_data['time'], 0)
+            existing = find_duplicate_task(
+                user_id,
+                reminder_data['content'],
+                reminder_data['date'],
+                reminder_data['time'],
             )
-            task_id = cur.fetchone()[0]
-            conn.commit()
-            cur.close()
-            conn.close()
-            reminder_data['task_id'] = task_id
-            print(f'[{user_id}] 提醒已保存 task_id={task_id}')
+            if existing:
+                task_id, _ = existing
+                reminder_data['task_id'] = task_id
+                reminder_data['duplicate'] = True
+                print(f'[{user_id}] 🔁 提醒已存在 task_id={task_id}，跳过新建')
+            else:
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    '''INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes)
+                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING id''',
+                    (user_id, reminder_data['content'], '个人',
+                     reminder_data['date'], reminder_data['time'], 0)
+                )
+                task_id = cur.fetchone()[0]
+                conn.commit()
+                cur.close()
+                conn.close()
+                reminder_data['task_id'] = task_id
+                reminder_data['duplicate'] = False
+                print(f'[{user_id}] ✅ 提醒已保存 task_id={task_id}')
         except Exception as e:
             print(f'提醒保存失败：{e}')
 
     resp = {'emotion': emotion, 'messages': msgs, 'total_days': total_days}
     if reminder_data:
         resp['reminder'] = reminder_data
+    if cancelled_tasks:
+        resp['cancelled_tasks'] = cancelled_tasks
     return JSONResponse(resp)
 
 
@@ -179,7 +219,7 @@ async def chat_proactive(data: dict):
 
     msgs = result.get('messages', [])
     for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp',''))
+        m['jp'] = sanitize_jp(m.get('jp', ''))
     msgs = merge_only_extreme_short(msgs)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
@@ -213,7 +253,6 @@ async def chat_voice_text(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 
-    # 使用完整 prompt（带背景检索）+ 通话场景额外约束
     system_prompt = build_system_prompt(user_id, character_id, user_text) + '''
 
 【★ 语音通话场景——必须遵守】
@@ -246,8 +285,7 @@ async def chat_voice_text(data: dict):
 
     msgs = result.get('messages', [])
     for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp',''))
-    # 语音场景只用第一条气泡，避免话太多
+        m['jp'] = sanitize_jp(m.get('jp', ''))
     msgs = msgs[:1]
 
     full_jp = ' '.join(m['jp'] for m in msgs)
@@ -272,14 +310,13 @@ async def chat_voice_proactive(data: dict):
     """语音通话中，对方长时间不说话时悟主动开口"""
     user_id         = data.get('user_id', 'default')
     character_id    = data.get('character_id', DEFAULT_CHARACTER_ID)
-    mode            = data.get('mode', 'idle')         # idle / missed
+    mode            = data.get('mode', 'idle')
     silence_seconds = int(data.get('silence_seconds', 15))
 
     char = get_character(character_id)
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
-    # 根据沉默时长选语气
     if mode == 'missed' or silence_seconds > 60:
         trigger = '【系统：对方已经很久没说话了，可能在发呆或者走神了。你主动问她在干嘛，语气慵懒带点调侃，一两句就好。】'
     elif silence_seconds > 30:
@@ -328,7 +365,7 @@ async def chat_voice_proactive(data: dict):
 
     msgs = result.get('messages', [])
     for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp',''))
+        m['jp'] = sanitize_jp(m.get('jp', ''))
     msgs = msgs[:1]
 
     full_jp = ' '.join(m['jp'] for m in msgs)
