@@ -153,9 +153,13 @@ def get_chat_days(user_id):
     return row[0] if row else 0
 
 
-# ────────── 记忆提取（带分类）──────────
+# ────────── 记忆提取（★ 严格只提取用户事实）──────────
 
 def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEFAULT_CHARACTER_ID):
+    """
+    严格只从用户那段话里提取关于"她"的事实。
+    悟回复仅作语境提示，绝对不提取悟说的事（悟自己的设定存在 character_memory 表）。
+    """
     try:
         now = datetime.now(CN_TZ)
         today_str = now.strftime('%Y-%m-%d')
@@ -171,7 +175,11 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
             max_tokens=250,
             messages=[{
                 'role': 'user',
-                'content': f'''你是事实抽取助手。从下面对话中提取关于"她"（用户）的新事实，并分类。
+                'content': f'''你是事实抽取助手。任务：从下面对话中提取**用户（"她"）**主动透露的关于她自己的新事实。
+
+【重要：对话有两方】
+- "她" = 用户（你要提取的对象）
+- "悟" = 角色（仅作语境参考，**绝对不要**从他的话里抓任何事实当作用户的事）
 
 【今天日期】{today_str}（{weekday_cn}）
 
@@ -180,29 +188,30 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
 
 【这次对话】
 她说：{user_text}
-AI回复：{assistant_text}
+悟回复：{assistant_text}
 
-提取规则：
-1. 只提取她主动透露的具体事实，撒娇/调侃/情绪宣泄不算事实。
-2. 时间必须用绝对日期：
+【提取规则——严格遵守】
+1. **只从"她说"那一段里提取**。悟说了什么是给你理解上下文用的，不要把悟的话当成事实来源。
+2. 例如：悟说"我喜欢甜食"——这是悟的喜好，**不要**记成"她喜欢甜食"或"她说悟喜欢甜食"，**直接忽略**。
+3. 只提取她主动透露的具体事实——撒娇/调侃/情绪宣泄/问候/提问/简单回应（"嗯""好""对"）都不算。
+4. 时间必须用绝对日期：
    - "明天" → {tomorrow_str}
    - "昨天" → {yesterday_str}
    - "还有3天" → {(now + timedelta(days=3)).strftime('%Y-%m-%d')}
-3. 用第三人称中文陈述句，以"她"开头。
-4. 去重：只在已有列表里有完全一样或几乎一字不差时才回复"无"。
+5. 用第三人称中文陈述句，**必须以"她"字开头**。
+6. **绝对禁止**使用以下主语：悟、五条、五条悟、AI、机器人、你、他、对方、用户。一律用"她"。
+7. 去重：已有列表里有完全一样或几乎一字不差时回复"无"。
+8. 如果用户这次没透露任何事实（只是闲聊/调侃/提问），返回"无"。
 
 分类（必须选一个）：
-- 喜好：喜欢的食物/颜色/动物/音乐/动漫/人
-- 厌恶：不喜欢的东西
-- 身份：名字/年龄/生日/职业/学校/专业
-- 状态：在做什么/最近忙什么/计划做什么
-- 经历：去过哪里/做过什么
-- 关系：家人/朋友/宠物的存在
-- 其他：以上都不是
+- 喜好/厌恶/身份/状态/经历/关系/其他
 
 【输出格式——严格 JSON，只输出一行】
 有新事实：{{"content":"她XXX","category":"喜好"}}
-没有新事实：{{"content":"无","category":""}}'''
+没有新事实：{{"content":"无","category":""}}
+
+【判断你输出是否合格的标准】
+content 必须以"她"字开头，否则系统会丢弃你的输出。'''
             }]
         )
         raw = response.content[0].text.strip()
@@ -210,10 +219,6 @@ AI回复：{assistant_text}
 
         parsed = extract_json(raw)
         if not parsed:
-            summary = raw.strip('「」"\'').strip().rstrip('。.')
-            if summary and summary != '无' and summary.startswith(('她','他','用户','对方')) and len(summary) > 4:
-                if save_long_memory(user_id, summary, '其他', character_id):
-                    print(f'[{user_id}] ✅ 新长期记忆（兼容）：{summary}')
             return
 
         content = parsed.get('content', '').strip().strip('「」"\'').rstrip('。.')
@@ -221,9 +226,18 @@ AI回复：{assistant_text}
 
         if not content or content == '无' or len(content) < 4:
             return
-        if not content.startswith(('她','他','用户','对方')):
-            print(f'[{user_id}] ❌ 格式不符：{content}')
+
+        # ★ 严格首字检查：必须以"她"开头，其他主语一律拒绝
+        if not content.startswith('她'):
+            print(f'[{user_id}] ❌ 拒绝（非"她"开头）：{content}')
             return
+
+        # ★ 内容黑名单：含有这些词的也拒绝（防止"她说悟..."这种间接污染）
+        forbidden = ['AI', 'ai', '五条悟', '五条', '机器人']
+        for word in forbidden:
+            if word in content:
+                print(f'[{user_id}] ❌ 拒绝（含违禁词 {word}）：{content}')
+                return
 
         valid_cats = ('喜好','厌恶','身份','状态','经历','关系','其他')
         if category not in valid_cats:
