@@ -249,22 +249,24 @@ async def chat_voice_text(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
-    short_memories = get_short_memory(user_id, 4, character_id)
+    short_memories = get_short_memory(user_id, 6, character_id)
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 
     system_prompt = build_system_prompt(user_id, character_id, user_text) + '''
 
-【★ 语音通话场景——必须遵守】
-现在在和对方打电话。回复要简短自然，只输出1条气泡，15-35字。
-不要长篇大论，像真打电话一样简洁。'''
+【★ 语音通话场景】
+现在在和对方打电话。回复自然口语化，根据对方说的话灵活决定回复条数和长度：
+- 简单寒暄/短句 → 1条气泡，简短回应
+- 对方说了重要的事/问了复杂的问题 → 可以分2-3条气泡，像真打电话一样自然衔接
+- 每条气泡10-50字，不要长篇大论，但也不要过于压缩。'''
 
     result = None
     for attempt in range(3):
         try:
             response = claude_client.messages.create(
                 model='claude-haiku-4-5-20251001',
-                max_tokens=300,
+                max_tokens=500,
                 system=system_prompt,
                 messages=messages
             )
@@ -286,7 +288,9 @@ async def chat_voice_text(data: dict):
     msgs = result.get('messages', [])
     for m in msgs:
         m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = msgs[:1]
+    # ★ 修复：去掉强制截断，改用 merge_only_extreme_short（和 /chat/text 一致）
+    # 这样多气泡才能真正传到前端
+    msgs = merge_only_extreme_short(msgs)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
@@ -299,7 +303,7 @@ async def chat_voice_text(data: dict):
     for m in msgs:
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
 
-    print(f'[voice_text] {character_id} emotion={emotion}')
+    print(f'[voice_text] {character_id} emotion={emotion} segs={len(msgs)}')
     return JSONResponse({'emotion': emotion, 'messages': msgs})
 
 
@@ -366,7 +370,7 @@ async def chat_voice_proactive(data: dict):
     msgs = result.get('messages', [])
     for m in msgs:
         m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = msgs[:1]
+    msgs = msgs[:1]   # 主动开口保持只1条气泡，避免突然刷屏
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
