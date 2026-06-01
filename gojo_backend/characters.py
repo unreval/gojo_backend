@@ -1,5 +1,35 @@
 """角色定义 + 角色背景记忆（CRUD + 检索 + 预置数据）"""
+import os
+import json
 from db import get_conn
+
+
+# ────────── 时间锚点：只检索 时间档 <= 锚点 的剧情背景（防剧透/控制角色认知）──────────
+# 优先读 gojo_lore.json 里的「当前锚点」；读不到才用这里的默认值
+CHARACTER_ANCHOR = {'gojo': 2}
+
+# JSON 知识库缓存（启动后只读一次硬盘）
+_lore_cache = {}
+
+
+def _load_lore_json(character_id):
+    if character_id in _lore_cache:
+        return _lore_cache[character_id]
+    path = os.path.join(os.path.dirname(__file__), f'{character_id}_lore.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f'[lore] 加载 {character_id}_lore.json 失败（没有该文件就忽略）：{e}')
+        data = {'_说明': {}, '条目': []}
+    _lore_cache[character_id] = data
+    return data
+
+
+def reload_lore(character_id='gojo'):
+    """手改完 json 想立刻生效、又不想重启服务时调用一次。"""
+    _lore_cache.pop(character_id, None)
+    return _load_lore_json(character_id)
 
 
 # ────────── 五条悟核心人格（存进数据库的 core_prompt）──────────
@@ -213,12 +243,22 @@ def delete_character_memory(mem_id: int):
     conn.close()
 
 
-# ────────── 检索（关键词匹配 + 重要性加权）──────────
+# ────────── 检索（数据库 + JSON 合并，关键词匹配 + 重要性加权 + 时间档过滤）──────────
 
 def retrieve_character_memory(character_id: str, query_text: str, limit: int = 4):
-    """根据查询文本检索相关背景。命中关键词的才返回。"""
+    """
+    根据查询文本检索相关背景，合并两个来源：
+      1) 数据库 character_memory —— 性格/喜好/习惯，视为"永远知道"，不做时间档过滤
+      2) JSON 知识库 {character_id}_lore.json —— 剧情/人物，按时间档过滤
+         （时间档 > 当前锚点的条目不返回，比如"涩谷事变封印"在锚点2时不会被想起）
+    命中关键词的才返回，按得分排序、去重、截断到 limit 条。
+    """
     if not query_text:
         return []
+
+    matched = []  # (score, content)
+
+    # 1) 数据库背景（性格/喜好/习惯，永远可用）
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -228,8 +268,6 @@ def retrieve_character_memory(character_id: str, query_text: str, limit: int = 4
     rows = cur.fetchall()
     cur.close()
     conn.close()
-
-    matched = []
     for content, keywords, importance in rows:
         kws = [k.strip() for k in (keywords or '').split(',') if k.strip()]
         hit = sum(1 for kw in kws if kw and kw in query_text)
@@ -237,5 +275,29 @@ def retrieve_character_memory(character_id: str, query_text: str, limit: int = 4
             score = hit * 1.0 + (importance or 0.5) * 0.5
             matched.append((score, content))
 
+    # 2) JSON 剧情/人物背景（带时间档过滤）
+    data = _load_lore_json(character_id)
+    anchor = data.get('_说明', {}).get('当前锚点')
+    if anchor is None:
+        anchor = CHARACTER_ANCHOR.get(character_id, 1)
+    for entry in data.get('条目', []):
+        if entry.get('时间档', 1) > anchor:
+            continue  # 此刻还不该知道的事，跳过
+        kws = entry.get('关键词', []) or []
+        hit = sum(1 for kw in kws if kw and kw in query_text)
+        if hit > 0:
+            content = f"{entry.get('标题', '')}：{entry.get('内容', '')}"
+            score = hit * 1.0 + 0.4  # 剧情条目给一个基础权重
+            matched.append((score, content))
+
+    # 排序 + 去重（内容几乎一样的只留一条）+ 截断
     matched.sort(key=lambda x: x[0], reverse=True)
-    return [c for _, c in matched[:limit]]
+    result, seen = [], []
+    for _, content in matched:
+        if any((content in s) or (s in content) for s in seen):
+            continue
+        seen.append(content)
+        result.append(content)
+        if len(result) >= limit:
+            break
+    return result
