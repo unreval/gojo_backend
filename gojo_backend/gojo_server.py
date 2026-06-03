@@ -18,6 +18,8 @@ from route_memory import router as memory_router
 from route_tasks import router as tasks_router
 from route_character import router as character_router
 from route_image import router as image_router   # ★ 新增
+from route_story import router as story_router
+app.include_router(story_router)
 
 
 app = FastAPI(title='GojoAssistant Backend')
