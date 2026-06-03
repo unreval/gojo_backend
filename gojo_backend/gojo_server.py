@@ -19,7 +19,7 @@ from route_tasks import router as tasks_router
 from route_character import router as character_router
 from route_image import router as image_router   # ★ 新增
 from route_story import router as story_router
-app.include_router(story_router)
+
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -38,7 +38,8 @@ app.include_router(chat_router)
 app.include_router(memory_router)
 app.include_router(tasks_router)
 app.include_router(character_router)
-app.include_router(image_router)   # ★ 新增
+app.include_router(image_router) 
+app.include_router(story_router)  
 
 
 @app.get('/health')
