@@ -1,7 +1,5 @@
-"""聊天路由：/chat/text /chat/proactive /chat/voice_text /chat/voice/proactive /transcribe"""
+"""聊天路由：/chat/text /chat/story /chat/proactive /chat/voice_text /chat/voice_story /chat/voice/proactive /transcribe"""
 import threading
-from datetime import datetime, timezone, timedelta
-
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -11,7 +9,6 @@ from db import get_conn
 from utils import extract_json, sanitize_jp, merge_only_extreme_short
 from tts import tts_to_b64, transcribe_audio_b64
 from prompt import build_system_prompt
-from character_lore import get_relevant_lore
 from user_memory import (
     save_short_memory, get_short_memory,
     update_chat_days, extract_and_save_memory
@@ -25,44 +22,6 @@ from tasks import (
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-
-# ─────────────────── 时间感知（马来西亚/新加坡 UTC+8）───────────────────
-# Railway 服务器跑的是 UTC，比本地慢 8 小时，所以这里用固定 +8 偏移修正。
-TZ_LOCAL = timezone(timedelta(hours=8))
-WEEKDAYS_ZH = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-
-
-def get_local_time_context():
-    """返回 (本地datetime, 星期几中文, 时段中文)。"""
-    now = datetime.now(TZ_LOCAL)
-    h = now.hour
-    if 5 <= h < 8:
-        period = '清晨'
-    elif 8 <= h < 11:
-        period = '上午'
-    elif 11 <= h < 13:
-        period = '中午'
-    elif 13 <= h < 18:
-        period = '下午'
-    elif 18 <= h < 23:
-        period = '晚上'
-    else:
-        period = '深夜凌晨'
-    return now, WEEKDAYS_ZH[now.weekday()], period
-
-
-def build_time_block():
-    """拼到系统提示词末尾的时间感知段落。让悟说话符合真实时间，但别每句报时。"""
-    now, weekday, period = get_local_time_context()
-    return (
-        '\n\n【★ 当前真实时间】现在是 '
-        + now.strftime('%Y-%m-%d %H:%M')
-        + '（' + weekday + '，' + period + '）。'
-        + '说话必须符合这个时间点，但不要每句都报时间，自然融入就行。'
-        + '深夜/凌晨绝对不要脑补白天的事（上课、午饭、上班等）；'
-        + '如果对方深夜还醒着，可以自然地关心她怎么不睡。'
-    )
 
 
 # ─────────────────── 普通文本聊天 ───────────────────
@@ -91,14 +50,6 @@ async def chat_text(data: dict):
         recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
 
     system_prompt = build_system_prompt(user_id, character_id, recall_query)
-
-    # ★ 角色背景知识库：按时间档 + 关键词检索，匹配到就拼进提示词（没匹配到返回空串，不影响任何东西）
-    lore_block = get_relevant_lore(user_text, character_id=character_id)
-    if lore_block:
-        system_prompt = system_prompt + '\n\n' + lore_block
-
-    # ★ 时间感知：普通聊天也需要，否则会出现「凌晨2点还问你上课没」的错乱
-    system_prompt = system_prompt + build_time_block()
 
     result = None
     for attempt in range(5):
@@ -212,6 +163,110 @@ async def chat_text(data: dict):
     return JSONResponse(resp)
 
 
+# ─────────────────── 长故事模式（文本）───────────────────
+
+@router.post('/chat/story')
+async def chat_story(data: dict):
+    """
+    长故事模式：生成一个完整的长故事，分成很多气泡，每条独立 TTS。
+    前端在检测到"讲故事"类请求时调用这个端点（而不是 /chat/text）。
+    声音质量靠和 /chat/text 完全相同的 per-bubble 合成保证（同 voice_id、同参数）。
+    """
+    user_text    = data.get('text', '')
+    user_id      = data.get('user_id', 'default')
+    character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
+
+    if not user_text:
+        return JSONResponse({'error': 'no input'}, status_code=400)
+
+    char = get_character(character_id)
+    if not char:
+        return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
+
+    total_days = update_chat_days(user_id)
+    short_memories = get_short_memory(user_id, 6, character_id)
+
+    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    messages.append({'role': 'user', 'content': user_text})
+
+    recall_query = user_text
+    if short_memories:
+        recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
+
+    system_prompt = build_system_prompt(user_id, character_id, recall_query) + '''
+
+【★ 故事模式——必须遵守】
+对方想听你讲一个完整的故事。用你（五条悟）的视角和口吻来讲。
+1. 故事要完整：有开头、发展、高潮、结尾，一口气讲完，不要中途停。
+2. 融入你的性格：慵懒、偶尔毒舌、偶尔温柔。
+3. 分成 10-15 个气泡，每个气泡是故事的一小段。
+4. 每个气泡的【日语】控制在 40-120 字之间——这点很重要，单段太长会影响语音合成质量。
+5. jp 必须是纯日语，zh 是对应的中文翻译，不要把中文混进 jp。
+
+严格按这个 JSON 返回：
+{"emotion":"情绪","messages":[{"jp":"第一段日语","zh":"第一段中文"},{"jp":"第二段日语","zh":"第二段中文"}]}'''
+
+    result = None
+    for attempt in range(5):
+        try:
+            response = claude_client.messages.create(
+                model='claude-sonnet-4-6',
+                max_tokens=4000,      # ★ 故事模式给更多 token
+                system=system_prompt,
+                messages=messages
+            )
+            raw = response.content[0].text.strip()
+            print(f'[story] attempt {attempt+1}: {raw[:120]}...')
+            parsed = extract_json(raw)
+            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
+                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
+                    result = parsed
+                    break
+        except Exception as e:
+            print(f'[story] attempt {attempt+1} error: {e}')
+
+    if not result:
+        result = {
+            'emotion': '平静',
+            'messages': [
+                {'jp': 'まあ、いいよ。話を聞かせてあげる。', 'zh': '嘛，好啊，讲个故事给你听。'},
+                {'jp': '昔々、最強の呪術師がいてね。', 'zh': '很久很久以前，有一个最强的咒术师。'},
+                {'jp': 'まあ、それ僕のことなんだけど。', 'zh': '嘛，虽然那说的就是我啦。'},
+            ],
+        }
+
+    emotion = result.get('emotion', '平静')
+    if emotion not in EMOTIONS:
+        emotion = '平静'
+
+    msgs = result.get('messages', [])
+    for m in msgs:
+        m['jp'] = sanitize_jp(m.get('jp', ''))
+    msgs = merge_only_extreme_short(msgs)
+
+    full_jp = ' '.join(m['jp'] for m in msgs)
+    save_short_memory(user_id, 'user', user_text, character_id)
+    save_short_memory(user_id, 'assistant', full_jp, character_id)
+    threading.Thread(target=extract_and_save_memory,
+                     args=(user_id, user_text, full_jp, character_id),
+                     daemon=True).start()
+
+    # ★ 和 /chat/text 一样，每段日语单独合成（串行、同 voice_id，声音一致）
+    voice_id = char.get('voice_id')
+    for m in msgs:
+        m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
+
+    total_chars = sum(len(m['jp']) for m in msgs)
+    print(f'[story] {character_id} emotion={emotion} segs={len(msgs)} chars={total_chars} days={total_days}')
+
+    return JSONResponse({
+        'emotion': emotion,
+        'messages': msgs,
+        'total_days': total_days,
+        'total_chars': total_chars,
+    })
+
+
 # ─────────────────── 主动消息（日程提醒 / 超时追问） ───────────────────
 
 @router.post('/chat/proactive')
@@ -228,20 +283,16 @@ async def chat_proactive(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
-    # ★ 主动消息最容易因为不知道时间而说错话，把时间直接写进触发指令里
-    now, weekday, period = get_local_time_context()
-    time_hint = f'（现在是 {now.strftime("%H:%M")}，{weekday}，{period}）'
-
     if mode == 'remind':
-        trigger = f'【系统触发：到提醒时间了{time_hint}】现在该主动提醒对方去做这件事："{task_title}"。语气慵懒又带点关心，1条气泡。注意符合当前时间，别说错时段。'
+        trigger = f'【系统触发：到提醒时间了】现在该主动提醒对方去做这件事："{task_title}"。语气慵懒又带点关心，1条气泡。'
     else:
-        trigger = f'【系统触发：超时未完成{time_hint}】对方之前要做"{task_title}"，已经过了时间没动静。主动问她做完了没，带点调侃或假装不在意的关心，1条气泡。注意符合当前时间，别说错时段。'
+        trigger = f'【系统触发：超时未完成】对方之前要做"{task_title}"，已经过了时间没动静。主动问她做完了没，带点调侃或假装不在意的关心，1条气泡。'
 
     short_memories = get_short_memory(user_id, 4, character_id)
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': trigger})
 
-    system_prompt = build_system_prompt(user_id, character_id, task_title) + build_time_block()
+    system_prompt = build_system_prompt(user_id, character_id, task_title)
 
     result = None
     for attempt in range(3):
@@ -306,50 +357,30 @@ async def chat_voice_text(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 
-    # ★ 先拿基础提示词，再拼上背景知识，最后才接语音通话场景说明
-    base_prompt = build_system_prompt(user_id, character_id, user_text)
-    lore_block = get_relevant_lore(user_text, character_id=character_id)
-    if lore_block:
-        base_prompt = base_prompt + '\n\n' + lore_block
-
-    # ★ 时间感知也要拼进来
-    base_prompt = base_prompt + build_time_block()
-
-    system_prompt = base_prompt + '''
+    system_prompt = build_system_prompt(user_id, character_id, user_text) + '''
 
 【★ 语音通话场景】
 现在在和对方打电话。回复自然口语化，根据对方说的话灵活决定回复条数和长度：
 - 简单寒暄/短句 → 1条气泡，简短回应
 - 对方说了重要的事/问了复杂的问题 → 可以分2-3条气泡，像真打电话一样自然衔接
-- 每条气泡10-50字，不要长篇大论，但也不要过于压缩。
+- 每条气泡10-50字，不要长篇大论，但也不要过于压缩。'''
 
-【★ 输出格式铁律】无论如何，只输出一个 JSON 对象，前后不要任何说明文字，也不要 markdown 代码块。
-格式严格为：{"emotion":"情绪","messages":[{"jp":"日文","zh":"中文"}]}
-每一条都必须同时有 jp 和 zh，不能漏。'''
-
-    # ★ 修复语音失败率过高：
-    #   1) max_tokens 500 → 800，避免多气泡 JSON 被截断（主因）
-    #   2) 重试 3 → 5 次，和文字版一致
-    #   3) 加上和文字版相同的严格校验（每条必须有 jp + zh）
-    #   4) 最后一次重试改用 Sonnet 兜底，几乎不会再出现「ふっ、何か言った？」
     result = None
-    for attempt in range(5):
-        model = 'claude-haiku-4-5-20251001' if attempt < 4 else 'claude-sonnet-4-6'
+    for attempt in range(3):
         try:
             response = claude_client.messages.create(
-                model=model,
-                max_tokens=800,
+                model='claude-haiku-4-5-20251001',
+                max_tokens=500,
                 system=system_prompt,
                 messages=messages
             )
             raw = response.content[0].text.strip()
             parsed = extract_json(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
-                    result = parsed
-                    break
+                result = parsed
+                break
         except Exception as e:
-            print(f'[voice_text] attempt {attempt+1} ({model}) error: {e}')
+            print(f'[voice_text] attempt {attempt+1} error: {e}')
 
     if not result:
         result = {'emotion': '调皮', 'messages': [{'jp': 'ふっ、何か言った？', 'zh': '哼，你说了什么？'}]}
@@ -361,7 +392,8 @@ async def chat_voice_text(data: dict):
     msgs = result.get('messages', [])
     for m in msgs:
         m['jp'] = sanitize_jp(m.get('jp', ''))
-    # ★ 用 merge_only_extreme_short（和 /chat/text 一致），多气泡才能真正传到前端
+    # ★ 修复：去掉强制截断，改用 merge_only_extreme_short（和 /chat/text 一致）
+    # 这样多气泡才能真正传到前端
     msgs = merge_only_extreme_short(msgs)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
@@ -377,6 +409,99 @@ async def chat_voice_text(data: dict):
 
     print(f'[voice_text] {character_id} emotion={emotion} segs={len(msgs)}')
     return JSONResponse({'emotion': emotion, 'messages': msgs})
+
+
+# ─────────────────── 语音通话·长故事模式 ───────────────────
+
+@router.post('/chat/voice_story')
+async def chat_voice_story(data: dict):
+    """
+    语音通话里的长故事：用 Sonnet 生成完整故事，分成很多短气泡，每段独立 TTS。
+    前端按顺序播放（在 voice 通话中检测到"讲故事"类请求时调用）。
+    """
+    user_text    = data.get('text', '')
+    user_id      = data.get('user_id', 'default')
+    character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
+
+    if not user_text:
+        return JSONResponse({'error': 'no input'}, status_code=400)
+
+    char = get_character(character_id)
+    if not char:
+        return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
+
+    short_memories = get_short_memory(user_id, 4, character_id)
+    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    messages.append({'role': 'user', 'content': user_text})
+
+    system_prompt = build_system_prompt(user_id, character_id, user_text) + '''
+
+【★ 语音通话·长故事模式】
+对方想在通话里听你讲故事。用你（五条悟）的视角和口吻，像真的在电话里娓娓道来。
+1. 故事要完整：开头、发展、高潮、结尾，一口气讲完。
+2. 分成 8-15 个气泡，每个气泡是故事的一小段。
+3. 每个气泡的【日语】控制在 40-90 字之间——通话场景要短一点更自然，也保证语音质量。
+4. jp 必须是纯日语，zh 是对应中文翻译，不要把中文混进 jp。
+
+严格按这个 JSON 返回：
+{"emotion":"情绪","messages":[{"jp":"第一段日语","zh":"第一段中文"},{"jp":"第二段日语","zh":"第二段中文"}]}'''
+
+    result = None
+    for attempt in range(5):
+        try:
+            response = claude_client.messages.create(
+                model='claude-sonnet-4-6',
+                max_tokens=3000,
+                system=system_prompt,
+                messages=messages
+            )
+            raw = response.content[0].text.strip()
+            parsed = extract_json(raw)
+            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 3:
+                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
+                    result = parsed
+                    break
+        except Exception as e:
+            print(f'[voice_story] attempt {attempt+1} error: {e}')
+
+    if not result:
+        result = {
+            'emotion': '平静',
+            'messages': [
+                {'jp': 'さて、どんな話をしようか。', 'zh': '那么，讲个什么故事呢。'},
+                {'jp': '昔々、最強の呪術師がいてね。', 'zh': '很久很久以前，有一个最强的咒术师。'},
+                {'jp': 'まあ、それ僕のことなんだけど。', 'zh': '嘛，虽然那说的就是我啦。'},
+            ],
+        }
+
+    emotion = result.get('emotion', '平静')
+    if emotion not in EMOTIONS:
+        emotion = '平静'
+
+    msgs = result.get('messages', [])
+    for m in msgs:
+        m['jp'] = sanitize_jp(m.get('jp', ''))
+    msgs = merge_only_extreme_short(msgs)
+
+    full_jp = ' '.join(m['jp'] for m in msgs)
+    save_short_memory(user_id, 'user', user_text, character_id)
+    save_short_memory(user_id, 'assistant', full_jp, character_id)
+    threading.Thread(target=extract_and_save_memory,
+                     args=(user_id, user_text, full_jp, character_id),
+                     daemon=True).start()
+
+    voice_id = char.get('voice_id')
+    for m in msgs:
+        m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
+
+    total_chars = sum(len(m['jp']) for m in msgs)
+    print(f'[voice_story] {character_id} emotion={emotion} segs={len(msgs)} chars={total_chars}')
+
+    return JSONResponse({
+        'emotion': emotion,
+        'messages': msgs,
+        'total_chars': total_chars,
+    })
 
 
 # ─────────────────── 语音通话沉默主动消息 ───────────────────
@@ -404,31 +529,28 @@ async def chat_voice_proactive(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': trigger})
 
-    system_prompt = build_system_prompt(user_id, character_id, '') + build_time_block() + '''
+    system_prompt = build_system_prompt(user_id, character_id, '') + '''
 
 【★ 语音通话沉默场景】
 现在你和对方在打电话，对方没说话。你主动开口打破沉默。
 只输出1条气泡，15字以内，自然简短，像真打电话一样。'''
 
-    # ★ 和 voice_text 一样的保护：max_tokens 抬到 350、重试 4 次、最后一次 Sonnet 兜底、严格校验
     result = None
-    for attempt in range(4):
-        model = 'claude-haiku-4-5-20251001' if attempt < 3 else 'claude-sonnet-4-6'
+    for attempt in range(3):
         try:
             response = claude_client.messages.create(
-                model=model,
-                max_tokens=350,
+                model='claude-haiku-4-5-20251001',
+                max_tokens=250,
                 system=system_prompt,
                 messages=messages
             )
             raw = response.content[0].text.strip()
             parsed = extract_json(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
-                    result = parsed
-                    break
+                result = parsed
+                break
         except Exception as e:
-            print(f'[voice_proactive] attempt {attempt+1} ({model}) error: {e}')
+            print(f'[voice_proactive] attempt {attempt+1} error: {e}')
 
     if not result:
         if mode == 'missed':
