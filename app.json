@@ -9,7 +9,11 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "需要访问相机以拍照发给五条悟",
+        "NSPhotoLibraryUsageDescription": "需要访问相册以发送图片给五条悟"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -28,7 +32,11 @@
         "android.permission.WAKE_LOCK",
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.VIBRATE",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "com.android.alarm.permission.SET_ALARM"
       ]
     },
     "web": {
@@ -55,6 +63,13 @@
         {
           "androidMode": "default",
           "androidCollapsedTitle": "五条悟"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "需要访问相册以发送图片给五条悟",
+          "cameraPermission": "需要访问相机以拍照发给五条悟"
         }
       ]
     ],
