@@ -88,6 +88,7 @@ const TILES = [
   { route: '/calendar',   icon: '📅', label: '日程', sub: '行程提醒',  color: '#A78BFA' },
   { route: '/accounting', icon: '💰', label: '记账', sub: '收支记录',  color: '#34D399' },
   { route: '/memory',     icon: '🧠', label: '记忆', sub: '悟记得的',  color: '#F59E0B' },
+  { route: '/bedtime-story', icon: '🌙', label: '睡前故事', sub: '哄你入睡',  color: '#8B7FD6' },
 ];
 
 export default function HomeScreen() {
