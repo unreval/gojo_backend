@@ -1,24 +1,32 @@
-// app/bedtime-story.tsx —— 独立的「睡前故事」页面
-// 调用后端 /story/generate，顺序播放每段音频，显示中文字幕。
+// app/bedtime-story.tsx —— 独立的「睡前故事」页面（两段式）
+// 第一步：/story/generate 秒回故事文字
+// 第二步：每段播之前才调 /story/tts 合成语音，并提前预取下一段，播放不卡顿
 // 不经过聊天、不写记忆。
 import axios from 'axios';
 import { Audio } from 'expo-av';
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-// ★ 和聊天用同一个后端地址（统一从 constants/theme 导入，绝不再硬编码）
+// ★ 和聊天用同一个后端地址
 import { SERVER_URL } from '../constants/theme';
 
 const CHARACTER_ID = 'gojo';
 
-type Segment = { jp: string; zh: string; audio_b64: string };
+type Segment = { jp: string; zh: string };
 
 export default function BedtimeStoryScreen() {
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(false);   // 第一步：生成文字中
   const [segments, setSegments] = useState<Segment[]>([]);
   const [index, setIndex] = useState(-1);
   const [playing, setPlaying] = useState(false);
+
+  const emotionRef = useRef('平静');
+  const audioCacheRef = useRef<Record<number, string>>({});  // 每段语音缓存（按需合成）
   const soundRef = useRef<Audio.Sound | null>(null);
   const cancelRef = useRef(false);
+
+  useEffect(() => {
+    return () => { soundRef.current?.unloadAsync().catch(() => {}); };
+  }, []);
 
   const unload = useCallback(async () => {
     if (soundRef.current) {
@@ -27,7 +35,26 @@ export default function BedtimeStoryScreen() {
     }
   }, []);
 
-  // 播放一段 base64 音频，等它放完再 resolve（和聊天里的 playAudioAndWait 同一套）
+  // 取第 i 段的语音（已取过就用缓存；没取过就向 /story/tts 要）
+  const fetchAudio = useCallback(async (i: number, segs: Segment[]): Promise<string> => {
+    if (audioCacheRef.current[i] !== undefined) return audioCacheRef.current[i];
+    try {
+      const res = await axios.post(
+        `${SERVER_URL}/story/tts`,
+        { text: segs[i].jp, emotion: emotionRef.current, character_id: CHARACTER_ID },
+        { timeout: 30000 },
+      );
+      const b64 = res.data?.audio_b64 || '';
+      audioCacheRef.current[i] = b64;
+      return b64;
+    } catch (e) {
+      console.warn('story tts error', e);
+      audioCacheRef.current[i] = '';
+      return '';
+    }
+  }, []);
+
+  // 播一段 base64 音频，放完再继续
   const playOne = useCallback(async (b64: string) => {
     if (!b64 || b64.length < 100) return;
     try {
@@ -47,34 +74,39 @@ export default function BedtimeStoryScreen() {
     }
   }, [unload]);
 
-  const playFrom = useCallback(async (segs: Segment[], start: number) => {
+  const playFrom = useCallback(async (segs: Segment[], startIdx: number) => {
     cancelRef.current = false;
     setPlaying(true);
-    for (let i = start; i < segs.length; i++) {
+    for (let i = startIdx; i < segs.length; i++) {
       if (cancelRef.current) break;
       setIndex(i);
-      await playOne(segs[i].audio_b64);
+      const b64 = await fetchAudio(i, segs);          // 确保当前段语音就绪
+      if (cancelRef.current) break;
+      if (i + 1 < segs.length) fetchAudio(i + 1, segs); // 一边播当前段，一边预取下一段（不等待）
+      await playOne(b64);
     }
     await unload();
     setPlaying(false);
-  }, [playOne, unload]);
+  }, [fetchAudio, playOne, unload]);
 
   const start = useCallback(async () => {
     setLoading(true);
     setSegments([]);
     setIndex(-1);
+    audioCacheRef.current = {};
     try {
       const res = await axios.post(
         `${SERVER_URL}/story/generate`,
         { character_id: CHARACTER_ID },
-        { timeout: 120000 },   // 故事生成较慢，给足 2 分钟
+        { timeout: 60000 },
       );
       const segs: Segment[] = Array.isArray(res.data?.segments) ? res.data.segments : [];
+      emotionRef.current = res.data?.emotion || '平静';
       setSegments(segs);
       setLoading(false);
       if (segs.length) playFrom(segs, 0);
     } catch (e) {
-      console.warn('story error', e);
+      console.warn('story generate error', e);
       setLoading(false);
     }
   }, [playFrom]);
@@ -85,7 +117,14 @@ export default function BedtimeStoryScreen() {
     setPlaying(false);
   }, [unload]);
 
-  const current = index >= 0 && index < segments.length ? segments[index] : null;
+  // 字幕：当前段没有中文（被切出来的后半句）时，往前找最近一句有中文的，保持字幕稳定
+  const subtitleZh = (() => {
+    for (let i = index; i >= 0; i--) {
+      if (segments[i]?.zh) return segments[i].zh;
+    }
+    return '';
+  })();
+  const currentJp = index >= 0 && index < segments.length ? segments[index].jp : '';
 
   return (
     <View style={styles.container}>
@@ -97,10 +136,10 @@ export default function BedtimeStoryScreen() {
             <ActivityIndicator color="#cbb3ff" size="large" />
             <Text style={styles.hint}>悟在想故事…</Text>
           </>
-        ) : current ? (
+        ) : index >= 0 ? (
           <>
-            <Text style={styles.zh}>{current.zh || '…'}</Text>
-            <Text style={styles.jp}>{current.jp}</Text>
+            <Text style={styles.zh}>{subtitleZh || '…'}</Text>
+            <Text style={styles.jp}>{currentJp}</Text>
           </>
         ) : (
           <Text style={styles.hint}>点下面的按钮，让悟讲个故事哄你睡觉</Text>
