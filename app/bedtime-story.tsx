@@ -1,6 +1,7 @@
-// app/bedtime-story.tsx —— 独立的「睡前故事」页面（两段式）
-// 第一步：/story/generate 秒回故事文字
-// 第二步：每段播之前才调 /story/tts 合成语音，并提前预取下一段，播放不卡顿
+// app/bedtime-story.tsx —— 独立的「睡前故事」页面（两段式 + 段间停顿）
+// 第一步：/story/generate 秒回故事文字（含 pause_ms 停顿时长）
+// 第二步：每段播之前才调 /story/tts 合成语音，播当前段时预取下一段
+// 段与段之间停顿，营造睡前舒缓感。停顿时长由后端控制，调节奏不用重打 APK。
 // 不经过聊天、不写记忆。
 import axios from 'axios';
 import { Audio } from 'expo-av';
@@ -10,17 +11,23 @@ import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'rea
 import { SERVER_URL } from '../constants/theme';
 
 const CHARACTER_ID = 'gojo';
+const DEFAULT_GAP_MS = 1500;   // 后端没返回 pause_ms 时的兜底停顿
 
 type Segment = { jp: string; zh: string };
 
+function sleep(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
+
 export default function BedtimeStoryScreen() {
-  const [loading, setLoading] = useState(false);   // 第一步：生成文字中
+  const [loading, setLoading] = useState(false);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [index, setIndex] = useState(-1);
   const [playing, setPlaying] = useState(false);
 
   const emotionRef = useRef('平静');
-  const audioCacheRef = useRef<Record<number, string>>({});  // 每段语音缓存（按需合成）
+  const pauseRef = useRef(DEFAULT_GAP_MS);                 // 段间停顿，来自后端 pause_ms
+  const audioCacheRef = useRef<Record<number, string>>({});
   const soundRef = useRef<Audio.Sound | null>(null);
   const cancelRef = useRef(false);
 
@@ -35,7 +42,7 @@ export default function BedtimeStoryScreen() {
     }
   }, []);
 
-  // 取第 i 段的语音（已取过就用缓存；没取过就向 /story/tts 要）
+  // 取第 i 段语音（取过就用缓存）
   const fetchAudio = useCallback(async (i: number, segs: Segment[]): Promise<string> => {
     if (audioCacheRef.current[i] !== undefined) return audioCacheRef.current[i];
     try {
@@ -54,7 +61,6 @@ export default function BedtimeStoryScreen() {
     }
   }, []);
 
-  // 播一段 base64 音频，放完再继续
   const playOne = useCallback(async (b64: string) => {
     if (!b64 || b64.length < 100) return;
     try {
@@ -80,10 +86,14 @@ export default function BedtimeStoryScreen() {
     for (let i = startIdx; i < segs.length; i++) {
       if (cancelRef.current) break;
       setIndex(i);
-      const b64 = await fetchAudio(i, segs);          // 确保当前段语音就绪
+      const b64 = await fetchAudio(i, segs);             // 确保当前段就绪
       if (cancelRef.current) break;
-      if (i + 1 < segs.length) fetchAudio(i + 1, segs); // 一边播当前段，一边预取下一段（不等待）
+      if (i + 1 < segs.length) fetchAudio(i + 1, segs);  // 一边播一边预取下一段
       await playOne(b64);
+      // ★ 段与段之间停顿一下，营造睡前舒缓节奏（时长来自后端 pause_ms）
+      if (!cancelRef.current && i + 1 < segs.length) {
+        await sleep(pauseRef.current);
+      }
     }
     await unload();
     setPlaying(false);
@@ -102,6 +112,7 @@ export default function BedtimeStoryScreen() {
       );
       const segs: Segment[] = Array.isArray(res.data?.segments) ? res.data.segments : [];
       emotionRef.current = res.data?.emotion || '平静';
+      pauseRef.current = res.data?.pause_ms ?? DEFAULT_GAP_MS;   // ★ 用后端给的停顿
       setSegments(segs);
       setLoading(false);
       if (segs.length) playFrom(segs, 0);

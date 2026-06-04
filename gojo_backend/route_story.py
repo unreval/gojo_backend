@@ -19,7 +19,8 @@ from characters import get_character
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-STORY_MAX_JP = 120  # 单段日语超过这个长度，就按句子再切，保证 TTS 质量
+STORY_MAX_JP = 120      # 单段日语超过这个长度，就按句子再切，保证 TTS 质量
+SEGMENT_PAUSE_MS = 1500  # ★ 每段之间停顿多少毫秒（想更慢就调大，比如 2200；更快就调小）
 
 
 def _split_jp_sentences(text: str, max_chars: int = STORY_MAX_JP):
@@ -115,7 +116,7 @@ async def story_generate(data: dict):
             segments.append({'jp': chunk, 'zh': zh if idx == 0 else ''})
 
     print(f'[story] {character_id} emotion={emotion} segments={len(segments)} (text only)')
-    return JSONResponse({'emotion': emotion, 'segments': segments})
+    return JSONResponse({'emotion': emotion, 'segments': segments, 'pause_ms': SEGMENT_PAUSE_MS})
 
 
 # ─────────────────── 第二步：单段语音合成（前端按需调用）───────────────────
