@@ -1,13 +1,13 @@
-// BedtimeStoryScreen.tsx —— 独立的「睡前故事」页面
+// app/bedtime-story.tsx —— 独立的「睡前故事」页面
 // 调用后端 /story/generate，顺序播放每段音频，显示中文字幕。
 // 不经过聊天、不写记忆。
-import React, { useState, useRef, useCallback } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet } from 'react-native';
-import { Audio } from 'expo-av';
 import axios from 'axios';
+import { Audio } from 'expo-av';
+import React, { useCallback, useRef, useState } from 'react';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+// ★ 和聊天用同一个后端地址（统一从 constants/theme 导入，绝不再硬编码）
+import { SERVER_URL } from '../constants/theme';
 
-// ★ 改成你自己的后端地址（和聊天用的同一个）
-const SERVER_URL = 'https://gojobackend-production-819d.up.railway.app';
 const CHARACTER_ID = 'gojo';
 
 type Segment = { jp: string; zh: string; audio_b64: string };
@@ -27,20 +27,19 @@ export default function BedtimeStoryScreen() {
     }
   }, []);
 
-  // 播放一段 base64 音频，等它放完再 resolve
-  // ★ 如果你语音通话里已有验证过的 playAudio，建议直接换成那个，更稳
+  // 播放一段 base64 音频，等它放完再 resolve（和聊天里的 playAudioAndWait 同一套）
   const playOne = useCallback(async (b64: string) => {
     if (!b64 || b64.length < 100) return;
     try {
       await unload();
       const { sound } = await Audio.Sound.createAsync(
         { uri: 'data:audio/mp3;base64,' + b64 },
-        { shouldPlay: true },
+        { shouldPlay: true, volume: 1.0 },
       );
       soundRef.current = sound;
       await new Promise<void>((resolve) => {
         sound.setOnPlaybackStatusUpdate((st: any) => {
-          if (st.didJustFinish || st.error) resolve();
+          if (st.isLoaded && (st.didJustFinish || st.error)) resolve();
         });
       });
     } catch (e) {
@@ -65,7 +64,11 @@ export default function BedtimeStoryScreen() {
     setSegments([]);
     setIndex(-1);
     try {
-      const res = await axios.post(`${SERVER_URL}/story/generate`, { character_id: CHARACTER_ID });
+      const res = await axios.post(
+        `${SERVER_URL}/story/generate`,
+        { character_id: CHARACTER_ID },
+        { timeout: 120000 },   // 故事生成较慢，给足 2 分钟
+      );
       const segs: Segment[] = Array.isArray(res.data?.segments) ? res.data.segments : [];
       setSegments(segs);
       setLoading(false);
