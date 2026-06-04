@@ -1,11 +1,10 @@
-"""睡前故事模块（独立于聊天与记忆）：/story/generate
+"""睡前故事模块（独立于聊天与记忆）—— 两段式
 
-特点：
-- 不写入 short_memory（聊天历史）
-- 不写入 long_memory（长期记忆）
-- 不调用 update_chat_days
-- 只借用角色的核心人格（core_prompt）来保证是"五条在讲故事"
-和聊天、记忆系统完全隔离，互不影响。
+/story/generate  ：只生成故事文字（一次 Claude 调用，很快，不做 TTS），返回分好的段落
+/story/tts       ：给一段日语，单独合成一段语音并返回（前端按需逐段调用）
+
+这样长故事不会因为"一次性合成十几段语音太久"而超时。
+不写入聊天历史 / 长期记忆 / 聊天天数 —— 与聊天、记忆系统完全隔离。
 """
 import re
 import anthropic
@@ -44,14 +43,13 @@ def _split_jp_sentences(text: str, max_chars: int = STORY_MAX_JP):
     return chunks or [text]
 
 
+# ─────────────────── 第一步：只生成文字（秒回）───────────────────
+
 @router.post('/story/generate')
 async def story_generate(data: dict):
-    """
-    睡前故事：生成一篇完整长故事，按句子切成多段，逐段 TTS（同一声音、串行）。
-    返回 segments 列表，前端按顺序播放、显示中文字幕。
-    """
+    """生成一篇完整睡前故事，按句子切成多段，只返回文字（不合成语音）。"""
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
-    theme        = (data.get('theme') or '').strip()   # 可选：故事主题；不传就自由发挥
+    theme        = (data.get('theme') or '').strip()
 
     char = get_character(character_id)
     if not char:
@@ -59,7 +57,7 @@ async def story_generate(data: dict):
 
     theme_line = f'故事主题：{theme}。' if theme else '主题自由发挥，温馨治愈即可。'
 
-    # ★ 只用角色核心人格，不接聊天/记忆/提醒那套脚手架 —— 保证隔离
+    # 只用角色核心人格，不接聊天/记忆那套脚手架 —— 保证隔离
     system_prompt = char.get('core_prompt', '') + f'''
 
 【★ 睡前故事模式】
@@ -108,28 +106,41 @@ async def story_generate(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    voice_id = char.get('voice_id')
-
-    # ★ 把每个气泡按句子切成 TTS 友好的小段，逐段合成（串行、同 voice_id，声音一致）
+    # 按句子切成 TTS 友好的小段（只切文字，不合成语音）
     segments = []
     for m in result.get('messages', []):
         jp_clean = sanitize_jp(m.get('jp', ''))
         zh = (m.get('zh') or '').strip()
-        sub_chunks = _split_jp_sentences(jp_clean)
-        for idx, chunk in enumerate(sub_chunks):
-            audio = tts_to_b64(chunk, emotion, voice_id)
-            segments.append({
-                'jp': chunk,
-                'zh': zh if idx == 0 else '',   # 字幕跟随原句；被切出来的后半段不重复显示
-                'audio_b64': audio,
-            })
+        for idx, chunk in enumerate(_split_jp_sentences(jp_clean)):
+            segments.append({'jp': chunk, 'zh': zh if idx == 0 else ''})
 
-    total_chars = sum(len(s['jp']) for s in segments)
-    print(f'[story] {character_id} emotion={emotion} segments={len(segments)} chars={total_chars}')
+    print(f'[story] {character_id} emotion={emotion} segments={len(segments)} (text only)')
+    return JSONResponse({'emotion': emotion, 'segments': segments})
 
-    # 注意：这里故意不调用 save_short_memory / extract_and_save_memory / update_chat_days
-    return JSONResponse({
-        'emotion': emotion,
-        'segments': segments,
-        'total_chars': total_chars,
-    })
+
+# ─────────────────── 第二步：单段语音合成（前端按需调用）───────────────────
+
+@router.post('/story/tts')
+async def story_tts(data: dict):
+    """给一段日语，合成一段语音返回。前端播一段取一段，并提前预取下一段。"""
+    text         = (data.get('text') or '').strip()
+    emotion      = data.get('emotion', '平静')
+    character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
+
+    if not text:
+        return JSONResponse({'error': 'no text'}, status_code=400)
+    if emotion not in EMOTIONS:
+        emotion = '平静'
+
+    char = get_character(character_id)
+    if not char:
+        return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
+
+    voice_id = char.get('voice_id')
+    try:
+        audio = tts_to_b64(text, emotion, voice_id)
+    except Exception as e:
+        print(f'[story_tts] error: {e}')
+        audio = ''
+
+    return JSONResponse({'audio_b64': audio or ''})
