@@ -41,6 +41,13 @@ def traditional_to_simplified(text: str) -> str:
 # ═══════════════════════════════════════
 #  TTS: Fish Audio
 # ═══════════════════════════════════════
+#
+# ★ 声音稳定性参数（解决"偶尔变成陌生声音 / 念出怪声"）：
+#   - TTS_TEMPERATURE 越低 → 越贴克隆源、越稳定（但太低会偏平淡）
+#   - 0.5 偏高，长句容易漂走；0.4 更稳；还漂就降到 0.3
+TTS_TEMPERATURE = 0.4
+TTS_TOP_P       = 0.7
+
 
 def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
     tag = EMOTION_TAGS.get(emotion, '')
@@ -69,8 +76,8 @@ def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
             'format': 'mp3',
             'latency': 'normal',
             'chunk_length': chunk_length,
-            'temperature': 0.5,
-            'top_p': 0.7,
+            'temperature': TTS_TEMPERATURE,
+            'top_p': TTS_TOP_P,
             'mp3_bitrate': 128,
             'prosody': {
                 'speed': 1.15,
