@@ -7,6 +7,10 @@ from utils import extract_json
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
+# ────────── 当前对话上下文范围（短期记忆喂给模型的部分）──────────
+SHORT_MEMORY_HOURS = 24   # 把最近这么多小时的对话当"当前上下文"（想要两天就改 48）
+SHORT_MEMORY_MAX   = 30   # 最多带这么多条，保护速度和 API 成本（嫌贵调小，想记更多调大）
+
 
 # ────────── 短期记忆 ──────────
 
@@ -27,13 +31,17 @@ def save_short_memory(user_id, role, content, character_id=DEFAULT_CHARACTER_ID)
 
 
 def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
+    """返回最近 SHORT_MEMORY_HOURS 小时内、最多 SHORT_MEMORY_MAX 条对话（时间正序）。
+       说明：原来的参数 n 不再决定条数，统一由上面两个常量控制，方便一处调。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         '''SELECT role, content FROM short_memory
            WHERE user_id = %s AND character_id = %s
-           ORDER BY timestamp DESC LIMIT %s''',
-        (user_id, character_id, n)
+             AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
+           ORDER BY timestamp DESC
+           LIMIT %s''',
+        (user_id, character_id, SHORT_MEMORY_HOURS, SHORT_MEMORY_MAX)
     )
     rows = cur.fetchall()
     cur.close()
@@ -357,12 +365,10 @@ content 必须以"她"字开头，否则系统会丢弃你的输出。'''
         if not content or content == '无' or len(content) < 4:
             return
 
-        # ★ 严格首字检查：必须以"她"开头，其他主语一律拒绝
         if not content.startswith('她'):
             print(f'[{user_id}] ❌ 拒绝（非"她"开头）：{content}')
             return
 
-        # ★ 内容黑名单：含有这些词的也拒绝（防止"她说悟..."这种间接污染）
         forbidden = ['AI', 'ai', '五条悟', '五条', '机器人']
         for word in forbidden:
             if word in content:

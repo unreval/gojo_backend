@@ -504,11 +504,11 @@ async def chat_voice_story(data: dict):
     })
 
 
-# ─────────────────── 语音通话沉默主动消息 ───────────────────
+# ─────────────────── 语音通话主动开口（接通开场 / 沉默追问） ───────────────────
 
 @router.post('/chat/voice/proactive')
 async def chat_voice_proactive(data: dict):
-    """语音通话中，对方长时间不说话时悟主动开口"""
+    """语音通话主动开口：接通开场(greeting) / 沉默追问(idle/missed)"""
     user_id         = data.get('user_id', 'default')
     character_id    = data.get('character_id', DEFAULT_CHARACTER_ID)
     mode            = data.get('mode', 'idle')
@@ -518,29 +518,54 @@ async def chat_voice_proactive(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
-    if mode == 'missed' or silence_seconds > 60:
+    # ★ greeting = 电话刚接通，顺着刚才文字聊的内容主动开口
+    if mode == 'greeting':
+        trigger = ('【系统：电话刚接通。请顺着你们刚才在文字里聊的内容（见上方对话历史），'
+                   '像真的接起电话一样自然主动开口——把刚才的话题接上，或随口关心一句。'
+                   '1-2句，简短自然。如果之前没怎么聊过，就用你的风格随意打个招呼。】')
+        scene = '''
+
+【★ 语音通话·接通开场】
+你刚接起和对方的电话。主动开口，自然口语化，1-2句。
+如果上方有刚才的聊天内容，就顺着那个话题接上去（别一字不差地重复，像继续聊）。'''
+        n_recent = 6
+    elif mode == 'missed' or silence_seconds > 60:
         trigger = '【系统：对方已经很久没说话了，可能在发呆或者走神了。你主动问她在干嘛，语气慵懒带点调侃，一两句就好。】'
-    elif silence_seconds > 30:
-        trigger = '【系统：对方沉默了一会儿了。你稍微催一下，带点撒娇或不耐烦，一两句就好。】'
-    else:
-        trigger = '【系统：对方刚沉默了几秒。你轻声问一句"在干嘛？"或者类似的，自然一点，一两句就好。】'
-
-    short_memories = get_short_memory(user_id, 4, character_id)
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
-    messages.append({'role': 'user', 'content': trigger})
-
-    system_prompt = build_system_prompt(user_id, character_id, '') + '''
+        scene = '''
 
 【★ 语音通话沉默场景】
 现在你和对方在打电话，对方没说话。你主动开口打破沉默。
 只输出1条气泡，15字以内，自然简短，像真打电话一样。'''
+        n_recent = 4
+    elif silence_seconds > 30:
+        trigger = '【系统：对方沉默了一会儿了。你稍微催一下，带点撒娇或不耐烦，一两句就好。】'
+        scene = '''
+
+【★ 语音通话沉默场景】
+现在你和对方在打电话，对方没说话。你主动开口打破沉默。
+只输出1条气泡，15字以内，自然简短，像真打电话一样。'''
+        n_recent = 4
+    else:
+        trigger = '【系统：对方刚沉默了几秒。你轻声问一句"在干嘛？"或者类似的，自然一点，一两句就好。】'
+        scene = '''
+
+【★ 语音通话沉默场景】
+现在你和对方在打电话，对方没说话。你主动开口打破沉默。
+只输出1条气泡，15字以内，自然简短，像真打电话一样。'''
+        n_recent = 4
+
+    short_memories = get_short_memory(user_id, n_recent, character_id)
+    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    messages.append({'role': 'user', 'content': trigger})
+
+    system_prompt = build_system_prompt(user_id, character_id, '') + scene
 
     result = None
     for attempt in range(3):
         try:
             response = claude_client.messages.create(
                 model='claude-haiku-4-5-20251001',
-                max_tokens=250,
+                max_tokens=300,
                 system=system_prompt,
                 messages=messages
             )
@@ -553,7 +578,9 @@ async def chat_voice_proactive(data: dict):
             print(f'[voice_proactive] attempt {attempt+1} error: {e}')
 
     if not result:
-        if mode == 'missed':
+        if mode == 'greeting':
+            result = {'emotion': '调皮', 'messages': [{'jp': 'もしもし、どうした？', 'zh': '喂，怎么啦？'}]}
+        elif mode == 'missed':
             result = {'emotion': '疑惑', 'messages': [{'jp': 'おい、聞こえてる？', 'zh': '喂，能听到吗？'}]}
         elif silence_seconds > 30:
             result = {'emotion': '调皮', 'messages': [{'jp': 'ねえ、寝ちゃった？', 'zh': '喂，睡着了吗？'}]}
@@ -567,7 +594,8 @@ async def chat_voice_proactive(data: dict):
     msgs = result.get('messages', [])
     for m in msgs:
         m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = msgs[:1]   # 主动开口保持只1条气泡，避免突然刷屏
+    # 接通开场最多2条；沉默追问保持1条
+    msgs = msgs[:2] if mode == 'greeting' else msgs[:1]
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
