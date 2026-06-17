@@ -1,6 +1,7 @@
 """聊天路由：/chat/text /chat/story /chat/proactive /chat/voice_text /chat/voice_story /chat/voice/proactive /transcribe"""
 import threading
 import random
+import json
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -24,8 +25,26 @@ from tasks import (
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-# 预填：让模型回合以 { 起手，物理上无法在 JSON 前写多余的散文/解说
-JSON_PREFILL = {'role': 'assistant', 'content': '{'}
+
+def _parse_reply(raw: str):
+    """把模型回复解析成 JSON。
+    先用 extract_json；失败就宽松地从第一个 { 抠到最后一个 } 再解析——
+    这样即使模型在 JSON 前面写了多余的日语/解说，也能把真正的 JSON 抠出来，
+    不会再因为"散文前缀"而整段解析失败、掉进兜底。"""
+    try:
+        parsed = extract_json(raw)
+    except Exception:
+        parsed = None
+    if parsed:
+        return parsed
+    try:
+        i = raw.find('{')
+        j = raw.rfind('}')
+        if i != -1 and j > i:
+            return json.loads(raw[i:j + 1])
+    except Exception:
+        pass
+    return None
 
 
 # ─────────────────── 普通文本聊天 ───────────────────
@@ -60,13 +79,13 @@ async def chat_text(data: dict):
         try:
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
-                max_tokens=1500,                       # ★ 800→1500，散文前缀不会再把 JSON 挤截断
+                max_tokens=1500,                       # ★ 800→1500，避免回复被截断导致 JSON 不完整
                 system=system_prompt,
-                messages=messages + [JSON_PREFILL]     # ★ 预填 { 强制 JSON 起手
+                messages=messages
             )
-            raw = '{' + response.content[0].text.strip()   # ★ 预填的 { 不在返回里，补回来
+            raw = response.content[0].text.strip()
             print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
-            parsed = extract_json(raw)
+            parsed = _parse_reply(raw)                  # ★ 宽松解析，能扛住 JSON 前的多余文字
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
                     result = parsed
@@ -224,11 +243,11 @@ async def chat_story(data: dict):
                 model='claude-sonnet-4-6',
                 max_tokens=4000,      # ★ 故事模式给更多 token
                 system=system_prompt,
-                messages=messages + [JSON_PREFILL]     # ★ 预填 { 强制 JSON 起手
+                messages=messages
             )
-            raw = '{' + response.content[0].text.strip()
+            raw = response.content[0].text.strip()
             print(f'[story] attempt {attempt+1}: {raw[:120]}...')
-            parsed = extract_json(raw)
+            parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
                     result = parsed
@@ -312,10 +331,10 @@ async def chat_proactive(data: dict):
                 model='claude-sonnet-4-6',
                 max_tokens=400,
                 system=system_prompt,
-                messages=messages + [JSON_PREFILL]     # ★ 预填 { 强制 JSON 起手
+                messages=messages
             )
-            raw = '{' + response.content[0].text.strip()
-            parsed = extract_json(raw)
+            raw = response.content[0].text.strip()
+            parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 result = parsed
                 break
@@ -383,10 +402,10 @@ async def chat_voice_text(data: dict):
                 model='claude-haiku-4-5-20251001',
                 max_tokens=500,
                 system=system_prompt,
-                messages=messages + [JSON_PREFILL]     # ★ 预填 { 强制 JSON 起手
+                messages=messages
             )
-            raw = '{' + response.content[0].text.strip()
-            parsed = extract_json(raw)
+            raw = response.content[0].text.strip()
+            parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 result = parsed
                 break
@@ -464,10 +483,10 @@ async def chat_voice_story(data: dict):
                 model='claude-sonnet-4-6',
                 max_tokens=3000,
                 system=system_prompt,
-                messages=messages + [JSON_PREFILL]     # ★ 预填 { 强制 JSON 起手
+                messages=messages
             )
-            raw = '{' + response.content[0].text.strip()
-            parsed = extract_json(raw)
+            raw = response.content[0].text.strip()
+            parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 3:
                 if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
                     result = parsed
@@ -578,10 +597,10 @@ async def chat_voice_proactive(data: dict):
                 model='claude-haiku-4-5-20251001',
                 max_tokens=300,
                 system=system_prompt,
-                messages=messages + [JSON_PREFILL]     # ★ 预填 { 强制 JSON 起手
+                messages=messages
             )
-            raw = '{' + response.content[0].text.strip()
-            parsed = extract_json(raw)
+            raw = response.content[0].text.strip()
+            parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 result = parsed
                 break
