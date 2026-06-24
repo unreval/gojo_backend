@@ -1,0 +1,443 @@
+"""群聊路由（第一步·骨架）
+
+端点：
+  POST   /group                 建群（传群名 + 成员角色列表）
+  GET    /groups                列出某用户的所有群
+  GET    /group/{gid}           群详情（成员 + 最近消息）
+  DELETE /group/{gid}           解散群
+  POST   /group/chat            ★ 核心：用户在群里发一句 → 智能调度谁回 → 角色依次回复（含角色互动）
+
+第一步范围（明确不做的，留给第二步）：
+  - 记忆三通（个人↔群↔跨角色）：本版每个角色仍只读自己的单人记忆，群有自己的历史，互不混。
+  - 个人库/群库分离判断：第二步再做。
+
+调度与回复都要求模型返回【单行 JSON】——因为 utils.extract_json 会把换行抹掉，多行 JSON 会被破坏。
+"""
+import threading
+import anthropic
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+
+from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID
+from db import get_conn
+from utils import extract_json, sanitize_jp
+from tts import tts_to_b64
+from prompt import build_system_prompt
+from characters import get_character
+
+router = APIRouter()
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+# 一轮群对话里，角色之间最多互相接话的次数（防止角色无限互怼烧钱）
+MAX_TURNS_PER_ROUND = 4
+
+
+def _parse_reply(raw: str):
+    """宽松解析：先 extract_json，失败再从第一个 { 抠到最后一个 }。"""
+    parsed = extract_json(raw)
+    if parsed:
+        return parsed
+    try:
+        import json
+        i = raw.find('{')
+        j = raw.rfind('}')
+        if i != -1 and j > i:
+            return json.loads(raw[i:j + 1])
+    except Exception:
+        pass
+    return None
+
+
+# ─────────────────── 群成员 / 历史 读取小工具 ───────────────────
+
+def _get_group(gid: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT id, name, avatar_url, owner_user_id FROM groups WHERE id = %s', (gid,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {'id': row[0], 'name': row[1], 'avatar_url': row[2], 'owner_user_id': row[3]}
+
+
+def _get_member_characters(gid: int):
+    """返回群里的角色成员列表 [{id, name, voice_id, is_owner_role}]，按入群顺序。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''SELECT member_id, is_owner_role FROM group_members
+           WHERE group_id = %s AND member_type = 'character'
+           ORDER BY id''',
+        (gid,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    result = []
+    for member_id, is_owner_role in rows:
+        char = get_character(member_id)
+        if char:
+            result.append({
+                'id': char['id'],
+                'name': char['name'],
+                'voice_id': char.get('voice_id'),
+                'is_owner_role': bool(is_owner_role),
+            })
+    return result
+
+
+def _get_group_history(gid: int, limit: int = 12):
+    """取群最近若干条消息，返回 [{sender_type, sender_id, sender_name, jp, zh}]（旧→新）。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''SELECT sender_type, sender_id, jp, zh FROM group_messages
+           WHERE group_id = %s ORDER BY timestamp DESC LIMIT %s''',
+        (gid, limit)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    rows = rows[::-1]  # 转成旧→新
+    history = []
+    name_cache = {}
+    for sender_type, sender_id, jp, zh in rows:
+        if sender_type == 'character':
+            if sender_id not in name_cache:
+                c = get_character(sender_id)
+                name_cache[sender_id] = c['name'] if c else sender_id
+            sender_name = name_cache[sender_id]
+        else:
+            sender_name = '群主'
+        history.append({
+            'sender_type': sender_type,
+            'sender_id': sender_id,
+            'sender_name': sender_name,
+            'jp': jp or '',
+            'zh': zh or '',
+        })
+    return history
+
+
+def _save_group_message(gid, sender_type, sender_id, jp, zh, emotion='平静'):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''INSERT INTO group_messages (group_id, sender_type, sender_id, jp, zh, emotion)
+           VALUES (%s, %s, %s, %s, %s, %s) RETURNING id''',
+        (gid, sender_type, sender_id, jp, zh, emotion)
+    )
+    mid = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return mid
+
+
+def _history_text(history):
+    """把群历史拼成给模型看的纯文本。"""
+    lines = []
+    for h in history:
+        who = h['sender_name'] if h['sender_type'] == 'character' else '群主'
+        # 角色用日语原文，用户用中文原话
+        content = h['jp'] if h['sender_type'] == 'character' and h['jp'] else h['zh']
+        lines.append(f'{who}：{content}')
+    return '\n'.join(lines)
+
+
+# ─────────────────── 智能调度：判断这一句该谁接 ───────────────────
+
+def _schedule_speakers(members, history, user_text, mentioned_id=None):
+    """用 Haiku 判断这轮该哪些角色发言、顺序如何。返回 character_id 列表。
+    若用户 @了某人，强制他打头。调度失败兜底为群主角色或第一个成员。"""
+    # @点名优先
+    forced = [mentioned_id] if mentioned_id else []
+
+    roster = '\n'.join(f'- {m["id"]}：{m["name"]}' for m in members)
+    hist_txt = _history_text(history[-8:]) if history else '（还没有人说过话）'
+
+    sched_prompt = f'''你是一个群聊"发言调度器"。下面是一个群,成员有这些角色：
+{roster}
+
+最近的群聊记录：
+{hist_txt}
+
+群主刚发了一句话："{user_text}"
+
+请判断这一句话之后,应该由哪些角色开口回应、按什么顺序。规则：
+1. 只挑真正适合接话的角色,1 到 2 个,别让所有人都抢着说。
+2. 如果话是明显冲着某个角色说的,让他先回。
+3. 如果是泛泛的话,挑一个最合适的角色回就行。
+4. 只能从上面列出的角色 id 里选。
+
+只返回单行 JSON,不要任何多余文字：
+{{"speakers":["角色id1"]}}
+或最多两个：
+{{"speakers":["角色id1","角色id2"]}}'''
+
+    try:
+        resp = claude_client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=120,
+            messages=[{'role': 'user', 'content': sched_prompt}]
+        )
+        raw = resp.content[0].text.strip()
+        parsed = _parse_reply(raw)
+        ids = []
+        if parsed and isinstance(parsed.get('speakers'), list):
+            valid = {m['id'] for m in members}
+            ids = [s for s in parsed['speakers'] if s in valid]
+        # 合并 @点名（去重、保序，@的人放最前）
+        ordered = forced + [i for i in ids if i not in forced]
+        if ordered:
+            return ordered[:2]
+    except Exception as e:
+        print(f'[group][schedule] error: {e}')
+
+    # 兜底：有@就@，否则群主角色，否则第一个
+    if forced:
+        return forced
+    owner_role = next((m['id'] for m in members if m['is_owner_role']), None)
+    return [owner_role] if owner_role else ([members[0]['id']] if members else [])
+
+
+# ─────────────────── 让单个角色在群里生成一条回复 ───────────────────
+
+def _generate_one_reply(gid, member, history, user_text, all_members):
+    """让某个角色基于群上下文回复一句。复用单人的 build_system_prompt + 角色人设/记忆。
+    返回 {'jp','zh','emotion'} 或 None。"""
+    others = '、'.join(m['name'] for m in all_members if m['id'] != member['id'])
+    hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
+
+    group_scene = f'''
+
+【★ 群聊场景——你现在在一个群里】
+这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
+下面是群里最近的对话记录：
+{hist_txt}
+
+现在轮到你（{member['name']}）说话。要求：
+1. 只说你自己会说的话,符合你的人设,别替别人说。
+2. 可以回应群主,也可以接其他角色刚说的话（像真群聊一样互动）,但不要长篇大论。
+3. 1 条气泡,简短自然,像群里随口接话。
+4. jp 必须是纯日语,zh 是中文翻译。
+
+只返回单行 JSON：
+{{"emotion":"情绪","messages":[{{"jp":"日语","zh":"中文"}}]}}'''
+
+    system_prompt = build_system_prompt('group_' + str(gid), member['id'], user_text) + group_scene
+    messages = [{'role': 'user', 'content': f'（群主刚说：{user_text}）请你在群里接话。'}]
+
+    for attempt in range(3):
+        try:
+            resp = claude_client.messages.create(
+                model='claude-sonnet-4-6',
+                max_tokens=400,
+                system=system_prompt,
+                messages=messages
+            )
+            raw = resp.content[0].text.strip()
+            parsed = _parse_reply(raw)
+            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
+                first = parsed['messages'][0]
+                if first.get('jp', '').strip() and first.get('zh', '').strip():
+                    emotion = parsed.get('emotion', '平静')
+                    if emotion not in EMOTIONS:
+                        emotion = '平静'
+                    return {
+                        'jp': sanitize_jp(first['jp']),
+                        'zh': first['zh'],
+                        'emotion': emotion,
+                    }
+        except Exception as e:
+            print(f'[group][{member["id"]}] attempt {attempt+1} error: {e}')
+    return None
+
+
+# ─────────────────── 建群 / 列群 / 详情 / 解散 ───────────────────
+
+@router.post('/group')
+async def create_group(data: dict):
+    name = (data.get('name') or '').strip()
+    owner_user_id = data.get('user_id', 'default')
+    member_ids = data.get('member_ids', [])      # 角色 id 列表
+    owner_role_id = data.get('owner_role_id')    # 可选：指定哪个角色是"群主角色"（没@时默认他回）
+
+    if not name:
+        return JSONResponse({'error': '群名不能为空'}, status_code=400)
+    if not member_ids:
+        return JSONResponse({'error': '至少拉一个角色进群'}, status_code=400)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'INSERT INTO groups (name, owner_user_id) VALUES (%s, %s) RETURNING id',
+        (name, owner_user_id)
+    )
+    gid = cur.fetchone()[0]
+
+    # 用户本人作为成员
+    cur.execute(
+        '''INSERT INTO group_members (group_id, member_type, member_id)
+           VALUES (%s, 'user', %s)''',
+        (gid, owner_user_id)
+    )
+    # 角色成员
+    for cid in member_ids:
+        is_owner = (cid == owner_role_id)
+        cur.execute(
+            '''INSERT INTO group_members (group_id, member_type, member_id, is_owner_role)
+               VALUES (%s, 'character', %s, %s)''',
+            (gid, cid, is_owner)
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f'[group] 已建群 id={gid} name={name} members={member_ids}')
+    return JSONResponse({'ok': True, 'group_id': gid})
+
+
+@router.get('/groups')
+async def list_groups(user_id: str = 'default'):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''SELECT id, name, avatar_url FROM groups
+           WHERE owner_user_id = %s ORDER BY created_at DESC''',
+        (user_id,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    groups = []
+    for gid, name, avatar in rows:
+        members = _get_member_characters(gid)
+        history = _get_group_history(gid, limit=1)
+        last = ''
+        if history:
+            h = history[-1]
+            last = (h['sender_name'] + '：' + (h['zh'] or h['jp'])) if h['sender_type'] == 'character' else ('群主：' + h['zh'])
+        groups.append({
+            'id': gid, 'name': name, 'avatar_url': avatar,
+            'member_names': [m['name'] for m in members],
+            'last_message': last,
+        })
+    return JSONResponse({'groups': groups})
+
+
+@router.get('/group/{gid}')
+async def group_detail(gid: int):
+    g = _get_group(gid)
+    if not g:
+        return JSONResponse({'error': 'group not found'}, status_code=404)
+    members = _get_member_characters(gid)
+    history = _get_group_history(gid, limit=30)
+    return JSONResponse({
+        'id': g['id'], 'name': g['name'],
+        'members': members,
+        'messages': history,
+    })
+
+
+@router.delete('/group/{gid}')
+async def delete_group(gid: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM group_messages WHERE group_id = %s', (gid,))
+    cur.execute('DELETE FROM group_members WHERE group_id = %s', (gid,))
+    cur.execute('DELETE FROM groups WHERE id = %s', (gid,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return JSONResponse({'ok': True})
+
+
+# ─────────────────── ★ 核心：群聊一轮 ───────────────────
+
+@router.post('/group/chat')
+async def group_chat(data: dict):
+    gid          = data.get('group_id')
+    user_text    = data.get('text', '')
+    user_id      = data.get('user_id', 'default')
+    mentioned_id = data.get('mentioned_id')   # 前端 @某角色时传他的 character_id（可选）
+    allow_interaction = data.get('allow_interaction', True)  # 角色之间是否互相接话
+
+    if not gid or not user_text:
+        return JSONResponse({'error': 'group_id 和 text 必填'}, status_code=400)
+
+    g = _get_group(gid)
+    if not g:
+        return JSONResponse({'error': 'group not found'}, status_code=404)
+
+    members = _get_member_characters(gid)
+    if not members:
+        return JSONResponse({'error': '群里没有角色成员'}, status_code=400)
+
+    # 1) 存用户这句话
+    _save_group_message(gid, 'user', user_id, '', user_text)
+
+    # 2) 智能调度：这一句该谁开口
+    history = _get_group_history(gid, limit=12)
+    speakers = _schedule_speakers(members, history, user_text, mentioned_id)
+    print(f'[group][{gid}] 调度结果 speakers={speakers}')
+
+    replies = []         # 这一轮所有角色回复，按生成顺序
+    member_map = {m['id']: m for m in members}
+
+    # 3) 被选中的角色依次回复
+    for cid in speakers:
+        member = member_map.get(cid)
+        if not member:
+            continue
+        cur_history = _get_group_history(gid, limit=12)   # 每次都读最新，让后说的能看到前面刚说的
+        reply = _generate_one_reply(gid, member, cur_history, user_text, members)
+        if not reply:
+            continue
+        _save_group_message(gid, 'character', cid, reply['jp'], reply['zh'], reply['emotion'])
+        audio = tts_to_b64(reply['jp'], reply['emotion'], member['voice_id'])
+        replies.append({
+            'sender_id': cid,
+            'sender_name': member['name'],
+            'jp': reply['jp'], 'zh': reply['zh'],
+            'emotion': reply['emotion'],
+            'audio_b64': audio,
+        })
+
+    # 4) 角色互动：让另一个没说话的角色有机会接一句（受 MAX_TURNS_PER_ROUND 限制）
+    if allow_interaction and replies:
+        turns_used = len(replies)
+        already = {r['sender_id'] for r in replies}
+        candidates = [m for m in members if m['id'] not in already]
+        # 简单策略：让调度再判断一次，要不要有人接、谁接
+        while turns_used < MAX_TURNS_PER_ROUND and candidates:
+            cur_history = _get_group_history(gid, limit=12)
+            follow = _schedule_speakers(candidates, cur_history,
+                                        f'（接刚才群里的话,你想接吗?不想接就别选人）', None)
+            follow = [c for c in follow if c in {m['id'] for m in candidates}]
+            if not follow:
+                break
+            cid = follow[0]
+            member = member_map.get(cid)
+            reply = _generate_one_reply(gid, member, cur_history, user_text, members)
+            if not reply:
+                break
+            _save_group_message(gid, 'character', cid, reply['jp'], reply['zh'], reply['emotion'])
+            audio = tts_to_b64(reply['jp'], reply['emotion'], member['voice_id'])
+            replies.append({
+                'sender_id': cid,
+                'sender_name': member['name'],
+                'jp': reply['jp'], 'zh': reply['zh'],
+                'emotion': reply['emotion'],
+                'audio_b64': audio,
+            })
+            already.add(cid)
+            candidates = [m for m in candidates if m['id'] != cid]
+            turns_used += 1
+
+    if not replies:
+        return JSONResponse({'replies': [], 'note': '这轮没人接话'})
+
+    print(f'[group][{gid}] 本轮共 {len(replies)} 条回复')
+    return JSONResponse({'group_id': gid, 'replies': replies})
