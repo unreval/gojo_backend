@@ -28,8 +28,9 @@ from characters import get_character
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-# 一轮群对话里，角色之间最多互相接话的次数（防止角色无限互怼烧钱）
-MAX_TURNS_PER_ROUND = 4
+# 一轮群对话里,角色发言总条数上限(用户1句 + 角色最多 7 句你来我往)
+# 8 = 让角色之间能真的"驳回 / 自由聊起来",但有硬上限防止无限互怼烧 API
+MAX_TURNS_PER_ROUND = 8
 
 
 def _parse_reply(raw: str):
@@ -201,6 +202,69 @@ def _schedule_speakers(members, history, user_text, mentioned_id=None):
         return forced
     owner_role = next((m['id'] for m in members if m['is_owner_role']), None)
     return [owner_role] if owner_role else ([members[0]['id']] if members else [])
+
+
+# ─────────────────── 角色互动调度：判断角色之间要不要继续接茬 ───────────────────
+
+def _schedule_interaction(candidates, history, all_members):
+    """专门给"角色之间互相接茬"用的调度。和 _schedule_speakers 不同：
+       - 这不是用户发话场景,而是判断"刚才那条角色发言,有没有别人想反驳/补充/调侃"
+       - 没人想接就直接返回 [],让循环自然停
+       - 强调"看话题":严肃话题真实回应,日常话题偏调侃
+    返回 character_id 列表(0 或 1 个),空列表 = 没人想接、本轮结束。"""
+    if not candidates or not history:
+        return []
+
+    last = history[-1]
+    if last['sender_type'] != 'character':
+        # 最后一条不是角色发言,没什么好"接茬"的
+        return []
+
+    last_speaker_name = last['sender_name']
+    last_content = last['jp'] if last['jp'] else last['zh']
+
+    roster = '\n'.join(f'- {m["id"]}：{m["name"]}' for m in candidates)
+    hist_txt = _history_text(history[-6:])
+
+    sched_prompt = f'''你是一个群聊"互动调度器"。下面这群里的角色刚刚有人说话了,你要判断:**还有没有别的角色会自然地接一句**。
+
+最近的群聊记录：
+{hist_txt}
+
+刚才{last_speaker_name}说："{last_content}"
+
+可以接话的角色候选(都还没在这轮说过)：
+{roster}
+
+判断规则:
+1. **有没有人想反驳、补充、调侃、吐槽他?** 如果有,选一个最想接的人接。
+2. **看话题分寸**:
+   - 如果刚才的话题严肃(涉及理念冲突、过去的事、价值观),让接话的人**真实尖锐**地回应——该怼就怼,该追问就追问。
+   - 如果是日常闲聊,让接话的人**偏向调侃、玩笑、互怼**——别端着,像朋友聊天。
+3. **如果没人真想接**(比如刚才那句话已经把话题终结了,或候选角色没立场参与),返回空数组。**不要为了凑热闹硬选人**。
+4. 一次最多挑 1 个人接,别同时让所有人挤上去。
+5. 只能从候选列表里挑。
+
+只返回单行 JSON,不要任何多余文字:
+{{"speakers":["角色id"]}}
+或没人接：
+{{"speakers":[]}}'''
+
+    try:
+        resp = claude_client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=80,
+            messages=[{'role': 'user', 'content': sched_prompt}]
+        )
+        raw = resp.content[0].text.strip()
+        parsed = _parse_reply(raw)
+        if parsed and isinstance(parsed.get('speakers'), list):
+            valid = {m['id'] for m in candidates}
+            ids = [s for s in parsed['speakers'] if s in valid]
+            return ids[:1]  # 一次最多 1 个
+    except Exception as e:
+        print(f'[group][interaction] error: {e}')
+    return []
 
 
 # ─────────────────── 让单个角色在群里生成一条回复 ───────────────────
@@ -405,21 +469,31 @@ async def group_chat(data: dict):
             'audio_b64': audio,
         })
 
-    # 4) 角色互动：让另一个没说话的角色有机会接一句（受 MAX_TURNS_PER_ROUND 限制）
+    # 4) 角色互动:用专门的"互动调度器"判断要不要有人接茬
+    #    - MAX_TURNS_PER_ROUND 是硬上限(防止极端情况下无限互怼)
+    #    - _schedule_interaction 是软刹车:模型判断没人想接就返回 [],循环自然停
+    #    - candidates 只排除"刚刚说话那个人",允许 A→B→A→B 来回交锋(这才是"驳回"的精髓)
     if allow_interaction and replies:
         turns_used = len(replies)
-        already = {r['sender_id'] for r in replies}
-        candidates = [m for m in members if m['id'] not in already]
-        # 简单策略：让调度再判断一次，要不要有人接、谁接
-        while turns_used < MAX_TURNS_PER_ROUND and candidates:
-            cur_history = _get_group_history(gid, limit=12)
-            follow = _schedule_speakers(candidates, cur_history,
-                                        f'（接刚才群里的话,你想接吗?不想接就别选人）', None)
-            follow = [c for c in follow if c in {m['id'] for m in candidates}]
-            if not follow:
+
+        while turns_used < MAX_TURNS_PER_ROUND:
+            last_speaker_id = replies[-1]['sender_id']
+            # 只排除刚刚说话那个人(避免自言自语),其他人都可接茬
+            candidates = [m for m in members if m['id'] != last_speaker_id]
+            if not candidates:
                 break
+
+            cur_history = _get_group_history(gid, limit=12)
+            follow = _schedule_interaction(candidates, cur_history, members)
+            if not follow:
+                # 调度器判断:没人真想接,本轮自然结束
+                print(f'[group][{gid}] 互动调度判断无人接茬,本轮结束(turns={turns_used})')
+                break
+
             cid = follow[0]
             member = member_map.get(cid)
+            if not member:
+                break
             reply = _generate_one_reply(gid, member, cur_history, user_text, members)
             if not reply:
                 break
@@ -432,9 +506,10 @@ async def group_chat(data: dict):
                 'emotion': reply['emotion'],
                 'audio_b64': audio,
             })
-            already.add(cid)
-            candidates = [m for m in candidates if m['id'] != cid]
             turns_used += 1
+
+        if turns_used >= MAX_TURNS_PER_ROUND:
+            print(f'[group][{gid}] 撞到硬上限 MAX_TURNS_PER_ROUND={MAX_TURNS_PER_ROUND},本轮强制结束')
 
     if not replies:
         return JSONResponse({'replies': [], 'note': '这轮没人接话'})
