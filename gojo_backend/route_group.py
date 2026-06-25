@@ -299,30 +299,75 @@ def _schedule_interaction(candidates, history, all_members):
 
 # ─────────────────── 让单个角色在群里生成一条回复 ───────────────────
 
-def _generate_one_reply(gid, member, history, user_text, all_members):
+def _generate_one_reply(gid, member, history, user_text, all_members, replying_to=None):
     """让某个角色基于群上下文回复一句。复用单人的 build_system_prompt + 角色人设/记忆。
-    返回 {'jp','zh','emotion'} 或 None。"""
+    返回 {'jp','zh','emotion'} 或 None。
+
+    replying_to: None 表示"响应群主的发言"(第一波);
+                 dict {'speaker_name', 'jp', 'zh'} 表示"接刚才某个角色说的话"(互动场景)。
+                 这两种场景给模型的指令不同——前者是回用户,后者是和另一个角色对话。
+    """
     others = '、'.join(m['name'] for m in all_members if m['id'] != member['id'])
     hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
 
-    group_scene = f'''
+    if replying_to is None:
+        # 第一波:响应群主
+        group_scene = f'''
 
 【★ 群聊场景——你现在在一个群里】
 这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
 下面是群里最近的对话记录：
 {hist_txt}
 
+群主刚说："{user_text}"
+
 现在轮到你（{member['name']}）说话。要求：
-1. 只说你自己会说的话,符合你的人设,别替别人说。
-2. 可以回应群主,也可以接其他角色刚说的话（像真群聊一样互动）,但不要长篇大论。
-3. 1 条气泡,简短自然,像群里随口接话。
+1. 这是在回应群主的话,符合你的人设。
+2. 1 条气泡,简短自然,像群里随口接话。
+3. jp 必须是纯日语,zh 是中文翻译。
+
+只返回单行 JSON：
+{{"emotion":"情绪","messages":[{{"jp":"日语","zh":"中文"}}]}}'''
+
+        user_msg = f'（群主刚说：{user_text}）请你在群里接话。'
+
+    else:
+        # 互动场景:接前一个角色刚说的话
+        prev_name = replying_to['speaker_name']
+        prev_content = replying_to['jp'] if replying_to.get('jp') else replying_to.get('zh', '')
+
+        group_scene = f'''
+
+【★ 群聊场景——你现在在一个群里】
+这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
+下面是群里最近的对话记录：
+{hist_txt}
+
+群主一开始说："{user_text}"
+然后 {prev_name} 刚说了一句："{prev_content}"
+
+★★★ 现在轮到你（{member['name']}）接 {prev_name} 的话 ★★★
+你不是在重新回应群主——群主的那句已经被 {prev_name} 接过了。
+你要做的是:**针对 {prev_name} 刚说的这句话**,做出自然的反应。比如:
+- 反驳他("不是这样的""你少胡说")
+- 补充他("还有件事你没说""说起来...")
+- 调侃他("你又来了""说得真好听")
+- 追问他("真的吗""那你呢")
+- 或者只是接一句感想
+
+要求：
+1. 你的话要**明显是针对 {prev_name} 那句**,不是在和群主对话。如果合适,可以直接说他的名字。
+2. 符合你自己的人设,但要让人看出来你是在接他的话。
+3. 1 条气泡,简短自然。**绝对不要重复 {prev_name} 刚才说的话**,你要说点新的。
 4. jp 必须是纯日语,zh 是中文翻译。
 
 只返回单行 JSON：
 {{"emotion":"情绪","messages":[{{"jp":"日语","zh":"中文"}}]}}'''
 
+        user_msg = f'（{prev_name} 刚在群里说：{prev_content}）请你针对他这句话接一句。'
+
     system_prompt = build_system_prompt('group_' + str(gid), member['id'], user_text) + group_scene
-    messages = [{'role': 'user', 'content': f'（群主刚说：{user_text}）请你在群里接话。'}]
+    messages = [{'role': 'user', 'content': user_msg}]
 
     for attempt in range(3):
         try:
@@ -525,7 +570,14 @@ async def group_chat(data: dict):
             member = member_map.get(cid)
             if not member:
                 break
-            reply = _generate_one_reply(gid, member, cur_history, user_text, members)
+            # ★ 关键:互动场景传 replying_to,让 Sonnet 知道这次是接上一个角色的话,不是回用户
+            prev = replies[-1]
+            replying_to = {
+                'speaker_name': prev['sender_name'],
+                'jp': prev['jp'],
+                'zh': prev['zh'],
+            }
+            reply = _generate_one_reply(gid, member, cur_history, user_text, members, replying_to=replying_to)
             if not reply:
                 break
 
