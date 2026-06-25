@@ -49,6 +49,36 @@ def _parse_reply(raw: str):
     return None
 
 
+def _is_repetitive(new_text: str, recent_texts: list, threshold: float = 0.7) -> bool:
+    """检测新生成的回复是否和最近回复"复读"。
+    简单算法:对每个最近回复,算字符级 Jaccard 相似度(集合交/并),
+    任何一个超过阈值就算复读。阈值 0.7 = 70% 字符重合就停。"""
+    if not new_text or not recent_texts:
+        return False
+    new_set = set(new_text)
+    if len(new_set) < 5:
+        # 太短的句子(比如纯标点),不算复读
+        return False
+    for old in recent_texts:
+        if not old:
+            continue
+        old_set = set(old)
+        if len(old_set) < 5:
+            continue
+        inter = len(new_set & old_set)
+        union = len(new_set | old_set)
+        if union == 0:
+            continue
+        sim = inter / union
+        if sim >= threshold:
+            return True
+        # 额外检查:如果新句子 80% 的字符都在旧句子里,也算复读
+        if len(new_set & old_set) / len(new_set) >= 0.85:
+            return True
+    return False
+
+
+
 # ─────────────────── 群成员 / 历史 读取小工具 ───────────────────
 
 def _get_group(gid: int):
@@ -473,6 +503,7 @@ async def group_chat(data: dict):
     #    - MAX_TURNS_PER_ROUND 是硬上限(防止极端情况下无限互怼)
     #    - _schedule_interaction 是软刹车:模型判断没人想接就返回 [],循环自然停
     #    - candidates 只排除"刚刚说话那个人",允许 A→B→A→B 来回交锋(这才是"驳回"的精髓)
+    #    - ★ 复读检测:Sonnet 词穷时会复读,这里检测到就强制停
     if allow_interaction and replies:
         turns_used = len(replies)
 
@@ -497,6 +528,14 @@ async def group_chat(data: dict):
             reply = _generate_one_reply(gid, member, cur_history, user_text, members)
             if not reply:
                 break
+
+            # ★ 复读检测:看新回复和最近 3 条是否过度相似(简单的字符相似度)
+            new_jp = reply['jp'].strip()
+            recent_jps = [r['jp'].strip() for r in replies[-3:]]
+            if _is_repetitive(new_jp, recent_jps):
+                print(f'[group][{gid}] 检测到复读,本轮强制结束(turns={turns_used}) 新句="{new_jp[:30]}"')
+                break
+
             _save_group_message(gid, 'character', cid, reply['jp'], reply['zh'], reply['emotion'])
             audio = tts_to_b64(reply['jp'], reply['emotion'], member['voice_id'])
             replies.append({
