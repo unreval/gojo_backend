@@ -1,171 +1,74 @@
-"""角色定义 + 角色背景记忆（CRUD + 检索 + 预置数据）"""
-import os
-import json
+"""角色 CRUD + 背景记忆检索（通用逻辑）
+角色人设在 characters_data/<id>/ 下,加新角色只需新建文件夹,不动本文件。
+"""
 from db import get_conn
+from characters_data import REGISTRY
+from characters_data._loader import load_core, load_memories, load_lore, reload_lore
 
 
-# ────────── 时间锚点：只检索 时间档 <= 锚点 的剧情背景（防剧透/控制角色认知）──────────
-# 优先读 gojo_lore.json 里的「当前锚点」；读不到才用这里的默认值
-CHARACTER_ANCHOR = {'gojo': 2}
-
-# JSON 知识库缓存（启动后只读一次硬盘）
-_lore_cache = {}
+CHARACTER_ANCHOR = {
+    'gojo': 2,
+    'geto': 2,
+}
 
 
-def _load_lore_json(character_id):
-    if character_id in _lore_cache:
-        return _lore_cache[character_id]
-    path = os.path.join(os.path.dirname(__file__), f'{character_id}_lore.json')
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except Exception as e:
-        print(f'[lore] 加载 {character_id}_lore.json 失败（没有该文件就忽略）：{e}')
-        data = {'_说明': {}, '条目': []}
-    _lore_cache[character_id] = data
-    return data
-
-
-def reload_lore(character_id='gojo'):
-    """手改完 json 想立刻生效、又不想重启服务时调用一次。"""
-    _lore_cache.pop(character_id, None)
-    return _load_lore_json(character_id)
-
-
-# ────────── 五条悟核心人格（存进数据库的 core_prompt）──────────
-GOJO_CORE_PROMPT = '''你是五条悟（Gojo Satoru），咒术回战角色，以第一人称扮演他与对方自然对话。
-
-【身份认知——非常重要】
-你的名字是五条悟，英文名 Satoru Gojo，小名 Satoru。
-对方叫你「satoru」「悟」「五条」「猫猫」时，都是在叫你。
-你是说话的那个人，对方是听话的那个人。
-
-【语言风格——核心】
-五条悟说话慵懒、玩世不恭，偶尔流露温柔。
-有时简短干脆，有时展开聊得久一点（特别是聊到喜欢的话题或在意的人时）。
-不是少年漫主角的傻气热血。
-
-口头禅：「まあ」「つまらない」「僕が最強だから」
-但口头禅不能滥用——一段对话里最多用一次「まあ」开头。
-
-【笑声规则——非常重要！】
-推荐：「ふっ」（60%）、「はは」（25%）、「へへ」（15%）
-禁止：「あはは」「ふふ」「ハハハ」
-
-【对话原则】
-- 用日语回复
-- 表面轻浮，内心温柔，不轻易流露深层情感
-- 提到甜品或喜欢的东西时自然流露真实开心
-- 提到夏油杰时态度复杂，不会轻易谈及
-- 别人关心你时不要傻乎乎直接道谢，用调侃化解
-- 直接回答对方这次说的话，不要复述之前已说过的事
-
-【严禁编造记忆】
-- 上方【关于对方的已确认事实】中的内容 → 真实可用
-- 上方【你此刻自然想起的、关于你自己的一些事】 → 你自己真实的设定，可用
-- 不在以上两个列表里的"过去的事" → 绝对不要编造'''
-
-
-GOJO_GREETING = 'おう、また会えたね。'
-
-
-# ────────── 五条悟预置背景记忆 ──────────
-GOJO_SEED_MEMORIES = [
-    ('特别喜欢甜食，最爱喜久福的蕨饼和麻薯，心情不好时靠甜食治愈',
-     '喜好', '甜,甜食,甜点,甜的,蛋糕,吃,零食,喜久福,麻薯,蕨饼,糖,布丁,冰淇淋,饼干,巧克力,治愈', 0.95),
-    ('喜欢黄油土豆，尤其是北海道产的',
-     '喜好', '土豆,薯,马铃薯,黄油,北海道', 0.6),
-    ('爱喝百事可乐，比其他饮料都喜欢',
-     '喜好', '可乐,百事,饮料,喝,汽水,饮品', 0.7),
-    ('酒量极差，一滴就醉，和硝子、伊地知去酒馆会主动点儿童套餐',
-     '喜好', '酒,喝酒,醉,啤酒,清酒,儿童套餐,酒馆,聚会', 0.8),
-    ('睡得很少，每天只睡3小时左右，是个慢性熬夜的人',
-     '习惯', '睡,睡觉,熬夜,困,睡眠,休息,几点睡,失眠,夜', 0.85),
-    ('平时用眼罩或墨镜遮住眼睛，因为六眼很耗神，只在认真时摘下',
-     '习惯', '眼罩,墨镜,眼睛,六眼,蓝眼睛,摘,遮,瞳', 0.8),
-    ('喜欢逗学生玩、给他们买零食吃，用轻松的方式表达关心',
-     '习惯', '学生,零食,逗,关心,照顾,带零食', 0.75),
-    ('天生拥有六眼和无下限术式，是百年一遇的咒术师，被称为最强',
-     '能力', '术式,无下限,六眼,最强,战斗,咒力,能力,强,实力,厉害', 0.9),
-    ('领域展开是「无量空处」，能直接让对手陷入信息地狱',
-     '能力', '领域,无量空处,展开,招式,必杀,绝招,战斗', 0.7),
-    ('夏油杰是他唯一的挚友，曾经是最强的搭档。后来夏油走上了另一条路，这是他心里最深的伤口，不轻易触碰',
-     '关系', '夏油,杰,挚友,朋友,搭档,过去,孤独,最好的朋友,bestfriend,伙伴', 1.0),
-    ('是东京咒术高专的老师，带着虎杖悠仁、伏黑惠、钉崎野蔷薇这一届学生',
-     '关系', '学生,老师,虎杖,伏黑,钉崎,教书,高专,学校,任教', 0.85),
-    ('特别在意伏黑惠这个学生，曾把他从腐朽的禅院家族里带出来抚养',
-     '关系', '伏黑,惠,学生,禅院', 0.75),
-    ('家入硝子是高专同学，反式术式能治愈伤口，受伤时常找她',
-     '关系', '硝子,家入,同学,治疗,受伤,治愈,伤口', 0.65),
-    ('七海健人曾经是他的学生，现在是同事，关系微妙又信任',
-     '关系', '七海,健人,娜娜明,同事,nanami', 0.6),
-    ('出身咒术界御三家的五条家，是天生背负百年一遇血统的人',
-     '身世', '五条家,御三家,家族,血统,身世,出身,出生', 0.7),
-    ('生日是12月7日',
-     '身世', '生日,12月7日,几号,出生日', 0.5),
-    ('表面轻浮、爱开玩笑、自信到欠揍，内心其实非常孤独——站在最强的高处时没人能并肩',
-     '性格', '孤独,寂寞,一个人,性格,最强,自信,玩世不恭,轻浮,内心', 0.95),
-    ('口头禅是「僕が最強だから」（因为我是最强的），常用来开玩笑也用来掩饰',
-     '性格', '最强,口头禅,自信', 0.5),
-    ('一直想改变咒术界腐朽的体制，培养强大的下一代是他的真正目标',
-     '性格', '目标,理想,咒术界,改变,体制,未来,使命,改革', 0.7),
-]
-
-
-def seed_gojo_character():
-    """如果五条悟角色不存在，写入；如果背景记忆为空，预置一批"""
+def seed_all_characters():
     conn = get_conn()
     cur = conn.cursor()
-
-    # 1. 角色定义
-    cur.execute("SELECT id FROM characters WHERE id = 'gojo'")
-    if not cur.fetchone():
-        cur.execute(
-            '''INSERT INTO characters (id, name, name_en, voice_id, core_prompt, greeting)
-               VALUES (%s, %s, %s, %s, %s, %s)''',
-            ('gojo', '五条悟', 'Gojo Satoru',
-             'bfcbd07c927742d6803f52084f6bb776',
-             GOJO_CORE_PROMPT, GOJO_GREETING)
-        )
-        print('[seed] 已创建角色：gojo')
-
-    # 2. 背景记忆
-    cur.execute("SELECT COUNT(*) FROM character_memory WHERE character_id = 'gojo'")
-    cnt = cur.fetchone()[0]
-    if cnt == 0:
-        for content, category, keywords, importance in GOJO_SEED_MEMORIES:
+    for cid in REGISTRY:
+        core = load_core(cid)
+        if not core:
+            print(f'[seed] ⚠️ 跳过 {cid}：加载 core 失败')
+            continue
+        cur.execute("SELECT id FROM characters WHERE id = %s", (cid,))
+        exists = cur.fetchone()
+        if not exists:
             cur.execute(
-                '''INSERT INTO character_memory (character_id, content, category, keywords, importance)
-                   VALUES (%s, %s, %s, %s, %s)''',
-                ('gojo', content, category, keywords, importance)
+                '''INSERT INTO characters (id, name, name_en, voice_id, core_prompt, greeting)
+                   VALUES (%s, %s, %s, %s, %s, %s)''',
+                (cid, core['name'], core['name_en'], core['voice_id'],
+                 core['core_prompt'], core['greeting'])
             )
-        print(f'[seed] 已预置 {len(GOJO_SEED_MEMORIES)} 条五条悟背景记忆')
-
+            print(f'[seed] 已创建角色：{cid}')
+        else:
+            cur.execute(
+                '''UPDATE characters SET core_prompt = %s, greeting = %s, name = %s, name_en = %s
+                   WHERE id = %s''',
+                (core['core_prompt'], core['greeting'], core['name'], core['name_en'], cid)
+            )
+            print(f'[seed] 已更新角色：{cid}')
+        seed_mems = load_memories(cid)
+        if seed_mems:
+            cur.execute("DELETE FROM character_memory WHERE character_id = %s", (cid,))
+            for content, category, keywords, importance in seed_mems:
+                cur.execute(
+                    '''INSERT INTO character_memory (character_id, content, category, keywords, importance)
+                       VALUES (%s, %s, %s, %s, %s)''',
+                    (cid, content, category, keywords, importance)
+                )
+            print(f'[seed] 已预置 {cid} 的 {len(seed_mems)} 条 background memory')
     conn.commit()
     cur.close()
     conn.close()
 
 
-# ────────── 角色 CRUD ──────────
+# 兼容 gojo_server.py 的旧入口
+def seed_gojo_character():
+    seed_all_characters()
+
 
 def get_character(character_id: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         '''SELECT id, name, name_en, avatar_url, voice_id, core_prompt, greeting
-           FROM characters WHERE id = %s''',
-        (character_id,)
-    )
+           FROM characters WHERE id = %s''', (character_id,))
     row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not row:
-        return None
-    return {
-        'id': row[0], 'name': row[1], 'name_en': row[2],
-        'avatar_url': row[3], 'voice_id': row[4],
-        'core_prompt': row[5], 'greeting': row[6],
-    }
+    cur.close(); conn.close()
+    if not row: return None
+    return {'id': row[0], 'name': row[1], 'name_en': row[2],
+            'avatar_url': row[3], 'voice_id': row[4],
+            'core_prompt': row[5], 'greeting': row[6]}
 
 
 def list_characters():
@@ -173,12 +76,9 @@ def list_characters():
     cur = conn.cursor()
     cur.execute('SELECT id, name, name_en, avatar_url, greeting FROM characters ORDER BY created_at')
     rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    cur.close(); conn.close()
     return [{'id': r[0], 'name': r[1], 'name_en': r[2], 'avatar_url': r[3], 'greeting': r[4]} for r in rows]
 
-
-# ────────── 角色背景记忆 CRUD ──────────
 
 def list_character_memory(character_id: str):
     conn = get_conn()
@@ -186,118 +86,74 @@ def list_character_memory(character_id: str):
     cur.execute(
         '''SELECT id, content, category, keywords, importance, timestamp
            FROM character_memory WHERE character_id = %s
-           ORDER BY category, importance DESC''',
-        (character_id,)
-    )
+           ORDER BY category, importance DESC''', (character_id,))
     rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [{
-        'id': r[0], 'content': r[1], 'category': r[2] or '其他',
-        'keywords': r[3] or '', 'importance': float(r[4] or 0.5),
-        'timestamp': str(r[5]) if r[5] else None,
-    } for r in rows]
+    cur.close(); conn.close()
+    return [{'id': r[0], 'content': r[1], 'category': r[2] or '其他',
+             'keywords': r[3] or '', 'importance': float(r[4] or 0.5),
+             'timestamp': str(r[5]) if r[5] else None} for r in rows]
 
 
-def add_character_memory(character_id: str, content: str, category: str = '其他',
-                         keywords: str = '', importance: float = 0.5):
+def add_character_memory(character_id, content, category='其他', keywords='', importance=0.5):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         '''INSERT INTO character_memory (character_id, content, category, keywords, importance)
            VALUES (%s, %s, %s, %s, %s) RETURNING id''',
-        (character_id, content, category, keywords, importance)
-    )
+        (character_id, content, category, keywords, importance))
     new_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
+    conn.commit(); cur.close(); conn.close()
     return new_id
 
 
-def update_character_memory(mem_id: int, fields: dict):
-    cols = []
-    vals = []
+def update_character_memory(mem_id, fields):
+    cols, vals = [], []
     for k in ['content', 'category', 'keywords', 'importance']:
-        if k in fields:
-            cols.append(f'{k} = %s')
-            vals.append(fields[k])
-    if not cols:
-        return False
+        if k in fields: cols.append(f'{k} = %s'); vals.append(fields[k])
+    if not cols: return False
     vals.append(mem_id)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(f'UPDATE character_memory SET {", ".join(cols)} WHERE id = %s', vals)
-    conn.commit()
-    cur.close()
-    conn.close()
+    conn.commit(); cur.close(); conn.close()
     return True
 
 
-def delete_character_memory(mem_id: int):
+def delete_character_memory(mem_id):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('DELETE FROM character_memory WHERE id = %s', (mem_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    conn.commit(); cur.close(); conn.close()
 
 
-# ────────── 检索（数据库 + JSON 合并，关键词匹配 + 重要性加权 + 时间档过滤）──────────
-
-def retrieve_character_memory(character_id: str, query_text: str, limit: int = 4):
-    """
-    根据查询文本检索相关背景，合并两个来源：
-      1) 数据库 character_memory —— 性格/喜好/习惯，视为"永远知道"，不做时间档过滤
-      2) JSON 知识库 {character_id}_lore.json —— 剧情/人物，按时间档过滤
-         （时间档 > 当前锚点的条目不返回，比如"涩谷事变封印"在锚点2时不会被想起）
-    命中关键词的才返回，按得分排序、去重、截断到 limit 条。
-    """
-    if not query_text:
-        return []
-
-    matched = []  # (score, content)
-
-    # 1) 数据库背景（性格/喜好/习惯，永远可用）
+def retrieve_character_memory(character_id, query_text, limit=4):
+    if not query_text: return []
+    matched = []
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        'SELECT content, keywords, importance FROM character_memory WHERE character_id = %s',
-        (character_id,)
-    )
+    cur.execute('SELECT content, keywords, importance FROM character_memory WHERE character_id = %s',
+                (character_id,))
     rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    cur.close(); conn.close()
     for content, keywords, importance in rows:
         kws = [k.strip() for k in (keywords or '').split(',') if k.strip()]
         hit = sum(1 for kw in kws if kw and kw in query_text)
         if hit > 0:
-            score = hit * 1.0 + (importance or 0.5) * 0.5
-            matched.append((score, content))
-
-    # 2) JSON 剧情/人物背景（带时间档过滤）
-    data = _load_lore_json(character_id)
+            matched.append((hit * 1.0 + (importance or 0.5) * 0.5, content))
+    data = load_lore(character_id)
     anchor = data.get('_说明', {}).get('当前锚点')
-    if anchor is None:
-        anchor = CHARACTER_ANCHOR.get(character_id, 1)
+    if anchor is None: anchor = CHARACTER_ANCHOR.get(character_id, 1)
     for entry in data.get('条目', []):
-        if entry.get('时间档', 1) > anchor:
-            continue  # 此刻还不该知道的事，跳过
+        if entry.get('时间档', 1) > anchor: continue
         kws = entry.get('关键词', []) or []
         hit = sum(1 for kw in kws if kw and kw in query_text)
         if hit > 0:
             content = f"{entry.get('标题', '')}：{entry.get('内容', '')}"
-            score = hit * 1.0 + 0.4  # 剧情条目给一个基础权重
-            matched.append((score, content))
-
-    # 排序 + 去重（内容几乎一样的只留一条）+ 截断
+            matched.append((hit * 1.0 + 0.4, content))
     matched.sort(key=lambda x: x[0], reverse=True)
     result, seen = [], []
     for _, content in matched:
-        if any((content in s) or (s in content) for s in seen):
-            continue
-        seen.append(content)
-        result.append(content)
-        if len(result) >= limit:
-            break
+        if any((content in s) or (s in content) for s in seen): continue
+        seen.append(content); result.append(content)
+        if len(result) >= limit: break
     return result

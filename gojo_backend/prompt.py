@@ -1,25 +1,11 @@
-"""Prompt 动态组装：把角色定义 + 用户记忆 + 角色背景 + 对话上下文拼起来"""
+"""Prompt 动态组装：把角色定义 + 用户记忆 + 角色背景 + 对话上下文拼起来
+★ CANON_LOCK 按 character_id 从 characters_data/<id>/canon_lock.py 动态加载
+"""
 from datetime import datetime
 from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID
-from characters import get_character, retrieve_character_memory, GOJO_CORE_PROMPT
+from characters import get_character, retrieve_character_memory
+from characters_data._loader import load_canon_lock, load_core
 from user_memory import get_long_memory, get_recent_openings, get_last_assistant_reply
-
-
-# ──────────────────────────────────────────────────────────────
-# 设定铁律：优先级高于一切风格/格式规则，紧跟在角色定义之后注入
-# 作用：堵住"为了戏剧张力而脑补原作没写过的私人经历"这个漏洞
-# ──────────────────────────────────────────────────────────────
-CANON_LOCK = '''
-【设定铁律 · 优先级最高 · 高于剧情推进和情绪安抚】
-1. 严格以五条悟的原作设定为准。原作未明确写过的私人经历——尤其恋爱史、性经历、暧昧对象——一律视为"不存在/没发生过"，绝不编造。
-2. 禁令包含一切间接手段：不许用反问、暗示、"嘴硬式承认"、欲言又止、"……ある"这种留白去暗示其实有过。
-3. 用户追问、质疑、生气、逼问这类话题时，你要接住的是"五条悟会怎么躲"，不是"怎么把剧情整得更有张力"。正确反应只有这几种：
-   - 嫌麻烦地打太极、转移话题
-   - 用"我可是最强嘛"那种自负态度调侃带过
-   - 反过来调侃用户为啥这么介意
-   - 要否认就用轻佻语气直接否认，不解释、不留白
-4. 任何为了"接住戏剧张力 / 安抚用户情绪 / 让对话顺下去"而给出的承认或暗示，都算 OOC，必须替换成上面的搪塞或调侃。
-5. 本规则优先级高于"多气泡""避免重复"等一切格式与风格要求。宁可这一轮显得平淡扫兴，也不能让角色失真。'''
 
 
 def get_time_context():
@@ -46,24 +32,20 @@ def get_time_context():
 
 
 def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message=''):
-    """
-    从四个来源动态拼装 system prompt：
-      1. 角色定义（characters 表的 core_prompt）
-      2. 角色背景记忆（按 user_message 检索相关条目）
-      3. 用户长期记忆（按 user_id + character_id 取）
-      4. 最近开头/上一条回复（避免重复 / 防复读）
-    + 设定铁律 + 时间上下文 + 输出格式规范
-    """
-
     # ── 1. 角色定义 ──
     char = get_character(character_id)
     if not char:
-        print(f'[prompt] ⚠️ 找不到角色 {character_id}，使用 GOJO_CORE_PROMPT 兜底')
-        core_prompt = GOJO_CORE_PROMPT
+        print(f'[prompt] ⚠️ DB 里找不到角色 {character_id}，尝试从代码包加载')
+        fallback = load_core(character_id)
+        if fallback:
+            core_prompt = fallback['core_prompt']
+        else:
+            default_char = get_character(DEFAULT_CHARACTER_ID)
+            core_prompt = default_char['core_prompt'] if default_char else ''
     else:
         core_prompt = char['core_prompt']
 
-    # ── 2. 角色背景记忆（按话题检索）──
+    # ── 2. 角色背景记忆 ──
     recalls = retrieve_character_memory(character_id, user_message, limit=4)
     recall_text = ''
     if recalls:
@@ -88,7 +70,7 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 {chr(10).join(memory_lines)}
 
 使用规则：
-1. 这些是关于【对方/用户本人】的事实，当作真的、不要质疑。但它们只约束"你对用户的了解"，绝不能拿来推翻或补充五条悟自己的原作设定——一旦涉及角色设定，一律以上面的【设定铁律】为准。
+1. 这些是关于【对方/用户本人】的事实，当作真的、不要质疑。但它们只约束"你对用户的了解"，绝不能拿来推翻或补充角色自己的原作设定——一旦涉及角色设定，一律以上面的【设定铁律】为准。
 2. 自然融入回复，不要刻意背诵清单。
 3. 列表里有的事必须当作记得，没有的可以说不记得。'''
 
@@ -107,12 +89,15 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 上一条：「{last_reply[:200]}」
 不要重复，不要承接，第一句话直接针对用户这次发的消息。'''
 
+    # ── ★ 角色专属铁律 ──
+    canon_lock = load_canon_lock(character_id)
+
     # ── 时间 + 输出规范 ──
     time_ctx = get_time_context()
     emotion_list = ', '.join(EMOTIONS)
 
     return f'''{core_prompt}
-{CANON_LOCK}
+{canon_lock}
 {memory_text}{recall_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}

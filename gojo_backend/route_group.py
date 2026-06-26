@@ -28,9 +28,8 @@ from characters import get_character
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-# 一轮群对话里,角色发言总条数上限(用户1句 + 角色最多 7 句你来我往)
-# 8 = 让角色之间能真的"驳回 / 自由聊起来",但有硬上限防止无限互怼烧 API
-MAX_TURNS_PER_ROUND = 8
+# 一轮群对话里，角色之间最多互相接话的次数（防止角色无限互怼烧钱）
+MAX_TURNS_PER_ROUND = 4
 
 
 def _parse_reply(raw: str):
@@ -47,36 +46,6 @@ def _parse_reply(raw: str):
     except Exception:
         pass
     return None
-
-
-def _is_repetitive(new_text: str, recent_texts: list, threshold: float = 0.7) -> bool:
-    """检测新生成的回复是否和最近回复"复读"。
-    简单算法:对每个最近回复,算字符级 Jaccard 相似度(集合交/并),
-    任何一个超过阈值就算复读。阈值 0.7 = 70% 字符重合就停。"""
-    if not new_text or not recent_texts:
-        return False
-    new_set = set(new_text)
-    if len(new_set) < 5:
-        # 太短的句子(比如纯标点),不算复读
-        return False
-    for old in recent_texts:
-        if not old:
-            continue
-        old_set = set(old)
-        if len(old_set) < 5:
-            continue
-        inter = len(new_set & old_set)
-        union = len(new_set | old_set)
-        if union == 0:
-            continue
-        sim = inter / union
-        if sim >= threshold:
-            return True
-        # 额外检查:如果新句子 80% 的字符都在旧句子里,也算复读
-        if len(new_set & old_set) / len(new_set) >= 0.85:
-            return True
-    return False
-
 
 
 # ─────────────────── 群成员 / 历史 读取小工具 ───────────────────
@@ -234,140 +203,32 @@ def _schedule_speakers(members, history, user_text, mentioned_id=None):
     return [owner_role] if owner_role else ([members[0]['id']] if members else [])
 
 
-# ─────────────────── 角色互动调度：判断角色之间要不要继续接茬 ───────────────────
-
-def _schedule_interaction(candidates, history, all_members):
-    """专门给"角色之间互相接茬"用的调度。和 _schedule_speakers 不同：
-       - 这不是用户发话场景,而是判断"刚才那条角色发言,有没有别人想反驳/补充/调侃"
-       - 没人想接就直接返回 [],让循环自然停
-       - 强调"看话题":严肃话题真实回应,日常话题偏调侃
-    返回 character_id 列表(0 或 1 个),空列表 = 没人想接、本轮结束。"""
-    if not candidates or not history:
-        return []
-
-    last = history[-1]
-    if last['sender_type'] != 'character':
-        # 最后一条不是角色发言,没什么好"接茬"的
-        return []
-
-    last_speaker_name = last['sender_name']
-    last_content = last['jp'] if last['jp'] else last['zh']
-
-    roster = '\n'.join(f'- {m["id"]}：{m["name"]}' for m in candidates)
-    hist_txt = _history_text(history[-6:])
-
-    sched_prompt = f'''你是一个群聊"互动调度器"。下面这群里的角色刚刚有人说话了,你要判断:**还有没有别的角色会自然地接一句**。
-
-最近的群聊记录：
-{hist_txt}
-
-刚才{last_speaker_name}说："{last_content}"
-
-可以接话的角色候选(都还没在这轮说过)：
-{roster}
-
-判断规则:
-1. **有没有人想反驳、补充、调侃、吐槽他?** 如果有,选一个最想接的人接。
-2. **看话题分寸**:
-   - 如果刚才的话题严肃(涉及理念冲突、过去的事、价值观),让接话的人**真实尖锐**地回应——该怼就怼,该追问就追问。
-   - 如果是日常闲聊,让接话的人**偏向调侃、玩笑、互怼**——别端着,像朋友聊天。
-3. **如果没人真想接**(比如刚才那句话已经把话题终结了,或候选角色没立场参与),返回空数组。**不要为了凑热闹硬选人**。
-4. 一次最多挑 1 个人接,别同时让所有人挤上去。
-5. 只能从候选列表里挑。
-
-只返回单行 JSON,不要任何多余文字:
-{{"speakers":["角色id"]}}
-或没人接：
-{{"speakers":[]}}'''
-
-    try:
-        resp = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=80,
-            messages=[{'role': 'user', 'content': sched_prompt}]
-        )
-        raw = resp.content[0].text.strip()
-        parsed = _parse_reply(raw)
-        if parsed and isinstance(parsed.get('speakers'), list):
-            valid = {m['id'] for m in candidates}
-            ids = [s for s in parsed['speakers'] if s in valid]
-            return ids[:1]  # 一次最多 1 个
-    except Exception as e:
-        print(f'[group][interaction] error: {e}')
-    return []
-
-
 # ─────────────────── 让单个角色在群里生成一条回复 ───────────────────
 
-def _generate_one_reply(gid, member, history, user_text, all_members, replying_to=None):
+def _generate_one_reply(gid, member, history, user_text, all_members):
     """让某个角色基于群上下文回复一句。复用单人的 build_system_prompt + 角色人设/记忆。
-    返回 {'jp','zh','emotion'} 或 None。
-
-    replying_to: None 表示"响应群主的发言"(第一波);
-                 dict {'speaker_name', 'jp', 'zh'} 表示"接刚才某个角色说的话"(互动场景)。
-                 这两种场景给模型的指令不同——前者是回用户,后者是和另一个角色对话。
-    """
+    返回 {'jp','zh','emotion'} 或 None。"""
     others = '、'.join(m['name'] for m in all_members if m['id'] != member['id'])
     hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
 
-    if replying_to is None:
-        # 第一波:响应群主
-        group_scene = f'''
+    group_scene = f'''
 
 【★ 群聊场景——你现在在一个群里】
 这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
 下面是群里最近的对话记录：
 {hist_txt}
-
-群主刚说："{user_text}"
 
 现在轮到你（{member['name']}）说话。要求：
-1. 这是在回应群主的话,符合你的人设。
-2. 1 条气泡,简短自然,像群里随口接话。
-3. jp 必须是纯日语,zh 是中文翻译。
-
-只返回单行 JSON：
-{{"emotion":"情绪","messages":[{{"jp":"日语","zh":"中文"}}]}}'''
-
-        user_msg = f'（群主刚说：{user_text}）请你在群里接话。'
-
-    else:
-        # 互动场景:接前一个角色刚说的话
-        prev_name = replying_to['speaker_name']
-        prev_content = replying_to['jp'] if replying_to.get('jp') else replying_to.get('zh', '')
-
-        group_scene = f'''
-
-【★ 群聊场景——你现在在一个群里】
-这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
-下面是群里最近的对话记录：
-{hist_txt}
-
-群主一开始说："{user_text}"
-然后 {prev_name} 刚说了一句："{prev_content}"
-
-★★★ 现在轮到你（{member['name']}）接 {prev_name} 的话 ★★★
-你不是在重新回应群主——群主的那句已经被 {prev_name} 接过了。
-你要做的是:**针对 {prev_name} 刚说的这句话**,做出自然的反应。比如:
-- 反驳他("不是这样的""你少胡说")
-- 补充他("还有件事你没说""说起来...")
-- 调侃他("你又来了""说得真好听")
-- 追问他("真的吗""那你呢")
-- 或者只是接一句感想
-
-要求：
-1. 你的话要**明显是针对 {prev_name} 那句**,不是在和群主对话。如果合适,可以直接说他的名字。
-2. 符合你自己的人设,但要让人看出来你是在接他的话。
-3. 1 条气泡,简短自然。**绝对不要重复 {prev_name} 刚才说的话**,你要说点新的。
+1. 只说你自己会说的话,符合你的人设,别替别人说。
+2. 可以回应群主,也可以接其他角色刚说的话（像真群聊一样互动）,但不要长篇大论。
+3. 1 条气泡,简短自然,像群里随口接话。
 4. jp 必须是纯日语,zh 是中文翻译。
 
 只返回单行 JSON：
 {{"emotion":"情绪","messages":[{{"jp":"日语","zh":"中文"}}]}}'''
 
-        user_msg = f'（{prev_name} 刚在群里说：{prev_content}）请你针对他这句话接一句。'
-
     system_prompt = build_system_prompt('group_' + str(gid), member['id'], user_text) + group_scene
-    messages = [{'role': 'user', 'content': user_msg}]
+    messages = [{'role': 'user', 'content': f'（群主刚说：{user_text}）请你在群里接话。'}]
 
     for attempt in range(3):
         try:
@@ -544,50 +405,24 @@ async def group_chat(data: dict):
             'audio_b64': audio,
         })
 
-    # 4) 角色互动:用专门的"互动调度器"判断要不要有人接茬
-    #    - MAX_TURNS_PER_ROUND 是硬上限(防止极端情况下无限互怼)
-    #    - _schedule_interaction 是软刹车:模型判断没人想接就返回 [],循环自然停
-    #    - candidates 只排除"刚刚说话那个人",允许 A→B→A→B 来回交锋(这才是"驳回"的精髓)
-    #    - ★ 复读检测:Sonnet 词穷时会复读,这里检测到就强制停
+    # 4) 角色互动：让另一个没说话的角色有机会接一句（受 MAX_TURNS_PER_ROUND 限制）
     if allow_interaction and replies:
         turns_used = len(replies)
-
-        while turns_used < MAX_TURNS_PER_ROUND:
-            last_speaker_id = replies[-1]['sender_id']
-            # 只排除刚刚说话那个人(避免自言自语),其他人都可接茬
-            candidates = [m for m in members if m['id'] != last_speaker_id]
-            if not candidates:
-                break
-
+        already = {r['sender_id'] for r in replies}
+        candidates = [m for m in members if m['id'] not in already]
+        # 简单策略：让调度再判断一次，要不要有人接、谁接
+        while turns_used < MAX_TURNS_PER_ROUND and candidates:
             cur_history = _get_group_history(gid, limit=12)
-            follow = _schedule_interaction(candidates, cur_history, members)
+            follow = _schedule_speakers(candidates, cur_history,
+                                        f'（接刚才群里的话,你想接吗?不想接就别选人）', None)
+            follow = [c for c in follow if c in {m['id'] for m in candidates}]
             if not follow:
-                # 调度器判断:没人真想接,本轮自然结束
-                print(f'[group][{gid}] 互动调度判断无人接茬,本轮结束(turns={turns_used})')
                 break
-
             cid = follow[0]
             member = member_map.get(cid)
-            if not member:
-                break
-            # ★ 关键:互动场景传 replying_to,让 Sonnet 知道这次是接上一个角色的话,不是回用户
-            prev = replies[-1]
-            replying_to = {
-                'speaker_name': prev['sender_name'],
-                'jp': prev['jp'],
-                'zh': prev['zh'],
-            }
-            reply = _generate_one_reply(gid, member, cur_history, user_text, members, replying_to=replying_to)
+            reply = _generate_one_reply(gid, member, cur_history, user_text, members)
             if not reply:
                 break
-
-            # ★ 复读检测:看新回复和最近 3 条是否过度相似(简单的字符相似度)
-            new_jp = reply['jp'].strip()
-            recent_jps = [r['jp'].strip() for r in replies[-3:]]
-            if _is_repetitive(new_jp, recent_jps):
-                print(f'[group][{gid}] 检测到复读,本轮强制结束(turns={turns_used}) 新句="{new_jp[:30]}"')
-                break
-
             _save_group_message(gid, 'character', cid, reply['jp'], reply['zh'], reply['emotion'])
             audio = tts_to_b64(reply['jp'], reply['emotion'], member['voice_id'])
             replies.append({
@@ -597,10 +432,9 @@ async def group_chat(data: dict):
                 'emotion': reply['emotion'],
                 'audio_b64': audio,
             })
+            already.add(cid)
+            candidates = [m for m in candidates if m['id'] != cid]
             turns_used += 1
-
-        if turns_used >= MAX_TURNS_PER_ROUND:
-            print(f'[group][{gid}] 撞到硬上限 MAX_TURNS_PER_ROUND={MAX_TURNS_PER_ROUND},本轮强制结束')
 
     if not replies:
         return JSONResponse({'replies': [], 'note': '这轮没人接话'})
