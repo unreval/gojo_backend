@@ -325,7 +325,7 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
 
 现在轮到你（{member['name']}）说话。要求：
 1. 这是在回应群主的话,符合你的人设。
-2. 1 条气泡,简短自然,像群里随口接话。
+2. 用 1~3 条气泡回复,像真人聊天一样自然。简单的话1条就够,想展开就拆2~3条。
 3. jp 必须是纯日语,zh 是中文翻译。
 
 只返回单行 JSON：
@@ -360,7 +360,7 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
 要求：
 1. 你的话要**明显是针对 {prev_name} 那句**,不是在和群主对话。偶尔提一下对方名字可以,但**不要每句都喊名字**——真朋友之间大部分时候不用叫名字也知道在跟谁说话。
 2. 符合你自己的人设,但要让人看出来你是在接他的话。
-3. 1 条气泡,简短自然。**绝对不要重复 {prev_name} 刚才说的话**,你要说点新的。
+3. 用 1~3 条气泡回复,像真人聊天一样自然。**绝对不要重复 {prev_name} 刚才说的话**,你要说点新的。
 4. jp 必须是纯日语,zh 是中文翻译。
 
 只返回单行 JSON：
@@ -383,21 +383,22 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
         try:
             resp = claude_client.messages.create(
                 model='claude-sonnet-4-6',
-                max_tokens=400,
+                max_tokens=800,
                 system=system_prompt,
                 messages=messages
             )
             raw = resp.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                first = parsed['messages'][0]
-                if first.get('jp', '').strip() and first.get('zh', '').strip():
+                all_msgs = parsed['messages']
+                # 确保每条都有 jp 和 zh
+                valid = [m for m in all_msgs if m.get('jp', '').strip() and m.get('zh', '').strip()]
+                if valid:
                     emotion = parsed.get('emotion', '平静')
                     if emotion not in EMOTIONS:
                         emotion = '平静'
                     return {
-                        'jp': sanitize_jp(first['jp']),
-                        'zh': first['zh'],
+                        'messages': [{'jp': sanitize_jp(m['jp']), 'zh': m['zh']} for m in valid],
                         'emotion': emotion,
                     }
         except Exception as e:
@@ -548,15 +549,16 @@ async def group_chat(data: dict):
                                     image_b64=image_b64, image_media_type=media_type)
         if not reply:
             continue
-        _save_group_message(gid, 'character', cid, reply['jp'], reply['zh'], reply['emotion'])
-        audio = tts_to_b64(reply['jp'], reply['emotion'], member['voice_id'])
-        replies.append({
-            'sender_id': cid,
-            'sender_name': member['name'],
-            'jp': reply['jp'], 'zh': reply['zh'],
-            'emotion': reply['emotion'],
-            'audio_b64': audio,
-        })
+        for m in reply['messages']:
+            _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
+            audio = tts_to_b64(m['jp'], reply['emotion'], member['voice_id'])
+            replies.append({
+                'sender_id': cid,
+                'sender_name': member['name'],
+                'jp': m['jp'], 'zh': m['zh'],
+                'emotion': reply['emotion'],
+                'audio_b64': audio,
+            })
 
     # 4) 角色互动:用专门的"互动调度器"判断要不要有人接茬
     #    - MAX_TURNS_PER_ROUND 是硬上限(防止极端情况下无限互怼)
@@ -595,22 +597,23 @@ async def group_chat(data: dict):
             if not reply:
                 break
 
-            # ★ 复读检测:看新回复和最近 3 条是否过度相似(简单的字符相似度)
-            new_jp = reply['jp'].strip()
+            # ★ 复读检测:用第一条气泡跟最近3条比
+            first_jp = reply['messages'][0]['jp'].strip()
             recent_jps = [r['jp'].strip() for r in replies[-3:]]
-            if _is_repetitive(new_jp, recent_jps):
-                print(f'[group][{gid}] 检测到复读,本轮强制结束(turns={turns_used}) 新句="{new_jp[:30]}"')
+            if _is_repetitive(first_jp, recent_jps):
+                print(f'[group][{gid}] 检测到复读,本轮强制结束(turns={turns_used}) 新句="{first_jp[:30]}"')
                 break
 
-            _save_group_message(gid, 'character', cid, reply['jp'], reply['zh'], reply['emotion'])
-            audio = tts_to_b64(reply['jp'], reply['emotion'], member['voice_id'])
-            replies.append({
-                'sender_id': cid,
-                'sender_name': member['name'],
-                'jp': reply['jp'], 'zh': reply['zh'],
-                'emotion': reply['emotion'],
-                'audio_b64': audio,
-            })
+            for m in reply['messages']:
+                _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
+                audio = tts_to_b64(m['jp'], reply['emotion'], member['voice_id'])
+                replies.append({
+                    'sender_id': cid,
+                    'sender_name': member['name'],
+                    'jp': m['jp'], 'zh': m['zh'],
+                    'emotion': reply['emotion'],
+                    'audio_b64': audio,
+                })
             turns_used += 1
 
         if turns_used >= MAX_TURNS_PER_ROUND:
@@ -621,3 +624,89 @@ async def group_chat(data: dict):
 
     print(f'[group][{gid}] 本轮共 {len(replies)} 条回复')
     return JSONResponse({'group_id': gid, 'replies': replies})
+
+
+# ─────────────────── 逐条互动（前端轮询,支持打断）───────────────────
+
+@router.post('/group/chat/continue')
+async def group_chat_continue(data: dict):
+    """前端每调一次,返回一条角色互动回复(或 done=True 表示没人想说了)。
+    前端循环调这个接口,每条回复到手就显示+播音,用户随时可以打断。"""
+    gid         = data.get('group_id')
+    turns_used  = data.get('turns_used', 0)
+    user_text   = data.get('user_text', '')   # 这一轮最初用户说的话(给 prompt 上下文)
+
+    if not gid:
+        return JSONResponse({'error': 'group_id 必填'}, status_code=400)
+
+    if turns_used >= MAX_TURNS_PER_ROUND:
+        return JSONResponse({'reply': None, 'done': True, 'reason': 'max_turns'})
+
+    members = _get_member_characters(gid)
+    if not members:
+        return JSONResponse({'reply': None, 'done': True, 'reason': 'no_members'})
+
+    member_map = {m['id']: m for m in members}
+    history = _get_group_history(gid, limit=12)
+
+    # 找到最后一条角色发言
+    last_char_msg = None
+    for h in reversed(history):
+        if h['sender_type'] == 'character':
+            last_char_msg = h
+            break
+
+    if not last_char_msg:
+        return JSONResponse({'reply': None, 'done': True, 'reason': 'no_char_msg'})
+
+    last_speaker_id = last_char_msg['sender_id']
+    candidates = [m for m in members if m['id'] != last_speaker_id]
+    if not candidates:
+        return JSONResponse({'reply': None, 'done': True, 'reason': 'no_candidates'})
+
+    # 调度:有没有人想接茬?
+    follow = _schedule_interaction(candidates, history, members)
+    if not follow:
+        print(f'[group][{gid}] continue: 无人接茬, done')
+        return JSONResponse({'reply': None, 'done': True, 'reason': 'no_one_wants'})
+
+    cid = follow[0]
+    member = member_map.get(cid)
+    if not member:
+        return JSONResponse({'reply': None, 'done': True, 'reason': 'member_missing'})
+
+    # 生成回复(互动场景:接上一个角色的话)
+    replying_to = {
+        'speaker_name': last_char_msg.get('sender_name', ''),
+        'jp': last_char_msg.get('jp', ''),
+        'zh': last_char_msg.get('zh', ''),
+    }
+    reply = _generate_one_reply(gid, member, history, user_text, members, replying_to=replying_to)
+    if not reply:
+        return JSONResponse({'replies': [], 'done': True, 'reason': 'gen_failed'})
+
+    # 复读检测(用第一条气泡)
+    first_jp = reply['messages'][0]['jp'].strip()
+    recent_jps = [h.get('jp', '').strip() for h in history[-3:] if h.get('sender_type') == 'character']
+    if _is_repetitive(first_jp, recent_jps):
+        print(f'[group][{gid}] continue: 检测到复读, done')
+        return JSONResponse({'replies': [], 'done': True, 'reason': 'repetitive'})
+
+    # 存 + TTS(每条气泡分别处理)
+    result_replies = []
+    for m in reply['messages']:
+        _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
+        audio = tts_to_b64(m['jp'], reply['emotion'], member['voice_id'])
+        result_replies.append({
+            'sender_id': cid,
+            'sender_name': member['name'],
+            'jp': m['jp'], 'zh': m['zh'],
+            'emotion': reply['emotion'],
+            'audio_b64': audio,
+        })
+
+    print(f'[group][{gid}] continue: {member["name"]} replied {len(result_replies)} bubbles (turns={turns_used+1})')
+    return JSONResponse({
+        'replies': result_replies,
+        'done': False,
+    })

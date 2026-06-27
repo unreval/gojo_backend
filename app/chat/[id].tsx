@@ -128,6 +128,8 @@ export default function ChatRoom() {
   const searchRef       = useRef<TextInput>(null);
   const currentSoundRef = useRef<Audio.Sound | null>(null);
   const checkingProactiveRef = useRef(false);
+  const interactionActiveRef = useRef(false);  // ★ 群聊互动轮询是否在进行
+  const [thinkingName, setThinkingName] = useState<string | null>(null);  // ★ 正在思考的角色名
 
   // ── 语音文件工具 ──
   const ensureAudioDir = async () => {
@@ -497,8 +499,63 @@ export default function ChatRoom() {
     }
   };
 
+  // ★ 单条群聊回复追加(流式用)
+  const appendOneGroupReply = async (r: GroupReply) => {
+    const msgId = `${Date.now()}_${r.sender_id}`;
+    let audioUri: string | null = null;
+    if (r.audio_b64 && r.audio_b64.length > 100) {
+      audioUri = await saveAudioFile(msgId, r.audio_b64);
+      if (audioUri) audioCacheRef.current[msgId] = audioUri;
+    }
+    const msg: Message = {
+      id: msgId, role: 'gojo',
+      text: r.jp, subtitle: r.zh, time: nowTime(), timestamp: Date.now(),
+      senderId: r.sender_id, senderName: r.sender_name,
+    };
+    setMessages(prev => [...prev, msg]);
+    scrollRef.current?.scrollToEnd({ animated: true });
+    if (audioUri) await playAudioAndWait(audioUri);
+  };
+
+  // ★ 群聊互动轮询(可打断)
+  const runGroupInteraction = async (originalText: string, turnsUsed: number) => {
+    interactionActiveRef.current = true;
+    let turns = turnsUsed;
+
+    while (interactionActiveRef.current && turns < 8) {
+      setThinkingName('有人想接话...');
+      try {
+        const contRes = await axios.post(`${SERVER_URL}/group/chat/continue`, {
+          group_id: groupId, turns_used: turns, user_text: originalText,
+        }, { timeout: 30000 });
+
+        if (!interactionActiveRef.current) break;
+        if (contRes.data?.done || !contRes.data?.replies?.length) break;
+
+        setThinkingName(null);
+        for (const r of contRes.data.replies) {
+          if (!interactionActiveRef.current) break;
+          await appendOneGroupReply(r);
+        }
+        turns++;
+      } catch (e) {
+        break;
+      }
+    }
+
+    setThinkingName(null);
+    interactionActiveRef.current = false;
+    pruneAudioFiles();
+  };
+
   // ── 发送（统一入口）──
   const sendImage = async (base64: string, mediaType: string, localUri: string, caption: string) => {
+    // ★ 打断互动
+    if (isGroup && interactionActiveRef.current) {
+      interactionActiveRef.current = false;
+      setThinkingName(null);
+      await sleep(100);
+    }
     if (loading) return;
     setLoading(true);
     const userMsg: Message = {
@@ -510,13 +567,14 @@ export default function ChatRoom() {
 
     try {
       if (isGroup) {
-        // 群聊发图
+        // ★ 群聊发图:第一波(不互动)
         const res = await axios.post(`${SERVER_URL}/group/chat`, {
           group_id: groupId,
           text: caption,
           user_id: FIXED_USER_ID,
           image_base64: base64,
           media_type: mediaType,
+          allow_interaction: false,
         }, { timeout: 60000 });
         const replies: GroupReply[] = res.data?.replies || [];
         if (replies.length === 0) {
@@ -526,8 +584,15 @@ export default function ChatRoom() {
           };
           setMessages(prev => [...prev, sys]);
         } else {
-          await appendGroupReplies(replies);
+          for (const r of replies) {
+            await appendOneGroupReply(r);
+          }
         }
+        setLoading(false);
+        if (replies.length > 0) {
+          runGroupInteraction(caption || '📷 [图片]', replies.length);
+        }
+        return;
       } else {
         // 单聊发图
         const res = await axios.post(`${SERVER_URL}/chat/image`, {
@@ -550,32 +615,49 @@ export default function ChatRoom() {
 
   const sendText = async (textOverride?: string) => {
     const text = (textOverride ?? inputText).trim();
-    if (!text || loading) return;
+    if (!text) return;
+    // ★ 打断:如果群里还在互动,立刻停掉,让新消息优先
+    if (isGroup && interactionActiveRef.current) {
+      interactionActiveRef.current = false;
+      setThinkingName(null);
+      await sleep(100);
+    }
+    if (loading) return;
     setInputText('');
     if (searchMode) { setSearchMode(false); setSearchQuery(''); }
 
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now(), timestamp: Date.now() };
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now() };
     setMessages(prev => [...prev, userMsg]);
     setLoading(true);
 
     try {
       if (isGroup) {
+        // ★ 第一波:只拿直接回复,不做互动循环
         const res = await axios.post(`${SERVER_URL}/group/chat`, {
           group_id: groupId,
           text,
           user_id: FIXED_USER_ID,
+          allow_interaction: false,
         });
         const replies: GroupReply[] = res.data?.replies || [];
         if (replies.length === 0) {
-          // 没人接话的情况
           const sys: Message = {
             id: `${Date.now()}_sys`, role: 'gojo',
             text: '（群里暂时没人接话）', time: nowTime(), timestamp: Date.now(),
           };
           setMessages(prev => [...prev, sys]);
         } else {
-          await appendGroupReplies(replies);
+          // 逐条显示第一波回复
+          for (const r of replies) {
+            await appendOneGroupReply(r);
+          }
         }
+        // ★ 第一波完了,解锁输入,开始互动轮询(用户随时可以打断)
+        setLoading(false);
+        if (replies.length > 0) {
+          runGroupInteraction(text, replies.length);
+        }
+        return; // ← 不走 finally 的 setLoading(false),因为已经手动设了
       } else {
         const res = await axios.post(`${SERVER_URL}/chat/text`, {
           text, user_id: FIXED_USER_ID, character_id: chatId,
@@ -816,13 +898,13 @@ export default function ChatRoom() {
           );
         })}
 
-        {loading && (
+        {(loading || thinkingName) && (
           <View style={s.msgRow}>
             <View style={s.msgAvatar}><Text style={s.msgAvatarText}>…</Text></View>
             <View style={[s.bubble, s.bubbleGojo, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
               <ActivityIndicator size="small" color={C.accent} />
               <Text style={{ color: C.textMute, fontSize: 13 }}>
-                {isGroup ? '群里在思考...' : '思考中...'}
+                {thinkingName || (isGroup ? '群里在思考...' : '思考中...')}
               </Text>
             </View>
           </View>
