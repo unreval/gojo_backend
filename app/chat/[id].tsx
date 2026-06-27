@@ -500,10 +500,6 @@ export default function ChatRoom() {
   // ── 发送（统一入口）──
   const sendImage = async (base64: string, mediaType: string, localUri: string, caption: string) => {
     if (loading) return;
-    if (isGroup) {
-      Alert.alert('提示', '群聊暂不支持图片，等以后再开放');
-      return;
-    }
     setLoading(true);
     const userMsg: Message = {
       id: Date.now().toString(), role: 'user',
@@ -513,17 +509,39 @@ export default function ChatRoom() {
     scrollRef.current?.scrollToEnd({ animated: true });
 
     try {
-      const res = await axios.post(`${SERVER_URL}/chat/image`, {
-        user_id: FIXED_USER_ID,
-        image_base64: base64,
-        media_type: mediaType,
-        text: caption,
-        character_id: chatId,
-      }, { timeout: 60000 });
-      await processResponseExtras(res.data);
-      const segments: Segment[] = res.data?.messages || [];
-      if (segments.length === 0) { Alert.alert('回复异常', '没有收到有效回复'); return; }
-      await appendSegments(segments, `${Date.now()}`);
+      if (isGroup) {
+        // 群聊发图
+        const res = await axios.post(`${SERVER_URL}/group/chat`, {
+          group_id: groupId,
+          text: caption,
+          user_id: FIXED_USER_ID,
+          image_base64: base64,
+          media_type: mediaType,
+        }, { timeout: 60000 });
+        const replies: GroupReply[] = res.data?.replies || [];
+        if (replies.length === 0) {
+          const sys: Message = {
+            id: `${Date.now()}_sys`, role: 'gojo',
+            text: '（群里暂时没人接话）', time: nowTime(), timestamp: Date.now(),
+          };
+          setMessages(prev => [...prev, sys]);
+        } else {
+          await appendGroupReplies(replies);
+        }
+      } else {
+        // 单聊发图
+        const res = await axios.post(`${SERVER_URL}/chat/image`, {
+          user_id: FIXED_USER_ID,
+          image_base64: base64,
+          media_type: mediaType,
+          text: caption,
+          character_id: chatId,
+        }, { timeout: 60000 });
+        await processResponseExtras(res.data);
+        const segments: Segment[] = res.data?.messages || [];
+        if (segments.length === 0) { Alert.alert('回复异常', '没有收到有效回复'); return; }
+        await appendSegments(segments, `${Date.now()}`);
+      }
       pruneAudioFiles();
     } catch (e: any) {
       Alert.alert('发送失败', e?.message ?? '请确认服务器正常运行');
@@ -815,7 +833,7 @@ export default function ChatRoom() {
         <View style={s.pendingBar}>
           <Image source={{ uri: pendingImage.uri }} style={s.pendingThumb} resizeMode="cover" />
           <Text style={s.pendingHint}>
-            {isGroup ? '群聊暂不支持图片' : '图片已选好，配点文字一起发吧'}
+            图片已选好，配点文字一起发吧
           </Text>
           <TouchableOpacity onPress={() => setPendingImage(null)} style={s.pendingRemove} disabled={loading}>
             <Text style={s.pendingRemoveText}>✕</Text>
@@ -824,11 +842,9 @@ export default function ChatRoom() {
       )}
 
       <View style={[s.inputBar, { marginBottom: keyboardHeight }]}>
-        {!isGroup && (
-          <TouchableOpacity style={s.attachBtn} onPress={showImagePicker} disabled={loading}>
-            <Text style={s.attachBtnText}>📎</Text>
-          </TouchableOpacity>
-        )}
+        <TouchableOpacity style={s.attachBtn} onPress={showImagePicker} disabled={loading}>
+          <Text style={s.attachBtnText}>📎</Text>
+        </TouchableOpacity>
 
         <TextInput
           style={s.input}
