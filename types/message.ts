@@ -7,9 +7,8 @@ export interface Message {
   text: string;
   subtitle?: string;
   time?: string;
+  timestamp?: number;  // epoch ms，用于时间分隔条
   imageUri?: string;
-  // 群聊场景才会用到：标记这条消息是哪个角色说的（gojo / geto / ...）
-  // 单聊里不用填，默认就是当前聊天页的对方
   senderId?: string;
   senderName?: string;
 }

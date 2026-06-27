@@ -121,6 +121,7 @@ export default function ChatRoom() {
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [searchMode, setSearchMode]   = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showFullTime, setShowFullTime] = useState(false); // 点击时间条切换完整/简短
 
   const audioCacheRef   = useRef<Record<string, string>>({});
   const scrollRef       = useRef<ScrollView>(null);
@@ -314,7 +315,7 @@ export default function ChatRoom() {
           audioUri = await saveAudioFile(msgId, seg.audio_b64);
           if (audioUri) audioCacheRef.current[msgId] = audioUri;
         }
-        const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime() };
+        const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now(), timestamp: Date.now() };
         setMessages(prev => [...prev, msg]);
         scrollRef.current?.scrollToEnd({ animated: true });
         if (audioUri) await playAudioAndWait(audioUri);
@@ -466,7 +467,7 @@ export default function ChatRoom() {
         audioUri = await saveAudioFile(msgId, seg.audio_b64);
         if (audioUri) audioCacheRef.current[msgId] = audioUri;
       }
-      const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime() };
+      const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now(), timestamp: Date.now() };
       setMessages(prev => [...prev, msg]);
       scrollRef.current?.scrollToEnd({ animated: true });
       if (audioUri) await playAudioAndWait(audioUri);
@@ -486,7 +487,7 @@ export default function ChatRoom() {
       }
       const msg: Message = {
         id: msgId, role: 'gojo',
-        text: r.jp, subtitle: r.zh, time: nowTime(),
+        text: r.jp, subtitle: r.zh, time: nowTime(), timestamp: Date.now(),
         senderId: r.sender_id, senderName: r.sender_name,
       };
       setMessages(prev => [...prev, msg]);
@@ -506,7 +507,7 @@ export default function ChatRoom() {
     setLoading(true);
     const userMsg: Message = {
       id: Date.now().toString(), role: 'user',
-      text: caption || '📷 [图片]', time: nowTime(), imageUri: localUri,
+      text: caption || '📷 [图片]', time: nowTime(), timestamp: Date.now(), imageUri: localUri,
     };
     setMessages(prev => [...prev, userMsg]);
     scrollRef.current?.scrollToEnd({ animated: true });
@@ -535,7 +536,7 @@ export default function ChatRoom() {
     setInputText('');
     if (searchMode) { setSearchMode(false); setSearchQuery(''); }
 
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime() };
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now(), timestamp: Date.now() };
     setMessages(prev => [...prev, userMsg]);
     setLoading(true);
 
@@ -551,7 +552,7 @@ export default function ChatRoom() {
           // 没人接话的情况
           const sys: Message = {
             id: `${Date.now()}_sys`, role: 'gojo',
-            text: '（群里暂时没人接话）', time: nowTime(),
+            text: '（群里暂时没人接话）', time: nowTime(), timestamp: Date.now(),
           };
           setMessages(prev => [...prev, sys]);
         } else {
@@ -613,6 +614,28 @@ export default function ChatRoom() {
     const text = msg.subtitle ? `${msg.text}\n${msg.subtitle}` : msg.text;
     await Clipboard.setStringAsync(text);
     Alert.alert('已复制', '', [{ text: '好', style: 'cancel' }], { cancelable: true });
+  };
+
+  // ── 时间分隔条工具 ──
+  const WEEKDAYS_CN = ['日', '一', '二', '三', '四', '五', '六'];
+  const shouldShowSeparator = (cur: Message, prev: Message | null): boolean => {
+    if (!prev) return true;
+    if (!cur.timestamp || !prev.timestamp) return false;
+    return cur.timestamp - prev.timestamp > 5 * 60 * 1000; // 5 分钟间隔
+  };
+  const formatSeparatorTime = (ts: number, full: boolean): string => {
+    const d = new Date(ts);
+    const now = new Date();
+    const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const isToday = d.toDateString() === now.toDateString();
+    const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+    const isYesterday = d.toDateString() === yesterday.toDateString();
+    if (!full) {
+      if (isToday) return hm;
+      if (isYesterday) return `昨天 ${hm}`;
+      return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+    }
+    return `${d.getMonth() + 1}月${d.getDate()}日 星期${WEEKDAYS_CN[d.getDay()]} ${hm}`;
   };
 
   // 标题区
@@ -710,17 +733,30 @@ export default function ChatRoom() {
           </View>
         )}
 
-        {displayMessages.map(msg => {
+        {displayMessages.map((msg, idx) => {
           const hasAudio = !!audioCacheRef.current[msg.id];
           const isHighlighted = searchMode && searchQuery.trim() &&
             (msg.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
              (msg.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase()));
-          // 角色发言的头像首字：群里用具体 senderName，单聊用 character.name
           const speakerName = msg.senderName || character?.name || (isGroup ? '?' : (chatId === 'gojo' ? '五条悟' : chatId));
           const speakerInitial = speakerName?.[0] || '?';
+          const prevMsg = idx > 0 ? displayMessages[idx - 1] : null;
+          const showSep = shouldShowSeparator(msg, prevMsg);
 
           return (
-            <View key={msg.id} style={[s.msgRow, msg.role === 'user' ? s.msgRowUser : s.msgRowGojo]}>
+            <React.Fragment key={msg.id}>
+              {showSep && msg.timestamp && (
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => setShowFullTime(v => !v)}
+                  style={s.timeSepWrap}
+                >
+                  <Text style={s.timeSepText}>
+                    {formatSeparatorTime(msg.timestamp, showFullTime)}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            <View style={[s.msgRow, msg.role === 'user' ? s.msgRowUser : s.msgRowGojo]}>
               {msg.role === 'gojo' && (
                 <View style={s.msgAvatar}>
                   <Text style={s.msgAvatarText}>{speakerInitial}</Text>
@@ -758,6 +794,7 @@ export default function ChatRoom() {
                 </View>
               </View>
             </View>
+            </React.Fragment>
           );
         })}
 
@@ -868,6 +905,9 @@ const s = StyleSheet.create({
   replayHint:      { color: C.accent, fontSize: 11, marginTop: 6, opacity: 0.7 },
   msgBottom:       { flexDirection: 'row', alignItems: 'center', marginTop: 4, marginHorizontal: 2 },
   msgTime:         { color: C.textMute, fontSize: 10 },
+
+  timeSepWrap:     { alignSelf: 'center', marginVertical: 12, paddingHorizontal: 14, paddingVertical: 4, borderRadius: 10, backgroundColor: C.card },
+  timeSepText:     { color: C.textMute, fontSize: 11 },
 
   bubbleImage:     { width: width * 0.55, height: width * 0.42, borderRadius: 10, marginBottom: 6, backgroundColor: C.bg },
 
