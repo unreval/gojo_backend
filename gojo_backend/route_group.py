@@ -1,4 +1,4 @@
-"""群聊路由（第一步·骨架）
+"""群聊路由（第二步·记忆互通版）
 
 端点：
   POST   /group                 建群（传群名 + 成员角色列表）
@@ -6,10 +6,14 @@
   GET    /group/{gid}           群详情（成员 + 最近消息）
   DELETE /group/{gid}           解散群
   POST   /group/chat            ★ 核心：用户在群里发一句 → 智能调度谁回 → 角色依次回复（含角色互动）
+  POST   /group/chat/continue   逐条互动（前端轮询，支持打断）
 
-第一步范围（明确不做的，留给第二步）：
-  - 记忆三通（个人↔群↔跨角色）：本版每个角色仍只读自己的单人记忆，群有自己的历史，互不混。
-  - 个人库/群库分离判断：第二步再做。
+第二步已完成：
+  - ★ 记忆互通：角色在群里读真实 user_id 的长期记忆（含 shared 共享桶），
+    群里用户透露的新事实由 extract_and_save_group_memory 提取并存入 shared 桶，
+    私聊立刻可用；反之私聊提取的事实群里也能读到。
+  - ★ 修复：原来 build_system_prompt 传的是 'group_<gid>' 假 user_id，
+    导致角色在群里读的是空记忆桶（记忆混乱的根源），现已改为真实群主 user_id。
 
 调度与回复都要求模型返回【单行 JSON】——因为 utils.extract_json 会把换行抹掉，多行 JSON 会被破坏。
 """
@@ -24,6 +28,7 @@ from utils import extract_json, sanitize_jp
 from tts import tts_to_b64
 from prompt import build_system_prompt
 from characters import get_character
+from user_memory import extract_and_save_group_memory   # ★ 群聊专用记忆提取
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -76,7 +81,6 @@ def _is_repetitive(new_text: str, recent_texts: list, threshold: float = 0.7) ->
         if len(new_set & old_set) / len(new_set) >= 0.85:
             return True
     return False
-
 
 
 # ─────────────────── 群成员 / 历史 读取小工具 ───────────────────
@@ -300,13 +304,15 @@ def _schedule_interaction(candidates, history, all_members):
 # ─────────────────── 让单个角色在群里生成一条回复 ───────────────────
 
 def _generate_one_reply(gid, member, history, user_text, all_members, replying_to=None,
-                        image_b64=None, image_media_type=None):
+                        image_b64=None, image_media_type=None, user_id='default'):
     """让某个角色基于群上下文回复一句。复用单人的 build_system_prompt + 角色人设/记忆。
     返回 {'jp','zh','emotion'} 或 None。
 
     replying_to: None 表示"响应群主的发言"(第一波);
                  dict {'speaker_name', 'jp', 'zh'} 表示"接刚才某个角色说的话"(互动场景)。
     image_b64 / image_media_type: 用户发的图片(只在第一波传,互动不传)。
+    user_id: ★ 群主真实 user_id——组 prompt 时用它读长期记忆（含 shared 桶），
+             这样角色在群里也认识你。绝对不要再传 'group_xx' 这种假 ID。
     """
     others = '、'.join(m['name'] for m in all_members if m['id'] != member['id'])
     hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
@@ -368,7 +374,9 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
 
         user_msg = f'（{prev_name} 刚在群里说：{prev_content}）请你针对他这句话接一句。'
 
-    system_prompt = build_system_prompt('group_' + str(gid), member['id'], user_text) + group_scene
+    # ★★★ 核心修复：用真实 user_id 组装 prompt。
+    #     原来这里是 'group_' + str(gid)，角色读的是空记忆桶——群聊记忆混乱的根源。
+    system_prompt = build_system_prompt(user_id, member['id'], user_text) + group_scene
 
     # ★ 如果有图片(第一波),用多模态格式让角色"看到"图片
     if image_b64 and image_media_type and replying_to is None:
@@ -527,6 +535,9 @@ async def group_chat(data: dict):
     if not members:
         return JSONResponse({'error': '群里没有角色成员'}, status_code=400)
 
+    # ★ 以群的创建者为准（前端传错也不怕），这是记忆读写的真实 user_id
+    owner_id = g.get('owner_user_id') or user_id
+
     # 1) 存用户这句话
     display_text = user_text or '📷 [图片]'
     _save_group_message(gid, 'user', user_id, '', display_text)
@@ -546,7 +557,8 @@ async def group_chat(data: dict):
             continue
         cur_history = _get_group_history(gid, limit=12)
         reply = _generate_one_reply(gid, member, cur_history, display_text, members,
-                                    image_b64=image_b64, image_media_type=media_type)
+                                    image_b64=image_b64, image_media_type=media_type,
+                                    user_id=owner_id)
         if not reply:
             continue
         for m in reply['messages']:
@@ -593,7 +605,8 @@ async def group_chat(data: dict):
                 'jp': prev['jp'],
                 'zh': prev['zh'],
             }
-            reply = _generate_one_reply(gid, member, cur_history, user_text, members, replying_to=replying_to)
+            reply = _generate_one_reply(gid, member, cur_history, user_text, members,
+                                        replying_to=replying_to, user_id=owner_id)
             if not reply:
                 break
 
@@ -622,6 +635,17 @@ async def group_chat(data: dict):
     if not replies:
         return JSONResponse({'replies': [], 'note': '这轮没人接话'})
 
+    # 5) ★ 后台提取记忆:只从群主这句话里抽事实,存 shared 桶(私聊也能读到)
+    if user_text and replies:
+        round_transcript = f'群主：{user_text}\n' + '\n'.join(
+            f"{r['sender_name']}：{r['zh']}" for r in replies
+        )
+        threading.Thread(
+            target=extract_and_save_group_memory,
+            args=(owner_id, user_text, round_transcript, [m['name'] for m in members]),
+            daemon=True
+        ).start()
+
     print(f'[group][{gid}] 本轮共 {len(replies)} 条回复')
     return JSONResponse({'group_id': gid, 'replies': replies})
 
@@ -641,6 +665,12 @@ async def group_chat_continue(data: dict):
 
     if turns_used >= MAX_TURNS_PER_ROUND:
         return JSONResponse({'reply': None, 'done': True, 'reason': 'max_turns'})
+
+    # ★ 拿群的创建者作为真实 user_id（记忆读取用）
+    g = _get_group(gid)
+    if not g:
+        return JSONResponse({'reply': None, 'done': True, 'reason': 'group_missing'})
+    owner_id = g.get('owner_user_id') or 'default'
 
     members = _get_member_characters(gid)
     if not members:
@@ -681,7 +711,8 @@ async def group_chat_continue(data: dict):
         'jp': last_char_msg.get('jp', ''),
         'zh': last_char_msg.get('zh', ''),
     }
-    reply = _generate_one_reply(gid, member, history, user_text, members, replying_to=replying_to)
+    reply = _generate_one_reply(gid, member, history, user_text, members,
+                                replying_to=replying_to, user_id=owner_id)
     if not reply:
         return JSONResponse({'replies': [], 'done': True, 'reason': 'gen_failed'})
 

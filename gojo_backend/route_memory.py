@@ -1,4 +1,4 @@
-"""用户记忆相关路由"""
+"""用户记忆相关路由（★ 记忆列表 / 重分类均包含 shared 共享桶）"""
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -7,7 +7,7 @@ from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID
 from db import get_conn
 from user_memory import (
     get_short_memory, get_long_memory, get_chat_days,
-    extract_and_save_memory
+    extract_and_save_memory, SHARED_CHARACTER_ID
 )
 
 router = APIRouter()
@@ -17,7 +17,7 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 @router.get('/memories')
 async def get_memories(user_id: str = 'default', character_id: str = DEFAULT_CHARACTER_ID):
     short = get_short_memory(user_id, 20, character_id)
-    long_mems = get_long_memory(user_id, character_id)
+    long_mems = get_long_memory(user_id, character_id)   # 底层已含 shared 桶
     return JSONResponse({
         'short_memory': [{'role': r, 'content': c} for r, c in short],
         'long_memory': [{'content': c, 'date': ts.strftime('%Y-%m-%d') if ts else None} for c, ts in long_mems]
@@ -33,10 +33,12 @@ async def get_stats(user_id: str = 'default'):
 async def list_long_memory(user_id: str = 'default', character_id: str = DEFAULT_CHARACTER_ID):
     conn = get_conn()
     cur = conn.cursor()
+    # ★ 把 shared 共享桶一起查出来，不然记忆页看不到新提取的共享记忆
     cur.execute(
         '''SELECT id, content, category, timestamp FROM long_memory
-           WHERE user_id = %s AND character_id = %s ORDER BY timestamp DESC''',
-        (user_id, character_id)
+           WHERE user_id = %s AND character_id IN (%s, %s)
+           ORDER BY timestamp DESC''',
+        (user_id, character_id, SHARED_CHARACTER_ID)
     )
     rows = cur.fetchall()
     cur.close()
@@ -122,11 +124,12 @@ async def reclassify_memories(data: dict):
 
     conn = get_conn()
     cur = conn.cursor()
+    # ★ shared 桶里的记忆也要能被重新分类
     cur.execute(
         '''SELECT id, content FROM long_memory
-           WHERE user_id = %s AND character_id = %s
+           WHERE user_id = %s AND character_id IN (%s, %s)
              AND (category IS NULL OR category = '其他' OR category = '')''',
-        (user_id, character_id)
+        (user_id, character_id, SHARED_CHARACTER_ID)
     )
     rows = cur.fetchall()
     cur.close()
