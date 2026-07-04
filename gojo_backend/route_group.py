@@ -304,7 +304,8 @@ def _schedule_interaction(candidates, history, all_members):
 # ─────────────────── 让单个角色在群里生成一条回复 ───────────────────
 
 def _generate_one_reply(gid, member, history, user_text, all_members, replying_to=None,
-                        image_b64=None, image_media_type=None, user_id='default'):
+                        image_b64=None, image_media_type=None, user_id='default',
+                        already_said=None):
     """让某个角色基于群上下文回复一句。复用单人的 build_system_prompt + 角色人设/记忆。
     返回 {'jp','zh','emotion'} 或 None。
 
@@ -313,21 +314,52 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
     image_b64 / image_media_type: 用户发的图片(只在第一波传,互动不传)。
     user_id: ★ 群主真实 user_id——组 prompt 时用它读长期记忆（含 shared 桶），
              这样角色在群里也认识你。绝对不要再传 'group_xx' 这种假 ID。
+    already_said: ★ 第一波里排在你前面的角色已经说了什么
+                  [{'sender_name','zh'}]——用来强制后发言者换角度,防止"复读机合唱"。
     """
     others = '、'.join(m['name'] for m in all_members if m['id'] != member['id'])
     hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
 
+    # ★ 声纹隔离:防止多个角色输出趋同,像"一个AI套了几个名字"
+    voice_lock = f'''
+
+【★ 你不是"群里的AI",你是{member['name']}本人】
+群里每个人的说话方式截然不同。你只用你自己的语气、口癖、节奏和态度说话。
+哪怕要表达和别人相同的意思,你的说法、句式、切入点也必须和对方完全不像。
+禁止"先共情一句+再给建议"这种通用模板腔——按你的性格想怎么说就怎么说:
+可以只调侃不建议、可以只丢一句短话、可以说反话、可以岔开,只要像"你"。
+
+【关于群里的其他角色】
+{others} 未必和你来自同一个世界。如果对方是你认识的人,按你们真实的关系相处;
+如果对方谈到你不认识的人名、事件、世界观设定,那是"他的事",你可以好奇、可以调侃,
+但不要不懂装懂顺着编,更不要把对方世界的设定当成你自己世界里的事实。'''
+
     if replying_to is None:
         # 第一波:响应群主
         image_hint = '\n群主还发了一张图片（你能看到）。' if (image_b64 and replying_to is None) else ''
-        group_scene = f'''
+
+        # ★ 防复读机合唱:告诉后发言者前面的人已经说了什么,强制换角度
+        said_block = ''
+        if already_said:
+            said_lines = '\n'.join(f"- {s['sender_name']}已经说了：「{s['zh']}」" for s in already_said)
+            said_block = f'''
+
+【★★ 本轮已经有人回应过群主了——你绝对不能当复读机 ★★】
+{said_lines}
+同样的意思被说第二遍毫无意义。你必须做到以下之一:
+- 换一个完全不同的切入角度(他讲道理你就讲感受,他严肃你就轻松,反之亦然)
+- 针对上面那个人说的话表态(同意但补一刀 / 嫌弃他的说法 / 拆他的台)
+- 聊群主那句话里被他忽略掉的另一个部分
+禁止重复上面已出现的建议、观点和句式,哪怕换个说法复述也不行。'''
+
+        group_scene = voice_lock + f'''
 
 【★ 群聊场景——你现在在一个群里】
 这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
 下面是群里最近的对话记录：
 {hist_txt}
 
-群主刚说："{user_text}"{image_hint}
+群主刚说："{user_text}"{image_hint}{said_block}
 
 现在轮到你（{member['name']}）说话。要求：
 1. 这是在回应群主的话,符合你的人设。
@@ -344,7 +376,7 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
         prev_name = replying_to['speaker_name']
         prev_content = replying_to['jp'] if replying_to.get('jp') else replying_to.get('zh', '')
 
-        group_scene = f'''
+        group_scene = voice_lock + f'''
 
 【★ 群聊场景——你现在在一个群里】
 这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
@@ -367,6 +399,7 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
 1. 你的话要**明显是针对 {prev_name} 那句**,不是在和群主对话。偶尔提一下对方名字可以,但**不要每句都喊名字**——真朋友之间大部分时候不用叫名字也知道在跟谁说话。
 2. 符合你自己的人设,但要让人看出来你是在接他的话。
 3. 用 1~3 条气泡回复,像真人聊天一样自然。**绝对不要重复 {prev_name} 刚才说的话**,你要说点新的。
+   群里已经有人给过的建议/观点,你换个说法再讲一遍也算重复——禁止。
 4. jp 必须是纯日语,zh 是中文翻译。
 
 只返回单行 JSON：
@@ -556,9 +589,11 @@ async def group_chat(data: dict):
         if not member:
             continue
         cur_history = _get_group_history(gid, limit=12)
+        # ★ 把本轮前面的人已经说的话喂给后发言者,强制他换角度,不许合唱
+        already = [{'sender_name': r['sender_name'], 'zh': r['zh']} for r in replies] or None
         reply = _generate_one_reply(gid, member, cur_history, display_text, members,
                                     image_b64=image_b64, image_media_type=media_type,
-                                    user_id=owner_id)
+                                    user_id=owner_id, already_said=already)
         if not reply:
             continue
         for m in reply['messages']:

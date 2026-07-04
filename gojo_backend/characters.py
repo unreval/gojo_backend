@@ -9,6 +9,7 @@ from characters_data._loader import load_core, load_memories, load_lore, reload_
 CHARACTER_ANCHOR = {
     'gojo': 2,
     'geto': 2,
+    'minato': 2,
 }
 
 

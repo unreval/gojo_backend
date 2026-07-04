@@ -11,4 +11,5 @@
 REGISTRY = [
     'gojo',
     'geto',
+    'minato',
 ]
