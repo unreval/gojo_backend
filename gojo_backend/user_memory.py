@@ -377,11 +377,10 @@ content 必须以"她"字开头，否则系统会丢弃你的输出。'''
             print(f'[{user_id}] ❌ 拒绝（非"她"开头）：{content}')
             return
 
-        forbidden = ['AI', 'ai', '五条悟', '五条', '机器人']
-        for word in forbidden:
-            if word in content:
-                print(f'[{user_id}] ❌ 拒绝（含违禁词 {word}）：{content}')
-                return
+        from characters import get_character
+        char = get_character(character_id)
+        char_name = char['name'] if char else ''
+        forbidden = ['AI', 'ai', '机器人', '五条悟', '五条', '夏油杰', '夏油', '波风水门', '水门']
 
         valid_cats = ('喜好', '厌恶', '身份', '状态', '经历', '关系', '其他')
         if category not in valid_cats:
