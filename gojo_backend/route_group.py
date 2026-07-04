@@ -670,14 +670,15 @@ async def group_chat(data: dict):
     if not replies:
         return JSONResponse({'replies': [], 'note': '这轮没人接话'})
 
-    # 5) ★ 后台提取记忆:只从群主这句话里抽事实,存 shared 桶(私聊也能读到)
+    # 5) ★ 后台提取记忆:从群主这句话里抽用户事实(shared)和定向告知(目标角色的 told 桶)
     if user_text and replies:
         round_transcript = f'群主：{user_text}\n' + '\n'.join(
             f"{r['sender_name']}：{r['zh']}" for r in replies
         )
         threading.Thread(
             target=extract_and_save_group_memory,
-            args=(owner_id, user_text, round_transcript, [m['name'] for m in members]),
+            args=(owner_id, user_text, round_transcript,
+                  [{'id': m['id'], 'name': m['name']} for m in members]),
             daemon=True
         ).start()
 

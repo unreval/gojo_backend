@@ -1,4 +1,13 @@
-"""用户记忆（短期 + 长期 + 提取 + 自动纠错 + ★shared 共享桶 + ★群聊专用提取）"""
+"""用户记忆 v3（短期 + 长期 + 羁绊 + 统一三桶提取 + 自动纠错）
+
+记忆四层结构：
+  1. 她的事实      long_memory (character_id='shared')  —— 关于用户本人，全角色共享
+  2. 我们之间的事  bond_memory (kind='between')          —— 她和某角色的共同经历，按角色独立
+  3. 她告诉我的事  bond_memory (kind='told')             —— 她告诉某角色的、关于角色本人/其世界的信息
+  4. 角色背景      character_memory                      —— 原作设定，只手动管理，聊天不写入
+
+提取只用一次 Haiku 调用，同时产出 1/2/3 三类，成本和原来一样。
+"""
 import anthropic
 from datetime import datetime, timedelta
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
@@ -12,8 +21,37 @@ SHORT_MEMORY_HOURS = 24   # 把最近这么多小时的对话当"当前上下文
 SHORT_MEMORY_MAX   = 30   # 最多带这么多条，保护速度和 API 成本（嫌贵调小，想记更多调大）
 
 # ★ 跨角色共享的"用户事实"桶。
-#   关于用户本人的事实（生日/喜好/经历…）存这里，所有角色、私聊群聊都能读到。
 SHARED_CHARACTER_ID = 'shared'
+
+# 全部角色名缓存（做违禁词用，启动后第一次用时查一次库）
+_char_names_cache = None
+
+
+def _all_character_names():
+    """返回库里所有角色的名字列表（含常见简称），用作用户事实的违禁词。
+    ★ 以后加新角色不用再手动改违禁词列表了。"""
+    global _char_names_cache
+    if _char_names_cache is not None:
+        return _char_names_cache
+    names = []
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT name FROM characters')
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        for (n,) in rows:
+            if not n:
+                continue
+            names.append(n)
+            if len(n) >= 3:
+                names.append(n[:2])   # 五条 / 夏油 / 波风
+                names.append(n[-2:])  # 条悟 / 油杰 / 水门
+    except Exception as e:
+        print(f'[memory] 读取角色名失败：{e}')
+    _char_names_cache = list(dict.fromkeys(names))  # 去重保序
+    return _char_names_cache
 
 
 # ────────── 短期记忆 ──────────
@@ -35,8 +73,6 @@ def save_short_memory(user_id, role, content, character_id=DEFAULT_CHARACTER_ID)
 
 
 def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
-    """返回最近 SHORT_MEMORY_HOURS 小时内、最多 SHORT_MEMORY_MAX 条对话（时间正序）。
-       说明：原来的参数 n 不再决定条数，统一由上面两个常量控制，方便一处调。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -83,7 +119,7 @@ def get_last_assistant_reply(user_id, character_id=DEFAULT_CHARACTER_ID):
     return row[0] if row else ''
 
 
-# ────────── 用户长期记忆 ──────────
+# ────────── 第 1 层：用户事实（长期记忆，shared 共享桶）──────────
 
 def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARACTER_ID):
     conn = get_conn()
@@ -113,8 +149,7 @@ def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARA
 
 
 def get_long_memory(user_id, character_id=DEFAULT_CHARACTER_ID):
-    """★ 返回该角色专属记忆 + 共享用户事实（shared 桶）。
-    关于用户的事实存在 shared 桶里，所有角色（私聊/群聊）都能读到 → 记忆互通。"""
+    """返回该角色专属记忆 + 共享用户事实（shared 桶）。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -130,7 +165,6 @@ def get_long_memory(user_id, character_id=DEFAULT_CHARACTER_ID):
 
 
 def _get_memories_with_id(user_id, character_id=DEFAULT_CHARACTER_ID):
-    """内部用：返回 (id, content)，仅供自动纠错定位要删的记忆。★ 包含 shared 桶。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -149,6 +183,65 @@ def delete_long_memory(memory_id):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('DELETE FROM long_memory WHERE id = %s', (memory_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ────────── 第 2/3 层：羁绊记忆（我们之间的事 / 她告诉我的事）──────────
+
+def save_bond_memory(user_id, character_id, kind, content):
+    """kind='between'（我们之间）或 'told'（她告诉我的）。带去重。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT content FROM bond_memory WHERE user_id = %s AND character_id = %s AND kind = %s',
+        (user_id, character_id, kind)
+    )
+    existing = cur.fetchall()
+    for (e,) in existing:
+        if content == e or (abs(len(content) - len(e)) < 5 and (content in e or e in content)):
+            cur.close(); conn.close()
+            print(f'[{user_id}] 羁绊记忆重复，跳过：{content}')
+            return False
+    cur.execute(
+        'INSERT INTO bond_memory (user_id, character_id, kind, content) VALUES (%s, %s, %s, %s)',
+        (user_id, character_id, kind, content)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+
+def get_bond_memories(user_id, character_id, kind=None, limit=30):
+    """返回 [(id, content, timestamp)]，新→旧。kind=None 时返回全部种类。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    if kind:
+        cur.execute(
+            '''SELECT id, content, timestamp FROM bond_memory
+               WHERE user_id = %s AND character_id = %s AND kind = %s
+               ORDER BY timestamp DESC LIMIT %s''',
+            (user_id, character_id, kind, limit)
+        )
+    else:
+        cur.execute(
+            '''SELECT id, content, timestamp FROM bond_memory
+               WHERE user_id = %s AND character_id = %s
+               ORDER BY timestamp DESC LIMIT %s''',
+            (user_id, character_id, limit)
+        )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def delete_bond_memory(memory_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM bond_memory WHERE id = %s', (memory_id,))
     conn.commit()
     cur.close()
     conn.close()
@@ -192,15 +285,10 @@ def get_chat_days(user_id):
     return row[0] if row else 0
 
 
-# ────────── ★ 记忆自动纠错 ──────────
+# ────────── 记忆自动纠错 ──────────
 
 def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
-    """
-    当用户纠正自己之前说错的信息时（"不是""我说错了""其实"…），
-    扫描已有长期记忆，找出被纠正的那条并删除。
-    返回 True 表示确实删了旧记忆。
-    """
-    # 1) 先用关键词做廉价预筛——没有纠正语气就直接跳过，省一次 Haiku 调用
+    """用户纠正之前说错的信息时，扫描长期记忆删掉错的那条。"""
     correction_keywords = [
         '不是', '我说错', '说错了', '其实', '不对', '搞错', '记错',
         '哪有', '才不', '说反了', '重新说', '纠正',
@@ -208,7 +296,6 @@ def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
     if not any(kw in user_text for kw in correction_keywords):
         return False
 
-    # 2) 取出带 ID 的记忆，交给 Haiku 判断到底要删哪条
     memories = _get_memories_with_id(user_id, character_id)
     if not memories:
         return False
@@ -267,8 +354,6 @@ def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
                     mid_int = int(mem_id)
                 except (ValueError, TypeError):
                     continue
-                # id + user_id + character_id 三重限定，防止 Haiku 万一给错 ID 误删别人的记忆
-                # ★ character_id 范围扩到 shared 桶，不然纠错删不掉共享记忆
                 cur.execute(
                     '''DELETE FROM long_memory
                        WHERE id = %s AND user_id = %s AND character_id IN (%s, %s)''',
@@ -291,21 +376,58 @@ def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
         return False
 
 
-# ────────── 记忆提取（★ 先纠错，再严格只提取用户事实）──────────
+# ────────── 提取结果的通用校验小工具 ──────────
+
+def _clean_content(raw_content):
+    return (raw_content or '').strip().strip('「」"\'').rstrip('。.')
+
+
+def _valid_user_fact(user_id, content, char_names):
+    """用户事实：必须"她"开头、不含任何角色名（角色相关的应归入 bond/told）。"""
+    if not content or content == '无' or len(content) < 4:
+        return False
+    if not content.startswith('她'):
+        print(f'[{user_id}] ❌ user_fact 拒绝（非"她"开头）：{content}')
+        return False
+    forbidden = ['AI', 'ai', '机器人'] + char_names
+    for word in forbidden:
+        if word and word in content:
+            print(f'[{user_id}] ❌ user_fact 拒绝（含违禁词 {word}）：{content}')
+            return False
+    return True
+
+
+def _valid_bond(user_id, content):
+    """羁绊记忆：必须"她"开头即可（允许出现角色名，那正是它的用途）。"""
+    if not content or content == '无' or len(content) < 4:
+        return False
+    if not content.startswith('她'):
+        print(f'[{user_id}] ❌ bond/told 拒绝（非"她"开头）：{content}')
+        return False
+    return True
+
+
+VALID_CATS = ('喜好', '厌恶', '身份', '状态', '经历', '关系', '其他')
+
+
+# ────────── ★ 统一三桶提取（私聊）──────────
 
 def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEFAULT_CHARACTER_ID):
-    """
-    严格只从用户那段话里提取关于"她"的事实。
-    若用户在纠正旧信息，先删掉错的，再提取新的正确事实。
-    悟回复仅作语境提示，绝不提取悟说的事。
-    ★ 提取结果统一存 shared 桶 → 所有角色、私聊群聊互通。
+    """一次 Haiku 调用同时提取三类记忆：
+    A user_fact —— 她透露的关于她自己的新事实 → long_memory(shared)
+    B bond      —— 她和这个角色之间发生的事/约定/共同经历 → bond_memory(between)
+    C told      —— 她告诉这个角色的、关于角色本人或其世界的信息（含剧透）→ bond_memory(told)
     """
     try:
-        # ★ 第一步：用户若在纠正，先把记错的旧记忆删掉
         corrected = correct_memories(user_id, user_text, character_id)
         correction_hint = ''
         if corrected:
             correction_hint = '\n【提示】用户刚纠正了之前说错的信息，旧记忆已删除，请提取她这次给出的正确事实。'
+
+        char_names = _all_character_names()
+        from characters import get_character
+        char = get_character(character_id)
+        char_name = char['name'] if char else character_id
 
         now = datetime.now(CN_TZ)
         today_str = now.strftime('%Y-%m-%d')
@@ -315,101 +437,113 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
 
         existing = get_long_memory(user_id, character_id)
         existing_text = '\n'.join(f'- {m[0]}' for m in existing) if existing else '（暂无）'
+        existing_bond = get_bond_memories(user_id, character_id, limit=20)
+        bond_text = '\n'.join(f'- {r[1]}' for r in existing_bond) if existing_bond else '（暂无）'
 
         response = claude_client.messages.create(
             model='claude-haiku-4-5-20251001',
-            max_tokens=250,
+            max_tokens=400,
             messages=[{
                 'role': 'user',
-                'content': f'''你是事实抽取助手。任务：从下面对话中提取**用户（"她"）**主动透露的关于她自己的新事实。
+                'content': f'''你是记忆整理助手。从下面这轮对话中提取值得长期记住的信息，分成三类。
 
-【重要：对话有两方】
-- "她" = 用户（你要提取的对象）
-- "悟" = 角色（仅作语境参考，**绝对不要**从他的话里抓任何事实当作用户的事）
+【对话双方】
+- "她" = 用户
+- "{char_name}" = 角色（她的聊天对象）
 
 【今天日期】{today_str}（{weekday_cn}）{correction_hint}
 
-【已记录的事实】
+【已记录的她的事实】
 {existing_text}
+
+【已记录的羁绊记忆】
+{bond_text}
 
 【这次对话】
 她说：{user_text}
-悟回复：{assistant_text}
+{char_name}回复：{assistant_text}
 
-【提取规则——严格遵守】
-1. **只从"她说"那一段里提取**。悟说了什么是给你理解上下文用的，不要把悟的话当成事实来源。
-2. 例如：悟说"我喜欢甜食"——这是悟的喜好，**不要**记成"她喜欢甜食"或"她说悟喜欢甜食"，**直接忽略**。
-3. 只提取她主动透露的具体事实——撒娇/调侃/情绪宣泄/问候/提问/简单回应（"嗯""好""对"）都不算。
-4. 时间必须用绝对日期：
-   - "明天" → {tomorrow_str}
-   - "昨天" → {yesterday_str}
-   - "还有3天" → {(now + timedelta(days=3)).strftime('%Y-%m-%d')}
-5. 用第三人称中文陈述句，**必须以"她"字开头**。
-6. **绝对禁止**使用以下主语：悟、五条、五条悟、AI、机器人、你、他、对方、用户。一律用"她"。
-7. 去重：已有列表里有完全一样或几乎一字不差时回复"无"。
-8. 如果用户这次没透露任何事实（只是闲聊/调侃/提问/纠正），返回"无"。
+【三类记忆的定义——每类独立判断，可以同时有，也可以都没有】
+A. user_fact：她透露的、关于她自己的新事实（生日/喜好/近况/经历等）。
+   - 内容里【不许】出现角色名字，只写她自己的事。
+B. bond：她和{char_name}之间这次发生的、值得记住的事——约定、承诺、重要的共同话题、她对他表达的重要情感。
+   - 日常寒暄闲聊不算，只记"以后会被提起"级别的事。例："她和{char_name}约好2026-07-10一起看电影"。
+C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信息——包括原作剧情、他的未来、他不知道的设定。
+   - content 用"她说过..."或"她告诉过{char_name}..."开头的转述。例："她说过{char_name}的未来会发生某某事"。
+   - 只有当她明确在陈述这类信息时才提取；她提问、开玩笑不算。
 
-分类（必须选一个）：
-- 喜好/厌恶/身份/状态/经历/关系/其他
+【通用规则】
+1. 只从"她说"里提取。{char_name}的回复仅供理解语境，绝不作为事实来源。
+2. 撒娇/调侃/情绪宣泄/问候/提问/简单回应都不算。
+3. 时间换算成绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
+4. 三类内容都必须是以"她"字开头的中文第三人称陈述句。
+5. 与已记录内容重复的不要再提。
+6. 某类没有就填 null。
 
 【输出格式——严格 JSON，只输出一行】
-有新事实：{{"content":"她XXX","category":"喜好"}}
-没有新事实：{{"content":"无","category":""}}
-
-【判断你输出是否合格的标准】
-content 必须以"她"字开头，否则系统会丢弃你的输出。'''
+{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"她和{char_name}XXX"}},"told":{{"content":"她说过XXX"}}}}
+没有的类填 null，例如全都没有：
+{{"user_fact":null,"bond":null,"told":null}}
+category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
             }]
         )
         raw = response.content[0].text.strip()
-        print(f'[{user_id}] Haiku：{raw[:100]}')
+        print(f'[{user_id}][{character_id}] Haiku：{raw[:150]}')
 
         parsed = extract_json(raw)
         if not parsed:
             return
 
-        content = parsed.get('content', '').strip().strip('「」"\'').rstrip('。.')
-        category = parsed.get('category', '').strip() or '其他'
+        # A. 用户事实 → shared 桶
+        uf = parsed.get('user_fact')
+        if isinstance(uf, dict):
+            content = _clean_content(uf.get('content'))
+            category = (uf.get('category') or '其他').strip()
+            if category not in VALID_CATS:
+                category = '其他'
+            if _valid_user_fact(user_id, content, char_names):
+                if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID):
+                    print(f'[{user_id}] ✅ 用户事实 [{category}]（shared）：{content}')
 
-        if not content or content == '无' or len(content) < 4:
-            return
+        # B. 我们之间的事 → bond_memory(between)
+        bd = parsed.get('bond')
+        if isinstance(bd, dict):
+            content = _clean_content(bd.get('content'))
+            if _valid_bond(user_id, content):
+                if save_bond_memory(user_id, character_id, 'between', content):
+                    print(f'[{user_id}] ✅ 羁绊记忆（{character_id}）：{content}')
 
-        if not content.startswith('她'):
-            print(f'[{user_id}] ❌ 拒绝（非"她"开头）：{content}')
-            return
+        # C. 她告诉我的事 → bond_memory(told)
+        td = parsed.get('told')
+        if isinstance(td, dict):
+            content = _clean_content(td.get('content'))
+            if _valid_bond(user_id, content):
+                if save_bond_memory(user_id, character_id, 'told', content):
+                    print(f'[{user_id}] ✅ 告知记忆（{character_id}）：{content}')
 
-        from characters import get_character
-        char = get_character(character_id)
-        char_name = char['name'] if char else ''
-        forbidden = ['AI', 'ai', '机器人', '五条悟', '五条', '夏油杰', '夏油', '波风水门', '水门']
-
-        valid_cats = ('喜好', '厌恶', '身份', '状态', '经历', '关系', '其他')
-        if category not in valid_cats:
-            category = '其他'
-
-        # ★ 用户事实统一存 shared 桶 → 私聊/群聊/所有角色互通
-        if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID):
-            print(f'[{user_id}] ✅ 新长期记忆 [{category}]（shared）：{content}')
     except Exception as e:
         print(f'记忆提取失败：{e}')
 
 
-# ────────── ★ 群聊专用记忆提取（多说话人安全版）──────────
+# ────────── ★ 群聊统一提取（用户事实 + 定向告知）──────────
 
-def extract_and_save_group_memory(user_id, user_text, round_transcript, character_names):
-    """群聊版：只从"群主"（用户本人）的发言里提取事实，角色说的话一律忽略。
-    提取结果存入 shared 桶。
+def extract_and_save_group_memory(user_id, user_text, round_transcript, members):
+    """群聊版提取（bond 在群里语义模糊，只做 A 和 C 两类）：
+    A user_fact —— 她的新事实 → long_memory(shared)
+    C told      —— 她在群里告诉【某个具体角色】的关于他/他世界的信息 → 该角色的 bond_memory(told)
 
-    user_id          : 群主真实 user_id（不是 group_xx！）
-    user_text        : 群主这一轮说的那句话
-    round_transcript : 本轮完整转录（带说话人标签，如 "五条悟：xxx"）
-    character_names  : 群里所有角色名列表，用于违禁词过滤
+    members: [{'id','name'}, ...] 群里全部角色。
     """
     try:
-        # 先跑纠错（扫 shared 桶 + 违禁范围一致）
         corrected = correct_memories(user_id, user_text, SHARED_CHARACTER_ID)
         correction_hint = ''
         if corrected:
             correction_hint = '\n【提示】用户刚纠正了之前说错的信息，旧记忆已删除，请提取她这次给出的正确事实。'
+
+        character_names = [m['name'] for m in members]
+        name_to_id = {m['name']: m['id'] for m in members}
+        names_str = '、'.join(character_names)
+        char_names_all = _all_character_names()
 
         now = datetime.now(CN_TZ)
         today_str = now.strftime('%Y-%m-%d')
@@ -419,22 +553,21 @@ def extract_and_save_group_memory(user_id, user_text, round_transcript, characte
 
         existing = get_long_memory(user_id, SHARED_CHARACTER_ID)
         existing_text = '\n'.join(f'- {m[0]}' for m in existing) if existing else '（暂无）'
-        names_str = '、'.join(character_names)
 
         response = claude_client.messages.create(
             model='claude-haiku-4-5-20251001',
-            max_tokens=250,
+            max_tokens=350,
             messages=[{
                 'role': 'user',
-                'content': f'''你是事实抽取助手。下面是一个群聊的一轮对话记录。
+                'content': f'''你是记忆整理助手。下面是一个群聊的一轮对话记录。
 
 【群里的说话人】
-- "群主" = 用户本人（她）——你【只能】从她的发言里提取事实
-- {names_str} = 虚构角色——他们说的【任何话】都不得提取，包括他们声称的关于群主的事
+- "群主" = 用户本人（她）——你【只能】从她的发言里提取
+- {names_str} = 虚构角色——他们说的任何话都不得提取
 
 【今天日期】{today_str}（{weekday_cn}）{correction_hint}
 
-【已记录的事实】
+【已记录的她的事实】
 {existing_text}
 
 【群主这一轮说的话】
@@ -443,50 +576,50 @@ def extract_and_save_group_memory(user_id, user_text, round_transcript, characte
 【本轮完整对话（仅供理解语境）】
 {round_transcript}
 
-【提取规则——严格遵守】
-1. 只从"群主这一轮说的话"里提取她主动透露的关于她自己的新事实。
-2. 角色（{names_str}）的发言只是语境，哪怕角色说"她喜欢XX"也绝对不要记。
-3. 撒娇/调侃/情绪宣泄/问候/提问/简单回应都不算事实。
-4. 时间必须换算成绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
-5. 用第三人称中文陈述句，必须以"她"字开头。
-6. 绝对禁止的主语：{names_str}、AI、机器人、你、他、对方、用户。一律用"她"。
-7. 已有列表里有相同或几乎相同的内容时返回"无"。
-8. 这次没透露任何新事实就返回"无"。
+【两类记忆——各自独立判断】
+A. user_fact：她透露的、关于她自己的新事实。内容里不许出现角色名。
+B. told：她在这句话里告诉【某个具体角色】的、关于那个角色本人或他世界的信息（含剧情/未来）。
+   - target 必须是这些名字之一：{names_str}
+   - content 用"她说过..."开头的转述。她是泛泛对全群说的、没有明确对象时，target 填 null。
+
+【通用规则】
+1. 只从群主的发言提取；角色说的话（哪怕角色说"她喜欢XX"）一律忽略。
+2. 撒娇/调侃/提问/简单回应不算。
+3. 时间换算绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
+4. 内容以"她"字开头。与已有记录重复的不提。没有就填 null。
 
 【输出格式——严格 JSON，只输出一行】
-有新事实：{{"content":"她XXX","category":"喜好"}}
-没有新事实：{{"content":"无","category":""}}
-分类只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
+{{"user_fact":{{"content":"她XXX","category":"喜好"}},"told":{{"target":"角色名","content":"她说过XXX"}}}}
+没有的类填 null。category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
             }]
         )
         raw = response.content[0].text.strip()
-        print(f'[{user_id}][group] Haiku：{raw[:100]}')
+        print(f'[{user_id}][group] Haiku：{raw[:150]}')
 
         parsed = extract_json(raw)
         if not parsed:
             return
 
-        content = parsed.get('content', '').strip().strip('「」"\'').rstrip('。.')
-        category = parsed.get('category', '').strip() or '其他'
+        # A. 用户事实 → shared
+        uf = parsed.get('user_fact')
+        if isinstance(uf, dict):
+            content = _clean_content(uf.get('content'))
+            category = (uf.get('category') or '其他').strip()
+            if category not in VALID_CATS:
+                category = '其他'
+            if _valid_user_fact(user_id, content, char_names_all):
+                if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID):
+                    print(f'[{user_id}][group] ✅ 用户事实 [{category}]：{content}')
 
-        if not content or content == '无' or len(content) < 4:
-            return
-        if not content.startswith('她'):
-            print(f'[{user_id}][group] ❌ 拒绝（非"她"开头）：{content}')
-            return
+        # C. 定向告知 → 目标角色的 told 桶
+        td = parsed.get('told')
+        if isinstance(td, dict):
+            content = _clean_content(td.get('content'))
+            target_name = (td.get('target') or '').strip()
+            target_id = name_to_id.get(target_name)
+            if target_id and _valid_bond(user_id, content):
+                if save_bond_memory(user_id, target_id, 'told', content):
+                    print(f'[{user_id}][group] ✅ 告知记忆（{target_id}）：{content}')
 
-        # 违禁词：通用词 + 群里所有角色名（防止把角色的事记成用户的事）
-        forbidden = ['AI', 'ai', '机器人'] + [n for n in character_names if n]
-        for word in forbidden:
-            if word in content:
-                print(f'[{user_id}][group] ❌ 拒绝（含违禁词 {word}）：{content}')
-                return
-
-        valid_cats = ('喜好', '厌恶', '身份', '状态', '经历', '关系', '其他')
-        if category not in valid_cats:
-            category = '其他'
-
-        if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID):
-            print(f'[{user_id}][group] ✅ 新共享记忆 [{category}]：{content}')
     except Exception as e:
         print(f'群聊记忆提取失败：{e}')

@@ -1,11 +1,15 @@
-"""Prompt 动态组装：把角色定义 + 用户记忆 + 角色背景 + 对话上下文拼起来
+"""Prompt 动态组装：把角色定义 + 用户记忆 + 羁绊记忆 + 角色背景 + 对话上下文拼起来
 ★ CANON_LOCK 按 character_id 从 characters_data/<id>/canon_lock.py 动态加载
+★ v3 新增：注入"你们之间的事"(bond) 和"她告诉过你的事"(told) 两段羁绊记忆
 """
 from datetime import datetime
 from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID
 from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock, load_core
-from user_memory import get_long_memory, get_recent_openings, get_last_assistant_reply
+from user_memory import (
+    get_long_memory, get_recent_openings, get_last_assistant_reply,
+    get_bond_memories,
+)
 
 
 def get_time_context():
@@ -74,6 +78,39 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 2. 自然融入回复，不要刻意背诵清单。
 3. 列表里有的事必须当作记得，没有的可以说不记得。'''
 
+    # ── ★ 3.5 羁绊记忆：你们之间的事 + 她告诉过你的事 ──
+    bonds = get_bond_memories(user_id, character_id, kind='between', limit=30)
+    bond_text = ''
+    if bonds:
+        bond_lines = []
+        for _bid, content, ts in bonds:
+            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
+            bond_lines.append(f'- [{date_str}] {content}')
+        bond_text = f'''
+
+【你们之间的事——你和她共同的回忆】
+（这些是你和她之间真实发生过的事、做过的约定。当作真的记得，聊到相关话题时可以自然提起，约定要记得兑现或跟进。）
+{chr(10).join(bond_lines)}'''
+
+    tolds = get_bond_memories(user_id, character_id, kind='told', limit=30)
+    told_text = ''
+    if tolds:
+        told_lines = []
+        for _tid, content, ts in tolds:
+            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
+            told_lines.append(f'- [{date_str}] {content}')
+        told_text = f'''
+
+【她告诉过你的事——关于你自己或你的世界】
+（这些是她在过去的对话里亲口告诉你的。你清楚地记得"她说过这些话"。）
+{chr(10).join(told_lines)}
+
+处理规则——非常重要：
+1. 你【记得她说过】这些，绝不能表现得从没听过。她再次提起时，你要接得上。
+2. 但这些是"她的说法"，不是你亲身经历的事实。信、半信半疑、觉得荒唐、心情复杂——由你的性格决定。
+3. 这些说法不改变你的原作设定和你所处的时间点。涉及你"未来"的内容，你可以带着那份被告知的认知去回应（好奇、沉默、追问、失笑都行），但不要假装你已经经历过。
+4. 例：她之前说过你未来会牺牲，这次她显得难过——你应该明白她为什么难过，用你的方式接住，而不是问"你在说什么"。'''
+
     # ── 4. 避免重复 ──
     recent_openings = get_recent_openings(user_id, n=5, character_id=character_id)
     avoid_text = ''
@@ -98,7 +135,7 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
     return f'''{core_prompt}
 {canon_lock}
-{memory_text}{recall_text}{avoid_text}{no_repeat_text}
+{memory_text}{bond_text}{told_text}{recall_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}
 

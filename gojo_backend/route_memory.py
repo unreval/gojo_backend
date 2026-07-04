@@ -7,7 +7,8 @@ from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID
 from db import get_conn
 from user_memory import (
     get_short_memory, get_long_memory, get_chat_days,
-    extract_and_save_memory, SHARED_CHARACTER_ID
+    extract_and_save_memory, SHARED_CHARACTER_ID,
+    get_bond_memories, delete_bond_memory,
 )
 
 router = APIRouter()
@@ -183,6 +184,24 @@ async def reclassify_memories(data: dict):
         'message': f'已重新分类 {updated} 条记忆',
         'processed': updated, 'total': len(rows),
     })
+
+
+@router.get('/bond_memory')
+async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT_CHARACTER_ID,
+                           kind: str = ''):
+    """★ 查看某角色的羁绊记忆。kind 传 between / told，不传返回全部。"""
+    rows = get_bond_memories(user_id, character_id, kind=kind or None, limit=100)
+    return JSONResponse({'memories': [{
+        'id': r[0], 'content': r[1],
+        'timestamp': str(r[2]) if r[2] else None,
+    } for r in rows]})
+
+
+@router.delete('/bond_memory/{memory_id}')
+async def remove_bond_memory(memory_id: int):
+    """★ 删除一条羁绊记忆（想让角色忘掉某个剧透/约定时用）。"""
+    delete_bond_memory(memory_id)
+    return JSONResponse({'ok': True, 'id': memory_id})
 
 
 @router.get('/debug/users')

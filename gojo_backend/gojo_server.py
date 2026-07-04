@@ -12,6 +12,8 @@ from config import TTS_PROVIDER
 from db import init_db, migrate_old_gojo_memory
 from db_group import init_group_tables          # ★ 新增：群聊建表
 from characters import seed_gojo_character
+from db_bond import init_bond_table
+
 
 # 路由模块
 from route_chat import router as chat_router
@@ -33,6 +35,7 @@ app.add_middleware(
 init_db()
 migrate_old_gojo_memory()
 init_group_tables()          # ★ 新增：建群聊三表（独立函数，不动 init_db）
+init_bond_table()
 seed_gojo_character()
 
 # ── 注册路由 ──
