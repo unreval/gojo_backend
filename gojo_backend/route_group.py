@@ -118,6 +118,7 @@ def _get_member_characters(gid: int):
                 'id': char['id'],
                 'name': char['name'],
                 'voice_id': char.get('voice_id'),
+                'avatar_url': char.get('avatar_url'),   # ★ 前端头像用
                 'is_owner_role': bool(is_owner_role),
             })
     return result

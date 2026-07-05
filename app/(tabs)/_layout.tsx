@@ -24,6 +24,7 @@ export default function TabLayout() {
       <Tabs.Screen name="calendar"   options={{ title:'日程', tabBarIcon:()=>null, tabBarLabel:'📅 日程' }}/>
       <Tabs.Screen name="accounting" options={{ title:'记账', tabBarIcon:()=>null, tabBarLabel:'💰 记账' }}/>
       <Tabs.Screen name="memory"     options={{ title:'记忆', tabBarIcon:()=>null, tabBarLabel:'🧠 记忆' }}/>
+      <Tabs.Screen name="settings"   options={{ title:'设置', tabBarIcon:()=>null, tabBarLabel:'⚙️ 设置' }}/>
     </Tabs>
   );
 }

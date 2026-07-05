@@ -1,18 +1,22 @@
 // app/(tabs)/chat.tsx
-// 替换原来的"直接进单聊"。改成微信式会话列表：
+// 微信式会话列表：
 //   上面是角色单聊（gojo / geto / ...，从 GET /characters 拉）
 //   下面是群（从 GET /groups 拉）
 // 点某个 → router.push('/chat/' + id)，进通用聊天页 app/chat/[id].tsx
 //
-// 视觉：毛玻璃风格（expo-blur），跟项目暗色主题搭。
-// 顶部有 ➕ 新建群按钮：弹一个简易选角色面板，建完自动刷新列表。
+// ★ 本版新增：
+//   - 图片头像：avatar_url 有值就显示图片，没有就显示首字
+//   - 长按角色行 → 更换/恢复头像（裁 1:1 + 压缩 → data URI 存后端）
+//   - 长按群聊行 → 更换群头像（同机制，走 PUT /group/{gid}/avatar）
 import axios from 'axios';
 import { BlurView } from 'expo-blur';
+import * as ImagePicker from 'expo-image-picker';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Modal,
   Platform,
   RefreshControl,
@@ -43,6 +47,25 @@ interface Group {
   avatar_url?: string | null;
   member_names: string[];
   last_message?: string;
+}
+
+// ★ 选图 → 裁 1:1 → 压缩 → 返回 data URI（角色和群共用）
+async function pickAvatarDataUri(): Promise<string | null> {
+  const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (status !== 'granted') {
+    Alert.alert('需要相册权限', '请在系统设置里允许访问相册');
+    return null;
+  }
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ['images'],
+    allowsEditing: true,
+    aspect: [1, 1],
+    quality: 0.4,
+    base64: true,
+  });
+  if (result.canceled || !result.assets?.[0]?.base64) return null;
+  const asset = result.assets[0];
+  return `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}`;
 }
 
 export default function ChatListScreen() {
@@ -78,6 +101,55 @@ export default function ChatListScreen() {
     setRefreshing(true);
     await load();
     setRefreshing(false);
+  };
+
+  // ★ 长按角色行 → 更换/恢复头像
+  const changeAvatar = (c: Character) => {
+    Alert.alert(c.name, '要做什么？', [
+      {
+        text: '🖼 更换头像',
+        onPress: async () => {
+          try {
+            const dataUri = await pickAvatarDataUri();
+            if (!dataUri) return;
+            await axios.put(`${SERVER_URL}/characters/${c.id}/avatar`, { avatar_url: dataUri });
+            await load();
+          } catch (e: any) {
+            Alert.alert('更换失败', e?.response?.data?.error ?? e?.message ?? '请检查网络');
+          }
+        },
+      },
+      {
+        text: '恢复默认头像',
+        onPress: async () => {
+          try {
+            await axios.delete(`${SERVER_URL}/characters/${c.id}/avatar`);
+            await load();
+          } catch {}
+        },
+      },
+      { text: '取消', style: 'cancel' },
+    ]);
+  };
+
+  // ★ 长按群聊行 → 更换群头像
+  const changeGroupAvatar = (g: Group) => {
+    Alert.alert(g.name, '要做什么？', [
+      {
+        text: '🖼 更换群头像',
+        onPress: async () => {
+          try {
+            const dataUri = await pickAvatarDataUri();
+            if (!dataUri) return;
+            await axios.put(`${SERVER_URL}/group/${g.id}/avatar`, { avatar_url: dataUri });
+            await load();
+          } catch (e: any) {
+            Alert.alert('更换失败', e?.response?.data?.error ?? e?.message ?? '请检查网络');
+          }
+        },
+      },
+      { text: '取消', style: 'cancel' },
+    ]);
   };
 
   const openCharacter = (id: string) => router.push(`/chat/${id}` as any);
@@ -123,9 +195,12 @@ export default function ChatListScreen() {
               subtitle={c.id === 'gojo' ? '最强的男人' : (c.name_en || '点击进入聊天')}
               firstChar={firstChar(c.name)}
               accentColor={c.id === 'gojo' ? C.accent : C.accent2}
+              avatarUrl={c.avatar_url}
               onPress={() => openCharacter(c.id)}
+              onLongPress={() => changeAvatar(c)}
             />
           ))}
+          <Text style={s.hintTiny}>长按角色可更换头像</Text>
 
           {/* ── 群聊 ── */}
           <Text style={[s.sectionTitle, { marginTop: 24 }]}>群聊</Text>
@@ -143,7 +218,9 @@ export default function ChatListScreen() {
               firstChar={firstChar(g.name)}
               accentColor={C.accent2}
               isGroup
+              avatarUrl={g.avatar_url}
               onPress={() => openGroup(g.id)}
+              onLongPress={() => changeGroupAvatar(g)}
             />
           ))}
         </ScrollView>
@@ -168,7 +245,7 @@ export default function ChatListScreen() {
 //  毛玻璃行：单聊 / 群聊 公用
 // ─────────────────────────────────────
 function GlassRow({
-  title, subtitle, lastMsg, firstChar, accentColor, isGroup, onPress,
+  title, subtitle, lastMsg, firstChar, accentColor, isGroup, avatarUrl, onPress, onLongPress,
 }: {
   title: string;
   subtitle: string;
@@ -176,17 +253,23 @@ function GlassRow({
   firstChar: string;
   accentColor: string;
   isGroup?: boolean;
+  avatarUrl?: string | null;
   onPress: () => void;
+  onLongPress?: () => void;
 }) {
   return (
-    <TouchableOpacity activeOpacity={0.7} onPress={onPress} style={s.rowWrap}>
+    <TouchableOpacity activeOpacity={0.7} onPress={onPress} onLongPress={onLongPress} delayLongPress={350} style={s.rowWrap}>
       <BlurView intensity={30} tint="dark" style={s.rowBlur}>
         <View style={[s.rowInner, { borderColor: accentColor + '33' }]}>
-          {/* 头像 */}
-          <View style={[s.avatar, { backgroundColor: accentColor + '22', borderColor: accentColor }]}>
-            <Text style={[s.avatarText, { color: accentColor }]}>
-              {isGroup ? '群' : firstChar}
-            </Text>
+          {/* 头像：有图显示图，没图显示首字 */}
+          <View style={[s.avatar, { backgroundColor: accentColor + '22', borderColor: accentColor, overflow: 'hidden' }]}>
+            {avatarUrl ? (
+              <Image source={{ uri: avatarUrl }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+            ) : (
+              <Text style={[s.avatarText, { color: accentColor }]}>
+                {isGroup ? '群' : firstChar}
+              </Text>
+            )}
           </View>
           {/* 文本区 */}
           <View style={{ flex: 1, marginLeft: 12 }}>
@@ -342,6 +425,7 @@ const s = StyleSheet.create({
     letterSpacing: 1,
   },
   emptyText: { color: C.textMute, fontSize: 13, paddingVertical: 16, textAlign: 'center' },
+  hintTiny:  { color: C.textMute, fontSize: 11, marginLeft: 4, marginTop: -4 },
 
   rowWrap: {
     marginBottom: 12,

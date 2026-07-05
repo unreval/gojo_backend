@@ -36,7 +36,20 @@ export const CATEGORIES = ['餐饮','购物','交通','娱乐','学习','医疗'
 export const WEEKDAYS = ['日','一','二','三','四','五','六'];
 export const MONTHS = ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
 
-export const SERVER_URL = 'https://gojosatoru.zeabur.app';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+const DEFAULT_SERVER_URL = 'https://gojosatoru.zeabur.app';
+
+export let SERVER_URL = DEFAULT_SERVER_URL;
+
+export const setServerUrl = async (url: string) => {
+  SERVER_URL = url.replace(/\/+$/, '');
+  try { await AsyncStorage.setItem('server_url', SERVER_URL); } catch {}
+};
+
+// 启动时读回上次保存的地址（异步，首屏极个别请求可能仍用默认值，无碍）
+AsyncStorage.getItem('server_url')
+  .then(v => { if (v) SERVER_URL = v; })
+  .catch(() => {});
 
 export function uid() { return Math.random().toString(36).slice(2); }
 export function nowTime() {

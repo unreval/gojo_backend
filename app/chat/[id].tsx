@@ -4,6 +4,9 @@
 //   - 群聊：id 是 'group_<gid>'（如 'group_2'）→ 走 /group/chat
 // 完整保留 gojo 单聊原有的功能：语音文件持久化、提醒/闹钟、图片暂存、搜索、长按复制。
 // 电话按钮：仅 id==='gojo' 时显示。
+// ★ 本版新增：
+//   - 群聊@功能：输入"@"弹成员面板；长按角色消息的头像/名字快速@；发送时自动传 mentioned_id
+//   - 图片头像：头部、消息行、@面板都支持 avatar_url 图片头像
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { Audio } from 'expo-av';
@@ -57,11 +60,13 @@ interface Character {
   name: string;
   voice_id?: string;
   greeting?: string;
+  avatar_url?: string | null;
 }
 interface GroupMember {
   id: string;
   name: string;
   voice_id?: string;
+  avatar_url?: string | null;
   is_owner_role?: boolean;
 }
 interface GroupDetail {
@@ -130,6 +135,7 @@ export default function ChatRoom() {
   const checkingProactiveRef = useRef(false);
   const interactionActiveRef = useRef(false);  // ★ 群聊互动轮询是否在进行
   const [thinkingName, setThinkingName] = useState<string | null>(null);  // ★ 正在思考的角色名
+  const [showMention, setShowMention] = useState(false);  // ★ @成员选择面板
 
   // ── 语音文件工具 ──
   const ensureAudioDir = async () => {
@@ -317,7 +323,7 @@ export default function ChatRoom() {
           audioUri = await saveAudioFile(msgId, seg.audio_b64);
           if (audioUri) audioCacheRef.current[msgId] = audioUri;
         }
-        const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now(), timestamp: Date.now() };
+        const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now() };
         setMessages(prev => [...prev, msg]);
         scrollRef.current?.scrollToEnd({ animated: true });
         if (audioUri) await playAudioAndWait(audioUri);
@@ -469,7 +475,7 @@ export default function ChatRoom() {
         audioUri = await saveAudioFile(msgId, seg.audio_b64);
         if (audioUri) audioCacheRef.current[msgId] = audioUri;
       }
-      const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now(), timestamp: Date.now() };
+      const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now() };
       setMessages(prev => [...prev, msg]);
       scrollRef.current?.scrollToEnd({ animated: true });
       if (audioUri) await playAudioAndWait(audioUri);
@@ -624,6 +630,7 @@ export default function ChatRoom() {
     }
     if (loading) return;
     setInputText('');
+    setShowMention(false);
     if (searchMode) { setSearchMode(false); setSearchQuery(''); }
 
     const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now() };
@@ -632,11 +639,19 @@ export default function ChatRoom() {
 
     try {
       if (isGroup) {
+        // ★ 扫描文本里的 @角色名 → 传给后端，被@的人强制先回话
+        let mentionedId: string | null = null;
+        if (group) {
+          for (const m of group.members) {
+            if (text.includes('@' + m.name)) { mentionedId = m.id; break; }
+          }
+        }
         // ★ 第一波:只拿直接回复,不做互动循环
         const res = await axios.post(`${SERVER_URL}/group/chat`, {
           group_id: groupId,
           text,
           user_id: FIXED_USER_ID,
+          mentioned_id: mentionedId,
           allow_interaction: false,
         });
         const replies: GroupReply[] = res.data?.replies || [];
@@ -773,8 +788,12 @@ export default function ChatRoom() {
             <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
               <Text style={s.backText}>‹</Text>
             </TouchableOpacity>
-            <View style={[s.avatarSmall, { borderColor: isGroup ? C.accent2 : C.accent }]}>
-              <Text style={s.avatarSmallText}>{isGroup ? '群' : (headerTitle?.[0] || '?')}</Text>
+            <View style={[s.avatarSmall, { borderColor: isGroup ? C.accent2 : C.accent, overflow: 'hidden' }]}>
+              {!isGroup && character?.avatar_url ? (
+                <Image source={{ uri: character.avatar_url }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+              ) : (
+                <Text style={s.avatarSmallText}>{isGroup ? '群' : (headerTitle?.[0] || '?')}</Text>
+              )}
             </View>
             <View style={{ flex: 1 }}>
               <Text style={s.headerName} numberOfLines={1}>{headerTitle}</Text>
@@ -840,6 +859,16 @@ export default function ChatRoom() {
              (msg.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase()));
           const speakerName = msg.senderName || character?.name || (isGroup ? '?' : (chatId === 'gojo' ? '五条悟' : chatId));
           const speakerInitial = speakerName?.[0] || '?';
+          // ★ 头像图：群聊按 senderId 从成员里找，单聊用角色自己的
+          const avatarUri = isGroup
+            ? (group?.members.find(x => x.id === msg.senderId)?.avatar_url || null)
+            : (character?.avatar_url || null);
+          // ★ 长按头像/名字 → @这个人（仅群聊）
+          const mentionThis = () => {
+            if (isGroup && msg.senderName) {
+              setInputText(prev => prev + '@' + msg.senderName + ' ');
+            }
+          };
           const prevMsg = idx > 0 ? displayMessages[idx - 1] : null;
           const showSep = shouldShowSeparator(msg, prevMsg);
 
@@ -858,12 +887,22 @@ export default function ChatRoom() {
               )}
             <View style={[s.msgRow, msg.role === 'user' ? s.msgRowUser : s.msgRowGojo]}>
               {msg.role === 'gojo' && (
-                <View style={s.msgAvatar}>
-                  <Text style={s.msgAvatarText}>{speakerInitial}</Text>
-                </View>
+                <TouchableOpacity onLongPress={mentionThis} delayLongPress={300} activeOpacity={0.7}>
+                  <View style={[s.msgAvatar, { overflow: 'hidden' }]}>
+                    {avatarUri ? (
+                      <Image source={{ uri: avatarUri }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                    ) : (
+                      <Text style={s.msgAvatarText}>{speakerInitial}</Text>
+                    )}
+                  </View>
+                </TouchableOpacity>
               )}
               <View style={[s.msgMain, msg.role === 'user' && { alignItems: 'flex-end' }]}>
-                {msg.role === 'gojo' && <Text style={s.msgSender}>{speakerName}</Text>}
+                {msg.role === 'gojo' && (
+                  <TouchableOpacity onLongPress={mentionThis} delayLongPress={300} activeOpacity={0.7}>
+                    <Text style={s.msgSender}>{speakerName}</Text>
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity
                   activeOpacity={0.85}
                   onPress={() => { if (msg.role === 'gojo' && hasAudio) replayAudio(msg.id); }}
@@ -923,6 +962,36 @@ export default function ChatRoom() {
         </View>
       )}
 
+      {/* ★ @成员选择面板：输入框打出"@"时弹出 */}
+      {isGroup && showMention && group && (
+        <View style={s.mentionBar}>
+          <Text style={s.mentionTitle}>@ 谁？</Text>
+          {group.members.map(m => (
+            <TouchableOpacity
+              key={m.id}
+              style={s.mentionItem}
+              onPress={() => {
+                setInputText(prev =>
+                  prev.endsWith('@') ? prev + m.name + ' ' : prev + '@' + m.name + ' ');
+                setShowMention(false);
+              }}
+            >
+              <View style={s.mentionAvatar}>
+                {m.avatar_url ? (
+                  <Image source={{ uri: m.avatar_url }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                ) : (
+                  <Text style={s.mentionAvatarText}>{m.name?.[0] || '?'}</Text>
+                )}
+              </View>
+              <Text style={s.mentionName}>{m.name}</Text>
+            </TouchableOpacity>
+          ))}
+          <TouchableOpacity style={s.mentionItem} onPress={() => setShowMention(false)}>
+            <Text style={[s.mentionName, { color: C.textMute }]}>取消</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       <View style={[s.inputBar, { marginBottom: keyboardHeight }]}>
         <TouchableOpacity style={s.attachBtn} onPress={showImagePicker} disabled={loading}>
           <Text style={s.attachBtnText}>📎</Text>
@@ -931,7 +1000,13 @@ export default function ChatRoom() {
         <TextInput
           style={s.input}
           value={inputText}
-          onChangeText={setInputText}
+          onChangeText={(t) => {
+            setInputText(t);
+            if (isGroup) {
+              if (t.endsWith('@')) setShowMention(true);
+              else if (showMention) setShowMention(false);
+            }
+          }}
           placeholder={
             loading
               ? (isGroup ? '群里回复中...' : '回复中...')
@@ -1017,6 +1092,14 @@ const s = StyleSheet.create({
 
   attachBtn:       { padding: 8, marginRight: 2 },
   attachBtnText:   { fontSize: 22 },
+
+  // ★ @成员面板
+  mentionBar:        { backgroundColor: C.card, borderTopWidth: 1, borderTopColor: C.border, paddingVertical: 6, paddingHorizontal: 12 },
+  mentionTitle:      { color: C.textMute, fontSize: 11, marginBottom: 4 },
+  mentionItem:       { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, gap: 10 },
+  mentionAvatar:     { width: 28, height: 28, borderRadius: 14, backgroundColor: C.accentDim, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  mentionAvatarText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  mentionName:       { color: C.text, fontSize: 14 },
 
   inputBar:        { flexDirection: 'row', alignItems: 'flex-end', backgroundColor: C.card, paddingHorizontal: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.border, gap: 8 },
   input:           { flex: 1, backgroundColor: C.bg, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, color: C.text, fontSize: 14, maxHeight: 100, borderWidth: 1, borderColor: C.border },
