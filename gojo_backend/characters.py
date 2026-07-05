@@ -1,5 +1,11 @@
 """角色 CRUD + 背景记忆检索（通用逻辑）
 角色人设在 characters_data/<id>/ 下,加新角色只需新建文件夹,不动本文件。
+
+★ v2 改动：
+  - seed 只在该角色背景记忆为空时预置，不再每次启动清空重灌
+    → 保护你在 app 记忆页里对背景记忆的修改
+    → 想强制按 memories.py 重灌某角色：手动删掉他的 character_memory 再重启
+  - list_characters 返回 voice_id（设置页音色编辑用）
 """
 from db import get_conn
 from characters_data import REGISTRY
@@ -32,22 +38,29 @@ def seed_all_characters():
             )
             print(f'[seed] 已创建角色：{cid}')
         else:
+            # 注意：不更新 voice_id / avatar_url —— 这两个字段允许在 app 里改，重启不覆盖
             cur.execute(
                 '''UPDATE characters SET core_prompt = %s, greeting = %s, name = %s, name_en = %s
                    WHERE id = %s''',
                 (core['core_prompt'], core['greeting'], core['name'], core['name_en'], cid)
             )
             print(f'[seed] 已更新角色：{cid}')
+
         seed_mems = load_memories(cid)
         if seed_mems:
-            cur.execute("DELETE FROM character_memory WHERE character_id = %s", (cid,))
-            for content, category, keywords, importance in seed_mems:
-                cur.execute(
-                    '''INSERT INTO character_memory (character_id, content, category, keywords, importance)
-                       VALUES (%s, %s, %s, %s, %s)''',
-                    (cid, content, category, keywords, importance)
-                )
-            print(f'[seed] 已预置 {cid} 的 {len(seed_mems)} 条 background memory')
+            # ★ 只在空表时预置——保护 app 里对背景记忆的增删改
+            cur.execute("SELECT COUNT(*) FROM character_memory WHERE character_id = %s", (cid,))
+            existing_cnt = cur.fetchone()[0]
+            if existing_cnt == 0:
+                for content, category, keywords, importance in seed_mems:
+                    cur.execute(
+                        '''INSERT INTO character_memory (character_id, content, category, keywords, importance)
+                           VALUES (%s, %s, %s, %s, %s)''',
+                        (cid, content, category, keywords, importance)
+                    )
+                print(f'[seed] 已预置 {cid} 的 {len(seed_mems)} 条 background memory')
+            else:
+                print(f'[seed] {cid} 已有 {existing_cnt} 条背景记忆，跳过预置（保护 app 内修改）')
     conn.commit()
     cur.close()
     conn.close()
@@ -75,10 +88,11 @@ def get_character(character_id: str):
 def list_characters():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT id, name, name_en, avatar_url, greeting FROM characters ORDER BY created_at')
+    cur.execute('SELECT id, name, name_en, avatar_url, voice_id, greeting FROM characters ORDER BY created_at')
     rows = cur.fetchall()
     cur.close(); conn.close()
-    return [{'id': r[0], 'name': r[1], 'name_en': r[2], 'avatar_url': r[3], 'greeting': r[4]} for r in rows]
+    return [{'id': r[0], 'name': r[1], 'name_en': r[2], 'avatar_url': r[3],
+             'voice_id': r[4], 'greeting': r[5]} for r in rows]
 
 
 def list_character_memory(character_id: str):

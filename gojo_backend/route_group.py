@@ -125,11 +125,12 @@ def _get_member_characters(gid: int):
 
 
 def _get_group_history(gid: int, limit: int = 12):
-    """取群最近若干条消息，返回 [{sender_type, sender_id, sender_name, jp, zh}]（旧→新）。"""
+    """取群最近若干条消息，返回 [{msg_id, ts, sender_type, sender_id, sender_name, jp, zh}]（旧→新）。
+    ★ msg_id/ts 供前端同步与去重；ts 是 epoch 毫秒。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        '''SELECT sender_type, sender_id, jp, zh FROM group_messages
+        '''SELECT id, sender_type, sender_id, jp, zh, timestamp FROM group_messages
            WHERE group_id = %s ORDER BY timestamp DESC LIMIT %s''',
         (gid, limit)
     )
@@ -139,7 +140,7 @@ def _get_group_history(gid: int, limit: int = 12):
     rows = rows[::-1]  # 转成旧→新
     history = []
     name_cache = {}
-    for sender_type, sender_id, jp, zh in rows:
+    for mid, sender_type, sender_id, jp, zh, ts in rows:
         if sender_type == 'character':
             if sender_id not in name_cache:
                 c = get_character(sender_id)
@@ -148,6 +149,8 @@ def _get_group_history(gid: int, limit: int = 12):
         else:
             sender_name = '群主'
         history.append({
+            'msg_id': mid,
+            'ts': int(ts.timestamp() * 1000) if ts else None,
             'sender_type': sender_type,
             'sender_id': sender_id,
             'sender_name': sender_name,
@@ -155,6 +158,16 @@ def _get_group_history(gid: int, limit: int = 12):
             'zh': zh or '',
         })
     return history
+
+
+def _group_msg_count(gid: int) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM group_messages WHERE group_id = %s', (gid,))
+    n = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return n
 
 
 def _save_group_message(gid, sender_type, sender_id, jp, zh, emotion='平静'):
@@ -515,6 +528,7 @@ async def list_groups(user_id: str = 'default'):
             'id': gid, 'name': name, 'avatar_url': avatar,
             'member_names': [m['name'] for m in members],
             'last_message': last,
+            'msg_count': _group_msg_count(gid),   # ★ 未读红点用
         })
     return JSONResponse({'groups': groups})
 
@@ -525,11 +539,12 @@ async def group_detail(gid: int):
     if not g:
         return JSONResponse({'error': 'group not found'}, status_code=404)
     members = _get_member_characters(gid)
-    history = _get_group_history(gid, limit=30)
+    history = _get_group_history(gid, limit=50)
     return JSONResponse({
         'id': g['id'], 'name': g['name'],
         'members': members,
         'messages': history,
+        'msg_count': _group_msg_count(gid),   # ★ 进群即已读的基准
     })
 
 
@@ -598,9 +613,10 @@ async def group_chat(data: dict):
         if not reply:
             continue
         for m in reply['messages']:
-            _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
+            mid = _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
             audio = tts_to_b64(m['jp'], reply['emotion'], member['voice_id'])
             replies.append({
+                'msg_id': mid,
                 'sender_id': cid,
                 'sender_name': member['name'],
                 'jp': m['jp'], 'zh': m['zh'],
@@ -654,9 +670,10 @@ async def group_chat(data: dict):
                 break
 
             for m in reply['messages']:
-                _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
+                mid = _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
                 audio = tts_to_b64(m['jp'], reply['emotion'], member['voice_id'])
                 replies.append({
+                    'msg_id': mid,
                     'sender_id': cid,
                     'sender_name': member['name'],
                     'jp': m['jp'], 'zh': m['zh'],
@@ -763,9 +780,10 @@ async def group_chat_continue(data: dict):
     # 存 + TTS(每条气泡分别处理)
     result_replies = []
     for m in reply['messages']:
-        _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
+        mid = _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
         audio = tts_to_b64(m['jp'], reply['emotion'], member['voice_id'])
         result_replies.append({
+            'msg_id': mid,
             'sender_id': cid,
             'sender_name': member['name'],
             'jp': m['jp'], 'zh': m['zh'],

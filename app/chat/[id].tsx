@@ -73,6 +73,7 @@ interface GroupDetail {
   id: number;
   name: string;
   members: GroupMember[];
+  msg_count?: number;
 }
 
 interface Segment {
@@ -81,6 +82,7 @@ interface Segment {
   audio_b64: string;
 }
 interface GroupReply {
+  msg_id?: number;
   sender_id: string;
   sender_name: string;
   jp: string;
@@ -210,17 +212,38 @@ export default function ChatRoom() {
               id: res.data.id,
               name: res.data.name,
               members: res.data.members || [],
+              msg_count: res.data.msg_count,
             });
+            // ★ 群聊以服务器为准：把服务器历史转成本地消息（离开期间生成的回复也能看到）
+            const serverMsgs: Message[] = (res.data.messages || []).map((m: any) => ({
+              id: m.msg_id != null ? `g_${m.msg_id}` : `srv_${m.ts || Math.random()}`,
+              role: m.sender_type === 'user' ? 'user' : 'gojo',
+              text: m.sender_type === 'user' ? (m.zh || '') : (m.jp || m.zh || ''),
+              subtitle: m.sender_type === 'user' ? undefined : (m.zh || undefined),
+              time: m.ts
+                ? `${String(new Date(m.ts).getHours()).padStart(2, '0')}:${String(new Date(m.ts).getMinutes()).padStart(2, '0')}`
+                : '',
+              timestamp: m.ts || Date.now(),
+              senderId: m.sender_id,
+              senderName: m.sender_type === 'user' ? undefined : m.sender_name,
+            }));
+            setMessages(serverMsgs);
+            // ★ 进群即已读：记录当前消息总数，列表页据此算未读红点
+            try {
+              await AsyncStorage.setItem(
+                `group_read_count_${groupId}`,
+                String(res.data.msg_count ?? serverMsgs.length)
+              );
+            } catch {}
           } catch (e) { console.warn('load group error', e); }
         } else {
           try {
             const res = await axios.get(`${SERVER_URL}/characters/${chatId}`);
             setCharacter(res.data);
           } catch (e) { console.warn('load character error', e); }
+          const saved = await AsyncStorage.getItem(STORAGE_KEY);
+          if (saved) setMessages(JSON.parse(saved));
         }
-
-        const saved = await AsyncStorage.getItem(STORAGE_KEY);
-        if (saved) setMessages(JSON.parse(saved));
 
         await loadAudioIndex();
       } catch (e) { console.warn('init error', e); }
@@ -257,6 +280,26 @@ export default function ChatRoom() {
     if (!ready) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
   }, [messages, ready]);
+
+  // ★ 已读计数 +delta（列表页红点 = 服务器总数 - 本地已读数）
+  const bumpRead = async (delta: number) => {
+    if (!isGroup || groupId == null) return;
+    try {
+      const k = `group_read_count_${groupId}`;
+      const v = parseInt((await AsyncStorage.getItem(k)) || '0', 10);
+      await AsyncStorage.setItem(k, String(v + delta));
+    } catch {}
+  };
+
+  // ★ 离开本页时：停掉群互动轮询 + 停掉正在播的语音（修复"人走了声音还在放"）
+  useFocusEffect(useCallback(() => {
+    return () => {
+      interactionActiveRef.current = false;
+      setThinkingName(null);
+      currentSoundRef.current?.unloadAsync().catch(() => {});
+      currentSoundRef.current = null;
+    };
+  }, []));
 
   // 五条单聊保留的"主动提醒"轮询
   useFocusEffect(useCallback(() => {
@@ -487,7 +530,7 @@ export default function ChatRoom() {
   const appendGroupReplies = async (replies: GroupReply[]) => {
     for (let i = 0; i < replies.length; i++) {
       const r = replies[i];
-      const msgId = `${Date.now()}_${i}_${r.sender_id}`;
+      const msgId = r.msg_id != null ? `g_${r.msg_id}` : `${Date.now()}_${i}_${r.sender_id}`;
       let audioUri: string | null = null;
       if (r.audio_b64 && r.audio_b64.length > 100) {
         audioUri = await saveAudioFile(msgId, r.audio_b64);
@@ -500,14 +543,15 @@ export default function ChatRoom() {
       };
       setMessages(prev => [...prev, msg]);
       scrollRef.current?.scrollToEnd({ animated: true });
+      bumpRead(1);
       if (audioUri) await playAudioAndWait(audioUri);
       if (i < replies.length - 1) await sleep(MSG_DELAY_MS);
     }
   };
 
-  // ★ 单条群聊回复追加(流式用)
+  // ★ 单条群聊回复追加(流式用)。用服务器 msg_id 作 id，重进群后与历史对得上（重播也能续上）
   const appendOneGroupReply = async (r: GroupReply) => {
-    const msgId = `${Date.now()}_${r.sender_id}`;
+    const msgId = r.msg_id != null ? `g_${r.msg_id}` : `${Date.now()}_${r.sender_id}`;
     let audioUri: string | null = null;
     if (r.audio_b64 && r.audio_b64.length > 100) {
       audioUri = await saveAudioFile(msgId, r.audio_b64);
@@ -520,6 +564,7 @@ export default function ChatRoom() {
     };
     setMessages(prev => [...prev, msg]);
     scrollRef.current?.scrollToEnd({ animated: true });
+    bumpRead(1);
     if (audioUri) await playAudioAndWait(audioUri);
   };
 
@@ -570,6 +615,7 @@ export default function ChatRoom() {
     };
     setMessages(prev => [...prev, userMsg]);
     scrollRef.current?.scrollToEnd({ animated: true });
+    if (isGroup) bumpRead(1);
 
     try {
       if (isGroup) {
@@ -635,6 +681,7 @@ export default function ChatRoom() {
 
     const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now() };
     setMessages(prev => [...prev, userMsg]);
+    if (isGroup) bumpRead(1);
     setLoading(true);
 
     try {

@@ -24,6 +24,7 @@ from route_image import router as image_router
 from route_story import router as story_router
 from route_group import router as group_router   # ★ 新增：群聊路由
 from route_avatar import router as avatar_router
+from route_config import router as config_router
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -48,6 +49,7 @@ app.include_router(image_router)
 app.include_router(story_router)
 app.include_router(group_router)   #群聊路由
 app.include_router(avatar_router)   #頭像路由
+app.include_router(config_router)
 
 
 @app.get('/health')

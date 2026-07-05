@@ -197,6 +197,24 @@ async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT
     } for r in rows]})
 
 
+@router.put('/bond_memory/{memory_id}')
+async def edit_bond_memory(memory_id: int, data: dict):
+    """★ 修改一条羁绊记忆（记忆页编辑用）。"""
+    content = (data.get('content') or '').strip()
+    if not content:
+        return JSONResponse({'error': '内容不能为空'}, status_code=400)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('UPDATE bond_memory SET content = %s WHERE id = %s', (content, memory_id))
+    updated = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    if not updated:
+        return JSONResponse({'error': 'not found'}, status_code=404)
+    return JSONResponse({'ok': True, 'id': memory_id})
+
+
 @router.delete('/bond_memory/{memory_id}')
 async def remove_bond_memory(memory_id: int):
     """★ 删除一条羁绊记忆（想让角色忘掉某个剧透/约定时用）。"""

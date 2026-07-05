@@ -29,6 +29,7 @@ interface Character {
   id: string;
   name: string;
   avatar_url?: string | null;
+  voice_id?: string | null;
 }
 
 interface ConfigStatus {
@@ -45,6 +46,8 @@ export default function SettingsScreen() {
   const [status, setStatus]       = useState<ConfigStatus | null>(null);
   const [chars, setChars]         = useState<Character[]>([]);
   const [defaultChar, setDefaultChar] = useState<string>('gojo');
+  const [voices, setVoices]       = useState<Record<string, string>>({});   // ★ 音色编辑框内容
+  const [savingVoice, setSavingVoice] = useState<string | null>(null);
 
   const loadAll = async () => {
     setUrlInput(SERVER_URL);
@@ -58,11 +61,30 @@ export default function SettingsScreen() {
         axios.get(`${SERVER_URL}/characters`, { timeout: 8000 }),
       ]);
       setStatus(sRes.data);
-      setChars(cRes.data?.characters || []);
+      const list: Character[] = cRes.data?.characters || [];
+      setChars(list);
+      // ★ 用后端当前音色初始化编辑框
+      const v: Record<string, string> = {};
+      for (const c of list) v[c.id] = c.voice_id || '';
+      setVoices(v);
     } catch (e: any) {
       console.warn('settings load error', e?.message);
       setStatus(null);
     }
+  };
+
+  // ★ 保存某个角色的音色 ID（立即生效，重启/重新部署不会被覆盖）
+  const saveVoice = async (cid: string) => {
+    const vid = (voices[cid] || '').trim();
+    if (!vid) { Alert.alert('音色 ID 不能为空'); return; }
+    setSavingVoice(cid);
+    try {
+      await axios.put(`${SERVER_URL}/characters/${cid}`, { voice_id: vid });
+      Alert.alert('✅ 已保存', '下一条语音开始用新音色');
+      await loadAll();
+    } catch (e: any) {
+      Alert.alert('保存失败', e?.response?.data?.error ?? e?.message ?? '请重试');
+    } finally { setSavingVoice(null); }
   };
 
   useFocusEffect(useCallback(() => { loadAll(); }, []));
@@ -201,6 +223,41 @@ export default function SettingsScreen() {
           </Text>
         </View>
 
+        {/* ── 角色音色 ── */}
+        <Text style={st.sectionTitle}>角色音色</Text>
+        <View style={st.card}>
+          {chars.length === 0 ? (
+            <Text style={st.hint}>还没拉到角色列表</Text>
+          ) : (
+            chars.map(c => (
+              <View key={c.id} style={st.voiceRow}>
+                <Text style={st.voiceName}>{c.name}</Text>
+                <TextInput
+                  style={st.voiceInput}
+                  value={voices[c.id] ?? ''}
+                  onChangeText={t => setVoices(p => ({ ...p, [c.id]: t }))}
+                  placeholder="fish.audio 音色 ID"
+                  placeholderTextColor={C.textMute}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <TouchableOpacity
+                  style={[st.voiceSaveBtn, savingVoice === c.id && { opacity: 0.5 }]}
+                  onPress={() => saveVoice(c.id)}
+                  disabled={savingVoice === c.id}
+                >
+                  {savingVoice === c.id
+                    ? <ActivityIndicator size="small" color="#fff" />
+                    : <Text style={st.voiceSaveText}>保存</Text>}
+                </TouchableOpacity>
+              </View>
+            ))
+          )}
+          <Text style={st.hint}>
+            填 fish.audio 模型页地址里那串 32 位 ID。保存即生效，重启和重新部署都不会被覆盖。
+          </Text>
+        </View>
+
         {/* ── 关于 ── */}
         <Text style={st.sectionTitle}>关于</Text>
         <View style={st.card}>
@@ -267,4 +324,19 @@ const st = StyleSheet.create({
   pickAvatarText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   pickName: { color: C.text, fontSize: 14, flex: 1 },
   pickCheck: { color: C.accent2, fontSize: 12, fontWeight: '600' },
+
+  // ★ 角色音色
+  voiceRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  voiceName: { color: C.text, fontSize: 13, width: 62 },
+  voiceInput: {
+    flex: 1, backgroundColor: C.bg, borderRadius: 10,
+    borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 10, paddingVertical: 8,
+    color: C.text, fontSize: 11,
+  },
+  voiceSaveBtn: {
+    backgroundColor: C.accent, borderRadius: 10,
+    paddingHorizontal: 12, paddingVertical: 9, minWidth: 52, alignItems: 'center',
+  },
+  voiceSaveText: { color: '#fff', fontSize: 12, fontWeight: '600' },
 });

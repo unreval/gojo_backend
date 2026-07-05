@@ -1,16 +1,20 @@
-// app/(tabs)/memory.tsx — 海马体神经元风格记忆管理页（增强版）
-import AsyncStorage from '@react-native-async-storage/async-storage';
+// app/(tabs)/memory.tsx
+// ★ 记忆页 v2 —— 海马体风格保留，按角色分四层：
+//   📌 她的事实（shared，全角色共享，按脑区分类）
+//   🤝 我们之间（bond between，按角色独立）
+//   📖 她告诉过TA的（bond told，剧透与设定）
+//   🎭 TA的背景（character_memory，原作设定）
+// 交互：顶部切角色 · 点卡片修改 · 长按遗忘 · 背景模块可手动添加
 import axios from 'axios';
-import React, { useEffect, useRef, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import React, { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Animated,
-  Dimensions,
-  Easing,
+  Image,
   Modal,
   Platform,
-  Pressable,
+  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -19,476 +23,510 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import ChibiSprite from '../../components/ChibiSprite';
 import { C, SERVER_URL } from '../../constants/theme';
 
-const USER_ID_KEY = 'gojo_user_id';
-const { width } = Dimensions.get('window');
+const FIXED_USER_ID = 'user_mofpiyd7442ia7';
 
-// 海马体脑区分类
-const MEMORY_CATEGORIES: Record<string, { icon: string; color: string; brainRegion: string }> = {
-  '喜好': { icon: '💜', color: '#F5A0C0', brainRegion: '愉悦核' },
-  '厌恶': { icon: '💔', color: '#F87171', brainRegion: '杏仁核' },
-  '身份': { icon: '👤', color: '#A78BFA', brainRegion: '前额叶' },
-  '状态': { icon: '📌', color: '#5BC4FF', brainRegion: '海马回' },
-  '经历': { icon: '📖', color: '#FFD700', brainRegion: '颞叶' },
-  '关系': { icon: '🤝', color: '#34D399', brainRegion: '镜像区' },
-  '其他': { icon: '✨', color: '#9CA3AF', brainRegion: '联想区' },
+interface Character { id: string; name: string; avatar_url?: string | null; }
+interface FactMem   { id: number; content: string; category: string; timestamp?: string | null; }
+interface BondMem   { id: number; content: string; timestamp?: string | null; }
+interface BgMem     { id: number; content: string; category: string; keywords?: string; importance?: number; timestamp?: string | null; }
+
+type ModuleKey = 'facts' | 'between' | 'told' | 'background';
+
+const CATEGORY_ORDER = ['状态', '身份', '喜好', '厌恶', '经历', '关系', '其他'];
+const CAT_EMOJI: Record<string, string> = {
+  状态: '📌', 身份: '🪪', 喜好: '💗', 厌恶: '🚫', 经历: '🧭', 关系: '🫂', 其他: '🗂',
+};
+const DOT_COLORS = ['#f472b6', '#60a5fa', '#a78bfa', '#f87171', '#facc15', '#34d399'];
+
+// 后端 naive UTC 时间串 → 本地相对时间
+function parseTs(ts?: string | null): number | null {
+  if (!ts) return null;
+  const iso = ts.includes('T') ? ts : ts.replace(' ', 'T');
+  const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z');
+  const t = d.getTime();
+  return isNaN(t) ? null : t;
+}
+function relTime(ts?: string | null): string {
+  const t = parseTs(ts);
+  if (!t) return '';
+  const diff = Date.now() - t;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${min}分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}小时前`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}天前`;
+  const d = new Date(t);
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+}
+const isNewborn = (ts?: string | null) => {
+  const t = parseTs(ts);
+  return t != null && Date.now() - t < 24 * 3600 * 1000;
+};
+const isToday = (ts?: string | null) => {
+  const t = parseTs(ts);
+  return t != null && new Date(t).toDateString() === new Date().toDateString();
 };
 
-interface LongMemory {
-  id: number;
-  content: string;
-  category: string;
-  timestamp: string;
-}
-
-// ────── 跳动的神经元节点 ──────
-function PulsingNode({ color, size = 8, delay = 0 }: { color: string; size?: number; delay?: number }) {
-  const scale = useRef(new Animated.Value(0.6)).current;
-  const opacity = useRef(new Animated.Value(0.3)).current;
-
-  useEffect(() => {
-    const pulse = () => {
-      Animated.loop(
-        Animated.sequence([
-          Animated.parallel([
-            Animated.timing(scale,   { toValue: 1.4, duration: 1200, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-            Animated.timing(opacity, { toValue: 0.9, duration: 1200, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-          ]),
-          Animated.parallel([
-            Animated.timing(scale,   { toValue: 0.6, duration: 1200, easing: Easing.in(Easing.quad),  useNativeDriver: true }),
-            Animated.timing(opacity, { toValue: 0.3, duration: 1200, easing: Easing.in(Easing.quad),  useNativeDriver: true }),
-          ]),
-        ])
-      ).start();
-    };
-    const t = setTimeout(pulse, delay);
-    return () => clearTimeout(t);
-  }, []);
-
-  return (
-    <Animated.View
-      style={{
-        width: size, height: size, borderRadius: size / 2,
-        backgroundColor: color, transform: [{ scale }], opacity,
-        shadowColor: color, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: size, elevation: 4,
-      }}
-    />
-  );
-}
-
-// ────── 缓慢呼吸的大脑（空状态用）──────
-function BreathingBrain() {
-  const scale = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(scale, { toValue: 1.08, duration: 2200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-        Animated.timing(scale, { toValue: 1.0,  duration: 2200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
-      ])
-    ).start();
-  }, []);
-
-  return (
-    <Animated.Text style={[s.emptyEmoji, { transform: [{ scale }] }]}>🧠</Animated.Text>
-  );
-}
-
-// ────── 大脑可视化（顶部头图）──────
-function BrainViz({ totalMemories, categoryCount }: { totalMemories: number; categoryCount: number }) {
-  return (
-    <View style={s.brainViz}>
-      <View style={s.brainNetwork}>
-        <View style={s.brainCenter}>
-          <Text style={s.brainEmoji}>🧠</Text>
-        </View>
-        <View style={[s.satelliteNode, { top: 6, left: 30 }]}>
-          <PulsingNode color="#F5A0C0" size={6} delay={0} />
-        </View>
-        <View style={[s.satelliteNode, { top: 14, right: 24 }]}>
-          <PulsingNode color="#5BC4FF" size={7} delay={300} />
-        </View>
-        <View style={[s.satelliteNode, { bottom: 8, left: 18 }]}>
-          <PulsingNode color="#FFD700" size={5} delay={600} />
-        </View>
-        <View style={[s.satelliteNode, { bottom: 14, right: 32 }]}>
-          <PulsingNode color="#34D399" size={6} delay={900} />
-        </View>
-        <View style={[s.satelliteNode, { top: 36, left: 6 }]}>
-          <PulsingNode color="#A78BFA" size={5} delay={450} />
-        </View>
-        <View style={[s.satelliteNode, { top: 40, right: 10 }]}>
-          <PulsingNode color="#F87171" size={6} delay={750} />
-        </View>
-      </View>
-
-      <View style={s.brainStats}>
-        <View style={s.statItem}>
-          <Text style={s.statNumber}>{totalMemories}</Text>
-          <Text style={s.statLabel}>神经元</Text>
-        </View>
-        <View style={s.statDivider} />
-        <View style={s.statItem}>
-          <Text style={s.statNumber}>{categoryCount}</Text>
-          <Text style={s.statLabel}>脑区</Text>
-        </View>
-      </View>
-    </View>
-  );
-}
-
-// 判断记忆是否是"新生"（24 小时内）
-function isFreshMemory(timestamp: string): boolean {
-  if (!timestamp) return false;
-  const now = Date.now();
-  const memTime = new Date(timestamp).getTime();
-  return (now - memTime) < 24 * 60 * 60 * 1000;
-}
-
-// 友好时间显示
-function friendlyTime(timestamp: string): string {
-  if (!timestamp) return '';
-  const date = new Date(timestamp);
-  const now = new Date();
-  const diff = (now.getTime() - date.getTime()) / 1000;
-
-  if (diff < 60) return '刚刚';
-  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
-  if (diff < 172800) return '昨天';
-  if (diff < 604800) return `${Math.floor(diff / 86400)}天前`;
-  return date.toLocaleDateString('zh-CN');
-}
-
 export default function MemoryScreen() {
-  const [userId, setUserId] = useState('');
-  const [memories, setMemories] = useState<LongMemory[]>([]);
+  const [chars, setChars] = useState<Character[]>([]);
+  const [charId, setCharId] = useState<string>('gojo');
+  const [facts, setFacts] = useState<FactMem[]>([]);
+  const [between, setBetween] = useState<BondMem[]>([]);
+  const [told, setTold] = useState<BondMem[]>([]);
+  const [background, setBackground] = useState<BgMem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [collapsed, setCollapsed] = useState<Record<ModuleKey, boolean>>({
+    facts: false, between: false, told: false, background: true,
+  });
+  // 编辑/新增弹窗
+  const [editing, setEditing] = useState<{ module: ModuleKey; id?: number; content: string; category?: string } | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  const [editModal, setEditModal] = useState(false);
-  const [editId, setEditId] = useState<number | null>(null);
-  const [editContent, setEditContent] = useState('');
-  const [editCategory, setEditCategory] = useState('其他');
-
-  useEffect(() => {
-    (async () => {
-      const uid = await AsyncStorage.getItem(USER_ID_KEY);
-      if (uid) {
-        setUserId(uid);
-        await fetchMemories(uid);
-      }
-      setLoading(false);
-    })();
-  }, []);
-
-  const fetchMemories = async (uid: string) => {
+  const loadChars = async () => {
     try {
-      const res = await axios.get(`${SERVER_URL}/long_memory`, { params: { user_id: uid } });
-      if (res.data?.memories) {
-        setMemories(res.data.memories);
-      }
-    } catch (e) {
-      console.warn('获取记忆失败', e);
+      const res = await axios.get(`${SERVER_URL}/characters`);
+      const list: Character[] = res.data?.characters || [];
+      setChars(list);
+      if (list.length && !list.find(c => c.id === charId)) setCharId(list[0].id);
+      return list;
+    } catch { return []; }
+  };
+
+  const loadMemories = async (cid: string) => {
+    try {
+      const [fRes, bRes, tRes, gRes] = await Promise.all([
+        axios.get(`${SERVER_URL}/long_memory?user_id=${FIXED_USER_ID}&character_id=${cid}`),
+        axios.get(`${SERVER_URL}/bond_memory?user_id=${FIXED_USER_ID}&character_id=${cid}&kind=between`),
+        axios.get(`${SERVER_URL}/bond_memory?user_id=${FIXED_USER_ID}&character_id=${cid}&kind=told`),
+        axios.get(`${SERVER_URL}/character_memory?character_id=${cid}`),
+      ]);
+      setFacts(fRes.data?.memories || []);
+      setBetween(bRes.data?.memories || []);
+      setTold(tRes.data?.memories || []);
+      setBackground(gRes.data?.memories || []);
+    } catch (e: any) {
+      console.warn('load memories error', e?.message);
     }
   };
 
-  const refresh = async () => {
+  useFocusEffect(useCallback(() => {
+    (async () => {
+      setLoading(true);
+      await loadChars();
+      await loadMemories(charId);
+      setLoading(false);
+    })();
+  }, [charId]));
+
+  const onRefresh = async () => {
     setRefreshing(true);
-    await fetchMemories(userId);
+    await loadMemories(charId);
     setRefreshing(false);
   };
 
-  const deleteMemory = (mem: LongMemory) => {
-    Alert.alert('遗忘这段记忆', `确认让悟忘记「${mem.content}」？`, [
+  const curChar = chars.find(c => c.id === charId);
+  const charName = curChar?.name || charId;
+  const neurons = facts.length + between.length + told.length + background.length;
+  const brainZones = new Set([...facts.map(f => f.category || '其他'), '羁绊', '认知', '背景']).size;
+  const todayNew = [...facts, ...between, ...told].filter(m => isToday(m.timestamp)).length;
+
+  // ── 遗忘（删除）──
+  const forget = (module: ModuleKey, id: number, content: string) => {
+    Alert.alert('遗忘这段记忆？', content.length > 40 ? content.slice(0, 40) + '…' : content, [
       { text: '取消', style: 'cancel' },
       {
-        text: '遗忘',
-        style: 'destructive',
+        text: '遗忘', style: 'destructive',
         onPress: async () => {
           try {
-            await axios.delete(`${SERVER_URL}/long_memory/${mem.id}`);
-            setMemories(prev => prev.filter(m => m.id !== mem.id));
-          } catch (e) {
-            Alert.alert('遗忘失败', '请检查网络');
+            const url =
+              module === 'facts' ? `${SERVER_URL}/long_memory/${id}` :
+              module === 'background' ? `${SERVER_URL}/character_memory/${id}` :
+              `${SERVER_URL}/bond_memory/${id}`;
+            await axios.delete(url);
+            await loadMemories(charId);
+          } catch (e: any) {
+            Alert.alert('遗忘失败', e?.message ?? '请重试');
           }
         },
       },
     ]);
   };
 
-  const openEdit = (mem: LongMemory) => {
-    setEditId(mem.id);
-    setEditContent(mem.content);
-    setEditCategory(mem.category || '其他');
-    setEditModal(true);
-  };
-
+  // ── 保存（修改 / 新增）──
   const saveEdit = async () => {
-    if (!editContent.trim() || editId === null) return;
+    if (!editing) return;
+    const content = editing.content.trim();
+    if (!content) { Alert.alert('内容不能为空'); return; }
+    setSaving(true);
     try {
-      await axios.put(`${SERVER_URL}/long_memory/${editId}`, {
-        content: editContent.trim(),
-        category: editCategory,
-      });
-      setMemories(prev =>
-        prev.map(m => m.id === editId ? { ...m, content: editContent.trim(), category: editCategory } : m)
-      );
-      setEditModal(false);
-    } catch (e) {
-      Alert.alert('修改失败', '请检查网络');
-    }
+      if (editing.module === 'facts' && editing.id != null) {
+        await axios.put(`${SERVER_URL}/long_memory/${editing.id}`, { content, category: editing.category });
+      } else if (editing.module === 'background') {
+        if (editing.id != null) {
+          await axios.put(`${SERVER_URL}/character_memory/${editing.id}`, { content });
+        } else {
+          await axios.post(`${SERVER_URL}/character_memory`, { character_id: charId, content, category: '其他' });
+        }
+      } else if (editing.id != null) {
+        await axios.put(`${SERVER_URL}/bond_memory/${editing.id}`, { content });
+      }
+      setEditing(null);
+      await loadMemories(charId);
+    } catch (e: any) {
+      Alert.alert('保存失败', e?.message ?? '请重试');
+    } finally { setSaving(false); }
   };
 
-  // 按分类分组
-  const grouped: Record<string, LongMemory[]> = {};
-  memories.forEach(m => {
-    const cat = m.category || '其他';
-    if (!grouped[cat]) grouped[cat] = [];
-    grouped[cat].push(m);
-  });
+  const toggle = (k: ModuleKey) => setCollapsed(p => ({ ...p, [k]: !p[k] }));
 
-  // 按记忆数量排序
-  const sortedCategories = Object.entries(grouped).sort((a, b) => b[1].length - a[1].length);
-
-  // 统计今日新增
-  const todayNewCount = memories.filter(m => isFreshMemory(m.timestamp)).length;
-
-  if (loading) {
-    return (
-      <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' }}>
-        <ActivityIndicator color={C.accent} />
+  // ── 单张记忆卡 ──
+  const MemCard = ({ module, id, content, meta, ts }: {
+    module: ModuleKey; id: number; content: string; meta?: string; ts?: string | null;
+  }) => (
+    <TouchableOpacity
+      activeOpacity={0.8}
+      style={s.card}
+      onPress={() => setEditing({
+        module, id, content,
+        category: module === 'facts' ? (facts.find(f => f.id === id)?.category || '其他') : undefined,
+      })}
+      onLongPress={() => forget(module, id, content)}
+      delayLongPress={400}
+    >
+      <View style={s.cardDot} />
+      <View style={{ flex: 1 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+          <Text style={s.cardText}>{content}</Text>
+          {isNewborn(ts) && <View style={s.newborn}><Text style={s.newbornText}>新生</Text></View>}
+        </View>
+        <Text style={s.cardMeta}>
+          {relTime(ts)}{meta ? `  ${meta}` : ''}  突触 #{id}
+        </Text>
       </View>
-    );
-  }
+      <Text style={s.cardArrow}>›</Text>
+    </TouchableOpacity>
+  );
+
+  // ── 模块头 ──
+  const SectionHead = ({ k, emoji, title, sub, count, extra }: {
+    k: ModuleKey; emoji: string; title: string; sub: string; count: number; extra?: React.ReactNode;
+  }) => (
+    <TouchableOpacity style={s.sectionHead} onPress={() => toggle(k)} activeOpacity={0.7}>
+      <View style={s.sectionDot} />
+      <Text style={s.sectionEmoji}>{emoji}</Text>
+      <Text style={s.sectionTitle}>{title}</Text>
+      <Text style={s.sectionSub}> · {sub}</Text>
+      <View style={{ flex: 1 }} />
+      {extra}
+      <View style={s.countPill}><Text style={s.countPillText}>{count}</Text></View>
+      <Text style={s.collapseArrow}>{collapsed[k] ? '▸' : '▾'}</Text>
+    </TouchableOpacity>
+  );
+
+  // 她的事实按脑区分组
+  const factsByCat: [string, FactMem[]][] = CATEGORY_ORDER
+    .map(cat => [cat, facts.filter(f => (f.category || '其他') === cat)] as [string, FactMem[]])
+    .filter(([, arr]) => arr.length > 0);
 
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+      <StatusBar barStyle="light-content" backgroundColor={C.card} />
 
-      {/* 顶栏 */}
+      {/* 顶部 */}
       <View style={s.header}>
-        <View style={s.headerLeft}>
-          <Text style={s.headerTitle}>悟的海马体</Text>
-          <ChibiSprite pose="tiny" />
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Text style={s.headerTitle}>{charName}的海马体</Text>
+            {curChar?.avatar_url ? (
+              <Image source={{ uri: curChar.avatar_url }} style={s.headerAvatar} />
+            ) : null}
+          </View>
+          <Text style={s.headerSub}>每一颗神经元都是一段记忆 · 长按遗忘 · 点击修改</Text>
         </View>
-        <TouchableOpacity onPress={refresh} style={s.refreshBtn}>
-          <Text style={s.refreshText}>{refreshing ? '...' : '刷新'}</Text>
+        <TouchableOpacity style={s.refreshBtn} onPress={onRefresh}>
+          <Text style={s.refreshText}>刷新</Text>
         </TouchableOpacity>
       </View>
 
-      <Text style={s.headerHint}>每一颗神经元都是一段记忆 · 长按遗忘 · 点击修改</Text>
-
-      <ScrollView style={s.list} contentContainerStyle={{ paddingBottom: 40 }}>
-        {/* ★ 大脑可视化 + 今日新增提示 */}
-        {memories.length > 0 && (
-          <>
-            <BrainViz totalMemories={memories.length} categoryCount={Object.keys(grouped).length} />
-            {todayNewCount > 0 && (
-              <View style={s.freshBanner}>
-                <View style={s.freshDot} />
-                <Text style={s.freshBannerText}>今日新生成 {todayNewCount} 颗神经元 ✨</Text>
-              </View>
-            )}
-          </>
-        )}
-
-        {memories.length === 0 && (
-          <View style={s.emptyWrap}>
-            <BreathingBrain />
-            <Text style={s.emptyText}>海马体一片空白</Text>
-            <Text style={s.emptyHint}>多跟悟聊天，他会自动形成神经元记忆</Text>
-          </View>
-        )}
-
-        {/* 按分类显示 */}
-        {sortedCategories.map(([category, mems]) => {
-          const config = MEMORY_CATEGORIES[category] || MEMORY_CATEGORIES['其他'];
-          return (
-            <View key={category} style={s.categorySection}>
-              {/* 脑区标题 */}
-              <View style={s.categoryHeader}>
-                <PulsingNode color={config.color} size={10} delay={Math.random() * 1000} />
-                <Text style={{ fontSize: 16, marginLeft: 6 }}>{config.icon}</Text>
-                <Text style={[s.categoryTitle, { color: config.color }]}>{category}</Text>
-                <Text style={[s.brainRegionLabel, { color: config.color + '88' }]}>· {config.brainRegion}</Text>
-                <View style={{ flex: 1 }} />
-                <View style={[s.countBadge, { borderColor: config.color + '55' }]}>
-                  <Text style={[s.countText, { color: config.color }]}>{mems.length}</Text>
+      {/* 角色切换 */}
+      <View style={s.charBar}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 14, gap: 8 }}>
+          {chars.map(c => {
+            const active = c.id === charId;
+            return (
+              <TouchableOpacity key={c.id} style={[s.charChip, active && s.charChipActive]} onPress={() => setCharId(c.id)}>
+                <View style={s.charChipAvatar}>
+                  {c.avatar_url
+                    ? <Image source={{ uri: c.avatar_url }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                    : <Text style={s.charChipAvatarText}>{c.name?.[0] || '?'}</Text>}
                 </View>
-              </View>
+                <Text style={[s.charChipName, active && { color: C.text }]}>{c.name}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
 
-              <View style={[s.connectionLine, { backgroundColor: config.color + '22' }]} />
-
-              {/* 神经元卡片 */}
-              {mems.map((mem) => {
-                const isFresh = isFreshMemory(mem.timestamp);
+      {loading ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator color={C.accent} />
+        </View>
+      ) : (
+        <ScrollView
+          contentContainerStyle={{ padding: 16, paddingBottom: 60 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />}
+        >
+          {/* 大脑卡片 */}
+          <View style={s.brainCard}>
+            <View style={s.brainOrbit}>
+              {DOT_COLORS.map((col, i) => {
+                const angle = (i / DOT_COLORS.length) * Math.PI * 2;
                 return (
-                  <TouchableOpacity
-                    key={mem.id}
-                    style={[
-                      s.neuronCard,
-                      { borderLeftColor: config.color },
-                      isFresh && { backgroundColor: config.color + '0A', borderColor: config.color + '33' },
-                    ]}
-                    onPress={() => openEdit(mem)}
-                    onLongPress={() => deleteMemory(mem)}
-                    activeOpacity={0.65}
-                  >
-                    <View style={s.neuronHead}>
-                      <View style={[s.neuronCore, { backgroundColor: config.color }]} />
-                      <View style={[s.neuronGlow, { backgroundColor: config.color + '22' }]} />
-                    </View>
-
-                    <View style={s.neuronContent}>
-                      <View style={s.neuronTopRow}>
-                        <Text style={s.neuronText} numberOfLines={3}>{mem.content}</Text>
-                        {isFresh && (
-                          <View style={[s.freshTag, { backgroundColor: config.color }]}>
-                            <Text style={s.freshTagText}>新生</Text>
-                          </View>
-                        )}
-                      </View>
-                      <View style={s.neuronMeta}>
-                        <Text style={s.neuronTime}>{friendlyTime(mem.timestamp)}</Text>
-                        <Text style={[s.neuronTag, { color: config.color + 'AA' }]}>突触 #{mem.id}</Text>
-                      </View>
-                    </View>
-                    <Text style={s.editArrow}>›</Text>
-                  </TouchableOpacity>
+                  <View key={i} style={[s.orbitDot, {
+                    backgroundColor: col,
+                    left: 90 + Math.cos(angle) * 82 - 5,
+                    top: 90 + Math.sin(angle) * 82 - 5,
+                  }]} />
                 );
               })}
+              <View style={s.brainCircle}><Text style={{ fontSize: 44 }}>🧠</Text></View>
             </View>
-          );
-        })}
-      </ScrollView>
-
-      {/* 编辑弹窗 */}
-      <Modal visible={editModal} transparent animationType="slide">
-        <Pressable style={s.modalOverlay} onPress={() => setEditModal(false)}>
-          <Pressable style={s.modalContent} onPress={e => e.stopPropagation()}>
-            <Text style={s.modalTitle}>编辑神经元</Text>
-
-            <TextInput
-              style={s.modalInput}
-              value={editContent}
-              onChangeText={setEditContent}
-              placeholder="记忆内容..."
-              placeholderTextColor={C.textMute}
-              multiline
-              autoFocus
-            />
-
-            <Text style={s.modalLabel}>归属脑区</Text>
-            <View style={s.catRow}>
-              {Object.entries(MEMORY_CATEGORIES).map(([cat, cfg]) => (
-                <TouchableOpacity
-                  key={cat}
-                  style={[
-                    s.catChip,
-                    editCategory === cat && { backgroundColor: cfg.color + '33', borderColor: cfg.color },
-                  ]}
-                  onPress={() => setEditCategory(cat)}
-                >
-                  <Text style={{ fontSize: 14 }}>{cfg.icon}</Text>
-                  <Text style={[s.catChipText, editCategory === cat && { color: cfg.color }]}>{cat}</Text>
-                </TouchableOpacity>
-              ))}
+            <View style={s.brainStats}>
+              <View style={s.statCol}>
+                <Text style={s.statNum}>{neurons}</Text>
+                <Text style={s.statLabel}>神经元</Text>
+              </View>
+              <View style={s.statDivider} />
+              <View style={s.statCol}>
+                <Text style={s.statNum}>{brainZones}</Text>
+                <Text style={s.statLabel}>脑区</Text>
+              </View>
             </View>
+          </View>
 
-            <View style={s.modalActions}>
-              <TouchableOpacity style={s.cancelBtn} onPress={() => setEditModal(false)}>
-                <Text style={s.cancelText}>取消</Text>
-              </TouchableOpacity>
+          {todayNew > 0 && (
+            <View style={s.todayBar}>
+              <View style={s.sectionDot} />
+              <Text style={s.todayText}>今日新生成 {todayNew} 颗神经元 ✨</Text>
+            </View>
+          )}
+
+          {/* 模块一：她的事实 */}
+          <SectionHead k="facts" emoji="📌" title="她的事实" sub="全角色共享" count={facts.length} />
+          {!collapsed.facts && factsByCat.map(([cat, arr]) => (
+            <View key={cat}>
+              <Text style={s.catHead}>{CAT_EMOJI[cat] || '🗂'} {cat} · 海马回</Text>
+              {arr.map(m => <MemCard key={m.id} module="facts" id={m.id} content={m.content} ts={m.timestamp} />)}
+            </View>
+          ))}
+          {!collapsed.facts && facts.length === 0 && <Text style={s.emptyText}>还没有关于她的记忆</Text>}
+
+          {/* 模块二：我们之间 */}
+          <SectionHead k="between" emoji="🤝" title="我们之间" sub={`她和${charName}的共同记忆`} count={between.length} />
+          {!collapsed.between && between.map(m => (
+            <MemCard key={m.id} module="between" id={m.id} content={m.content} ts={m.timestamp} />
+          ))}
+          {!collapsed.between && between.length === 0 && <Text style={s.emptyText}>还没有共同的记忆，去创造一些吧</Text>}
+
+          {/* 模块三：她告诉过TA的 */}
+          <SectionHead k="told" emoji="📖" title={`她告诉过${charName}的`} sub="剧透与设定" count={told.length} />
+          {!collapsed.told && told.map(m => (
+            <MemCard key={m.id} module="told" id={m.id} content={m.content} ts={m.timestamp} />
+          ))}
+          {!collapsed.told && told.length === 0 && <Text style={s.emptyText}>她还没有告诉{charName}什么特别的事</Text>}
+
+          {/* 模块四：TA的背景 */}
+          <SectionHead
+            k="background" emoji="🎭" title={`${charName}的背景`} sub="原作设定"
+            count={background.length}
+            extra={
               <TouchableOpacity
-                style={[s.saveBtn, { opacity: editContent.trim() ? 1 : 0.4 }]}
-                onPress={saveEdit}
-                disabled={!editContent.trim()}
+                style={s.addBtn}
+                onPress={() => setEditing({ module: 'background', content: '' })}
               >
-                <Text style={s.saveText}>保存</Text>
+                <Text style={s.addBtnText}>＋</Text>
               </TouchableOpacity>
+            }
+          />
+          {!collapsed.background && background.map(m => (
+            <MemCard
+              key={m.id} module="background" id={m.id} content={m.content}
+              meta={`${m.category || '其他'}${m.importance != null ? ` · 权重${m.importance}` : ''}`}
+              ts={m.timestamp}
+            />
+          ))}
+          {!collapsed.background && background.length === 0 && <Text style={s.emptyText}>没有背景记忆</Text>}
+        </ScrollView>
+      )}
+
+      {/* 编辑 / 新增弹窗 */}
+      {editing && (
+        <Modal visible transparent animationType="fade" statusBarTranslucent>
+          <View style={s.modalBackdrop}>
+            <View style={s.modalCard}>
+              <Text style={s.modalTitle}>
+                {editing.id != null ? '修改这颗神经元' : '新增背景记忆'}
+              </Text>
+              <TextInput
+                style={s.modalInput}
+                value={editing.content}
+                onChangeText={t => setEditing(p => p ? { ...p, content: t } : p)}
+                multiline
+                placeholder="记忆内容…"
+                placeholderTextColor={C.textMute}
+              />
+              {editing.module === 'facts' && (
+                <View style={s.catPickRow}>
+                  {CATEGORY_ORDER.map(cat => (
+                    <TouchableOpacity
+                      key={cat}
+                      style={[s.catPick, editing.category === cat && s.catPickActive]}
+                      onPress={() => setEditing(p => p ? { ...p, category: cat } : p)}
+                    >
+                      <Text style={[s.catPickText, editing.category === cat && { color: '#fff' }]}>{cat}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+              <View style={s.modalBtnRow}>
+                <TouchableOpacity style={[s.modalBtn, s.modalBtnGhost]} onPress={() => setEditing(null)} disabled={saving}>
+                  <Text style={s.modalBtnGhostText}>取消</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.modalBtn, s.modalBtnPrimary]} onPress={saveEdit} disabled={saving}>
+                  {saving ? <ActivityIndicator color="#fff" /> : <Text style={s.modalBtnPrimaryText}>保存</Text>}
+                </TouchableOpacity>
+              </View>
             </View>
-          </Pressable>
-        </Pressable>
-      </Modal>
+          </View>
+        </Modal>
+      )}
     </View>
   );
 }
 
 const s = StyleSheet.create({
-  header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: Platform.OS === 'ios' ? 54 : 44, paddingBottom: 8, backgroundColor: C.bg },
-  headerLeft:   { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  headerTitle:  { color: C.text, fontSize: 22, fontWeight: '600' },
-  headerHint:   { color: C.textMute, fontSize: 11, paddingHorizontal: 20, marginBottom: 8 },
-  refreshBtn:   { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: C.border },
-  refreshText:  { color: C.textMute, fontSize: 12 },
+  header: {
+    flexDirection: 'row', alignItems: 'flex-end',
+    paddingHorizontal: 20, paddingTop: Platform.OS === 'ios' ? 56 : 44, paddingBottom: 12,
+    backgroundColor: C.card, borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  headerTitle:  { color: C.text, fontSize: 22, fontWeight: '700' },
+  headerAvatar: { width: 30, height: 30, borderRadius: 15, backgroundColor: C.bg },
+  headerSub:    { color: C.textMute, fontSize: 11, marginTop: 4 },
+  refreshBtn: {
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12,
+    borderWidth: 1, borderColor: C.border,
+  },
+  refreshText: { color: C.textMute, fontSize: 13 },
 
-  list:         { flex: 1, paddingHorizontal: 16 },
+  charBar: { backgroundColor: C.card, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border },
+  charChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.04)', borderWidth: 1, borderColor: C.border,
+  },
+  charChipActive: { borderColor: C.accent, backgroundColor: C.accent + '22' },
+  charChipAvatar: {
+    width: 24, height: 24, borderRadius: 12, overflow: 'hidden',
+    backgroundColor: C.accentDim, alignItems: 'center', justifyContent: 'center',
+  },
+  charChipAvatarText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  charChipName: { color: C.textMute, fontSize: 13, fontWeight: '600' },
 
-  // 大脑可视化
-  brainViz:        { alignItems: 'center', marginVertical: 16, paddingVertical: 20, backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' },
-  brainNetwork:    { width: 130, height: 100, alignItems: 'center', justifyContent: 'center', position: 'relative' },
-  brainCenter:     { width: 64, height: 64, borderRadius: 32, backgroundColor: 'rgba(167,139,250,0.15)', borderWidth: 1.5, borderColor: 'rgba(167,139,250,0.4)', alignItems: 'center', justifyContent: 'center', shadowColor: '#A78BFA', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.6, shadowRadius: 14, elevation: 8 },
-  brainEmoji:      { fontSize: 28 },
-  satelliteNode:   { position: 'absolute' },
+  brainCard: {
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 22, borderWidth: 1, borderColor: C.border,
+    alignItems: 'center', paddingVertical: 22, marginBottom: 14,
+  },
+  brainOrbit: { width: 180, height: 180 },
+  orbitDot:   { position: 'absolute', width: 10, height: 10, borderRadius: 5, opacity: 0.9 },
+  brainCircle: {
+    position: 'absolute', left: 90 - 46, top: 90 - 46,
+    width: 92, height: 92, borderRadius: 46,
+    backgroundColor: '#2a2440', borderWidth: 2, borderColor: '#6d5fa8',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  brainStats:  { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
+  statCol:     { alignItems: 'center', paddingHorizontal: 28 },
+  statNum:     { color: C.text, fontSize: 34, fontWeight: '800' },
+  statLabel:   { color: C.textMute, fontSize: 13, marginTop: 2 },
+  statDivider: { width: 1, height: 44, backgroundColor: C.border },
 
-  brainStats:      { flexDirection: 'row', alignItems: 'center', marginTop: 14, gap: 24 },
-  statItem:        { alignItems: 'center' },
-  statNumber:      { color: C.text, fontSize: 22, fontWeight: '700', letterSpacing: 1 },
-  statLabel:       { color: C.textMute, fontSize: 11, marginTop: 2, letterSpacing: 1 },
-  statDivider:     { width: 1, height: 28, backgroundColor: C.border },
+  todayBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 14, borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 14, paddingVertical: 12, marginBottom: 6,
+  },
+  todayText: { color: C.accent2, fontSize: 14, fontWeight: '600' },
 
-  // ★ 今日新增横幅
-  freshBanner:     { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(91,196,255,0.08)', borderWidth: 1, borderColor: 'rgba(91,196,255,0.2)', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, marginBottom: 16, gap: 10 },
-  freshDot:        { width: 8, height: 8, borderRadius: 4, backgroundColor: '#5BC4FF', shadowColor: '#5BC4FF', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 6, elevation: 4 },
-  freshBannerText: { color: '#5BC4FF', fontSize: 13, fontWeight: '500' },
+  sectionHead: { flexDirection: 'row', alignItems: 'center', marginTop: 18, marginBottom: 8 },
+  sectionDot:  { width: 10, height: 10, borderRadius: 5, backgroundColor: C.accent2 },
+  sectionEmoji:{ fontSize: 15, marginLeft: 8 },
+  sectionTitle:{ color: C.text, fontSize: 16, fontWeight: '700', marginLeft: 4 },
+  sectionSub:  { color: C.textMute, fontSize: 12, fontStyle: 'italic' },
+  countPill: {
+    borderWidth: 1, borderColor: C.border, borderRadius: 12,
+    paddingHorizontal: 10, paddingVertical: 2, marginLeft: 8,
+  },
+  countPillText: { color: C.textDim, fontSize: 12, fontWeight: '600' },
+  collapseArrow: { color: C.textMute, fontSize: 14, marginLeft: 8 },
+  addBtn: {
+    width: 24, height: 24, borderRadius: 12, borderWidth: 1, borderColor: C.accent + '66',
+    alignItems: 'center', justifyContent: 'center', backgroundColor: C.accent + '22',
+  },
+  addBtnText: { color: C.accent2, fontSize: 14, fontWeight: '700', lineHeight: 16 },
 
-  emptyWrap:    { alignItems: 'center', paddingTop: 100 },
-  emptyEmoji:   { fontSize: 64, marginBottom: 22, opacity: 0.75 },
-  emptyText:    { color: C.textMute, fontSize: 16, marginBottom: 8 },
-  emptyHint:    { color: C.textDim, fontSize: 12 },
+  catHead: { color: C.textDim, fontSize: 12, marginTop: 8, marginBottom: 6, marginLeft: 4 },
 
-  // 分类
-  categorySection:    { marginBottom: 22 },
-  categoryHeader:     { flexDirection: 'row', alignItems: 'center', marginBottom: 6, paddingLeft: 4 },
-  categoryTitle:      { fontSize: 15, fontWeight: '600', marginLeft: 6, letterSpacing: 0.5 },
-  brainRegionLabel:   { fontSize: 11, marginLeft: 6, fontStyle: 'italic' },
-  countBadge:         { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, borderWidth: 1 },
-  countText:          { fontSize: 11, fontWeight: '600' },
-  connectionLine:     { height: 1, marginBottom: 8, marginLeft: 18 },
+  card: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 16, borderWidth: 1, borderColor: C.border,
+    borderLeftWidth: 3, borderLeftColor: C.accent + '99',
+    paddingHorizontal: 12, paddingVertical: 12, marginBottom: 8,
+  },
+  cardDot:  { width: 8, height: 8, borderRadius: 4, backgroundColor: C.accent2 + 'aa' },
+  cardText: { color: C.text, fontSize: 14, lineHeight: 20, flex: 1 },
+  cardMeta: { color: C.textMute, fontSize: 11, marginTop: 5 },
+  cardArrow:{ color: C.textMute, fontSize: 18 },
+  newborn: {
+    backgroundColor: C.accent2 + '33', borderRadius: 10,
+    paddingHorizontal: 8, paddingVertical: 2, marginLeft: 6,
+  },
+  newbornText: { color: C.accent2, fontSize: 10, fontWeight: '700' },
+  emptyText: { color: C.textMute, fontSize: 12, paddingVertical: 10, paddingLeft: 4 },
 
-  // 神经元卡片
-  neuronCard:   { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, borderRadius: 14, padding: 12, paddingLeft: 16, marginBottom: 8, borderLeftWidth: 3, borderWidth: 1, borderColor: 'rgba(255,255,255,0.04)' },
-  neuronHead:   { width: 22, height: 22, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
-  neuronCore:   { width: 8, height: 8, borderRadius: 4, zIndex: 2 },
-  neuronGlow:   { position: 'absolute', width: 20, height: 20, borderRadius: 10 },
-  neuronContent:{ flex: 1 },
-  neuronTopRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' },
-  neuronText:   { color: C.text, fontSize: 14, lineHeight: 20, flex: 1 },
-  // ★ 新生标签
-  freshTag:     { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 8, marginLeft: 8 },
-  freshTagText: { color: '#fff', fontSize: 9, fontWeight: '700', letterSpacing: 0.5 },
-  neuronMeta:   { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 4 },
-  neuronTime:   { color: C.textDim, fontSize: 10 },
-  neuronTag:    { fontSize: 10, fontWeight: '500', letterSpacing: 0.5 },
-  editArrow:    { color: C.textMute, fontSize: 20, paddingLeft: 8 },
-
-  // 弹窗
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: C.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: Platform.OS === 'ios' ? 40 : 24 },
-  modalTitle:   { color: C.text, fontSize: 18, fontWeight: '600', marginBottom: 16 },
-  modalInput:   { backgroundColor: C.bg, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12, color: C.text, fontSize: 14, borderWidth: 1, borderColor: C.border, marginBottom: 16, minHeight: 60, textAlignVertical: 'top' },
-  modalLabel:   { color: C.textMute, fontSize: 12, marginBottom: 8, letterSpacing: 1 },
-
-  catRow:       { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 20 },
-  catChip:      { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: C.border },
-  catChipText:  { color: C.textMute, fontSize: 12 },
-
-  modalActions: { flexDirection: 'row', gap: 12 },
-  cancelBtn:    { flex: 1, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: C.border, alignItems: 'center' },
-  cancelText:   { color: C.textMute, fontSize: 15 },
-  saveBtn:      { flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: C.accent, alignItems: 'center' },
-  saveText:     { color: '#fff', fontSize: 15, fontWeight: '600' },
+  modalBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center', justifyContent: 'center', padding: 24,
+  },
+  modalCard: {
+    width: '100%', backgroundColor: 'rgba(13,26,46,0.97)',
+    borderRadius: 20, borderWidth: 1, borderColor: C.border, padding: 18,
+  },
+  modalTitle: { color: C.text, fontSize: 16, fontWeight: '700', marginBottom: 12 },
+  modalInput: {
+    backgroundColor: C.bg, borderRadius: 12, borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 14, paddingVertical: 10, color: C.text, fontSize: 14,
+    minHeight: 90, textAlignVertical: 'top',
+  },
+  catPickRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
+  catPick: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12,
+    borderWidth: 1, borderColor: C.border,
+  },
+  catPickActive: { backgroundColor: C.accent, borderColor: C.accent },
+  catPickText:   { color: C.textMute, fontSize: 12 },
+  modalBtnRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  modalBtn: { flex: 1, paddingVertical: 12, borderRadius: 14, alignItems: 'center' },
+  modalBtnGhost: { borderWidth: 1, borderColor: C.border },
+  modalBtnGhostText: { color: C.textMute, fontSize: 14 },
+  modalBtnPrimary: { backgroundColor: C.accent },
+  modalBtnPrimaryText: { color: '#fff', fontSize: 14, fontWeight: '600' },
 });

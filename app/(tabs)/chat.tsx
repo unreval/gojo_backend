@@ -8,6 +8,7 @@
 //   - 图片头像：avatar_url 有值就显示图片，没有就显示首字
 //   - 长按角色行 → 更换/恢复头像（裁 1:1 + 压缩 → data URI 存后端）
 //   - 长按群聊行 → 更换群头像（同机制，走 PUT /group/{gid}/avatar）
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
@@ -47,6 +48,7 @@ interface Group {
   avatar_url?: string | null;
   member_names: string[];
   last_message?: string;
+  msg_count?: number;
 }
 
 // ★ 选图 → 裁 1:1 → 压缩 → 返回 data URI（角色和群共用）
@@ -75,6 +77,7 @@ export default function ChatListScreen() {
   const [loading, setLoading]   = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [unread, setUnread] = useState<Record<number, number>>({});  // ★ 群未读数
 
   const load = async () => {
     try {
@@ -83,7 +86,17 @@ export default function ChatListScreen() {
         axios.get(`${SERVER_URL}/groups?user_id=${FIXED_USER_ID}`),
       ]);
       setChars(cRes.data?.characters || []);
-      setGroups(gRes.data?.groups || []);
+      const gs: Group[] = gRes.data?.groups || [];
+      setGroups(gs);
+      // ★ 未读 = 服务器消息总数 - 本地已读数（进过群就会被聊天页更新）
+      const u: Record<number, number> = {};
+      for (const g of gs) {
+        try {
+          const read = parseInt((await AsyncStorage.getItem(`group_read_count_${g.id}`)) || '0', 10);
+          u[g.id] = Math.max(0, (g.msg_count ?? 0) - read);
+        } catch { u[g.id] = 0; }
+      }
+      setUnread(u);
     } catch (e: any) {
       console.warn('load list error', e?.message);
     }
@@ -219,6 +232,7 @@ export default function ChatListScreen() {
               accentColor={C.accent2}
               isGroup
               avatarUrl={g.avatar_url}
+              badge={unread[g.id] || 0}
               onPress={() => openGroup(g.id)}
               onLongPress={() => changeGroupAvatar(g)}
             />
@@ -245,7 +259,7 @@ export default function ChatListScreen() {
 //  毛玻璃行：单聊 / 群聊 公用
 // ─────────────────────────────────────
 function GlassRow({
-  title, subtitle, lastMsg, firstChar, accentColor, isGroup, avatarUrl, onPress, onLongPress,
+  title, subtitle, lastMsg, firstChar, accentColor, isGroup, avatarUrl, badge, onPress, onLongPress,
 }: {
   title: string;
   subtitle: string;
@@ -254,6 +268,7 @@ function GlassRow({
   accentColor: string;
   isGroup?: boolean;
   avatarUrl?: string | null;
+  badge?: number;
   onPress: () => void;
   onLongPress?: () => void;
 }) {
@@ -279,6 +294,11 @@ function GlassRow({
               <Text style={s.rowLast} numberOfLines={1}>{lastMsg}</Text>
             ) : null}
           </View>
+          {badge && badge > 0 ? (
+            <View style={s.badge}>
+              <Text style={s.badgeText}>{badge > 99 ? '99+' : badge}</Text>
+            </View>
+          ) : null}
           <Text style={s.arrow}>›</Text>
         </View>
       </BlurView>
@@ -451,6 +471,13 @@ const s = StyleSheet.create({
   rowSub:     { color: C.textMute, fontSize: 12, marginTop: 3 },
   rowLast:    { color: C.textDim, fontSize: 12, marginTop: 4, fontStyle: 'italic' },
   arrow:      { color: C.textMute, fontSize: 22, marginLeft: 8 },
+  badge: {
+    minWidth: 20, height: 20, borderRadius: 10,
+    backgroundColor: '#f43f5e',
+    alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 6, marginLeft: 6,
+  },
+  badgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
 
   // 模态
   modalBackdrop: {
