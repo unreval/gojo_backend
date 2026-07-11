@@ -1,14 +1,14 @@
 // app/(tabs)/calendar.tsx
-// UX 重构：
-//   1. 新建任务 → 简洁底部 sheet（只有输入框 + 图标行）
-//   2. 点日历图标 → 弹出日期选择弹窗（完整月历 + 快捷选项）
-//   3. 点任务卡片 → 打开全屏编辑 Modal
-//   4. 每日打卡 → repeat_type='daily'，DAILY 通知触发器
-//
-// ★ 本次新增（均无需改后端）：
-//   A. 每日打卡可设「结束日期」：复用 due_date 字段存结束日期，到期后自动停。
-//   B. DDL 自动多次倒数提醒：远期任务在 7/3/1 天前 + 当天分别提醒；
-//      多条通知 ID 用逗号存进 notification_id，取消时拆开逐个取消。
+// ★ 完整版多功能日程（基于原版重写，原有逻辑全部保留）：
+//   保留：每日打卡(结束日期自动停) / DDL 倒数梯度提醒 / 原生时间转盘 / 聊天取消提醒联动 / 前端去重
+//   新增：
+//     1. 列表 ⇄ 月历 双视图（月历有任务圆点，点日期看当天任务）
+//     2. 今日进度卡（完成度进度条 + 最近 DDL 倒计时）
+//     3. 列表按时间智能分组：逾期 / 每日打卡 / 今天 / 明天 / 7天内 / 以后 / 无日期
+//     4. 任务卡 DDL 倒计时徽章（D-N，越近越红）
+//     5. 已完成区可折叠
+//     6. DDL 提醒梯度升级：≥14天 → 14/7/3/1/当天 五连提醒
+//     7. 备注本机持久化（按任务 id 存 AsyncStorage）
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -112,12 +112,19 @@ function getMonthDays(y: number, m: number) {
     date: `${y}-${String(m+1).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`,
   }));
 }
-// ★ DDL 倒数提醒的"提前天数"梯度：越远提醒越多
+// ★ DDL 倒数提醒梯度（升级：超远期任务 14 天前也提醒）
 function getDdlOffsets(daysAway: number): number[] {
-  if (daysAway >= 7) return [7, 3, 1, 0];
-  if (daysAway >= 3) return [3, 1, 0];
-  if (daysAway >= 1) return [1, 0];
+  if (daysAway >= 14) return [14, 7, 3, 1, 0];
+  if (daysAway >= 7)  return [7, 3, 1, 0];
+  if (daysAway >= 3)  return [3, 1, 0];
+  if (daysAway >= 1)  return [1, 0];
   return [0];
+}
+function ladderLabel(daysAway: number): string {
+  if (daysAway >= 14) return '14/7/3/1天前 + 当天';
+  if (daysAway >= 7)  return '7/3/1天前 + 当天';
+  if (daysAway >= 3)  return '3/1天前 + 当天';
+  return '1天前 + 当天';
 }
 
 export default function CalendarScreen() {
@@ -125,18 +132,23 @@ export default function CalendarScreen() {
   const [loading, setLoading]     = useState(true);
   const [userId, setUserId]       = useState('');
   const [activeTab, setActiveTab] = useState('所有');
+  const [viewMode, setViewMode]   = useState<'list'|'month'>('list');   // ★ 双视图
+  const [showCompleted, setShowCompleted] = useState(false);            // ★ 已完成折叠
+  const [selDate, setSelDate]     = useState<string>(formatDate(new Date())); // ★ 月历选中日
+  const [viewYear, setViewYear]   = useState(new Date().getFullYear());
+  const [viewMonth, setViewMonth] = useState(new Date().getMonth());
 
   // 新建 sheet
   const [showAddSheet, setShowAddSheet]   = useState(false);
   const [newTitle, setNewTitle]           = useState('');
   const [newCategory, setNewCategory]     = useState('个人');
-  const [newDueDate, setNewDueDate]       = useState<string | null>(null);  // daily 模式下这里存"结束日期"
+  const [newDueDate, setNewDueDate]       = useState<string | null>(null);
   const [newDueTime, setNewDueTime]       = useState<string | null>(null);
   const [newReminder, setNewReminder]     = useState<number | null>(null);
   const [newRepeat, setNewRepeat]         = useState<string>('none');
   const [showCatPicker, setShowCatPicker] = useState(false);
 
-  // 日期弹窗（新建/编辑共用）
+  // 日期弹窗
   const [showDateModal, setShowDateModal]   = useState(false);
   const [dateCtx, setDateCtx]               = useState<'add'|'edit'>('add');
   const [calYear, setCalYear]               = useState(new Date().getFullYear());
@@ -152,7 +164,7 @@ export default function CalendarScreen() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [editTitle, setEditTitle]         = useState('');
   const [editCategory, setEditCategory]   = useState('个人');
-  const [editDueDate, setEditDueDate]     = useState<string | null>(null);  // daily 模式下这里存"结束日期"
+  const [editDueDate, setEditDueDate]     = useState<string | null>(null);
   const [editDueTime, setEditDueTime]     = useState<string | null>(null);
   const [editReminder, setEditReminder]   = useState<number | null>(null);
   const [editRepeat, setEditRepeat]       = useState<string>('none');
@@ -161,17 +173,14 @@ export default function CalendarScreen() {
 
   const todayStr = formatDate(new Date());
 
-  // ── 每日打卡：是否已过结束日期（停掉）──
   const isDailyEnded = (t: Task): boolean =>
     t.repeat_type === 'daily' && !!t.due_date && t.due_date < todayStr;
 
-  // ── 每日打卡判断 ──
   const isTaskCompleted = (t: Task): boolean => {
     if (t.repeat_type === 'daily') return t.last_completed_date === todayStr;
     return t.completed;
   };
 
-  // 日期弹窗是否处于每日打卡模式
   const isDailyContext = dateCtx === 'add' ? newRepeat === 'daily' : editRepeat === 'daily';
 
   useEffect(() => {
@@ -190,7 +199,6 @@ export default function CalendarScreen() {
     })();
   }, []);
 
-  // ── 每次切到日程页时刷新任务（聊天取消提醒后立即生效） ──
   useFocusEffect(
     useCallback(() => {
       if (userId) loadTasks(userId);
@@ -203,12 +211,12 @@ export default function CalendarScreen() {
       if (res.data?.tasks) {
         const list: Task[] = res.data.tasks;
         setTasks(list);
-        reconcileExpiredDailies(list);  // ★ 顺手清理过了结束日期的每日打卡
+        reconcileExpiredDailies(list);
       }
     } catch {}
   };
 
-  // ── ★ 通用：取消一个任务下的全部通知（支持逗号分隔的多 ID）──
+  // ── 取消一个任务下的全部通知（支持逗号分隔多 ID）──
   const cancelNotifs = async (idStr: string | null | undefined) => {
     if (!idStr) return;
     const ids = idStr.split(',').map(x => x.trim()).filter(Boolean);
@@ -217,7 +225,7 @@ export default function CalendarScreen() {
     }
   };
 
-  // ── ★ 每日打卡到了结束日期：取消它的 DAILY 通知，并清空 notification_id 防止重复处理 ──
+  // ── 每日打卡到了结束日期：停通知 ──
   const reconcileExpiredDailies = async (list: Task[]) => {
     for (const t of list) {
       if (isDailyEnded(t) && t.notification_id) {
@@ -227,7 +235,7 @@ export default function CalendarScreen() {
     }
   };
 
-  // ── ★ 调度任务通知（每日 DAILY / 一次性 DDL 倒数梯度），返回多 ID 逗号拼接存库 ──
+  // ── 调度任务通知（每日 DAILY / 一次性 DDL 梯度）──
   const scheduleTaskNotifications = async (
     taskId: number,
     opts: { date: string | null; time: string; reminder: number | null; repeat: string; title: string },
@@ -243,10 +251,9 @@ export default function CalendarScreen() {
       const ids: string[] = [];
 
       if (repeat === 'daily') {
-        // 每日打卡：一个 DAILY 触发器（结束日期由 reconcileExpiredDailies 负责停掉）
         const id = await Notifications.scheduleNotificationAsync({
           content: {
-            title: '五条悟提醒你打卡',
+            title: '打卡时间到',
             body: title,
             sound: 'default',
             ...(Platform.OS === 'android' ? { channelId: 'gojo-reminders' } : {}),
@@ -265,18 +272,16 @@ export default function CalendarScreen() {
           let when: Date;
           let body: string;
           if (off === 0) {
-            // 当天：按提前分钟数
             when = new Date(due.getTime() - (reminder || 0) * 60000);
             body = title;
           } else {
-            // 提前 N 天：当天同一时刻提醒
             when = new Date(due.getTime() - off * 86400000);
             body = `还有${off}天 · ${title}`;
           }
-          if (when.getTime() <= Date.now()) continue;  // 只排未来的
+          if (when.getTime() <= Date.now()) continue;
           const id = await Notifications.scheduleNotificationAsync({
             content: {
-              title: '五条悟提醒你',
+              title: '别忘了这件事',
               body,
               sound: 'default',
               ...(Platform.OS === 'android' ? { channelId: 'gojo-reminders' } : {}),
@@ -306,7 +311,6 @@ export default function CalendarScreen() {
     const title = newTitle.trim();
     if (!title || !userId) return;
 
-    // ── 前端去重：同 title + 同 date + 同 time 的未完成任务已存在就提示 ──
     const dup = tasks.find(t =>
       !t.completed &&
       t.title === title &&
@@ -324,7 +328,7 @@ export default function CalendarScreen() {
       const res = await axios.post(`${SERVER_URL}/tasks`, {
         user_id: userId, title,
         category: newCategory,
-        due_date: newDueDate,   // daily 模式下这里是"结束日期"，none 模式下是截止日期
+        due_date: newDueDate,
         due_time: newDueTime,
         reminder_minutes: newReminder,
         repeat_type: newRepeat,
@@ -366,7 +370,6 @@ export default function CalendarScreen() {
     setShowDateModal(false);
   };
 
-  // 普通任务的快捷日期
   const quickDates = [
     { label: '今天',       val: formatDate(new Date()) },
     { label: '明天',       val: formatDate(new Date(Date.now() + 86400000)) },
@@ -374,17 +377,16 @@ export default function CalendarScreen() {
     { label: '这个星期天', val: getNextSunday() },
     { label: '无日期',     val: null as string | null },
   ];
-  // ★ 每日打卡的"结束日期"快捷选项
   const dailyEndQuick = [
     { label: '一直重复', val: null as string | null },
-    { label: '1周后',    val: addMonthsStr(0) === '' ? null : formatDate(new Date(Date.now() + 86400000*7)) },
+    { label: '1周后',    val: formatDate(new Date(Date.now() + 86400000*7)) },
     { label: '1个月后',  val: addMonthsStr(1) },
     { label: '3个月后',  val: addMonthsStr(3) },
   ];
   const quickOptions = isDailyContext ? dailyEndQuick : quickDates;
 
-  // ── 编辑 ──
-  const openEdit = (task: Task) => {
+  // ── 编辑（★ 备注改为本机持久化）──
+  const openEdit = async (task: Task) => {
     setEditTask(task);
     setEditTitle(task.title);
     setEditCategory(task.category);
@@ -392,8 +394,11 @@ export default function CalendarScreen() {
     setEditDueTime(task.due_time);
     setEditReminder(task.reminder_minutes);
     setEditRepeat(task.repeat_type || 'none');
-    setEditNote('');
     setShowEditCat(false);
+    try {
+      const note = await AsyncStorage.getItem(`task_note_${task.id}`);
+      setEditNote(note || '');
+    } catch { setEditNote(''); }
     setShowEditModal(true);
   };
 
@@ -410,7 +415,11 @@ export default function CalendarScreen() {
         reminder_minutes: editReminder,
         repeat_type: editRepeat,
       });
-      // 取消旧通知（可能是多条）→ 按新配置重新调度
+      // ★ 备注存本机
+      try {
+        if (editNote.trim()) await AsyncStorage.setItem(`task_note_${editTask.id}`, editNote.trim());
+        else await AsyncStorage.removeItem(`task_note_${editTask.id}`);
+      } catch {}
       await cancelNotifs(editTask.notification_id);
       if (editDueTime) {
         if (editRepeat === 'daily') {
@@ -423,15 +432,15 @@ export default function CalendarScreen() {
     } catch { Alert.alert('保存失败'); }
   };
 
-  // ── 删除 ──
   const deleteTask = (task: Task) => {
     Alert.alert('删除任务', `确认删除「${task.title}」？`, [
       { text: '取消', style: 'cancel' },
       { text: '删除', style: 'destructive', onPress: async () => {
         setShowEditModal(false);
         try {
-          await cancelNotifs(task.notification_id);  // ★ 多条通知一起取消
+          await cancelNotifs(task.notification_id);
           await axios.delete(`${SERVER_URL}/tasks/${task.id}`);
+          await AsyncStorage.removeItem(`task_note_${task.id}`).catch(() => {});
           setTasks(prev => prev.filter(t => t.id !== task.id));
         } catch { Alert.alert('删除失败'); }
       }},
@@ -454,21 +463,46 @@ export default function CalendarScreen() {
 
   // ── 过滤 & 分组 ──
   const filtered  = activeTab === '所有' ? tasks : tasks.filter(t => t.category === activeTab);
-  // ★ 过了结束日期的每日打卡归到"已完成/已结束"区，不再算待办
   const pending   = filtered.filter(t => !isTaskCompleted(t) && !isDailyEnded(t));
   const completed = filtered.filter(t => isTaskCompleted(t) || isDailyEnded(t));
-  const overdue   = pending.filter(t => {
-    if (t.repeat_type === 'daily') return false;
-    const d = daysUntil(t.due_date);
-    return d !== null && d < 0;
-  });
-  const upcoming  = pending.filter(t => {
-    if (t.repeat_type === 'daily') return true;
-    const d = daysUntil(t.due_date);
-    return d === null || d >= 0;
-  });
 
-  // 新建预览：截止日期距今多远（用于提示会自动多次提醒）
+  const dailies   = pending.filter(t => t.repeat_type === 'daily');
+  const nonDaily  = pending.filter(t => t.repeat_type !== 'daily');
+  const overdue   = nonDaily.filter(t => { const d = daysUntil(t.due_date); return d !== null && d < 0; });
+  const dueToday  = nonDaily.filter(t => daysUntil(t.due_date) === 0);
+  const dueTomorrow = nonDaily.filter(t => daysUntil(t.due_date) === 1);
+  const dueWeek   = nonDaily.filter(t => { const d = daysUntil(t.due_date); return d !== null && d >= 2 && d <= 7; });
+  const dueLater  = nonDaily.filter(t => { const d = daysUntil(t.due_date); return d !== null && d > 7; });
+  const noDate    = nonDaily.filter(t => !t.due_date);
+
+  // ★ 今日进度：今天到期的任务 + 今天的打卡
+  const todayScope = [...filtered.filter(t => t.repeat_type === 'daily' && !isDailyEnded(t)),
+                      ...nonDaily.filter(t => daysUntil(t.due_date) === 0),
+                      ...filtered.filter(t => t.repeat_type !== 'daily' && t.completed && t.due_date === todayStr)];
+  const todayUniq  = Array.from(new Map(todayScope.map(t => [t.id, t])).values());
+  const todayDone  = todayUniq.filter(isTaskCompleted).length;
+  const todayTotal = todayUniq.length;
+  const progress   = todayTotal > 0 ? todayDone / todayTotal : 0;
+
+  // ★ 最近的 DDL（未完成、未来最近的一个）
+  const nextDdl = nonDaily
+    .filter(t => { const d = daysUntil(t.due_date); return d !== null && d >= 0; })
+    .sort((a, b) => (daysUntil(a.due_date)! - daysUntil(b.due_date)!))[0] || null;
+
+  // ★ 月历视图：某天有哪些任务（打卡按有效期算）
+  const tasksOnDate = (dateStr: string): Task[] => {
+    return filtered.filter(t => {
+      if (isTaskCompleted(t) && t.repeat_type !== 'daily') {
+        return t.due_date === dateStr;   // 已完成的也在它的日期上显示（打勾态）
+      }
+      if (t.repeat_type === 'daily') {
+        if (dateStr < todayStr && !t.last_completed_date) return false;
+        return !t.due_date || t.due_date >= dateStr;
+      }
+      return t.due_date === dateStr;
+    });
+  };
+
   const addDaysAway = (!isDailyContext && tempDate) ? daysUntil(tempDate) : null;
 
   if (loading) return (
@@ -477,15 +511,56 @@ export default function CalendarScreen() {
     </View>
   );
 
+  const selDayTasks = tasksOnDate(selDate);
+
   return (
     <View style={{flex:1, backgroundColor:C.bg}}>
       <StatusBar barStyle="light-content" backgroundColor={C.bg} />
 
+      {/* ── 头部：标题 + 视图切换 ── */}
       <View style={s.header}>
-        <Text style={s.headerTitle}>日程</Text>
-        <ChibiSprite pose="peek" size={52} />
+        <View>
+          <Text style={s.headerTitle}>日程</Text>
+          <Text style={s.headerSub}>
+            {new Date().getMonth()+1}月{new Date().getDate()}日 · 周{WEEKDAYS[new Date().getDay()]}
+          </Text>
+        </View>
+        <View style={{flexDirection:'row', alignItems:'center', gap:10}}>
+          <View style={s.viewToggle}>
+            <TouchableOpacity
+              style={[s.viewToggleBtn, viewMode==='list' && s.viewToggleActive]}
+              onPress={() => setViewMode('list')}>
+              <Text style={[s.viewToggleText, viewMode==='list' && {color:'#fff'}]}>列表</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.viewToggleBtn, viewMode==='month' && s.viewToggleActive]}
+              onPress={() => { setViewMode('month'); setSelDate(todayStr); setViewYear(new Date().getFullYear()); setViewMonth(new Date().getMonth()); }}>
+              <Text style={[s.viewToggleText, viewMode==='month' && {color:'#fff'}]}>月历</Text>
+            </TouchableOpacity>
+          </View>
+          <ChibiSprite pose="peek" size={48} />
+        </View>
       </View>
 
+      {/* ── 今日进度卡 ── */}
+      <View style={s.statCard}>
+        <View style={{flex:1}}>
+          <Text style={s.statTitle}>
+            今日 {todayDone}/{todayTotal} 完成
+            {todayTotal > 0 && todayDone === todayTotal ? '  🎉 全部搞定' : ''}
+          </Text>
+          <View style={s.progressTrack}>
+            <View style={[s.progressFill, { width: `${Math.round(progress*100)}%` }]} />
+          </View>
+          {nextDdl && (
+            <Text style={s.statDdl} numberOfLines={1}>
+              ⏳ 最近 DDL：{nextDdl.title} · {daysUntil(nextDdl.due_date) === 0 ? '就是今天' : `还有 ${daysUntil(nextDdl.due_date)} 天`}
+            </Text>
+          )}
+        </View>
+      </View>
+
+      {/* ── 分类筛选 ── */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false}
         style={s.tabBar} contentContainerStyle={s.tabBarInner}>
         {FILTER_TABS.map(tab => {
@@ -501,30 +576,143 @@ export default function CalendarScreen() {
         })}
       </ScrollView>
 
-      <ScrollView style={{flex:1}} contentContainerStyle={s.list}>
-        {overdue.length > 0 && (
-          <>
-            <Text style={[s.sectionLabel, {color:'#f87171'}]}>已逾期</Text>
-            {overdue.map(task => <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} />)}
-          </>
-        )}
-        {upcoming.length === 0 && overdue.length === 0 && (
-          <View style={s.emptyWrap}>
-            <Text style={s.emptyText}>没有任务{'\n'}悟在等你来安排 ✦</Text>
+      {viewMode === 'list' ? (
+        /* ════ 列表视图 ════ */
+        <ScrollView style={{flex:1}} contentContainerStyle={s.list}>
+          {overdue.length > 0 && (
+            <>
+              <Text style={[s.sectionLabel, {color:'#f87171'}]}>⚠️ 已逾期 ({overdue.length})</Text>
+              {overdue.map(task => <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} />)}
+            </>
+          )}
+          {dailies.length > 0 && (
+            <>
+              <Text style={[s.sectionLabel, {color:'#d97706'}]}>🔁 每日打卡 ({dailies.filter(isTaskCompleted).length}/{dailies.length})</Text>
+              {dailies.map(task => (
+                <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete}
+                  done={isTaskCompleted(task)} />
+              ))}
+            </>
+          )}
+          {dueToday.length > 0 && (
+            <>
+              <Text style={[s.sectionLabel, {color:C.accent2||'#5BC4FF'}]}>📌 今天 ({dueToday.length})</Text>
+              {dueToday.map(task => <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} />)}
+            </>
+          )}
+          {dueTomorrow.length > 0 && (
+            <>
+              <Text style={s.sectionLabel}>明天</Text>
+              {dueTomorrow.map(task => <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} />)}
+            </>
+          )}
+          {dueWeek.length > 0 && (
+            <>
+              <Text style={s.sectionLabel}>7 天内</Text>
+              {dueWeek.map(task => <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} />)}
+            </>
+          )}
+          {dueLater.length > 0 && (
+            <>
+              <Text style={s.sectionLabel}>以后</Text>
+              {dueLater.map(task => <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} />)}
+            </>
+          )}
+          {noDate.length > 0 && (
+            <>
+              <Text style={s.sectionLabel}>随时 / 无日期</Text>
+              {noDate.map(task => <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} />)}
+            </>
+          )}
+          {pending.length === 0 && (
+            <View style={s.emptyWrap}>
+              <Text style={s.emptyText}>没有待办{'\n'}悟在等你来安排 ✦</Text>
+            </View>
+          )}
+          {completed.length > 0 && (
+            <>
+              <TouchableOpacity onPress={() => setShowCompleted(v => !v)}>
+                <Text style={s.sectionLabel}>
+                  {showCompleted ? '▾' : '▸'} 已完成 / 已结束 ({completed.length})
+                </Text>
+              </TouchableOpacity>
+              {showCompleted && completed.map(task => (
+                <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} done />
+              ))}
+            </>
+          )}
+        </ScrollView>
+      ) : (
+        /* ════ 月历视图 ════ */
+        <ScrollView style={{flex:1}} contentContainerStyle={{paddingBottom:100}}>
+          <View style={s.monthCard}>
+            <View style={s.calHeader}>
+              <TouchableOpacity onPress={() => {
+                if (viewMonth === 0) { setViewMonth(11); setViewYear(viewYear-1); }
+                else setViewMonth(viewMonth-1);
+              }}><Text style={s.calNav}>◀</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => {
+                setViewYear(new Date().getFullYear()); setViewMonth(new Date().getMonth()); setSelDate(todayStr);
+              }}>
+                <Text style={s.calHeaderTitle}>{MONTHS[viewMonth]} {viewYear}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => {
+                if (viewMonth === 11) { setViewMonth(0); setViewYear(viewYear+1); }
+                else setViewMonth(viewMonth+1);
+              }}><Text style={s.calNav}>▶</Text></TouchableOpacity>
+            </View>
+            <View style={s.weekRow}>
+              {WEEKDAYS.map(w => <Text key={w} style={s.weekLabel}>{w}</Text>)}
+            </View>
+            <View style={s.calGrid}>
+              {Array.from({length: new Date(viewYear, viewMonth, 1).getDay()}).map((_,i) =>
+                <View key={`e${i}`} style={s.calCellBig} />
+              )}
+              {getMonthDays(viewYear, viewMonth).map(({day, date}) => {
+                const dayTasks = tasksOnDate(date);
+                const isSel = selDate === date;
+                const isTd  = date === todayStr;
+                const dots = dayTasks.slice(0, 3);
+                return (
+                  <TouchableOpacity key={date} style={s.calCellBig} onPress={() => setSelDate(date)}>
+                    <View style={[
+                      s.calDayWrapBig,
+                      isSel && {backgroundColor: C.accent2 || '#5BC4FF'},
+                      isTd && !isSel && {borderWidth:1.5, borderColor: C.accent2 || '#5BC4FF'},
+                    ]}>
+                      <Text style={[
+                        s.calDayText,
+                        isSel && {color:'#fff', fontWeight:'700'},
+                        isTd && !isSel && {color: C.accent2 || '#5BC4FF'},
+                      ]}>{day}</Text>
+                    </View>
+                    <View style={s.dotRow}>
+                      {dots.map((t, i) => (
+                        <View key={i} style={[s.taskDot, {backgroundColor: CATEGORY_COLORS[t.category] || C.accent}]} />
+                      ))}
+                      {dayTasks.length > 3 && <Text style={s.dotMore}>+</Text>}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
-        )}
-        {upcoming.map(task => (
-          <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} />
-        ))}
-        {completed.length > 0 && (
-          <>
-            <Text style={s.sectionLabel}>已完成 / 已结束 ({completed.length})</Text>
-            {completed.map(task => (
-              <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete} done />
+
+          {/* 选中日的任务 */}
+          <View style={{paddingHorizontal:20, gap:6}}>
+            <Text style={s.sectionLabel}>
+              {selDate === todayStr ? '今天' : selDate.slice(5).replace('-','/')} 的安排 ({selDayTasks.length})
+            </Text>
+            {selDayTasks.length === 0 && (
+              <Text style={[s.emptyText, {marginTop:16}]}>这天没有安排</Text>
+            )}
+            {selDayTasks.map(task => (
+              <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete}
+                done={isTaskCompleted(task)} />
             ))}
-          </>
-        )}
-      </ScrollView>
+          </View>
+        </ScrollView>
+      )}
 
       <TouchableOpacity style={s.fab} onPress={openAddSheet} activeOpacity={0.85}>
         <Text style={s.fabText}>＋</Text>
@@ -545,7 +733,6 @@ export default function CalendarScreen() {
               autoFocus
               multiline
             />
-            {/* 提示 chips */}
             <View style={s.addHints}>
               {newRepeat === 'daily' && (
                 <View style={[s.hintChip, {backgroundColor:'#d9770622'}]}>
@@ -570,7 +757,6 @@ export default function CalendarScreen() {
                 </View>
               )}
             </View>
-            {/* 图标行 */}
             <View style={s.addIconRow}>
               <TouchableOpacity style={s.catChip} onPress={() => setShowCatPicker(!showCatPicker)}>
                 <View style={[s.catDot, {backgroundColor: CATEGORY_COLORS[newCategory] || C.accent}]} />
@@ -581,7 +767,7 @@ export default function CalendarScreen() {
                 onPress={() => {
                   const next = newRepeat === 'daily' ? 'none' : 'daily';
                   setNewRepeat(next);
-                  setNewDueDate(null);  // 切换模式时清掉日期，避免含义混淆
+                  setNewDueDate(null);
                 }}
               >
                 <Text style={[s.repeatBtnText, newRepeat === 'daily' && {color:'#fff'}]}>🔁</Text>
@@ -625,14 +811,12 @@ export default function CalendarScreen() {
           <Pressable style={{flex:1, backgroundColor:'#00000055'}} onPress={() => setShowDateModal(false)} />
           <View style={s.dateSheet}>
             <ScrollView showsVerticalScrollIndicator={false}>
-              {/* 每日打卡提示 */}
               {isDailyContext && (
                 <View style={s.dailyHint}>
                   <Text style={s.dailyHintText}>🔁 每日打卡 — 设提醒时间，并可选「结束日期」（选「一直重复」则永久）</Text>
                 </View>
               )}
 
-              {/* 日历：普通任务=截止日期；每日打卡=结束日期 */}
               <View style={s.calHeader}>
                 <TouchableOpacity onPress={() => {
                   if (calMonth === 0) { setCalMonth(11); setCalYear(calYear-1); }
@@ -686,19 +870,16 @@ export default function CalendarScreen() {
                 })}
               </View>
 
-              {/* ★ 普通任务：远期会自动多次提醒的说明 */}
               {!isDailyContext && addDaysAway !== null && addDaysAway >= 1 && tempTime && tempReminder !== null && (
                 <View style={s.ddlNote}>
                   <Text style={s.ddlNoteText}>
-                    📚 距今 {addDaysAway} 天，临近时会自动多次提醒
-                    {addDaysAway >= 7 ? '（7/3/1天前 + 当天）' : addDaysAway >= 3 ? '（3/1天前 + 当天）' : '（1天前 + 当天）'}
+                    📚 距今 {addDaysAway} 天，临近时会自动多次提醒（{ladderLabel(addDaysAway)}）
                   </Text>
                 </View>
               )}
 
               <View style={s.divider} />
 
-              {/* 时间 */}
               <TouchableOpacity style={s.dateRow} onPress={() => setShowTimePicker(!showTimePicker)}>
                 <Text style={s.dateRowIcon}>🕐</Text>
                 <Text style={s.dateRowLabel}>时间</Text>
@@ -725,7 +906,6 @@ export default function CalendarScreen() {
                   </TouchableOpacity>
                 </View>
               )}
-              {/* 原生时钟转盘 */}
               {showNativeTime && (
                 <DateTimePicker
                   value={(() => {
@@ -752,7 +932,6 @@ export default function CalendarScreen() {
               )}
               <View style={s.divider} />
 
-              {/* 提醒（每日打卡不需要提前量，隐藏） */}
               {!isDailyContext && (
                 <View style={[s.dateRow, !tempTime && {opacity:0.3}]}>
                   <Text style={s.dateRowIcon}>🔔</Text>
@@ -805,7 +984,6 @@ export default function CalendarScreen() {
           </View>
 
           <ScrollView contentContainerStyle={s.editBody}>
-            {/* 分类 */}
             <TouchableOpacity style={s.editCatRow} onPress={() => setShowEditCat(!showEditCat)}>
               <View style={[s.catDot, {backgroundColor: CATEGORY_COLORS[editCategory]||C.accent}]} />
               <Text style={s.editCatText}>{editCategory} ▼</Text>
@@ -822,7 +1000,6 @@ export default function CalendarScreen() {
               </View>
             )}
 
-            {/* 标题 */}
             <TextInput
               style={s.editTitleInput}
               value={editTitle}
@@ -834,7 +1011,6 @@ export default function CalendarScreen() {
 
             <View style={s.divider} />
 
-            {/* 重复类型 */}
             <View style={s.editRow}>
               <Text style={s.editRowIcon}>🔁</Text>
               <Text style={s.editRowLabel}>重复</Text>
@@ -855,7 +1031,6 @@ export default function CalendarScreen() {
             </View>
             <View style={s.divider} />
 
-            {/* 截止日期 / 结束日期 */}
             <TouchableOpacity style={s.editRow} onPress={() => openDateModal('edit')}>
               <Text style={s.editRowIcon}>📅</Text>
               <Text style={s.editRowLabel}>{editRepeat === 'daily' ? '结束日期' : '截止日期'}</Text>
@@ -867,7 +1042,6 @@ export default function CalendarScreen() {
             </TouchableOpacity>
             <View style={s.divider} />
 
-            {/* 时间和提醒 */}
             <TouchableOpacity style={s.editRow} onPress={() => openDateModal('edit')}>
               <Text style={s.editRowIcon}>🕐</Text>
               <Text style={s.editRowLabel}>时间和提醒</Text>
@@ -879,10 +1053,9 @@ export default function CalendarScreen() {
             </TouchableOpacity>
             <View style={s.divider} />
 
-            {/* 备注 */}
             <View style={s.editRow}>
               <Text style={s.editRowIcon}>📝</Text>
-              <Text style={s.editRowLabel}>备注</Text>
+              <Text style={s.editRowLabel}>备注（存在本机）</Text>
             </View>
             <TextInput
               style={s.editNoteInput}
@@ -904,7 +1077,7 @@ export default function CalendarScreen() {
   );
 }
 
-// ─── TaskRow 组件 ───
+// ─── TaskRow 组件（★ 加 DDL 倒计时徽章 + 左侧分类色条）───
 function TaskRow({ task, onPress, onCheck, done }: {
   task: Task;
   onPress: (t: Task) => void;
@@ -918,9 +1091,20 @@ function TaskRow({ task, onPress, onCheck, done }: {
   const today = formatDate(new Date());
   const dailyEnded = isDaily && !!task.due_date && task.due_date < today;
 
+  // ★ DDL 徽章：越近越红
+  let badge: { text: string; color: string } | null = null;
+  if (!isDaily && !done && days !== null && days >= 0) {
+    if (days === 0)      badge = { text: '今天', color: '#f87171' };
+    else if (days === 1) badge = { text: 'D-1', color: '#fb923c' };
+    else if (days <= 3)  badge = { text: `D-${days}`, color: '#fbbf24' };
+    else if (days <= 7)  badge = { text: `D-${days}`, color: C.accent2 || '#5BC4FF' };
+    else                 badge = { text: `D-${days}`, color: '#64748b' };
+  }
+  if (isOverdue && !done) badge = { text: `逾期${Math.abs(days!)}天`, color: '#f87171' };
+
   return (
     <TouchableOpacity
-      style={[s.taskRow, done && {opacity:0.45}]}
+      style={[s.taskRow, { borderLeftWidth: 3, borderLeftColor: catColor + (done ? '55' : 'ee') }, done && {opacity:0.45}]}
       onPress={() => onPress(task)}
       activeOpacity={0.75}
     >
@@ -952,6 +1136,11 @@ function TaskRow({ task, onPress, onCheck, done }: {
           {task.notification_id && <Text style={{fontSize:11}}>🔔</Text>}
         </View>
       </View>
+      {badge && (
+        <View style={[s.ddlBadge, {backgroundColor: badge.color + '22', borderColor: badge.color + '66'}]}>
+          <Text style={[s.ddlBadgeText, {color: badge.color}]}>{badge.text}</Text>
+        </View>
+      )}
       <Text style={s.taskArrow}>›</Text>
     </TouchableOpacity>
   );
@@ -963,6 +1152,31 @@ const s = StyleSheet.create({
     paddingHorizontal:20, paddingTop:52, paddingBottom:8,
   },
   headerTitle: { color:C.text, fontSize:24, fontWeight:'800' },
+  headerSub:   { color:C.textMute, fontSize:12, marginTop:2 },
+  viewToggle: {
+    flexDirection:'row', backgroundColor:C.card,
+    borderRadius:12, borderWidth:1, borderColor:C.border, overflow:'hidden',
+  },
+  viewToggleBtn: { paddingHorizontal:14, paddingVertical:7 },
+  viewToggleActive: { backgroundColor: C.accent2 || '#5BC4FF' },
+  viewToggleText: { color:C.textMute, fontSize:12, fontWeight:'600' },
+
+  // 今日进度卡
+  statCard: {
+    flexDirection:'row', alignItems:'center',
+    marginHorizontal:20, marginBottom:10,
+    backgroundColor:C.card, borderRadius:16,
+    borderWidth:1, borderColor:C.border,
+    paddingHorizontal:16, paddingVertical:12,
+  },
+  statTitle: { color:C.text, fontSize:14, fontWeight:'700', marginBottom:8 },
+  progressTrack: {
+    height:6, backgroundColor:C.bg, borderRadius:3, overflow:'hidden',
+    borderWidth:1, borderColor:C.border,
+  },
+  progressFill: { height:'100%', backgroundColor: C.accent2 || '#5BC4FF', borderRadius:3 },
+  statDdl: { color:C.textMute, fontSize:11, marginTop:8 },
+
   tabBar: { flexGrow:0, marginBottom:4 },
   tabBarInner: { paddingHorizontal:20, gap:8 },
   tab: {
@@ -973,8 +1187,8 @@ const s = StyleSheet.create({
   tabText: { color:C.textMute, fontSize:13 },
 
   list: { paddingHorizontal:20, paddingBottom:100, paddingTop:8, gap:6 },
-  sectionLabel: { color:C.textMute, fontSize:11, letterSpacing:1, marginTop:10, marginBottom:4 },
-  emptyWrap: { alignItems:'center', marginTop:80 },
+  sectionLabel: { color:C.textMute, fontSize:11, letterSpacing:1, marginTop:12, marginBottom:4, fontWeight:'700' },
+  emptyWrap: { alignItems:'center', marginTop:60 },
   emptyText: { color:C.textMute, fontSize:14, textAlign:'center', lineHeight:24 },
 
   taskRow: {
@@ -994,6 +1208,11 @@ const s = StyleSheet.create({
   catTagText: { fontSize:10, fontWeight:'600' },
   taskDate: { color:C.textMute, fontSize:11 },
   taskArrow: { color:C.textMute, fontSize:22 },
+  ddlBadge: {
+    borderRadius:8, borderWidth:1,
+    paddingHorizontal:8, paddingVertical:3,
+  },
+  ddlBadgeText: { fontSize:11, fontWeight:'800' },
 
   fab: {
     position:'absolute', bottom:28, right:24,
@@ -1004,6 +1223,19 @@ const s = StyleSheet.create({
     shadowRadius:8, shadowOffset:{width:0,height:4},
   },
   fabText: { color:'#fff', fontSize:28, lineHeight:32 },
+
+  // 月历视图
+  monthCard: {
+    marginHorizontal:16, marginBottom:8,
+    backgroundColor:C.card, borderRadius:18,
+    borderWidth:1, borderColor:C.border,
+    paddingTop:14, paddingBottom:8,
+  },
+  calCellBig: { width:(width-32)/7, height:52, alignItems:'center', justifyContent:'flex-start', paddingTop:2 },
+  calDayWrapBig: { width:32, height:32, borderRadius:16, alignItems:'center', justifyContent:'center' },
+  dotRow: { flexDirection:'row', gap:2, marginTop:2, alignItems:'center', height:6 },
+  taskDot: { width:5, height:5, borderRadius:2.5 },
+  dotMore: { color:C.textMute, fontSize:8, lineHeight:8 },
 
   // 新建 sheet
   sheetOverlay: { flex:1, justifyContent:'flex-end' },

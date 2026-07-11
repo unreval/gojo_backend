@@ -9,7 +9,7 @@
 提取只用一次 Haiku 调用，同时产出 1/2/3 三类，成本和原来一样。
 """
 import anthropic
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
 from utils import extract_json
@@ -73,10 +73,13 @@ def save_short_memory(user_id, role, content, character_id=DEFAULT_CHARACTER_ID)
 
 
 def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
+    """★ v3.1：给历史消息加时间标记，防止把昨晚的话当成刚刚发生。
+    规则：2小时内的消息不加标记（保持自然）；更早的加【今天HH:MM】【昨天HH:MM】【M月D日 HH:MM】。
+    标记只在读取时拼接，不改数据库内容。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        '''SELECT role, content FROM short_memory
+        '''SELECT role, content, timestamp FROM short_memory
            WHERE user_id = %s AND character_id = %s
              AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
            ORDER BY timestamp DESC
@@ -86,7 +89,27 @@ def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return list(reversed(rows))
+
+    now = datetime.now(CN_TZ)
+    today = now.date()
+    result = []
+    for role, content, ts in reversed(rows):
+        marker = ''
+        if ts is not None:
+            # 数据库存的是 UTC，换算到北京时间再判断
+            ts_cn = ts.replace(tzinfo=timezone.utc).astimezone(CN_TZ)
+            gap_hours = (now - ts_cn).total_seconds() / 3600
+            if gap_hours >= 2:
+                d = ts_cn.date()
+                if d == today:
+                    day_label = '今天'
+                elif (today - d).days == 1:
+                    day_label = '昨天'
+                else:
+                    day_label = f'{d.month}月{d.day}日'
+                marker = f'【{day_label}{ts_cn.strftime("%H:%M")}的消息】'
+        result.append((role, marker + content if marker else content))
+    return result
 
 
 def get_recent_openings(user_id, n=5, character_id=DEFAULT_CHARACTER_ID):

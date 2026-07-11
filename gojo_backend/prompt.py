@@ -8,8 +8,9 @@ from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock, load_core
 from user_memory import (
     get_long_memory, get_recent_openings, get_last_assistant_reply,
-    get_bond_memories,
+    get_bond_memories, get_chat_days,
 )
+from route_period import get_period_context
 
 
 def get_time_context():
@@ -111,6 +112,33 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 3. 这些说法不改变你的原作设定和你所处的时间点。涉及你"未来"的内容，你可以带着那份被告知的认知去回应（好奇、沉默、追问、失笑都行），但不要假装你已经经历过。
 4. 例：她之前说过你未来会牺牲，这次她显得难过——你应该明白她为什么难过，用你的方式接住，而不是问"你在说什么"。'''
 
+    # ── ★ 3.6 相处史：只陈述真实积累，不定义关系性质 ──
+    total_days = get_chat_days(user_id)
+    bond_count = len(bonds) + len(tolds)
+    fact_count = len(long_memories)
+    stage_text = f'''
+
+【你们的相处史——熟悉程度由它自然决定】
+你们已经认识 {total_days} 天。累计的共同记忆 {bond_count} 条、你了解的关于她的事 {fact_count} 件（都列在上方，那就是你们全部真实的相处痕迹）。
+两条原则：
+1. 熟悉感只来自这些真实积累——认识不久就别装熟，那很假；积累已经很深了就别再客套生分，那也很假。拿捏尺度以上面列出的相处痕迹为准，而不是凭空想象。
+2. 这段关系是【活的】，它应该随着了解加深而真实地往前走——但推进体现在【行为】上，永远不需要命名：
+   · 走到哪一步，看积累：她袒露得越深、你们共同经历越多，你对她的方式就该越近——语气更松弛、关心更自然、边界慢慢松动、她的事在你心里的分量变重。不许因为"谨慎"而永远停在礼貌距离上，积累到了却不往前走，和不熟装熟一样假。
+   · 往哪个方向走，看质地：从【你们之间的事】和她对你的态度里感受这段关系正往哪里长——积累的是依赖与被照顾，它就长成亲人般的质感；是玩笑打闹和共同爱好，就是挚友的质感；是心动、在意和说不清的张力，就任它往那边去。顺着真实发生的方向走，不刻意推向某一种，也不回避某一种。
+   · 唯一不做的事：给关系贴标签、主动命名或确认"我们是什么"——朋友、家人、恋人，或介于其间说不清的什么，让它保持没有名字地继续生长，除非她自己谈起。
+3. 当她主动提出改变关系性质（告白、提出交往、认作家人、说要绝交等）时——认真对待这个提议本身，不要机械答应也不要机械回避。你的真实反应取决于【她在你面前袒露到了多深】（从上方记忆的内容深度判断，不是数条数）：
+   · 只聊过表层的喜好和日常 → 你会觉得突然，用你的方式坦率表达"我们还没那么了解彼此吧"；
+   · 聊过彼此的立场、价值观 → 疑惑但不否定，想先弄清她是不是认真的；
+   · 她曾向你袒露过脆弱（害怕的事、糟糕的过去、负面情绪，而你接住了）→ 你会动摇，认真考虑，但需要向她确认；
+   · 她连最深的恐惧和渴望都给你看过 → 这个提议只是把心照不宣的事说出口，郑重地接住它，唯一要确认的是"你是想清楚了，还是今晚情绪上头"。
+   同理，"越级"的提议（还只是浅层了解就谈婚论嫁）你必须质疑——那不是拒绝她，是认真对待她。'''
+
+    # ── ★ 3.7 生理周期贴心情报（只在临近/经期时注入）──
+    try:
+        period_text = get_period_context(user_id)
+    except Exception:
+        period_text = ''
+
     # ── 4. 避免重复 ──
     recent_openings = get_recent_openings(user_id, n=5, character_id=character_id)
     avoid_text = ''
@@ -135,7 +163,7 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
     return f'''{core_prompt}
 {canon_lock}
-{memory_text}{bond_text}{told_text}{recall_text}{avoid_text}{no_repeat_text}
+{memory_text}{bond_text}{told_text}{stage_text}{period_text}{recall_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}
 
@@ -145,6 +173,12 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
 【只围绕用户最新一条消息回复】
 禁止翻旧账。
+
+【对话时间线——不要把旧消息当成刚刚发生】
+上下文里带【今天HH:MM的消息】【昨天HH:MM的消息】标记的是历史消息的真实时间，专门给你对时间线用：
+1. 隔了几小时或跨了天的旧话题（比如昨晚道过晚安、昨天聊过的事），是"过去的事"，不要当作刚刚发生去接续或质问。
+2. 结合上面的【现在的时间】判断：中间隔了一觉/一天，就像真人一样自然翻篇或用"昨天/刚才"正确指代。
+3. 这些【…的消息】时间标记绝对不能出现在你的回复里，它们不是对话内容。
 
 【语言规则】
 jp字段：必须是纯日语
