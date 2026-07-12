@@ -170,6 +170,14 @@ def _group_msg_count(gid: int) -> int:
     return n
 
 
+import re as _re
+_KANA = _re.compile(r'[\u3040-\u30ff]')
+
+def _looks_japanese(text):
+    """jp 字段防呆：必须含假名（防止模型把中文塞进 jp、TTS 念中文）。"""
+    return bool(_KANA.search(text or ''))
+
+
 def _save_group_message(gid, sender_type, sender_id, jp, zh, emotion='平静'):
     conn = get_conn()
     cur = conn.cursor()
@@ -216,9 +224,9 @@ def _schedule_speakers(members, history, user_text, mentioned_id=None):
 群主刚发了一句话："{user_text}"
 
 请判断这一句话之后,应该由哪些角色开口回应、按什么顺序。规则：
-1. 只挑真正适合接话的角色,1 到 2 个,别让所有人都抢着说。
-2. 如果话是明显冲着某个角色说的,让他先回。
-3. 如果是泛泛的话,挑一个最合适的角色回就行。
+1. 群主的消息抛出了话题/问题/情绪时,通常会有人回应:话题跟多个角色都相关就选 2 个(按谁更想说排先后),只跟一个人相关就选 1 个。
+2. 如果话是明显冲着某个角色说的,让他先回;另一个角色若也自然想搭话,可以排在后面。
+3. 泛泛的日常话(比如聊天气、日常吐槽),也倾向选 2 个人,群里才有活人味——但绝不为了凑数选进和话题无关的人。
 4. 只能从上面列出的角色 id 里选。
 
 只返回单行 JSON,不要任何多余文字：
@@ -286,8 +294,8 @@ def _schedule_interaction(candidates, history, all_members):
 
 判断规则:
 1. 先想:刚才这句话说完,一个真实群聊的自然走向是什么?
-   - 话已经说完整、或已经得到回应 → **没人需要接,返回空数组**(这应该是最常见的结果,不要为了热闹硬选人)
-   - 确实有人会自然接一句 → 挑最想接的那个人
+   - 刚才的话抛出了问题、观点或情绪,还没被回应 → 通常会有一个人自然接一句,挑最想接的那个
+   - 话已经说完整、或已经得到回应、或只是句收尾的客套 → 返回空数组,不要为了热闹硬选人
 2. 接话的动机是多样的,**不要总往"反驳/互怼"上靠**:
    附和共鸣、补充信息、聊起自己相关的事、简单搭个腔、关心群主、开个小玩笑,
    偶尔才是不同意见。朋友之间大多数时候是顺着聊,不是抬杠。
@@ -452,7 +460,9 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 all_msgs = parsed['messages']
                 # 确保每条都有 jp 和 zh
-                valid = [m for m in all_msgs if m.get('jp', '').strip() and m.get('zh', '').strip()]
+                valid = [m for m in all_msgs
+                         if m.get('jp', '').strip() and m.get('zh', '').strip()
+                         and _looks_japanese(m['jp'])]   # ★ jp 必须真是日语
                 if valid:
                     emotion = parsed.get('emotion', '平静')
                     if emotion not in EMOTIONS:

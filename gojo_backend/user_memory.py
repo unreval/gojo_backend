@@ -270,6 +270,29 @@ def delete_bond_memory(memory_id):
     conn.close()
 
 
+# ────────── 认识时长（按角色最早共同痕迹算，不是全局app天数）──────────
+
+def get_first_interaction_days(user_id, character_id):
+    """返回和【这个角色】最早的共同痕迹距今多少天；完全没有痕迹返回 None。
+    依据：该角色的羁绊记忆 + 该角色专属长期记忆 + 该角色的短期记忆，取最早时间。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''SELECT LEAST(
+        COALESCE((SELECT MIN(timestamp) FROM bond_memory  WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp),
+        COALESCE((SELECT MIN(timestamp) FROM long_memory  WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp),
+        COALESCE((SELECT MIN(timestamp) FROM short_memory WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp)
+    )''', (user_id, character_id, user_id, character_id, user_id, character_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    earliest = row[0] if row else None
+    # psycopg2 会把 'infinity' 转成 9999 年的 datetime.max
+    if earliest is None or str(earliest) == 'infinity' or getattr(earliest, 'year', 0) >= 9000:
+        return None
+    days = (datetime.utcnow() - earliest).days
+    return max(days, 0)
+
+
 # ────────── 用户统计（聊天天数）──────────
 
 def update_chat_days(user_id):
@@ -420,12 +443,25 @@ def _valid_user_fact(user_id, content, char_names):
     return True
 
 
-def _valid_bond(user_id, content):
-    """羁绊记忆：必须"她"开头即可（允许出现角色名，那正是它的用途）。"""
+def _valid_bond(user_id, content, char_name=''):
+    """羁绊记忆：主语可以是 她 / 他们 / 角色本人（他的表态记成他的）。"""
+    if not content or content == '无' or len(content) < 4:
+        return False
+    ok_prefixes = ['我', '我们', '她', '他们']
+    if char_name:
+        ok_prefixes.append(char_name)   # 兼容旧格式
+    if not any(content.startswith(p) for p in ok_prefixes):
+        print(f'[{user_id}] ❌ bond 拒绝（主语不合规）：{content}')
+        return False
+    return True
+
+
+def _valid_told(user_id, content):
+    """告知记忆：她告诉角色的事，必须"她"开头。"""
     if not content or content == '无' or len(content) < 4:
         return False
     if not content.startswith('她'):
-        print(f'[{user_id}] ❌ bond/told 拒绝（非"她"开头）：{content}')
+        print(f'[{user_id}] ❌ told 拒绝（非"她"开头）：{content}')
         return False
     return True
 
@@ -489,22 +525,29 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
 【三类记忆的定义——每类独立判断，可以同时有，也可以都没有】
 A. user_fact：她透露的、关于她自己的新事实（生日/喜好/近况/经历等）。
    - 内容里【不许】出现角色名字，只写她自己的事。
-B. bond：她和{char_name}之间这次发生的、值得记住的事——约定、承诺、重要的共同话题、她对他表达的重要情感。
-   - 日常寒暄闲聊不算，只记"以后会被提起"级别的事。例："她和{char_name}约好2026-07-10一起看电影"。
+B. bond：她和{char_name}之间这次发生的、值得记住的事——约定、承诺、重要表态、她表达的重要情感、{char_name}对她说的重要的话。
+   - 【视角】：以{char_name}的第一人称写，"我"就是{char_name}——这是要存进他自己脑子里的回忆。
+     她做的写"她…对我…"；{char_name}自己做的写"我…"；共同的写"我和她…"。绝不把我说的话写成"她说过"。
+   - 日常寒暄闲聊不算，只记"以后会被提起"级别的事。
+   - 例："我和她约好2026-07-10一起看电影"；"我说过朋友这个说法我觉得有点不一样"；"她夸了我的新发型"。
 C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信息——包括原作剧情、他的未来、他不知道的设定。
    - content 用"她说过..."或"她告诉过{char_name}..."开头的转述。例："她说过{char_name}的未来会发生某某事"。
    - 只有当她明确在陈述这类信息时才提取；她提问、开玩笑不算。
 
 【通用规则】
-1. 只从"她说"里提取。{char_name}的回复仅供理解语境，绝不作为事实来源。
-2. 撒娇/调侃/情绪宣泄/问候/提问/简单回应都不算。
-3. 时间换算成绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
-4. 三类内容都必须是以"她"字开头的中文第三人称陈述句。
-5. 与已记录内容重复的不要再提。
-6. 某类没有就填 null。
+1. 【事实只信她】：user_fact 和 told 只能从"她说"里提取，{char_name}的回复绝不作为这两类的来源。
+2. 【我的话记成我的】：{char_name}（也就是"我"）的重要表态可以记入 bond，写成"我说过/我认为/我答应了…"，
+   绝不写成"她说过"。我随口报的数字、天数、结论（如"我们认识35天了"）多半只是顺着聊，一般不值得记；
+   真要记也只能记成"我当时说…"，绝不能当客观事实。
+3. 撒娇/调侃/情绪宣泄/问候/提问/简单回应都不算。"她问了XX"这类只有在话题本身重大时才值得记。
+4. "确认了认识多少天"这类元对话不要提取；"讨论了是什么关系"只有当某一方给出了值得记住的正式表态时才记，且主语写对。
+5. 时间换算成绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
+6. user_fact 和 told 必须以"她"开头；bond 以"我""我们"或"她"开头（第一人称，"我"={char_name}）。
+7. 与已记录内容重复或【意思相近】的，绝不再提——宁可漏记不可重复。
+8. 某类没有就填 null（大多数日常对话三类都是 null，这很正常）。
 
 【输出格式——严格 JSON，只输出一行】
-{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"她和{char_name}XXX"}},"told":{{"content":"她说过XXX"}}}}
+{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}}}}
 没有的类填 null，例如全都没有：
 {{"user_fact":null,"bond":null,"told":null}}
 category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
@@ -525,14 +568,15 @@ category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
             if category not in VALID_CATS:
                 category = '其他'
             if _valid_user_fact(user_id, content, char_names):
-                if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID):
-                    print(f'[{user_id}] ✅ 用户事实 [{category}]（shared）：{content}')
+                # ★ 单聊里说的只有这个角色知道（谁在场谁知道）；群聊说的才进 shared
+                if save_long_memory(user_id, content, category, character_id):
+                    print(f'[{user_id}] ✅ 用户事实 [{category}]（{character_id} 专属）：{content}')
 
         # B. 我们之间的事 → bond_memory(between)
         bd = parsed.get('bond')
         if isinstance(bd, dict):
             content = _clean_content(bd.get('content'))
-            if _valid_bond(user_id, content):
+            if _valid_bond(user_id, content, char_name):
                 if save_bond_memory(user_id, character_id, 'between', content):
                     print(f'[{user_id}] ✅ 羁绊记忆（{character_id}）：{content}')
 
@@ -540,7 +584,7 @@ category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
         td = parsed.get('told')
         if isinstance(td, dict):
             content = _clean_content(td.get('content'))
-            if _valid_bond(user_id, content):
+            if _valid_told(user_id, content):
                 if save_bond_memory(user_id, character_id, 'told', content):
                     print(f'[{user_id}] ✅ 告知记忆（{character_id}）：{content}')
 
@@ -599,21 +643,27 @@ def extract_and_save_group_memory(user_id, user_text, round_transcript, members)
 【本轮完整对话（仅供理解语境）】
 {round_transcript}
 
-【两类记忆——各自独立判断】
+【三类记忆——各自独立判断】
 A. user_fact：她透露的、关于她自己的新事实。内容里不许出现角色名。
 B. told：她在这句话里告诉【某个具体角色】的、关于那个角色本人或他世界的信息（含剧情/未来）。
    - target 必须是这些名字之一：{names_str}
    - content 用"她说过..."开头的转述。她是泛泛对全群说的、没有明确对象时，target 填 null。
+C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回忆的互动——角色之间的交流、角色和群主之间的重要往来都算。
+   - 为每个相关角色各写一条（0~3条），以【该角色的第一人称】写，"我"=该角色本人。
+   - target 是这条回忆属于谁；content 例："我和杰在群里为说话方式拌了几句嘴，她在旁边看着"（存进五条悟）、
+     "我和悟斗了几句嘴，她说我们像老夫老妻"（存进夏油杰）。
+   - 日常寒暄不记，只记有内容的互动。
 
 【通用规则】
-1. 只从群主的发言提取；角色说的话（哪怕角色说"她喜欢XX"）一律忽略。
-2. 撒娇/调侃/提问/简单回应不算。
+1. 【事实只信群主】：user_fact 和 told 只能来自群主的发言；角色说的话（哪怕角色说"她喜欢XX"）不得作为这两类的来源。
+   但 char_bonds 记录的是互动事件本身，谁参与了、发生了什么，可以基于完整对话判断。
+2. 撒娇/调侃/提问/简单回应不算 user_fact 和 told。
 3. 时间换算绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
-4. 内容以"她"字开头。与已有记录重复的不提。没有就填 null。
+4. user_fact 和 told 以"她"开头；char_bonds 以"我"或"我们"开头。与已有记录重复的不提。没有就填 null。
 
 【输出格式——严格 JSON，只输出一行】
-{{"user_fact":{{"content":"她XXX","category":"喜好"}},"told":{{"target":"角色名","content":"她说过XXX"}}}}
-没有的类填 null。category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
+{{"user_fact":{{"content":"她XXX","category":"喜好"}},"told":{{"target":"角色名","content":"她说过XXX"}},"char_bonds":[{{"target":"角色名","content":"我XXX"}}]}}
+没有的类填 null（char_bonds 没有就填 []）。category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
             }]
         )
         raw = response.content[0].text.strip()
@@ -640,9 +690,22 @@ B. told：她在这句话里告诉【某个具体角色】的、关于那个角�
             content = _clean_content(td.get('content'))
             target_name = (td.get('target') or '').strip()
             target_id = name_to_id.get(target_name)
-            if target_id and _valid_bond(user_id, content):
+            if target_id and _valid_told(user_id, content):
                 if save_bond_memory(user_id, target_id, 'told', content):
                     print(f'[{user_id}][group] ✅ 告知记忆（{target_id}）：{content}')
+
+        # D. ★ 角色互动回忆 → 各自的 bond 桶（第一人称）
+        cbs = parsed.get('char_bonds')
+        if isinstance(cbs, list):
+            for cb in cbs[:3]:
+                if not isinstance(cb, dict):
+                    continue
+                content = _clean_content(cb.get('content'))
+                target_name = (cb.get('target') or '').strip()
+                target_id = name_to_id.get(target_name)
+                if target_id and _valid_bond(user_id, content):
+                    if save_bond_memory(user_id, target_id, 'between', content):
+                        print(f'[{user_id}][group] ✅ 互动记忆（{target_id}）：{content}')
 
     except Exception as e:
         print(f'群聊记忆提取失败：{e}')

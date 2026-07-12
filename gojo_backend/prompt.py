@@ -90,7 +90,7 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
         bond_text = f'''
 
 【你们之间的事——你和她共同的回忆】
-（这些是你和她之间真实发生过的事、做过的约定。当作真的记得，聊到相关话题时可以自然提起，约定要记得兑现或跟进。条目里以你的名字开头的，记录的就是【你自己】说过的话、做过的事——那是你的言行，不是别人的。）
+（这些是以你自己的视角记下的回忆——条目里的"我"就是你本人。当作真的记得，聊到相关话题时可以自然提起，约定要记得兑现或跟进。）
 {chr(10).join(bond_lines)}'''
 
     tolds = get_bond_memories(user_id, character_id, kind='told', limit=30)

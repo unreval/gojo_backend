@@ -25,6 +25,7 @@ from route_story import router as story_router
 from route_group import router as group_router   # ★ 新增：群聊路由
 from route_avatar import router as avatar_router
 from route_config import router as config_router
+from route_period import router as period_router, init_period_table
 
 
 app = FastAPI(title='GojoAssistant Backend')

@@ -138,6 +138,8 @@ export default function ChatRoom() {
   const interactionActiveRef = useRef(false);  // ★ 群聊互动轮询是否在进行
   const [thinkingName, setThinkingName] = useState<string | null>(null);  // ★ 正在思考的角色名
   const [showMention, setShowMention] = useState(false);  // ★ @成员选择面板
+  const focusedRef = useRef(true);            // ★ 人是否还在这个页面
+  const messagesRef = useRef<Message[]>([]);  // ★ 消息镜像（离开后仍能落盘）
 
   // ── 语音文件工具 ──
   const ensureAudioDir = async () => {
@@ -278,6 +280,7 @@ export default function ChatRoom() {
 
   useEffect(() => {
     if (!ready) return;
+    messagesRef.current = messages;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
   }, [messages, ready]);
 
@@ -291,15 +294,19 @@ export default function ChatRoom() {
     } catch {}
   };
 
-  // ★ 离开本页时：停掉群互动轮询 + 停掉正在播的语音（修复"人走了声音还在放"）
+  // ★ 焦点管理：进入本页 → 标记在场、清掉本会话未读；
+  //   离开本页 → 停群互动轮询、停正在播的语音、后续消息静默落盘计未读
   useFocusEffect(useCallback(() => {
+    focusedRef.current = true;
+    if (!isGroup) AsyncStorage.setItem(`char_unread_${chatId}`, '0').catch(() => {});
     return () => {
+      focusedRef.current = false;
       interactionActiveRef.current = false;
       setThinkingName(null);
       currentSoundRef.current?.unloadAsync().catch(() => {});
       currentSoundRef.current = null;
     };
-  }, []));
+  }, [chatId, isGroup]));
 
   // 五条单聊保留的"主动提醒"轮询
   useFocusEffect(useCallback(() => {
@@ -519,10 +526,21 @@ export default function ChatRoom() {
         if (audioUri) audioCacheRef.current[msgId] = audioUri;
       }
       const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now() };
-      setMessages(prev => [...prev, msg]);
-      scrollRef.current?.scrollToEnd({ animated: true });
-      if (audioUri) await playAudioAndWait(audioUri);
-      if (i < segments.length - 1) await sleep(MSG_DELAY_MS);
+      if (focusedRef.current) {
+        setMessages(prev => [...prev, msg]);
+        scrollRef.current?.scrollToEnd({ animated: true });
+      } else {
+        // ★ 人已离开：静默写入本机存储 + 计未读，回来能看到、语音可点重播
+        messagesRef.current = [...messagesRef.current, msg];
+        AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messagesRef.current)).catch(() => {});
+        try {
+          const k = `char_unread_${chatId}`;
+          const v = parseInt((await AsyncStorage.getItem(k)) || '0', 10);
+          await AsyncStorage.setItem(k, String(v + 1));
+        } catch {}
+      }
+      if (audioUri && focusedRef.current) await playAudioAndWait(audioUri);
+      if (i < segments.length - 1 && focusedRef.current) await sleep(MSG_DELAY_MS);
     }
   };
 
@@ -562,6 +580,10 @@ export default function ChatRoom() {
       text: r.jp, subtitle: r.zh, time: nowTime(), timestamp: Date.now(),
       senderId: r.sender_id, senderName: r.sender_name,
     };
+    if (!focusedRef.current) {
+      // ★ 人已离开：不进状态、不播音、不计已读——服务器存着，回来时从历史加载并显示红点
+      return;
+    }
     setMessages(prev => [...prev, msg]);
     scrollRef.current?.scrollToEnd({ animated: true });
     bumpRead(1);
@@ -755,7 +777,7 @@ export default function ChatRoom() {
   };
 
   const clearHistory = () =>
-    Alert.alert('清空记录', '只清空这个会话的记录，确认？', [
+    Alert.alert('清空记录', isGroup ? '会连服务器上的群记录一起清空，确认？' : '只清空这个会话的记录，确认？', [
       { text: '取消', style: 'cancel' },
       { text: '清空', style: 'destructive',
         onPress: async () => {
@@ -763,6 +785,11 @@ export default function ChatRoom() {
           audioCacheRef.current = {};
           await AsyncStorage.removeItem(STORAGE_KEY);
           try { await FileSystem.deleteAsync(AUDIO_DIR, { idempotent: true }); } catch {}
+          // ★ 群聊以服务器为准：不清服务器的话，一进群又全回来了
+          if (isGroup && groupId != null) {
+            try { await axios.delete(`${SERVER_URL}/group/${groupId}/messages`); } catch {}
+            try { await AsyncStorage.setItem(`group_read_count_${groupId}`, '0'); } catch {}
+          }
         }
       },
     ]);

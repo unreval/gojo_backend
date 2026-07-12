@@ -78,6 +78,7 @@ export default function ChatListScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [unread, setUnread] = useState<Record<number, number>>({});  // ★ 群未读数
+  const [charUnread, setCharUnread] = useState<Record<string, number>>({});  // ★ 单聊未读数
 
   const load = async () => {
     try {
@@ -97,6 +98,15 @@ export default function ChatListScreen() {
         } catch { u[g.id] = 0; }
       }
       setUnread(u);
+      // ★ 单聊未读（离开聊天页后送达的消息数，存本机）
+      const cu: Record<string, number> = {};
+      for (const c of (cRes.data?.characters || [])) {
+        try {
+          const raw = await AsyncStorage.getItem(`char_unread_${c.id}`);
+          cu[c.id] = raw ? (parseInt(raw, 10) || 0) : 0;
+        } catch { cu[c.id] = 0; }
+      }
+      setCharUnread(cu);
     } catch (e: any) {
       console.warn('load list error', e?.message);
     }
@@ -209,6 +219,7 @@ export default function ChatListScreen() {
               firstChar={firstChar(c.name)}
               accentColor={c.id === 'gojo' ? C.accent : C.accent2}
               avatarUrl={c.avatar_url}
+              badge={charUnread[c.id] || 0}
               onPress={() => openCharacter(c.id)}
               onLongPress={() => changeAvatar(c)}
             />
