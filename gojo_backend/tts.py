@@ -98,14 +98,14 @@ def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
 _TTS_LOCK = threading.Semaphore(1)
 
 def tts_to_b64(text: str, emotion: str, voice_id: str = None) -> str:
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             with _TTS_LOCK:
                 audio_bytes = fish_tts(text, emotion, voice_id)
             return base64.b64encode(audio_bytes).decode()
         except Exception as e:
             if '429' in str(e) and attempt < 2:
-                time.sleep(1.5 * (attempt + 1))   # 等 1.5s / 3s 再试
+                time.sleep(2.5 * (attempt + 1))   # 等 1.5s / 3s 再试
                 continue
             print(f'[TTS fail] {text[:30]} | {e}')
             return ''
