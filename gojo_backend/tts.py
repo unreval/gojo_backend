@@ -105,7 +105,7 @@ def tts_to_b64(text: str, emotion: str, voice_id: str = None) -> str:
             return base64.b64encode(audio_bytes).decode()
         except Exception as e:
             if '429' in str(e) and attempt < 2:
-                time.sleep(2.5 * (attempt + 1))   # 等 1.5s / 3s 再试
+                time.sleep(1.5 * (attempt + 1))   # 等 1.5s / 3s 再试
                 continue
             print(f'[TTS fail] {text[:30]} | {e}')
             return ''
