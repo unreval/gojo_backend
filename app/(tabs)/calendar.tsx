@@ -156,6 +156,9 @@ export default function CalendarScreen() {
   const [tempDate, setTempDate]             = useState<string | null>(null);
   const [tempTime, setTempTime]             = useState<string | null>(null);
   const [tempReminder, setTempReminder]     = useState<number | null>(null);
+  const [tempOffsets, setTempOffsets]       = useState<number[] | null>(null);   // ★ DDL 提前几天，null=自动梯度
+  const [newOffsets, setNewOffsets]         = useState<number[] | null>(null);
+  const [editOffsets, setEditOffsets]       = useState<number[] | null>(null);
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [showNativeTime, setShowNativeTime] = useState(false);
 
@@ -172,6 +175,48 @@ export default function CalendarScreen() {
   const [showEditCat, setShowEditCat]     = useState(false);
 
   const todayStr = formatDate(new Date());
+
+  // ★ 生理期
+  const [periodStatus, setPeriodStatus] = useState<any>(null);
+  const [periodRecords, setPeriodRecords] = useState<any[]>([]);
+  const [showPeriod, setShowPeriod] = useState(false);
+  const [showPStartPicker, setShowPStartPicker] = useState(false);
+  const [showPEndPicker, setShowPEndPicker] = useState(false);
+
+  const loadPeriod = async (uid: string) => {
+    try {
+      const [st, rc] = await Promise.all([
+        axios.get(`${SERVER_URL}/period/status?user_id=${uid}`),
+        axios.get(`${SERVER_URL}/period/records?user_id=${uid}`),
+      ]);
+      setPeriodStatus(st.data);
+      setPeriodRecords(rc.data?.records || []);
+    } catch { setPeriodStatus(null); }
+  };
+
+  const recordPeriod = async (startDate: string, endDate?: string | null) => {
+    if (!userId) return;
+    try {
+      await axios.post(`${SERVER_URL}/period/record`, {
+        user_id: userId, start_date: startDate, end_date: endDate || '',
+      });
+      await loadPeriod(userId);
+    } catch (e: any) {
+      Alert.alert('记录失败', e?.response?.data?.error ?? e?.message ?? '检查后端是否已更新');
+    }
+  };
+
+  const deletePeriodRecord = (rid: number) => {
+    Alert.alert('删除这条记录？', '', [
+      { text: '取消', style: 'cancel' },
+      { text: '删除', style: 'destructive', onPress: async () => {
+        try {
+          await axios.delete(`${SERVER_URL}/period/record/${rid}`);
+          await loadPeriod(userId);
+        } catch {}
+      }},
+    ]);
+  };
 
   const isDailyEnded = (t: Task): boolean =>
     t.repeat_type === 'daily' && !!t.due_date && t.due_date < todayStr;
@@ -194,7 +239,7 @@ export default function CalendarScreen() {
         });
       }
       const uid = await AsyncStorage.getItem(USER_ID_KEY);
-      if (uid) { setUserId(uid); await loadTasks(uid); }
+      if (uid) { setUserId(uid); await loadTasks(uid); loadPeriod(uid); }
       setLoading(false);
     })();
   }, []);
@@ -238,7 +283,7 @@ export default function CalendarScreen() {
   // ── 调度任务通知（每日 DAILY / 一次性 DDL 梯度）──
   const scheduleTaskNotifications = async (
     taskId: number,
-    opts: { date: string | null; time: string; reminder: number | null; repeat: string; title: string },
+    opts: { date: string | null; time: string; reminder: number | null; repeat: string; title: string; customOffsets?: number[] | null },
   ) => {
     try {
       const { status } = await Notifications.getPermissionsAsync();
@@ -246,7 +291,7 @@ export default function CalendarScreen() {
         const ns = await Notifications.requestPermissionsAsync();
         if (ns.status !== 'granted') return;
       }
-      const { date, time, reminder, repeat, title } = opts;
+      const { date, time, reminder, repeat, title, customOffsets } = opts;
       const [h, m] = time.split(':').map(Number);
       const ids: string[] = [];
 
@@ -266,7 +311,10 @@ export default function CalendarScreen() {
         const [y, mo, d] = date.split('-').map(Number);
         const due = new Date(y, mo - 1, d, h, m, 0);
         const daysAway = Math.ceil((due.getTime() - Date.now()) / 86400000);
-        const offsets = getDdlOffsets(daysAway);
+        // ★ 用户自定义了提前天数就用用户的（当天必含），否则自动梯度
+        const offsets = (customOffsets && customOffsets.length > 0)
+          ? Array.from(new Set([...customOffsets.filter(o => o >= 1 && o <= daysAway), 0])).sort((a, b) => b - a)
+          : getDdlOffsets(daysAway);
 
         for (const off of offsets) {
           let when: Date;
@@ -303,6 +351,7 @@ export default function CalendarScreen() {
     setNewTitle(''); setNewCategory('个人');
     setNewDueDate(null); setNewDueTime(null); setNewReminder(null);
     setNewRepeat('none');
+    setNewOffsets(null);
     setShowCatPicker(false);
     setShowAddSheet(true);
   };
@@ -335,11 +384,16 @@ export default function CalendarScreen() {
       });
       const taskId: number = res.data?.id;
 
+      // ★ DDL 自定义提前天数存本机（通知在本机调度，存本机即可）
+      if (taskId && newOffsets && newOffsets.length > 0) {
+        await AsyncStorage.setItem(`task_ddl_${taskId}`, JSON.stringify(newOffsets)).catch(() => {});
+      }
+
       if (newDueTime && taskId) {
         if (newRepeat === 'daily') {
           await scheduleTaskNotifications(taskId, { date: null, time: newDueTime, reminder: null, repeat: 'daily', title });
         } else if (newDueDate && newReminder !== null) {
-          await scheduleTaskNotifications(taskId, { date: newDueDate, time: newDueTime, reminder: newReminder, repeat: 'none', title });
+          await scheduleTaskNotifications(taskId, { date: newDueDate, time: newDueTime, reminder: newReminder, repeat: 'none', title, customOffsets: newOffsets });
         }
       }
       await loadTasks(userId);
@@ -351,8 +405,10 @@ export default function CalendarScreen() {
     setDateCtx(ctx);
     if (ctx === 'add') {
       setTempDate(newDueDate); setTempTime(newDueTime); setTempReminder(newReminder);
+      setTempOffsets(newOffsets);
     } else {
       setTempDate(editDueDate); setTempTime(editDueTime); setTempReminder(editReminder);
+      setTempOffsets(editOffsets);
     }
     setCalYear(new Date().getFullYear());
     setCalMonth(new Date().getMonth());
@@ -364,8 +420,10 @@ export default function CalendarScreen() {
   const confirmDate = () => {
     if (dateCtx === 'add') {
       setNewDueDate(tempDate); setNewDueTime(tempTime); setNewReminder(tempReminder);
+      setNewOffsets(tempOffsets);
     } else {
       setEditDueDate(tempDate); setEditDueTime(tempTime); setEditReminder(tempReminder);
+      setEditOffsets(tempOffsets);
     }
     setShowDateModal(false);
   };
@@ -399,6 +457,10 @@ export default function CalendarScreen() {
       const note = await AsyncStorage.getItem(`task_note_${task.id}`);
       setEditNote(note || '');
     } catch { setEditNote(''); }
+    try {
+      const off = await AsyncStorage.getItem(`task_ddl_${task.id}`);
+      setEditOffsets(off ? JSON.parse(off) : null);
+    } catch { setEditOffsets(null); }
     setShowEditModal(true);
   };
 
@@ -420,12 +482,17 @@ export default function CalendarScreen() {
         if (editNote.trim()) await AsyncStorage.setItem(`task_note_${editTask.id}`, editNote.trim());
         else await AsyncStorage.removeItem(`task_note_${editTask.id}`);
       } catch {}
+      // ★ DDL 自定义提前天数存本机
+      try {
+        if (editOffsets && editOffsets.length > 0) await AsyncStorage.setItem(`task_ddl_${editTask.id}`, JSON.stringify(editOffsets));
+        else await AsyncStorage.removeItem(`task_ddl_${editTask.id}`);
+      } catch {}
       await cancelNotifs(editTask.notification_id);
       if (editDueTime) {
         if (editRepeat === 'daily') {
           await scheduleTaskNotifications(editTask.id, { date: null, time: editDueTime, reminder: null, repeat: 'daily', title });
         } else if (editDueDate && editReminder !== null) {
-          await scheduleTaskNotifications(editTask.id, { date: editDueDate, time: editDueTime, reminder: editReminder, repeat: 'none', title });
+          await scheduleTaskNotifications(editTask.id, { date: editDueDate, time: editDueTime, reminder: editReminder, repeat: 'none', title, customOffsets: editOffsets });
         }
       }
       await loadTasks(userId);
@@ -441,6 +508,7 @@ export default function CalendarScreen() {
           await cancelNotifs(task.notification_id);
           await axios.delete(`${SERVER_URL}/tasks/${task.id}`);
           await AsyncStorage.removeItem(`task_note_${task.id}`).catch(() => {});
+          await AsyncStorage.removeItem(`task_ddl_${task.id}`).catch(() => {});
           setTasks(prev => prev.filter(t => t.id !== task.id));
         } catch { Alert.alert('删除失败'); }
       }},
@@ -560,6 +628,17 @@ export default function CalendarScreen() {
         </View>
       </View>
 
+      {/* ── 🌸 生理期卡 ── */}
+      <TouchableOpacity style={s.periodCard} activeOpacity={0.8} onPress={() => setShowPeriod(true)}>
+        <Text style={s.periodEmoji}>🌸</Text>
+        <Text style={s.periodText} numberOfLines={1}>
+          {periodStatus?.has_data
+            ? `${periodStatus.phase} · 下次预计 ${String(periodStatus.next_predicted).slice(5).replace('-','/')}`
+            : '生理期 · 还没有记录，点这里开始'}
+        </Text>
+        <Text style={s.periodArrow}>›</Text>
+      </TouchableOpacity>
+
       {/* ── 分类筛选 ── */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false}
         style={s.tabBar} contentContainerStyle={s.tabBarInner}>
@@ -661,8 +740,8 @@ export default function CalendarScreen() {
                 else setViewMonth(viewMonth+1);
               }}><Text style={s.calNav}>▶</Text></TouchableOpacity>
             </View>
-            <View style={s.weekRow}>
-              {WEEKDAYS.map(w => <Text key={w} style={s.weekLabel}>{w}</Text>)}
+            <View style={s.weekRowM}>
+              {WEEKDAYS.map(w => <Text key={w} style={s.weekLabelM}>{w}</Text>)}
             </View>
             <View style={s.calGrid}>
               {Array.from({length: new Date(viewYear, viewMonth, 1).getDay()}).map((_,i) =>
@@ -870,11 +949,40 @@ export default function CalendarScreen() {
                 })}
               </View>
 
-              {!isDailyContext && addDaysAway !== null && addDaysAway >= 1 && tempTime && tempReminder !== null && (
+              {!isDailyContext && addDaysAway !== null && addDaysAway >= 1 && (
                 <View style={s.ddlNote}>
                   <Text style={s.ddlNoteText}>
-                    📚 距今 {addDaysAway} 天，临近时会自动多次提醒（{ladderLabel(addDaysAway)}）
+                    📚 距今 {addDaysAway} 天 · 提前几天提醒（当天必提醒）：
                   </Text>
+                  <View style={s.offsetRow}>
+                    <TouchableOpacity
+                      style={[s.offsetChip, tempOffsets === null && s.offsetChipOn]}
+                      onPress={() => setTempOffsets(null)}>
+                      <Text style={[s.offsetChipText, tempOffsets === null && s.offsetChipTextOn]}>
+                        自动（{ladderLabel(addDaysAway)}）
+                      </Text>
+                    </TouchableOpacity>
+                    {[1, 2, 3, 5, 7, 14].filter(o => o <= addDaysAway).map(o => {
+                      const on = !!tempOffsets?.includes(o);
+                      return (
+                        <TouchableOpacity key={o}
+                          style={[s.offsetChip, on && s.offsetChipOn]}
+                          onPress={() => {
+                            setTempOffsets(prev => {
+                              const cur = prev ? [...prev] : [];
+                              return cur.includes(o) ? cur.filter(x => x !== o) : [...cur, o];
+                            });
+                          }}>
+                          <Text style={[s.offsetChipText, on && s.offsetChipTextOn]}>{o}天前</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  {tempOffsets !== null && tempOffsets.length > 0 && (
+                    <Text style={s.ddlNoteText}>
+                      已选：{[...tempOffsets].sort((a, b) => b - a).map(o => `${o}天前`).join('、')} + 当天
+                    </Text>
+                  )}
                 </View>
               )}
 
@@ -1073,6 +1181,97 @@ export default function CalendarScreen() {
           </TouchableOpacity>
         </View>
       </Modal>
+
+      {/* ═══ 🌸 生理期弹窗 ═══ */}
+      <Modal visible={showPeriod} transparent animationType="slide">
+        <View style={{flex:1}}>
+          <Pressable style={{flex:1, backgroundColor:'#00000055'}} onPress={() => setShowPeriod(false)} />
+          <View style={s.dateSheet}>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{paddingBottom:16}}>
+              <Text style={s.periodTitle}>🌸 生理期</Text>
+
+              {periodStatus?.has_data ? (
+                <View style={s.periodStatusBox}>
+                  <Text style={s.periodStatusMain}>{periodStatus.phase}</Text>
+                  <Text style={s.periodStatusSub}>
+                    下次预计 {periodStatus.next_predicted} · 还有 {periodStatus.days_until} 天{'\n'}
+                    平均周期 {periodStatus.avg_cycle} 天 · 平均经期 {periodStatus.avg_length} 天 · 已记录 {periodStatus.records_count} 次
+                  </Text>
+                </View>
+              ) : (
+                <View style={s.periodStatusBox}>
+                  <Text style={s.periodStatusSub}>
+                    还没有记录。先记一次开始日期，记满两个周期后预测就准了。{'\n'}
+                    临近和经期中，角色也会悄悄多一分体贴。
+                  </Text>
+                </View>
+              )}
+
+              <Text style={s.periodSection}>记录一次</Text>
+              <View style={s.periodBtnRow}>
+                <TouchableOpacity style={s.periodBtn} onPress={() => recordPeriod(todayStr)}>
+                  <Text style={s.periodBtnText}>今天开始了</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.periodBtn}
+                  onPress={() => recordPeriod(formatDate(new Date(Date.now() - 86400000)))}>
+                  <Text style={s.periodBtnText}>昨天开始的</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.periodBtn, {borderStyle:'dashed'}]} onPress={() => setShowPStartPicker(true)}>
+                  <Text style={s.periodBtnText}>选日期...</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={s.periodHint}>结束那天再来点「记录结束日」即可（不记也行，会按平均长度估算）</Text>
+              <View style={s.periodBtnRow}>
+                <TouchableOpacity style={[s.periodBtn, {borderColor:(C.accent2||'#5BC4FF')+'88'}]} onPress={() => setShowPEndPicker(true)}>
+                  <Text style={[s.periodBtnText, {color:C.accent2||'#5BC4FF'}]}>记录最近一次的结束日</Text>
+                </TouchableOpacity>
+              </View>
+
+              {showPStartPicker && (
+                <DateTimePicker
+                  value={new Date()} mode="date" display="default" maximumDate={new Date()}
+                  onChange={(event: any, d?: Date) => {
+                    setShowPStartPicker(false);
+                    if (event.type === 'set' && d) recordPeriod(formatDate(d));
+                  }}
+                />
+              )}
+              {showPEndPicker && (
+                <DateTimePicker
+                  value={new Date()} mode="date" display="default" maximumDate={new Date()}
+                  onChange={(event: any, d?: Date) => {
+                    setShowPEndPicker(false);
+                    if (event.type === 'set' && d && periodRecords.length > 0) {
+                      recordPeriod(periodRecords[0].start_date, formatDate(d));
+                    }
+                  }}
+                />
+              )}
+
+              {periodRecords.length > 0 && (
+                <>
+                  <Text style={s.periodSection}>历史记录（点右侧删除记错的）</Text>
+                  {periodRecords.map(r => (
+                    <View key={r.id} style={s.periodRecRow}>
+                      <Text style={s.periodRecText}>
+                        {r.start_date}{r.end_date ? ` ~ ${r.end_date}` : ' 开始'}
+                      </Text>
+                      <TouchableOpacity onPress={() => deletePeriodRecord(r.id)} hitSlop={{top:8,bottom:8,left:8,right:8}}>
+                        <Text style={{color:'#f87171', fontSize:15}}>🗑</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </>
+              )}
+            </ScrollView>
+            <View style={s.dateFooter}>
+              <TouchableOpacity style={s.dateFooterBtn} onPress={() => setShowPeriod(false)}>
+                <Text style={s.dateFooterConfirm}>关闭</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1177,6 +1376,50 @@ const s = StyleSheet.create({
   progressFill: { height:'100%', backgroundColor: C.accent2 || '#5BC4FF', borderRadius:3 },
   statDdl: { color:C.textMute, fontSize:11, marginTop:8 },
 
+  // 🌸 生理期
+  periodCard: {
+    flexDirection:'row', alignItems:'center', gap:8,
+    marginHorizontal:20, marginBottom:10,
+    backgroundColor:'#e879a0'+'14', borderRadius:14,
+    borderWidth:1, borderColor:'#e879a0'+'44',
+    paddingHorizontal:14, paddingVertical:10,
+  },
+  periodEmoji: { fontSize:15 },
+  periodText:  { color:'#e8a0bb', fontSize:12.5, flex:1, fontWeight:'600' },
+  periodArrow: { color:'#e8a0bb', fontSize:18 },
+  periodTitle: { color:C.text, fontSize:17, fontWeight:'700', paddingHorizontal:20, marginBottom:12 },
+  periodStatusBox: {
+    marginHorizontal:16, borderRadius:14, padding:14,
+    backgroundColor:'#e879a0'+'12', borderWidth:1, borderColor:'#e879a0'+'33',
+  },
+  periodStatusMain: { color:'#e8a0bb', fontSize:16, fontWeight:'700', marginBottom:6 },
+  periodStatusSub:  { color:C.textMute, fontSize:12, lineHeight:19 },
+  periodSection: { color:C.textMute, fontSize:11, letterSpacing:1, fontWeight:'700', paddingHorizontal:20, marginTop:16, marginBottom:8 },
+  periodBtnRow:  { flexDirection:'row', flexWrap:'wrap', gap:8, paddingHorizontal:16 },
+  periodBtn: {
+    paddingHorizontal:14, paddingVertical:9, borderRadius:10,
+    borderWidth:1, borderColor:C.border, backgroundColor:C.bg,
+  },
+  periodBtnText: { color:C.text, fontSize:13 },
+  periodHint: { color:C.textMute, fontSize:11, paddingHorizontal:20, marginTop:8, marginBottom:6, lineHeight:16 },
+  periodRecRow: {
+    flexDirection:'row', alignItems:'center', justifyContent:'space-between',
+    marginHorizontal:16, paddingHorizontal:12, paddingVertical:10,
+    borderRadius:10, backgroundColor:'rgba(255,255,255,0.03)',
+    borderWidth:1, borderColor:C.border, marginBottom:6,
+  },
+  periodRecText: { color:C.text, fontSize:13 },
+
+  // ★ DDL 自定义天数
+  offsetRow: { flexDirection:'row', flexWrap:'wrap', gap:6, marginVertical:8 },
+  offsetChip: {
+    paddingHorizontal:10, paddingVertical:6, borderRadius:9,
+    borderWidth:1, borderColor:C.border, backgroundColor:C.bg,
+  },
+  offsetChipOn: { backgroundColor:(C.accent2||'#5BC4FF')+'33', borderColor:C.accent2||'#5BC4FF' },
+  offsetChipText: { color:C.textMute, fontSize:12 },
+  offsetChipTextOn: { color:C.accent2||'#5BC4FF', fontWeight:'700' },
+
   tabBar: { flexGrow:0, marginBottom:4 },
   tabBarInner: { paddingHorizontal:20, gap:8 },
   tab: {
@@ -1231,7 +1474,9 @@ const s = StyleSheet.create({
     borderWidth:1, borderColor:C.border,
     paddingTop:14, paddingBottom:8,
   },
-  calCellBig: { width:(width-32)/7, height:52, alignItems:'center', justifyContent:'flex-start', paddingTop:2 },
+  calCellBig: { width:(width-56)/7, height:52, alignItems:'center', justifyContent:'flex-start', paddingTop:2 },
+  weekRowM:   { flexDirection:'row', paddingHorizontal:12, marginBottom:4 },
+  weekLabelM: { color:C.textMute, fontSize:12, width:(width-56)/7, textAlign:'center' },
   calDayWrapBig: { width:32, height:32, borderRadius:16, alignItems:'center', justifyContent:'center' },
   dotRow: { flexDirection:'row', gap:2, marginTop:2, alignItems:'center', height:6 },
   taskDot: { width:5, height:5, borderRadius:2.5 },

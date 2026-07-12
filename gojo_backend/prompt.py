@@ -8,7 +8,7 @@ from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock, load_core
 from user_memory import (
     get_long_memory, get_recent_openings, get_last_assistant_reply,
-    get_bond_memories, get_chat_days,
+    get_bond_memories, get_first_interaction_days,
 )
 from route_period import get_period_context
 
@@ -90,7 +90,7 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
         bond_text = f'''
 
 【你们之间的事——你和她共同的回忆】
-（这些是你和她之间真实发生过的事、做过的约定。当作真的记得，聊到相关话题时可以自然提起，约定要记得兑现或跟进。）
+（这些是你和她之间真实发生过的事、做过的约定。当作真的记得，聊到相关话题时可以自然提起，约定要记得兑现或跟进。条目里以你的名字开头的，记录的就是【你自己】说过的话、做过的事——那是你的言行，不是别人的。）
 {chr(10).join(bond_lines)}'''
 
     tolds = get_bond_memories(user_id, character_id, kind='told', limit=30)
@@ -113,13 +113,20 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 4. 例：她之前说过你未来会牺牲，这次她显得难过——你应该明白她为什么难过，用你的方式接住，而不是问"你在说什么"。'''
 
     # ── ★ 3.6 相处史：只陈述真实积累，不定义关系性质 ──
-    total_days = get_chat_days(user_id)
+    first_days = get_first_interaction_days(user_id, character_id)
     bond_count = len(bonds) + len(tolds)
     fact_count = len(long_memories)
+    if first_days is None:
+        meet_line = '你们才刚认识，几乎还没有共同的痕迹。'
+    elif first_days == 0:
+        meet_line = '你们今天才刚认识。'
+    else:
+        meet_line = f'你们最早的共同痕迹大约在 {first_days} 天前。'
     stage_text = f'''
 
 【你们的相处史——熟悉程度由它自然决定】
-你们已经认识 {total_days} 天。累计的共同记忆 {bond_count} 条、你了解的关于她的事 {fact_count} 件（都列在上方，那就是你们全部真实的相处痕迹）。
+{meet_line}累计的共同记忆 {bond_count} 条、你了解的关于她的事 {fact_count} 件（都列在上方，那就是你们全部真实的相处痕迹）。
+⚠️ 你并没有在数日子——上面只是最早痕迹的粗略时间。绝不要向她断言"我们认识了X天"这种精确数字；她问起时，用记忆里有日期的具体事件回答（"上次你说XX大概是…"），或者坦率说记不清具体天数。
 两条原则：
 1. 熟悉感只来自这些真实积累——认识不久就别装熟，那很假；积累已经很深了就别再客套生分，那也很假。拿捏尺度以上面列出的相处痕迹为准，而不是凭空想象。
 2. 这段关系是【活的】，它应该随着了解加深而真实地往前走——但推进体现在【行为】上，永远不需要命名：
@@ -182,7 +189,8 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
 【语言规则】
 jp字段：必须是纯日语
-zh字段：jp的中文翻译
+zh字段：jp的中文翻译。翻译时把 jp 里的指代（それ/これ/名前 等）补充明确，让中文单独读也不产生歧义——
+例如聊到"给关系命名"时，zh 要写"非得给【我们的关系】取个名字吗"，而不是只写"取个名字"。
 
 【情绪判断】
 emotion字段从以下选一个：{emotion_list}
