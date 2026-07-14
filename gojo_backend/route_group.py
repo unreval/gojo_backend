@@ -293,9 +293,11 @@ def _schedule_interaction(candidates, history, all_members):
 {roster}
 
 判断规则:
-1. 先想:刚才这句话说完,一个真实群聊的自然走向是什么?
-   - 刚才的话抛出了问题、观点或情绪,还没被回应 → 通常会有一个人自然接一句,挑最想接的那个
-   - 话已经说完整、或已经得到回应、或只是句收尾的客套 → 返回空数组,不要为了热闹硬选人
+1. 核心判据:刚才这句话【留没留话头】?
+   - 有话头 = 提了问题 / 调侃或点名(cue)了某个人 / 立了个明显等人回应的观点 / 话里带着没落地的情绪
+     → 挑最该接的那个人(被提问、被调侃、被cue的人优先)接一句
+   - 没话头 = 话说圆了 / 只是附和、收尾、客套 / 话头已经被人接过了
+     → 返回空数组,不要为了热闹硬选人
 2. 接话的动机是多样的,**不要总往"反驳/互怼"上靠**:
    附和共鸣、补充信息、聊起自己相关的事、简单搭个腔、关心群主、开个小玩笑,
    偶尔才是不同意见。朋友之间大多数时候是顺着聊,不是抬杠。
@@ -326,6 +328,17 @@ def _schedule_interaction(candidates, history, all_members):
 
 
 # ─────────────────── 让单个角色在群里生成一条回复 ───────────────────
+
+def _too_similar(a: str, b: str, threshold: float = 0.55) -> bool:
+    """轻量相似度：中文双字重合率。防第一波两人撞出同一个意思。"""
+    def bigrams(s):
+        s = ''.join(ch for ch in (s or '') if not ch.isspace())
+        return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) > 1 else set()
+    ba, bb = bigrams(a), bigrams(b)
+    if not ba or not bb:
+        return False
+    return len(ba & bb) / min(len(ba), len(bb)) >= threshold
+
 
 def _generate_one_reply(gid, member, history, user_text, all_members, replying_to=None,
                         image_b64=None, image_media_type=None, user_id='default',
@@ -368,14 +381,16 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
             said_lines = '\n'.join(f"- {s['sender_name']}已经说了：「{s['zh']}」" for s in already_said)
             said_block = f'''
 
-【★★ 本轮已经有人回应过群主了——你绝对不能当复读机 ★★】
+【★★ 接力——本轮已经有人先开口了 ★★】
 {said_lines}
-同样的意思被说第二遍毫无意义。你必须做到以下之一:
-- 换一个完全不同的切入角度(他讲道理你就讲感受,他严肃你就轻松,反之亦然)
-- 顺着他的话自然补充,或表达你自己不同的感受
-- 聊群主那句话里被他忽略掉的另一个部分
-禁止重复上面已出现的建议、观点和句式,哪怕换个说法复述也不行。
-注意:换角度≠必须唱反调,自然就好。'''
+你不是在独立答同一道题。你是群里后开口的人,自然的做法是【接着前面的话继续聊】,
+从这些方式里挑此刻最自然的一种:
+- 接他的话茬往下说("就是说""这话倒没错,不过…")
+- 补充他没说到的点,或调侃/纠正他这个说法
+- 从他没碰的角度回应群主
+- 对他刚说的话表达你自己的感受
+硬性要求:绝不复述他已表达过的意思和句式——同样的意思换个说法说第二遍也不行。
+注意:接话≠必须唱反调,顺着聊、歪个楼都可以,自然就好。'''
 
         group_scene = voice_lock + f'''
 
@@ -641,6 +656,17 @@ async def group_chat(data: dict):
                                     user_id=owner_id, already_said=already)
         if not reply:
             continue
+        # ★ 相似度保险丝：第2+个发言者若与前面的人撞了意思，带强化指令重试一次
+        if already:
+            joined_zh = ' '.join(m['zh'] for m in reply['messages'])
+            if any(_too_similar(joined_zh, s['zh']) for s in already):
+                print(f'[group][{gid}] ⚠️ {member["name"]} 与前者意思重复，强化重试')
+                retry_said = already + [{'sender_name': '（系统提示）', 'zh': '你刚才想说的和前面的人重复了！必须彻底换角度或直接接他的话茬，绝不复述'}]
+                retry = _generate_one_reply(gid, member, cur_history, display_text, members,
+                                            image_b64=image_b64, image_media_type=media_type,
+                                            user_id=owner_id, already_said=retry_said)
+                if retry:
+                    reply = retry
         for m in reply['messages']:
             mid = _save_group_message(gid, 'character', cid, m['jp'], m['zh'], reply['emotion'])
             audio = tts_to_b64(m['jp'], reply['emotion'], member['voice_id'])

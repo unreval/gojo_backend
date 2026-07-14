@@ -18,7 +18,7 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 # ────────── 当前对话上下文范围（短期记忆喂给模型的部分）──────────
 SHORT_MEMORY_HOURS = 24   # 把最近这么多小时的对话当"当前上下文"（想要两天就改 48）
-SHORT_MEMORY_MAX   = 30   # 最多带这么多条，保护速度和 API 成本（嫌贵调小，想记更多调大）
+SHORT_MEMORY_MAX   = 20   # 最多带这么多条，保护速度和 API 成本（嫌贵调小，想记更多调大）
 
 # ★ 跨角色共享的"用户事实"桶。
 SHARED_CHARACTER_ID = 'shared'
@@ -172,19 +172,19 @@ def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARA
 
 
 def get_long_memory(user_id, character_id=DEFAULT_CHARACTER_ID):
-    """返回该角色专属记忆 + 共享用户事实（shared 桶）。"""
+    """返回该角色专属记忆 + 共享用户事实（shared 桶）。[(content, timestamp, category)]"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        '''SELECT content, timestamp FROM long_memory
+        '''SELECT content, timestamp, category FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
-           ORDER BY timestamp DESC LIMIT 50''',
+           ORDER BY timestamp DESC LIMIT 40''',
         (user_id, character_id, SHARED_CHARACTER_ID)
     )
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [(r[0], r[1]) for r in rows]
+    return [(r[0], r[1], r[2] or '其他') for r in rows]
 
 
 def _get_memories_with_id(user_id, character_id=DEFAULT_CHARACTER_ID):
@@ -193,7 +193,7 @@ def _get_memories_with_id(user_id, character_id=DEFAULT_CHARACTER_ID):
     cur.execute(
         '''SELECT id, content FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
-           ORDER BY timestamp DESC LIMIT 50''',
+           ORDER BY timestamp DESC LIMIT 40''',
         (user_id, character_id, SHARED_CHARACTER_ID)
     )
     rows = cur.fetchall()

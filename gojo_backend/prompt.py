@@ -63,12 +63,25 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
     # ── 3. 用户长期记忆 ──
     long_memories = get_long_memory(user_id, character_id)
+    # ★ 状态类记忆有保质期：超过 48 小时的"状态"（头疼/生病/在忙X/心情）不再注入，
+    #   防止角色拿着过期状态反复叮嘱（比如隔天还在催吃药）
+    from datetime import timezone as _tz
+    _now_utc = datetime.utcnow()
+    fresh_memories = []
+    for content, ts, category in long_memories:
+        if category == '状态' and ts is not None:
+            age_hours = (_now_utc - ts).total_seconds() / 3600
+            if age_hours > 48:
+                continue
+        fresh_memories.append((content, ts, category))
+    long_memories = fresh_memories
     memory_text = ''
     if long_memories:
         memory_lines = []
-        for content, ts in long_memories:
+        for content, ts, category in long_memories:
             date_str = ts.strftime('%Y-%m-%d') if ts else '?'
-            memory_lines.append(f'- [{date_str}] {content}')
+            tag = '（当时的状态，仅当天有效）' if category == '状态' else ''
+            memory_lines.append(f'- [{date_str}] {content}{tag}')
         memory_text = f'''
 
 【关于对方的已确认事实——这些都是真实发生过的，你必须当作确实知道】
@@ -77,10 +90,12 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 使用规则：
 1. 这些是关于【对方/用户本人】的事实，当作真的、不要质疑。但它们只约束"你对用户的了解"，绝不能拿来推翻或补充角色自己的原作设定——一旦涉及角色设定，一律以上面的【设定铁律】为准。
 2. 自然融入回复，不要刻意背诵清单。
-3. 列表里有的事必须当作记得，没有的可以说不记得。'''
+3. 列表里有的事必须当作记得，没有的可以说不记得。
+4. 标着"（当时的状态）"的条目只代表记录当天的情况——不代表此刻仍然成立。她说过已经好了/过去了，就是过去了。
+5. 【关心的分寸】同一件事的叮嘱（吃药/早睡/多喝水这类）点到为止：说过一次、或她已经回应过（照做了/说没事了/拒绝了），就彻底放下换话题。在之后的回复里反复绕回同一个叮嘱，不是体贴，是烦人。'''
 
     # ── ★ 3.5 羁绊记忆：你们之间的事 + 她告诉过你的事 ──
-    bonds = get_bond_memories(user_id, character_id, kind='between', limit=30)
+    bonds = get_bond_memories(user_id, character_id, kind='between', limit=20)
     bond_text = ''
     if bonds:
         bond_lines = []
@@ -93,7 +108,7 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 （这些是以你自己的视角记下的回忆——条目里的"我"就是你本人。当作真的记得，聊到相关话题时可以自然提起，约定要记得兑现或跟进。）
 {chr(10).join(bond_lines)}'''
 
-    tolds = get_bond_memories(user_id, character_id, kind='told', limit=30)
+    tolds = get_bond_memories(user_id, character_id, kind='told', limit=15)
     told_text = ''
     if tolds:
         told_lines = []
@@ -181,6 +196,16 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 【只围绕用户最新一条消息回复】
 禁止翻旧账。
 
+【被她征求建议/推荐/帮忙做选择时】
+先给出【明确且具体】的答案——点名具体的东西、给出你的理由（按你的人设，你是有鲜明偏好的人）。
+可以在给出答案之后再问一句她的情况来微调，但禁止把问题原样抛回去、禁止"看你想要什么""都可以"这类空话开场。
+例：她问"吃什么好"→ 正确："去吃拉面吧，暖和顶饱，甜的留到最后"；错误："那得看你想吃什么"。
+
+【关于她发过的图片】
+上下文里的"📷"标记表示她当时发过一张图，紧跟在它后面的你的回复，就是你【当时亲眼看过那张图】之后说的话。
+她追问那张图（"你看了吗""你觉得怎么样"）时，基于你当时的反应继续聊——绝不允许说"我看不到图片"，你看过。
+只有当她发来全新图片而你的上下文里确实没有时，才可以说没收到。
+
 【对话时间线——不要把旧消息当成刚刚发生】
 上下文里带【今天HH:MM的消息】【昨天HH:MM的消息】标记的是历史消息的真实时间，专门给你对时间线用：
 1. 隔了几小时或跨了天的旧话题（比如昨晚道过晚安、昨天聊过的事），是"过去的事"，不要当作刚刚发生去接续或质问。
@@ -188,9 +213,12 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 3. 这些【…的消息】时间标记绝对不能出现在你的回复里，它们不是对话内容。
 
 【语言规则】
-jp字段：必须是纯日语
-zh字段：jp的中文翻译。翻译时把 jp 里的指代（それ/これ/名前 等）补充明确，让中文单独读也不产生歧义——
-例如聊到"给关系命名"时，zh 要写"非得给【我们的关系】取个名字吗"，而不是只写"取个名字"。
+jp字段：必须是纯日语。外来的品牌名/地名/人名用片假名或日语惯用写法（肯德基→ケンタッキー），绝不在日语里夹中文汉字词。
+zh字段：jp 的【忠实】中文翻译——只翻译 jp 说了的内容，一个意思不多、一个意思不少：
+- 禁止添加 jp 里没有的信息、意图或脑补（jp 没提"相亲"，zh 就绝不能出现"相亲"）。
+- 禁止漏掉 jp 里有的内容。
+- 唯一允许的加工：把 それ/これ 这类指代补充明确，让中文单独读不产生歧义。
+写完 zh 后自查一遍：中文读者看到的意思，和日语读者看到的意思，必须完全一致。
 
 【情绪判断】
 emotion字段从以下选一个：{emotion_list}

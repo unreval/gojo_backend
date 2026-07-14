@@ -21,7 +21,8 @@ async def get_memories(user_id: str = 'default', character_id: str = DEFAULT_CHA
     long_mems = get_long_memory(user_id, character_id)   # 底层已含 shared 桶
     return JSONResponse({
         'short_memory': [{'role': r, 'content': c} for r, c in short],
-        'long_memory': [{'content': c, 'date': ts.strftime('%Y-%m-%d') if ts else None} for c, ts in long_mems]
+        'long_memory': [{'content': c, 'date': ts.strftime('%Y-%m-%d') if ts else None, 'category': cat}
+                        for c, ts, cat in long_mems]
     })
 
 
