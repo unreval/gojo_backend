@@ -1,13 +1,17 @@
 // app/(tabs)/index.tsx
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+import { useFocusEffect, useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ScrollView, StatusBar, StyleSheet, Text,
   TouchableOpacity, View,
 } from 'react-native';
 import ChibiSprite from '../../components/ChibiSprite';
-import { C } from '../../constants/theme';
+import { C, SERVER_URL } from '../../constants/theme';
+
+const USER_ID_KEY    = 'gojo_user_id';
+const DAYS_CACHE_KEY = 'gojo_chat_days';   // ★ 只当离线缓存，真值以服务器为准
 
 // ── 60条今日悟语，约2个月不重复 ──
 const DAILY_MSGS = [
@@ -96,11 +100,35 @@ export default function HomeScreen() {
   const [chatDays, setChatDays] = useState(0);
   const todayMsg = getTodayMessage();
 
-  useEffect(() => {
-    AsyncStorage.getItem('gojo_chat_days').then(v => {
-      if (v) setChatDays(Number(v));
-    });
+  // ★ 天数以服务器为准（/stats 返回"陪伴的日历天数"：从第一次聊天到今天，没说话的日子也算）
+  //   以前这里只读本机缓存 gojo_chat_days，而【全 app 已经没有任何代码在写这个键】——
+  //   于是永远显示很久以前存下的那个数字，怎么聊都不动。
+  const loadDays = useCallback(async () => {
+    // 先用本机缓存垫一下，避免进页面闪 0
+    try {
+      const cached = await AsyncStorage.getItem(DAYS_CACHE_KEY);
+      if (cached) setChatDays(Number(cached));
+    } catch {}
+    // 再问服务器要真值
+    try {
+      const uid = (await AsyncStorage.getItem(USER_ID_KEY)) || 'default';
+      const res = await axios.get(`${SERVER_URL}/stats`, {
+        params: { user_id: uid },
+        timeout: 8000,
+      });
+      const d = Number(res.data?.total_days);
+      if (!isNaN(d) && d > 0) {
+        setChatDays(d);
+        AsyncStorage.setItem(DAYS_CACHE_KEY, String(d)).catch(() => {});
+      }
+    } catch (e: any) {
+      console.warn('load stats', e?.message);   // 离线时保持缓存值，不清零
+    }
   }, []);
+
+  useEffect(() => { loadDays(); }, [loadDays]);
+  // 每次回到首页都刷新一下（跨零点、换设备都能自动对上）
+  useFocusEffect(useCallback(() => { loadDays(); }, [loadDays]));
 
   const todayLabel = (() => {
     const d = new Date();
