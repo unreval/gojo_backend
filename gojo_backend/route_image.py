@@ -1,4 +1,9 @@
-"""图片聊天路由：/chat/image"""
+"""图片聊天路由：/chat/image
+
+★ 本版改动（prompt 缓存）：
+  - system 改用 build_system_blocks()（带 cache_control 分段）
+  - 调用后 log_cache_usage 打印缓存命中
+"""
 import threading
 import anthropic
 from fastapi import APIRouter
@@ -8,7 +13,7 @@ from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID
 from db import get_conn
 from utils import extract_json, sanitize_jp, merge_only_extreme_short
 from tts import tts_to_b64
-from prompt import build_system_prompt
+from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
     save_short_memory, get_short_memory,
     update_chat_days, extract_and_save_memory
@@ -81,7 +86,7 @@ async def chat_image(data: dict):
 
     # 用 caption 做背景记忆检索（聊到甜食的照片→召回喜久福那条）
     recall_query = user_text if user_text else ''
-    system_prompt = build_system_prompt(user_id, character_id, recall_query)
+    system_blocks = build_system_blocks(user_id, character_id, recall_query)
 
     # ── 调用 Claude Vision ──
     result = None
@@ -90,9 +95,10 @@ async def chat_image(data: dict):
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
                 max_tokens=800,
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages,
             )
+            log_cache_usage(f'image:{character_id}', response)
             raw = response.content[0].text.strip()
             print(f'[{user_id}][{character_id}] image attempt {attempt+1}: {raw[:120]}...')
             parsed = extract_json(raw)

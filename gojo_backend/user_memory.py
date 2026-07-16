@@ -144,6 +144,18 @@ def get_last_assistant_reply(user_id, character_id=DEFAULT_CHARACTER_ID):
 
 # ────────── 第 1 层：用户事实（长期记忆，shared 共享桶）──────────
 
+def _bg_embed(table, row_id, content):
+    """后台补 embedding（RAG 未启用时是空操作）。"""
+    try:
+        import memory_search, threading
+        if not memory_search.is_vector_ready():
+            return
+        threading.Thread(target=memory_search.save_embedding,
+                         args=(table, row_id, content), daemon=True).start()
+    except Exception:
+        pass
+
+
 def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARACTER_ID):
     conn = get_conn()
     cur = conn.cursor()
@@ -162,12 +174,14 @@ def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARA
             print(f'[{user_id}] 记忆高度重复，跳过：{content}（已有：{e}）')
             return False
     cur.execute(
-        'INSERT INTO long_memory (user_id, character_id, content, category) VALUES (%s, %s, %s, %s)',
+        'INSERT INTO long_memory (user_id, character_id, content, category) VALUES (%s, %s, %s, %s) RETURNING id',
         (user_id, character_id, content, category)
     )
+    new_id = cur.fetchone()[0]
     conn.commit()
     cur.close()
     conn.close()
+    _bg_embed('long_memory', new_id, content)   # ★ RAG 启用时后台补向量
     return True
 
 
@@ -228,12 +242,14 @@ def save_bond_memory(user_id, character_id, kind, content):
             print(f'[{user_id}] 羁绊记忆重复，跳过：{content}')
             return False
     cur.execute(
-        'INSERT INTO bond_memory (user_id, character_id, kind, content) VALUES (%s, %s, %s, %s)',
+        'INSERT INTO bond_memory (user_id, character_id, kind, content) VALUES (%s, %s, %s, %s) RETURNING id',
         (user_id, character_id, kind, content)
     )
+    new_id = cur.fetchone()[0]
     conn.commit()
     cur.close()
     conn.close()
+    _bg_embed('bond_memory', new_id, content)   # ★ RAG 启用时后台补向量
     return True
 
 

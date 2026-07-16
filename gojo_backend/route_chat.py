@@ -1,4 +1,11 @@
-"""聊天路由：/chat/text /chat/story /chat/proactive /chat/voice_text /chat/voice_story /chat/voice/proactive /transcribe"""
+"""聊天路由：/chat/text /chat/story /chat/proactive /chat/voice_text /chat/voice_story /chat/voice/proactive /transcribe
+
+★ 本版改动（prompt 缓存）：
+  - system 改用 build_system_blocks()，返回带 cache_control 的分段数组
+  - 场景补充文字（故事模式/语音通话等）必须走 extra_suffix 参数传入，
+    绝不能写成 build_system_blocks(...) + '字符串'（列表加字符串会直接 TypeError 崩溃）
+  - 每次调用后 log_cache_usage 打印缓存命中，部署后看日志即可确认省了多少
+"""
 import threading
 import random
 import json
@@ -10,7 +17,7 @@ from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID
 from db import get_conn
 from utils import extract_json, sanitize_jp, merge_only_extreme_short
 from tts import tts_to_b64, transcribe_audio_b64
-from prompt import build_system_prompt
+from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
     save_short_memory, get_short_memory,
     update_chat_days, extract_and_save_memory
@@ -72,7 +79,7 @@ async def chat_text(data: dict):
     if short_memories:
         recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
 
-    system_prompt = build_system_prompt(user_id, character_id, recall_query)
+    system_blocks = build_system_blocks(user_id, character_id, recall_query)
 
     result = None
     for attempt in range(5):
@@ -80,9 +87,10 @@ async def chat_text(data: dict):
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
                 max_tokens=1500,                       # ★ 800→1500，避免回复被截断导致 JSON 不完整
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages
             )
+            log_cache_usage(f'chat:{character_id}', response)
             raw = response.content[0].text.strip()
             print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
             parsed = _parse_reply(raw)                  # ★ 宽松解析，能扛住 JSON 前的多余文字
@@ -195,6 +203,20 @@ async def chat_text(data: dict):
 
 # ─────────────────── 长故事模式（文本）───────────────────
 
+STORY_SCENE = '''
+
+【★ 故事模式——必须遵守】
+对方想听你讲一个完整的故事。用你自己的视角和口吻来讲。
+1. 故事要完整：有开头、发展、高潮、结尾，一口气讲完，不要中途停。
+2. 融入你的性格。
+3. 分成 10-15 个气泡，每个气泡是故事的一小段。
+4. 每个气泡的【日语】控制在 40-120 字之间——这点很重要，单段太长会影响语音合成质量。
+5. jp 必须是纯日语，zh 是对应的中文翻译，不要把中文混进 jp。
+
+严格按这个 JSON 返回：
+{"emotion":"情绪","messages":[{"jp":"第一段日语","zh":"第一段中文"},{"jp":"第二段日语","zh":"第二段中文"}]}'''
+
+
 @router.post('/chat/story')
 async def chat_story(data: dict):
     """
@@ -223,18 +245,8 @@ async def chat_story(data: dict):
     if short_memories:
         recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
 
-    system_prompt = build_system_prompt(user_id, character_id, recall_query) + '''
-
-【★ 故事模式——必须遵守】
-对方想听你讲一个完整的故事。用你（五条悟）的视角和口吻来讲。
-1. 故事要完整：有开头、发展、高潮、结尾，一口气讲完，不要中途停。
-2. 融入你的性格：慵懒、偶尔毒舌、偶尔温柔。
-3. 分成 10-15 个气泡，每个气泡是故事的一小段。
-4. 每个气泡的【日语】控制在 40-120 字之间——这点很重要，单段太长会影响语音合成质量。
-5. jp 必须是纯日语，zh 是对应的中文翻译，不要把中文混进 jp。
-
-严格按这个 JSON 返回：
-{"emotion":"情绪","messages":[{"jp":"第一段日语","zh":"第一段中文"},{"jp":"第二段日语","zh":"第二段中文"}]}'''
+    # ★ 场景文字走 extra_suffix（列表不能直接 + 字符串）
+    system_blocks = build_system_blocks(user_id, character_id, recall_query, extra_suffix=STORY_SCENE)
 
     result = None
     for attempt in range(5):
@@ -242,9 +254,10 @@ async def chat_story(data: dict):
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
                 max_tokens=4000,      # ★ 故事模式给更多 token
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages
             )
+            log_cache_usage(f'story:{character_id}', response)
             raw = response.content[0].text.strip()
             print(f'[story] attempt {attempt+1}: {raw[:120]}...')
             parsed = _parse_reply(raw)
@@ -322,7 +335,7 @@ async def chat_proactive(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': trigger})
 
-    system_prompt = build_system_prompt(user_id, character_id, task_title)
+    system_blocks = build_system_blocks(user_id, character_id, task_title)
 
     result = None
     for attempt in range(3):
@@ -330,9 +343,10 @@ async def chat_proactive(data: dict):
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
                 max_tokens=400,
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages
             )
+            log_cache_usage(f'proactive:{character_id}', response)
             raw = response.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
@@ -369,6 +383,15 @@ async def chat_proactive(data: dict):
 
 # ─────────────────── 语音通话专用（Haiku 极速版） ───────────────────
 
+VOICE_CALL_SCENE = '''
+
+【★ 语音通话场景】
+现在在和对方打电话。回复自然口语化，根据对方说的话灵活决定回复条数和长度：
+- 简单寒暄/短句 → 1条气泡，简短回应
+- 对方说了重要的事/问了复杂的问题 → 可以分2-3条气泡，像真打电话一样自然衔接
+- 每条气泡10-50字，不要长篇大论，但也不要过于压缩。'''
+
+
 @router.post('/chat/voice_text')
 async def chat_voice_text(data: dict):
     """语音通话快速回复（Haiku，比 Sonnet 快 2-3 倍）"""
@@ -387,13 +410,7 @@ async def chat_voice_text(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 
-    system_prompt = build_system_prompt(user_id, character_id, user_text) + '''
-
-【★ 语音通话场景】
-现在在和对方打电话。回复自然口语化，根据对方说的话灵活决定回复条数和长度：
-- 简单寒暄/短句 → 1条气泡，简短回应
-- 对方说了重要的事/问了复杂的问题 → 可以分2-3条气泡，像真打电话一样自然衔接
-- 每条气泡10-50字，不要长篇大论，但也不要过于压缩。'''
+    system_blocks = build_system_blocks(user_id, character_id, user_text, extra_suffix=VOICE_CALL_SCENE)
 
     result = None
     for attempt in range(3):
@@ -401,9 +418,10 @@ async def chat_voice_text(data: dict):
             response = claude_client.messages.create(
                 model='claude-haiku-4-5-20251001',
                 max_tokens=500,
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages
             )
+            log_cache_usage(f'voice:{character_id}', response)
             raw = response.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
@@ -443,6 +461,19 @@ async def chat_voice_text(data: dict):
 
 # ─────────────────── 语音通话·长故事模式 ───────────────────
 
+VOICE_STORY_SCENE = '''
+
+【★ 语音通话·长故事模式】
+对方想在通话里听你讲故事。用你自己的视角和口吻，像真的在电话里娓娓道来。
+1. 故事要完整：开头、发展、高潮、结尾，一口气讲完。
+2. 分成 8-15 个气泡，每个气泡是故事的一小段。
+3. 每个气泡的【日语】控制在 40-90 字之间——通话场景要短一点更自然，也保证语音质量。
+4. jp 必须是纯日语，zh 是对应中文翻译，不要把中文混进 jp。
+
+严格按这个 JSON 返回：
+{"emotion":"情绪","messages":[{"jp":"第一段日语","zh":"第一段中文"},{"jp":"第二段日语","zh":"第二段中文"}]}'''
+
+
 @router.post('/chat/voice_story')
 async def chat_voice_story(data: dict):
     """
@@ -464,17 +495,7 @@ async def chat_voice_story(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 
-    system_prompt = build_system_prompt(user_id, character_id, user_text) + '''
-
-【★ 语音通话·长故事模式】
-对方想在通话里听你讲故事。用你（五条悟）的视角和口吻，像真的在电话里娓娓道来。
-1. 故事要完整：开头、发展、高潮、结尾，一口气讲完。
-2. 分成 8-15 个气泡，每个气泡是故事的一小段。
-3. 每个气泡的【日语】控制在 40-90 字之间——通话场景要短一点更自然，也保证语音质量。
-4. jp 必须是纯日语，zh 是对应中文翻译，不要把中文混进 jp。
-
-严格按这个 JSON 返回：
-{"emotion":"情绪","messages":[{"jp":"第一段日语","zh":"第一段中文"},{"jp":"第二段日语","zh":"第二段中文"}]}'''
+    system_blocks = build_system_blocks(user_id, character_id, user_text, extra_suffix=VOICE_STORY_SCENE)
 
     result = None
     for attempt in range(5):
@@ -482,9 +503,10 @@ async def chat_voice_story(data: dict):
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
                 max_tokens=3000,
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages
             )
+            log_cache_usage(f'voice_story:{character_id}', response)
             raw = response.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 3:
@@ -588,7 +610,7 @@ async def chat_voice_proactive(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': trigger})
 
-    system_prompt = build_system_prompt(user_id, character_id, '') + scene
+    system_blocks = build_system_blocks(user_id, character_id, '', extra_suffix=scene)
 
     result = None
     for attempt in range(3):
@@ -596,9 +618,10 @@ async def chat_voice_proactive(data: dict):
             response = claude_client.messages.create(
                 model='claude-haiku-4-5-20251001',
                 max_tokens=300,
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages
             )
+            log_cache_usage(f'voice_proactive:{character_id}', response)
             raw = response.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:

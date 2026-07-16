@@ -139,6 +139,8 @@ export default function ChatRoom() {
   const [thinkingName, setThinkingName] = useState<string | null>(null);  // ★ 正在思考的角色名
   const [showMention, setShowMention] = useState(false);  // ★ @成员选择面板
   const focusedRef = useRef(true);            // ★ 人是否还在这个页面
+  const [hasMore, setHasMore] = useState(false);      // ★ 群聊：还有更早的消息
+  const [loadingMore, setLoadingMore] = useState(false);
   const messagesRef = useRef<Message[]>([]);  // ★ 消息镜像（离开后仍能落盘）
 
   // ── 语音文件工具 ──
@@ -158,23 +160,9 @@ export default function ChatRoom() {
       return uri;
     } catch (e) { console.warn('saveAudioFile', e); return null; }
   };
-  const pruneAudioFiles = async () => {
-    try {
-      const files = await FileSystem.readDirectoryAsync(AUDIO_DIR);
-      const mp3s = files.filter(f => f.endsWith('.mp3'));
-      if (mp3s.length <= MAX_AUDIO_ENTRIES) return;
-      const withTime = await Promise.all(mp3s.map(async f => {
-        const info: any = await FileSystem.getInfoAsync(`${AUDIO_DIR}${f}`);
-        return { f, t: (info?.modificationTime ?? 0) };
-      }));
-      withTime.sort((a, b) => a.t - b.t);
-      const toDelete = withTime.slice(0, withTime.length - MAX_AUDIO_ENTRIES);
-      for (const { f } of toDelete) {
-        try { await FileSystem.deleteAsync(`${AUDIO_DIR}${f}`, { idempotent: true }); } catch {}
-        delete audioCacheRef.current[f.replace('.mp3', '')];
-      }
-    } catch (e) { console.warn('pruneAudioFiles', e); }
-  };
+  // ★ 不再按条数自动删音频——老消息的重播要永久可用。
+  //   万一哪天占用太大，可在"清空记录"里一并清掉。
+  const pruneAudioFiles = async () => { /* no-op：保留全部语音 */ };
   const loadAudioIndex = async () => {
     try {
       await ensureAudioDir();
@@ -230,6 +218,7 @@ export default function ChatRoom() {
               senderName: m.sender_type === 'user' ? undefined : m.sender_name,
             }));
             setMessages(serverMsgs);
+            setHasMore(!!res.data.has_more);   // ★ 还有更早的消息可往前翻
             // ★ 进群即已读：记录当前消息总数，列表页据此算未读红点
             try {
               await AsyncStorage.setItem(
@@ -383,11 +372,70 @@ export default function ChatRoom() {
     } catch (e) { console.warn('sendProactive error', e); }
   };
 
-  // 重播
+  // ★ 群聊：往前翻更早的聊天记录（服务器永久保存，随便翻）
+  const loadEarlier = async () => {
+    if (!isGroup || groupId == null || loadingMore) return;
+    const oldest = messages.find(m => m.id.startsWith('g_'));
+    if (!oldest) return;
+    const beforeId = parseInt(oldest.id.replace('g_', ''), 10);
+    if (!beforeId) return;
+    try {
+      setLoadingMore(true);
+      const res = await axios.get(`${SERVER_URL}/group/${groupId}/history`, {
+        params: { before_id: beforeId, limit: 30 },
+      });
+      const older: Message[] = (res.data?.messages || []).map((m: any) => ({
+        id: m.msg_id != null ? `g_${m.msg_id}` : `srv_${m.ts || Math.random()}`,
+        role: m.sender_type === 'user' ? 'user' : 'gojo',
+        text: m.sender_type === 'user' ? (m.zh || '') : (m.jp || m.zh || ''),
+        subtitle: m.sender_type === 'user' ? undefined : (m.zh || undefined),
+        time: m.ts
+          ? `${String(new Date(m.ts).getHours()).padStart(2, '0')}:${String(new Date(m.ts).getMinutes()).padStart(2, '0')}`
+          : '',
+        timestamp: m.ts || Date.now(),
+        senderId: m.sender_id,
+        senderName: m.sender_type === 'user' ? undefined : m.sender_name,
+      }));
+      if (older.length > 0) setMessages(prev => [...older, ...prev]);
+      setHasMore(!!res.data?.has_more);
+    } catch (e: any) {
+      console.warn('loadEarlier', e?.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // 重播（★ 本地没有音频就现场重新合成——任何年代的老消息都能重播）
+  const [resynthing, setResynthing] = useState<string | null>(null);
   const replayAudio = async (msgId: string) => {
     const uri = audioCacheRef.current[msgId];
-    if (!uri) return;
-    await playAudioAndWait(uri);
+    if (uri) { await playAudioAndWait(uri); return; }
+
+    // 找到这条消息，拿日语原文和说话人
+    const msg = messagesRef.current.find(m => m.id === msgId) || messages.find(m => m.id === msgId);
+    if (!msg || msg.role === 'user' || !msg.text) return;
+    const speakerId = msg.senderId || (isGroup ? null : chatId);
+    if (!speakerId) return;
+
+    try {
+      setResynthing(msgId);
+      const res = await axios.post(`${SERVER_URL}/tts/resynth`, {
+        text: msg.text, character_id: speakerId,
+      }, { timeout: 30000 });
+      const b64 = res.data?.audio_b64;
+      if (!b64) { Alert.alert('语音合成失败', '稍后再试一次'); return; }
+      const newUri = await saveAudioFile(msgId, b64);
+      if (newUri) {
+        audioCacheRef.current[msgId] = newUri;
+        await playAudioAndWait(newUri);
+      }
+    } catch (e: any) {
+      Alert.alert('语音合成失败', e?.response?.data?.error === 'tts_failed'
+        ? '语音服务忙（并发超限），过几秒再点一次'
+        : (e?.message ?? '稍后再试'));
+    } finally {
+      setResynthing(null);
+    }
   };
   const playAudioAndWait = async (uri: string): Promise<void> => {
     try {
@@ -915,6 +963,15 @@ export default function ChatRoom() {
         contentContainerStyle={s.chatContent}
         onContentSizeChange={() => { if (!searchMode) scrollRef.current?.scrollToEnd({ animated: true }); }}
       >
+        {/* ★ 群聊：载入更早（聊天记录永久保存在服务器，不占 token） */}
+        {isGroup && hasMore && !searchMode && (
+          <TouchableOpacity style={s.loadMoreBtn} onPress={loadEarlier} disabled={loadingMore}>
+            {loadingMore
+              ? <ActivityIndicator size="small" color={C.accent2 || '#5BC4FF'} />
+              : <Text style={s.loadMoreText}>↑ 载入更早的消息</Text>}
+          </TouchableOpacity>
+        )}
+
         {displayMessages.length === 0 && (
           <View style={s.emptyWrap}>
             {searchMode && searchQuery.trim()
@@ -927,7 +984,8 @@ export default function ChatRoom() {
         )}
 
         {displayMessages.map((msg, idx) => {
-          const hasAudio = !!audioCacheRef.current[msg.id];
+          // ★ 角色消息一律可重播：有本地音频直接放，没有就点了现场重合成
+          const hasAudio = msg.role !== 'user' && !!msg.text;
           const isHighlighted = searchMode && searchQuery.trim() &&
             (msg.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
              (msg.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase()));
@@ -998,7 +1056,11 @@ export default function ChatRoom() {
                     )}
                     {msg.subtitle && <Text style={s.subtitle}>{msg.subtitle}</Text>}
                     {msg.role === 'gojo' && hasAudio && (
-                      <Text style={s.replayHint}>🔊 点击重播</Text>
+                      <Text style={s.replayHint}>
+                        {resynthing === msg.id
+                          ? '🔄 生成语音中…'
+                          : (audioCacheRef.current[msg.id] ? '🔊 点击重播' : '🔊 点击播放')}
+                      </Text>
                     )}
                   </View>
                 </TouchableOpacity>
@@ -1132,6 +1194,13 @@ const s = StyleSheet.create({
   searchResultText:{ color: C.textMute, fontSize: 12 },
   chatArea:        { flex: 1, backgroundColor: C.bg },
   chatContent:     { padding: 16, paddingBottom: 8, flexGrow: 1 },
+  loadMoreBtn: {
+    alignSelf: 'center', paddingHorizontal: 16, paddingVertical: 8,
+    borderRadius: 14, borderWidth: 1, borderColor: C.border,
+    backgroundColor: 'rgba(255,255,255,0.04)', marginBottom: 10, minWidth: 130,
+    alignItems: 'center',
+  },
+  loadMoreText: { color: C.textMute, fontSize: 12 },
   emptyWrap:       { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 120 },
   emptyEmoji:      { fontSize: 48, marginBottom: 16 },
   emptyText:       { color: C.textMute, fontSize: 15 },

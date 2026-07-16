@@ -13,6 +13,7 @@ from db import init_db, migrate_old_gojo_memory
 from db_group import init_group_tables
 from characters import seed_gojo_character
 from db_bond import init_bond_table
+import memory_search
 
 
 # 路由模块
@@ -26,6 +27,7 @@ from route_group import router as group_router
 from route_avatar import router as avatar_router
 from route_config import router as config_router
 from route_period import router as period_router, init_period_table
+from route_tts import router as tts_router          # ★ 重播兜底 + RAG 维护
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -39,7 +41,8 @@ init_db()
 migrate_old_gojo_memory()
 init_group_tables()
 init_bond_table()
-init_period_table()          # ★ 生理期建表（之前缺的就是这行）
+init_period_table()                    # 生理期建表
+memory_search.init_vector_support()    # ★ 探测 pgvector（不可用时自动退回，不影响启动）
 seed_gojo_character()
 
 # ── 注册路由 ──
@@ -52,14 +55,21 @@ app.include_router(story_router)
 app.include_router(group_router)    # 群聊路由
 app.include_router(avatar_router)   # 头像路由
 app.include_router(config_router)
-app.include_router(period_router)   # ★ 生理期路由（之前缺的另一行）
+app.include_router(period_router)   # 生理期路由
+app.include_router(tts_router)      # ★ 语音重合成 + RAG 状态
 
 
 @app.get('/health')
 async def health():
-    return {'status': 'ok', 'tts_provider': TTS_PROVIDER, 'db': 'postgresql', 'arch': 'modular-v4-period'}
+    return {
+        'status': 'ok',
+        'tts_provider': TTS_PROVIDER,
+        'db': 'postgresql',
+        'arch': 'modular-v5-cache',
+        'vector_ready': memory_search.is_vector_ready(),
+    }
 
 
 if __name__ == '__main__':
-    print(f'GojoAssistant starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL | Modular + Group + Period')
+    print(f'GojoAssistant starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL | Cache + Group + Period')
     uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))

@@ -26,7 +26,7 @@ from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID
 from db import get_conn
 from utils import extract_json, sanitize_jp
 from tts import tts_to_b64
-from prompt import build_system_prompt
+from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
 from user_memory import extract_and_save_group_memory   # ★ 群聊专用记忆提取
 
@@ -124,16 +124,24 @@ def _get_member_characters(gid: int):
     return result
 
 
-def _get_group_history(gid: int, limit: int = 12):
+def _get_group_history(gid: int, limit: int = 12, before_id: int = None):
     """取群最近若干条消息，返回 [{msg_id, ts, sender_type, sender_id, sender_name, jp, zh}]（旧→新）。
     ★ msg_id/ts 供前端同步与去重；ts 是 epoch 毫秒。"""
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        '''SELECT id, sender_type, sender_id, jp, zh, timestamp FROM group_messages
-           WHERE group_id = %s ORDER BY timestamp DESC LIMIT %s''',
-        (gid, limit)
-    )
+    if before_id:
+        # ★ 往前翻页：只取比这条更早的
+        cur.execute(
+            '''SELECT id, sender_type, sender_id, jp, zh, timestamp FROM group_messages
+               WHERE group_id = %s AND id < %s ORDER BY id DESC LIMIT %s''',
+            (gid, before_id, limit)
+        )
+    else:
+        cur.execute(
+            '''SELECT id, sender_type, sender_id, jp, zh, timestamp FROM group_messages
+               WHERE group_id = %s ORDER BY id DESC LIMIT %s''',
+            (gid, limit)
+        )
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -451,7 +459,8 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
 
     # ★★★ 核心修复：用真实 user_id 组装 prompt。
     #     原来这里是 'group_' + str(gid)，角色读的是空记忆桶——群聊记忆混乱的根源。
-    system_prompt = build_system_prompt(user_id, member['id'], user_text) + group_scene
+    # ★ 缓存版：静态头/记忆段带 cache_control，group_scene 进动态尾
+    system_blocks = build_system_blocks(user_id, member['id'], user_text, extra_suffix=group_scene)
 
     # ★ 如果有图片(第一波),用多模态格式让角色"看到"图片
     if image_b64 and image_media_type and replying_to is None:
@@ -467,9 +476,10 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
             resp = claude_client.messages.create(
                 model='claude-sonnet-4-6',
                 max_tokens=800,
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages
             )
+            log_cache_usage(f'group:{member["id"]}', resp)
             raw = resp.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
@@ -570,12 +580,30 @@ async def group_detail(gid: int):
         return JSONResponse({'error': 'group not found'}, status_code=404)
     members = _get_member_characters(gid)
     history = _get_group_history(gid, limit=50)
+    total = _group_msg_count(gid)
     return JSONResponse({
         'id': g['id'], 'name': g['name'],
         'members': members,
         'messages': history,
-        'msg_count': _group_msg_count(gid),   # ★ 进群即已读的基准
+        'msg_count': total,                    # ★ 进群即已读的基准
+        'has_more': total > len(history),      # ★ 还有更早的消息可以往前翻
     })
+
+
+@router.get('/group/{gid}/history')
+async def group_history_page(gid: int, before_id: int, limit: int = 30):
+    """★ 往前翻页：取比 before_id 更早的 limit 条（旧→新）。聊天记录永久保留，随便往回翻。"""
+    history = _get_group_history(gid, limit=limit, before_id=before_id)
+    has_more = False
+    if history:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM group_messages WHERE group_id = %s AND id < %s',
+                    (gid, history[0]['msg_id']))
+        has_more = cur.fetchone()[0] > 0
+        cur.close()
+        conn.close()
+    return JSONResponse({'messages': history, 'has_more': has_more})
 
 
 @router.delete('/group/{gid}/messages')
