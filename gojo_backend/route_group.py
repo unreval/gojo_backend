@@ -28,7 +28,7 @@ from utils import extract_json, sanitize_jp
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
-from user_memory import extract_and_save_group_memory   # ★ 群聊专用记忆提取
+from user_memory import extract_and_save_group_memory, update_chat_days   # ★ 群聊专用记忆提取 + 陪伴天数
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -350,7 +350,7 @@ def _too_similar(a: str, b: str, threshold: float = 0.55) -> bool:
 
 def _generate_one_reply(gid, member, history, user_text, all_members, replying_to=None,
                         image_b64=None, image_media_type=None, user_id='default',
-                        already_said=None):
+                        already_said=None, extra_scene=None):
     """让某个角色基于群上下文回复一句。复用单人的 build_system_prompt + 角色人设/记忆。
     返回 {'jp','zh','emotion'} 或 None。
 
@@ -459,6 +459,11 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
 
     # ★★★ 核心修复：用真实 user_id 组装 prompt。
     #     原来这里是 'group_' + str(gid)，角色读的是空记忆桶——群聊记忆混乱的根源。
+    # ★ 主动冒泡等特殊场景，把额外指令接在群聊场景后面
+    if extra_scene:
+        group_scene = group_scene + extra_scene
+        user_msg = '（群里安静了一会儿）现在你主动在群里说一句。'
+
     # ★ 缓存版：静态头/记忆段带 cache_control，group_scene 进动态尾
     system_blocks = build_system_blocks(user_id, member['id'], user_text, extra_suffix=group_scene)
 
@@ -662,6 +667,7 @@ async def group_chat(data: dict):
     # 1) 存用户这句话
     display_text = user_text or '📷 [图片]'
     _save_group_message(gid, 'user', user_id, '', display_text)
+    update_chat_days(owner_id)   # ★ 群聊也算陪伴（以前只有单聊才更新，天数会停住）
 
     # 2) 智能调度：这一句该谁开口
     history = _get_group_history(gid, limit=12)

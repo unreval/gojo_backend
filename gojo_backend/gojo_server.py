@@ -14,6 +14,7 @@ from db_group import init_group_tables
 from characters import seed_gojo_character
 from db_bond import init_bond_table
 import memory_search
+import group_bubbler
 
 
 # 路由模块
@@ -44,6 +45,7 @@ init_bond_table()
 init_period_table()                    # 生理期建表
 memory_search.init_vector_support()    # ★ 探测 pgvector（不可用时自动退回，不影响启动）
 seed_gojo_character()
+group_bubbler.start_bubbler()         # ★ 群聊定时主动冒泡（克制版：每群每天≤3次、深夜静音、不合成语音）
 
 # ── 注册路由 ──
 app.include_router(chat_router)

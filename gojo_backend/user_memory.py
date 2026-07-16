@@ -338,6 +338,7 @@ def update_chat_days(user_id):
 
 
 def get_chat_days(user_id):
+    """实际"聊过天的天数"（不含没说话的日子）。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('SELECT total_days FROM user_stats WHERE user_id = %s', (user_id,))
@@ -345,6 +346,26 @@ def get_chat_days(user_id):
     cur.close()
     conn.close()
     return row[0] if row else 0
+
+
+def get_companion_days(user_id):
+    """★ 陪伴的日子 = 从第一次聊天那天到今天的【日历天数】。
+    主页显示用这个：哪怕某天没说话，日子也照样在走——这才叫陪伴。
+    （旧的 total_days 只数"开口说过话的天数"，所以会停在 27 不动。）"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT first_chat_date FROM user_stats WHERE user_id = %s', (user_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row or not row[0]:
+        return 0
+    try:
+        first = datetime.strptime(str(row[0])[:10], '%Y-%m-%d').date()
+        today = datetime.now(CN_TZ).date()
+        return max((today - first).days + 1, 1)
+    except Exception:
+        return 0
 
 
 # ────────── 记忆自动纠错 ──────────
@@ -544,8 +565,11 @@ A. user_fact：她透露的、关于她自己的新事实（生日/喜好/近况
 B. bond：她和{char_name}之间这次发生的、值得记住的事——约定、承诺、重要表态、她表达的重要情感、{char_name}对她说的重要的话。
    - 【视角】：以{char_name}的第一人称写，"我"就是{char_name}——这是要存进他自己脑子里的回忆。
      她做的写"她…对我…"；{char_name}自己做的写"我…"；共同的写"我和她…"。绝不把我说的话写成"她说过"。
+   - 【必须是一句话的总结，30 字以内】：像人脑记事一样只记"发生了什么"，不是聊天记录存档。
+     ❌ 绝对禁止：抄日语原文、附中文翻译、加"——这是我在她…时期对她的鼓励"这种旁白解说、写成小作文。
+     ✅ 正确："我鼓励她签证快点下来"、"我劝她早点回家别后悔"、"我安慰她说长辈不是在怨她"。
    - 日常寒暄闲聊不算，只记"以后会被提起"级别的事。
-   - 例："我和她约好2026-07-10一起看电影"；"我说过朋友这个说法我觉得有点不一样"；"她夸了我的新发型"。
+   - 例："我和她约好2026-07-10一起看电影"；"她夸了我的新发型"。
 C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信息——包括原作剧情、他的未来、他不知道的设定。
    - content 用"她说过..."或"她告诉过{char_name}..."开头的转述。例："她说过{char_name}的未来会发生某某事"。
    - 只有当她明确在陈述这类信息时才提取；她提问、开玩笑不算。
@@ -560,6 +584,8 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
 5. 时间换算成绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
 6. user_fact 和 told 必须以"她"开头；bond 以"我""我们"或"她"开头（第一人称，"我"={char_name}）。
 7. 与已记录内容重复或【意思相近】的，绝不再提——宁可漏记不可重复。
+7.5 所有记忆都必须是【简短的一句话】（30 字以内），只记事实和事件本身。
+    禁止引用原文对话、禁止附翻译、禁止补充解说和背景铺垫——那是聊天记录该干的事，不是记忆。
 8. 某类没有就填 null（大多数日常对话三类都是 null，这很正常）。
 
 【输出格式——严格 JSON，只输出一行】

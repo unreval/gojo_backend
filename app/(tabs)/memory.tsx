@@ -62,9 +62,11 @@ function relTime(ts?: string | null): string {
   const d = new Date(t);
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 }
+// ★ 新生 = 今天（本地日历日）新增的，不再是"24小时内"——
+//   否则昨晚生成的记忆到今天早上还挂着"新生"，看着混乱。
 const isNewborn = (ts?: string | null) => {
   const t = parseTs(ts);
-  return t != null && Date.now() - t < 24 * 3600 * 1000;
+  return t != null && new Date(t).toDateString() === new Date().toDateString();
 };
 const isToday = (ts?: string | null) => {
   const t = parseTs(ts);

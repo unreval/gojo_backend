@@ -28,7 +28,13 @@ async def get_memories(user_id: str = 'default', character_id: str = DEFAULT_CHA
 
 @router.get('/stats')
 async def get_stats(user_id: str = 'default'):
-    return JSONResponse({'total_days': get_chat_days(user_id)})
+    """★ total_days 改成"陪伴的日历天数"（首页显示用）——
+    以前返回的是"聊过天的天数"，没说话的日子不算，所以会停住不动。"""
+    from user_memory import get_companion_days
+    return JSONResponse({
+        'total_days': get_companion_days(user_id),   # 首页「悟陪伴你的日子」
+        'active_days': get_chat_days(user_id),       # 实际开口聊过的天数（备用）
+    })
 
 
 @router.get('/long_memory')
