@@ -24,6 +24,7 @@ from tasks import (
     find_and_delete_tasks_by_keyword,
     delete_latest_task,
 )
+from task_dedup import find_similar_task   # ★ 模糊去重：同时段+意思相近就算同一件事
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -47,8 +48,20 @@ async def chat_image(data: dict):
     image_b64    = data.get('image_base64', '')
     media_type   = data.get('media_type', 'image/jpeg')
     user_text    = (data.get('text') or '').strip()
+    is_video     = bool(data.get('is_video'))
 
-    if not image_b64:
+    # 统一成图片列表：单图和多图（视频抽帧）走同一条路
+    raw_images = data.get('images')
+    images = []
+    if isinstance(raw_images, list) and raw_images:
+        for it in raw_images[:6]:
+            d = (it or {}).get('data')
+            if d:
+                images.append({'data': d, 'media_type': it.get('media_type') or 'image/jpeg'})
+    elif image_b64:
+        images.append({'data': image_b64, 'media_type': media_type})
+
+    if not images:
         return JSONResponse({'error': 'no image'}, status_code=400)
 
     char = get_character(character_id)
@@ -66,20 +79,39 @@ async def chat_image(data: dict):
             'type': 'image',
             'source': {
                 'type': 'base64',
-                'media_type': media_type,
-                'data': image_b64,
+                'media_type': img['media_type'],
+                'data': img['data'],
             }
         }
+        for img in images
     ]
-    # 如果有 caption，作为文字一起发；否则用引导语
-    if user_text:
+
+    NO_TEXT_HINT = (
+        '【对方发来了一张图片，没有附文字。你看到了这张图，自然反应——根据图里的内容回应，'
+        '像真朋友收到对方发来的照片一样：可以好奇、调侃、关心、表达喜好。'
+        '不要冷冰冰地"描述图片内容"，要像看到了实物一样有情绪。】'
+    )
+
+    if is_video:
+        # 这些是同一段视频按时间顺序抽出来的画面
+        video_hint = (
+            '【★ 对方发来的是一段【视频】。上面 %d 张图是这段视频里按时间顺序抽出的画面'
+            '（第一张=开头，最后一张=结尾）。把它们当成【连续发生的一件事】来看，'
+            '脑补中间的过程，像真的看了这段视频一样反应：聊发生了什么、你的感受、你注意到的细节。'
+            '绝不要当成几张无关的照片逐张点评，也不要说"我看不到视频"。'
+            '（你听不到声音，所以别评论声音。）】'
+        ) % len(images)
+        if user_text:
+            user_content.append({'type': 'text', 'text': video_hint + '\n她说：' + user_text})
+            display_text = '🎬 ' + user_text
+        else:
+            user_content.append({'type': 'text', 'text': video_hint + '她没有附文字，你看完自然反应就好。'})
+            display_text = '🎬 [视频]'
+    elif user_text:
         user_content.append({'type': 'text', 'text': user_text})
-        display_text = f'📷 {user_text}'
+        display_text = '📷 ' + user_text
     else:
-        user_content.append({
-            'type': 'text',
-            'text': '【对方发来了一张图片，没有附文字。你看到了这张图，自然反应——根据图里的内容回应，像真朋友收到对方发来的照片一样：可以好奇、调侃、关心、表达喜好。不要冷冰冰地"描述图片内容"，要像看到了实物一样有情绪。】'
-        })
+        user_content.append({'type': 'text', 'text': NO_TEXT_HINT})
         display_text = '📷 [图片]'
 
     messages.append({'role': 'user', 'content': user_content})
@@ -139,7 +171,8 @@ async def chat_image(data: dict):
     for m in msgs:
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
 
-    print(f'[TTS:{TTS_PROVIDER}] {character_id} image emotion={emotion} segs={len(msgs)}')
+    kind = 'video' if is_video else 'image'
+    print(f'[TTS:{TTS_PROVIDER}] {character_id} {kind}({len(images)}帧) emotion={emotion} segs={len(msgs)}')
 
     # ─── 处理取消提醒 ───
     cancelled_tasks = []
@@ -171,14 +204,28 @@ async def chat_image(data: dict):
             'notification': rem.get('notification', ''),
         }
         try:
+            # ★ 先精确查，再模糊查（治"同一件事换个说法又建一条"）
             existing = find_duplicate_task(
                 user_id,
                 reminder_data['content'],
                 reminder_data['date'],
                 reminder_data['time'],
             )
-            if existing:
-                task_id, _ = existing
+            similar = None
+            if not existing:
+                similar = find_similar_task(
+                    user_id,
+                    reminder_data['content'],
+                    reminder_data['date'],
+                    reminder_data['time'],
+                )
+            if existing or similar:
+                if existing:
+                    task_id, _ = existing
+                    same_title = reminder_data['content']
+                else:
+                    task_id, _notif, same_title = similar
+                    print(f'[{user_id}] 🔁 同时段已有相近提醒「{same_title}」，跳过新建：{reminder_data["content"]}')
                 reminder_data['task_id'] = task_id
                 reminder_data['duplicate'] = True
             else:

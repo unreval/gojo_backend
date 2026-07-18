@@ -28,6 +28,7 @@ from tasks import (
     find_and_delete_tasks_by_keyword,
     delete_latest_task,
 )
+from task_dedup import find_similar_task   # ★ 模糊去重：同时段+意思相近就算同一件事
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -163,14 +164,28 @@ async def chat_text(data: dict):
             'notification': rem.get('notification', ''),
         }
         try:
+            # ★ 先精确查，再模糊查（治"同一件事换个说法又建一条"）
             existing = find_duplicate_task(
                 user_id,
                 reminder_data['content'],
                 reminder_data['date'],
                 reminder_data['time'],
             )
-            if existing:
-                task_id, _ = existing
+            similar = None
+            if not existing:
+                similar = find_similar_task(
+                    user_id,
+                    reminder_data['content'],
+                    reminder_data['date'],
+                    reminder_data['time'],
+                )
+            if existing or similar:
+                if existing:
+                    task_id, _ = existing
+                    same_title = reminder_data['content']
+                else:
+                    task_id, _notif, same_title = similar
+                    print(f'[{user_id}] 🔁 同时段已有相近提醒「{same_title}」，跳过新建：{reminder_data["content"]}')
                 reminder_data['task_id'] = task_id
                 reminder_data['duplicate'] = True
                 print(f'[{user_id}] 🔁 提醒已存在 task_id={task_id}，跳过新建')

@@ -16,6 +16,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as Notifications from 'expo-notifications';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import * as VideoThumbnails from 'expo-video-thumbnails'; // ★ 视频抽帧
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -92,9 +93,11 @@ interface GroupReply {
 }
 
 interface PendingImage {
-  base64: string;
+  base64: string;      // 单图=图片本身；视频=第一帧（用于本地预览）
   mediaType: string;
-  uri: string;
+  uri: string;         // 本地预览用
+  isVideo?: boolean;                                    // ★ 是不是视频
+  frames?: { data: string; media_type: string }[];      // ★ 视频抽出的帧（按时间顺序）
 }
 
 function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }
@@ -555,10 +558,60 @@ export default function ChatRoom() {
       Alert.alert('选图失败', e?.message ?? '请重试');
     }
   };
+  // ★ 发视频：Claude 只能看图片，看不了视频文件。
+  //   所以按时间顺序抽 4 张关键帧当"连环画"发过去，让他把这段当成连续发生的一件事来看。
+  const VIDEO_FRAMES = 4;
+  const pickVideo = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') { Alert.alert('需要相册权限', '请在设置中允许访问相册'); return; }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['videos'], quality: 0.7, allowsEditing: false,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      const durationMs = Math.max(asset.duration ?? 3000, 500);
+      if (durationMs > 120000) {
+        Alert.alert('视频太长了', '选 2 分钟以内的片段吧，太长的话抽出来的画面跳太狠，他看不明白。');
+        return;
+      }
+
+      setLoading(true);
+      // 在 0% / 33% / 66% / 95% 处各抽一帧
+      const points = Array.from({ length: VIDEO_FRAMES }, (_, i) =>
+        Math.floor(durationMs * (i / (VIDEO_FRAMES - 1)) * 0.95)
+      );
+      const frames: { data: string; media_type: string }[] = [];
+      let firstUri = asset.uri;
+      for (const t of points) {
+        try {
+          const { uri } = await VideoThumbnails.getThumbnailAsync(asset.uri, { time: t, quality: 0.6 });
+          const b64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' as any });
+          frames.push({ data: b64, media_type: 'image/jpeg' });
+          if (frames.length === 1) firstUri = uri;
+        } catch (err) {
+          console.warn('thumbnail fail at', t, err);
+        }
+      }
+      setLoading(false);
+      if (frames.length === 0) { Alert.alert('读取视频失败', '换一个视频试试'); return; }
+
+      setPendingImage({
+        base64: frames[0].data, mediaType: 'image/jpeg', uri: firstUri,
+        isVideo: true, frames,
+      });
+    } catch (e: any) {
+      setLoading(false);
+      console.warn('pickVideo error', e);
+      Alert.alert('选视频失败', e?.message ?? '请重试');
+    }
+  };
+
   const showImagePicker = () => {
-    Alert.alert('发送图片', '选择图片来源', [
+    Alert.alert('发送', '选择要发什么', [
       { text: '📷 拍照', onPress: () => pickImage(true) },
-      { text: '🖼 从相册选择', onPress: () => pickImage(false) },
+      { text: '🖼 从相册选图片', onPress: () => pickImage(false) },
+      { text: '🎬 发送视频', onPress: () => pickVideo() },
       { text: '取消', style: 'cancel' },
     ]);
   };
@@ -670,7 +723,10 @@ export default function ChatRoom() {
   };
 
   // ── 发送（统一入口）──
-  const sendImage = async (base64: string, mediaType: string, localUri: string, caption: string) => {
+  const sendImage = async (
+    base64: string, mediaType: string, localUri: string, caption: string,
+    video?: { frames: { data: string; media_type: string }[] },   // ★ 传了就是视频
+  ) => {
     // ★ 打断互动
     if (isGroup && interactionActiveRef.current) {
       interactionActiveRef.current = false;
@@ -681,7 +737,8 @@ export default function ChatRoom() {
     setLoading(true);
     const userMsg: Message = {
       id: Date.now().toString(), role: 'user',
-      text: caption || '📷 [图片]', time: nowTime(), timestamp: Date.now(), imageUri: localUri,
+      text: caption || (video ? '🎬 [视频]' : '📷 [图片]'),
+      time: nowTime(), timestamp: Date.now(), imageUri: localUri,
     };
     setMessages(prev => [...prev, userMsg]);
     scrollRef.current?.scrollToEnd({ animated: true });
@@ -689,6 +746,12 @@ export default function ChatRoom() {
 
     try {
       if (isGroup) {
+        if (video) {
+          Alert.alert('群聊暂不支持视频', '先在单聊里发给他吧，群聊的视频支持稍后再加。');
+          setMessages(prev => prev.filter(m => m.id !== userMsg.id));
+          setLoading(false);
+          return;
+        }
         // ★ 群聊发图:第一波(不互动)
         const res = await axios.post(`${SERVER_URL}/group/chat`, {
           group_id: groupId,
@@ -716,14 +779,21 @@ export default function ChatRoom() {
         }
         return;
       } else {
-        // 单聊发图
-        const res = await axios.post(`${SERVER_URL}/chat/image`, {
+        // 单聊发图/发视频（视频=按时间顺序的多帧）
+        const payload: any = {
           user_id: FIXED_USER_ID,
-          image_base64: base64,
-          media_type: mediaType,
           text: caption,
           character_id: chatId,
-        }, { timeout: 60000 });
+        };
+        if (video) {
+          payload.images = video.frames;
+          payload.is_video = true;
+        } else {
+          payload.image_base64 = base64;
+          payload.media_type = mediaType;
+        }
+        const res = await axios.post(`${SERVER_URL}/chat/image`, payload,
+          { timeout: video ? 90000 : 60000 });
         await processResponseExtras(res.data);
         const segments: Segment[] = res.data?.messages || [];
         if (segments.length === 0) { Alert.alert('回复异常', '没有收到有效回复'); return; }
@@ -818,7 +888,8 @@ export default function ChatRoom() {
       setPendingImage(null);
       setInputText('');
       if (searchMode) { setSearchMode(false); setSearchQuery(''); }
-      sendImage(img.base64, img.mediaType, img.uri, caption);
+      sendImage(img.base64, img.mediaType, img.uri, caption,
+                img.isVideo && img.frames ? { frames: img.frames } : undefined);
     } else {
       sendText();
     }
@@ -1089,6 +1160,11 @@ export default function ChatRoom() {
       {pendingImage && (
         <View style={s.pendingBar}>
           <Image source={{ uri: pendingImage.uri }} style={s.pendingThumb} resizeMode="cover" />
+          {pendingImage.isVideo && (
+            <View style={s.videoTag}>
+              <Text style={s.videoTagText}>🎬 {pendingImage.frames?.length || 0} 帧</Text>
+            </View>
+          )}
           <Text style={s.pendingHint}>
             图片已选好，配点文字一起发吧
           </Text>
@@ -1146,7 +1222,9 @@ export default function ChatRoom() {
           placeholder={
             loading
               ? (isGroup ? '群里回复中...' : '回复中...')
-              : (pendingImage ? '给图片配句话，或直接发送…' : (isGroup ? '在群里说点什么...' : '说点什么...'))
+              : (pendingImage
+                  ? (pendingImage.isVideo ? '给视频配句话，或直接发送…' : '给图片配句话，或直接发送…')
+                  : (isGroup ? '在群里说点什么...' : '说点什么...'))
           }
           placeholderTextColor={C.textMute}
           multiline
@@ -1229,6 +1307,12 @@ const s = StyleSheet.create({
 
   pendingBar:      { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, paddingHorizontal: 12, paddingTop: 10, paddingBottom: 4, gap: 10, borderTopWidth: 1, borderTopColor: C.border },
   pendingThumb:    { width: 48, height: 48, borderRadius: 8, backgroundColor: C.bg, borderWidth: 1, borderColor: C.border },
+  videoTag: {
+    position: 'absolute', left: 4, bottom: 4,
+    backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: 6,
+    paddingHorizontal: 5, paddingVertical: 1,
+  },
+  videoTagText: { color: '#fff', fontSize: 9, fontWeight: '600' },
   pendingHint:     { flex: 1, color: C.textMute, fontSize: 12, lineHeight: 16 },
   pendingRemove:   { width: 26, height: 26, borderRadius: 13, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.border },
   pendingRemoveText:{ color: C.textMute, fontSize: 14, fontWeight: '600' },
