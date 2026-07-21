@@ -7,6 +7,8 @@
 // ★ 本版新增：
 //   - 群聊@功能：输入"@"弹成员面板；长按角色消息的头像/名字快速@；发送时自动传 mentioned_id
 //   - 图片头像：头部、消息行、@面板都支持 avatar_url 图片头像
+//   - ★★ 发送防抖：2秒内同样内容不重复发（挡网络卡顿/重试导致的双发，顺便省一次 API+TTS）
+//   - ★★ 长按气泡 → 复制 / 删除（删除对用户和角色气泡都生效，只删本地画面+落盘，不动后端记忆）
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { Audio } from 'expo-av';
@@ -145,6 +147,7 @@ export default function ChatRoom() {
   const [hasMore, setHasMore] = useState(false);      // ★ 群聊：还有更早的消息
   const [loadingMore, setLoadingMore] = useState(false);
   const messagesRef = useRef<Message[]>([]);  // ★ 消息镜像（离开后仍能落盘）
+  const lastSentRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });  // ★ 防抖：挡网络卡顿导致的重复发送
 
   // ── 语音文件工具 ──
   const ensureAudioDir = async () => {
@@ -808,6 +811,13 @@ export default function ChatRoom() {
   const sendText = async (textOverride?: string) => {
     const text = (textOverride ?? inputText).trim();
     if (!text) return;
+    // ★ 防抖：2秒内同样内容不重复发（挡网络卡顿/重试导致的双发，也省一次 API+TTS）
+    const now = Date.now();
+    if (text === lastSentRef.current.text && now - lastSentRef.current.at < 2000) {
+      console.log('[防抖] 拦截重复发送：', text);
+      return;
+    }
+    lastSentRef.current = { text, at: now };
     // ★ 打断:如果群里还在互动,立刻停掉,让新消息优先
     if (isGroup && interactionActiveRef.current) {
       interactionActiveRef.current = false;
@@ -924,6 +934,32 @@ export default function ChatRoom() {
     Alert.alert('已复制', '', [{ text: '好', style: 'cancel' }], { cancelable: true });
   };
 
+  // ★ 删除单个气泡：从画面移除 + 落盘 + 删掉本地语音文件（用户和角色的气泡都能删）
+  //   注意：只删本地画面，不动后端短期记忆——那条很快会滑出上下文窗口，无需硬删。
+  const deleteMessage = (msg: Message) => {
+    Alert.alert('删除这条', msg.subtitle || msg.text || '', [
+      { text: '取消', style: 'cancel' },
+      { text: '删除', style: 'destructive', onPress: async () => {
+        setMessages(prev => prev.filter(m => m.id !== msg.id));
+        // 顺手删掉这条的本地语音文件（如果有）
+        const uri = audioCacheRef.current[msg.id];
+        if (uri) {
+          delete audioCacheRef.current[msg.id];
+          try { await FileSystem.deleteAsync(uri, { idempotent: true }); } catch {}
+        }
+      }},
+    ]);
+  };
+
+  // ★ 长按气泡：复制 or 删除
+  const onBubbleLongPress = (msg: Message) => {
+    Alert.alert('这条消息', '', [
+      { text: '📋 复制', onPress: () => copyMessage(msg) },
+      { text: '🗑 删除', style: 'destructive', onPress: () => deleteMessage(msg) },
+      { text: '取消', style: 'cancel' },
+    ]);
+  };
+
   // ── 时间分隔条工具 ──
   const WEEKDAYS_CN = ['日', '一', '二', '三', '四', '五', '六'];
   const shouldShowSeparator = (cur: Message, prev: Message | null): boolean => {
@@ -996,6 +1032,19 @@ export default function ChatRoom() {
             {!isGroup && chatId === 'gojo' && (
               <TouchableOpacity onPress={() => setShowCall(true)} style={s.iconBtn}>
                 <Text style={s.iconBtnText}>📞</Text>
+              </TouchableOpacity>
+            )}
+            {/* ★ 日记入口：仅单聊显示。点一下弹"看他的日记 / 写我的日记" */}
+            {!isGroup && (
+              <TouchableOpacity
+                onPress={() => Alert.alert('日记', '要做什么？', [
+                  { text: '📔 看他的日记', onPress: () => router.push(`/diary/${chatId}` as any) },
+                  { text: '🖊 写我的日记', onPress: () => router.push('/diary/mine' as any) },
+                  { text: '取消', style: 'cancel' },
+                ])}
+                style={s.iconBtn}
+              >
+                <Text style={s.iconBtnText}>📔</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity onPress={toggleSearch} style={s.iconBtn}>
@@ -1109,7 +1158,7 @@ export default function ChatRoom() {
                 <TouchableOpacity
                   activeOpacity={0.85}
                   onPress={() => { if (msg.role === 'gojo' && hasAudio) replayAudio(msg.id); }}
-                  onLongPress={() => copyMessage(msg)}
+                  onLongPress={() => onBubbleLongPress(msg)}
                   delayLongPress={400}
                 >
                   <View style={[

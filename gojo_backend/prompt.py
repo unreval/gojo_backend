@@ -310,6 +310,16 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
    （她赌气你就接住那个气、她撒娇你就接住那份撒娇），只要说的是新的内容。
 3. 第一句要回应她【这次】说的话，别答非所问。'''
 
+    # ── ★ 日记线索：他发现你留言 / 他偷看你日记后的反应 ──
+    #   放进动态尾（每次可能不同，且取出即标记已处理，不能进缓存段）
+    diary_hint = ''
+    try:
+        import diary_engine
+        diary_hint = diary_engine.build_diary_hint(character_id, user_id)
+    except Exception as _e:
+        diary_hint = ''
+    diary_hint_block = ('\n\n' + diary_hint) if diary_hint else ''
+
     # ── ★ 角色专属铁律 ──
     canon_lock = load_canon_lock(character_id)
 
@@ -328,7 +338,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
     semi_static = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 
-    dynamic_tail = f"""{stage_text}{period_text}{recall_text}{avoid_text}{no_repeat_text}
+    dynamic_tail = f"""{stage_text}{period_text}{recall_text}{diary_hint_block}{avoid_text}{no_repeat_text}
 
 {time_ctx}
 
