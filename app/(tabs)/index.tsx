@@ -4,9 +4,8 @@ import axios from 'axios';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Alert,
   ScrollView, StatusBar, StyleSheet, Text,
-  TouchableOpacity, View,
+  TouchableOpacity, View
 } from 'react-native';
 import ChibiSprite from '../../components/ChibiSprite';
 import { C, SERVER_URL } from '../../constants/theme';
@@ -124,13 +123,9 @@ export default function HomeScreen() {
   useEffect(() => { loadDays(); }, [loadDays]);
   useFocusEffect(useCallback(() => { loadDays(); }, [loadDays]));
 
-  // ★ 点日记格 → 弹选单
+  // ★ 点日记格 → 进日记首页（列出两本，深色卡片，和聊天统一）
   const openDiary = () => {
-    Alert.alert('日记', '要看哪本？', [
-      { text: '📔 Satoru 的日记', onPress: () => router.push(`/diary/${DIARY_CHARACTER}` as any) },
-      { text: '🖊 我的日记',       onPress: () => router.push('/diary/mine' as any) },
-      { text: '取消', style: 'cancel' },
-    ]);
+    router.push('/diary' as any);
   };
 
   const onTilePress = (tile: typeof TILES[number]) => {

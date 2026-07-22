@@ -6,7 +6,7 @@ import { useFonts } from 'expo-font';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Modal, Platform, RefreshControl,
+  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, RefreshControl,
   ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { SERVER_URL } from '../../constants/theme';
@@ -200,6 +200,10 @@ export default function MyDiaryScreen() {
 
       {/* 写日记 */}
       <Modal visible={showWrite} animationType="slide" transparent statusBarTranslucent>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
         <View style={s.modalBackdrop}>
           <View style={s.modalCard}>
             <Text style={s.modalTitle}>写日记</Text>
@@ -229,6 +233,7 @@ export default function MyDiaryScreen() {
             </View>
           </View>
         </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* 改书名 */}
