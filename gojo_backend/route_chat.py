@@ -39,19 +39,18 @@ router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 # ★ 预填：强制模型从 { 开始输出 JSON
-_PREFILL = {'role': 'assistant', 'content': '{'}
-
-
 def _create_json(model, max_tokens, system_blocks, messages):
-    """统一的"预填 JSON"调用：把回复强制成从 { 开始的合法 JSON。
-    返回 (raw_text, response)。raw_text 已把开头的 { 补回去。"""
+    """统一的模型调用。
+    ★ 不再预填 assistant '{'——claude-sonnet-4-6 不支持 assistant prefill（会 400）。
+    改为直接调用，靠下面 _parse_reply 的宽松解析（从第一个 { 抠到最后一个 }）扛住
+    模型偶尔在 JSON 前多说两句的情况。返回 (raw_text, response)。"""
     response = claude_client.messages.create(
         model=model,
         max_tokens=max_tokens,
         system=system_blocks,
-        messages=messages + [_PREFILL],
+        messages=messages,
     )
-    raw = ('{' + response.content[0].text).strip()
+    raw = response.content[0].text.strip()
     return raw, response
 
 
@@ -76,7 +75,26 @@ def _parse_reply(raw: str):
     return None
 
 
-# ─────────────────── 普通文本聊天 ───────────────────
+def _salvage_japanese(raw: str):
+    """从模型没包成 JSON 的原始回复里，抢救出可用的日语当回复。
+    用于：模型直接吐日语大白话、没输出 JSON 时，别浪费他真说的话。
+    返回 {'jp':..., 'zh':...} 或 None。"""
+    import re
+    if not raw:
+        return None
+    # 去掉可能的 JSON 残骸/代码块符号/花括号碎片
+    text = raw.strip().strip('`').strip()
+    text = re.sub(r'^\s*\{?\s*"?(emotion|messages|jp|zh)"?\s*:?', '', text)
+    text = text.replace('{', '').replace('}', '').replace('[', '').replace(']', '').strip()
+    text = text.strip('"\'，, 。').strip()
+    if not text:
+        return None
+    # 必须含有假名/日文汉字，才认为是"他真说了话"，否则宁可走兜底
+    if not re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', text):
+        return None
+    # 截断过长的（避免把一堆乱码全塞进去）
+    jp = text[:200].strip()
+    return {'jp': jp, 'zh': ''}   # zh 留空，前端/TTS 用 jp 即可
 
 @router.post('/chat/text')
 async def chat_text(data: dict):
@@ -104,11 +122,14 @@ async def chat_text(data: dict):
     system_blocks = build_system_blocks(user_id, character_id, recall_query)
 
     result = None
+    last_raw = ''   # ★ 记住最后一次模型原始回复，用于"纯日语救援"
     for attempt in range(3):
         try:
             raw, response = _create_json('claude-sonnet-4-6', 1500, system_blocks, messages)
             log_cache_usage(f'chat:{character_id}', response)
             print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
+            if raw:
+                last_raw = raw
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
@@ -116,6 +137,14 @@ async def chat_text(data: dict):
                     break
         except Exception as e:
             print(f'attempt {attempt+1} error: {e}')
+
+    # ★ 纯日语救援：模型说了日语但没包成 JSON（解析全失败）时，
+    #   与其甩一句"没听清"，不如把他真正说的话用上——比兜底自然得多。
+    if not result and last_raw:
+        salvaged = _salvage_japanese(last_raw)
+        if salvaged:
+            result = {'emotion': '平静', 'messages': [salvaged]}
+            print(f'[{user_id}][{character_id}] 纯日语救援：{salvaged["jp"][:40]}')
 
     if not result:
         fallback_pool = [
