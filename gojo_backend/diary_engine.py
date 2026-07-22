@@ -83,10 +83,46 @@ emotion 从这里选：{'/'.join(EMOTIONS_FOR_DIARY)}'''
 
         diary_id, created_at = db_diary.add_char_diary(character_id, user_id, content, emotion)
         print(f'[diary] ✅ {character_id} 写了日记 #{diary_id}：{content[:40]}')
+
+        # ★ A+C：如果他还没给自己那本日记取过名，第一次写就顺便取一个
+        try:
+            if not db_diary.has_named_self(user_id, character_id):
+                name = _name_own_diary(char_name)
+                if name:
+                    db_diary.set_book_title(user_id, character_id, name, named_by_self=True)
+                    print(f'[diary] ✒️ {character_id} 给自己的日记取名：{name}')
+        except Exception as _e:
+            print(f'[diary] 取名跳过：{_e}')
+
         return diary_id, content, emotion
 
     except Exception as e:
         print(f'[diary] 写日记失败：{e}')
+        return None
+
+
+# ══════════════════════════════════════════════════════════
+#  他给自己的日记取名（A+C，第一次写日记时触发）
+# ══════════════════════════════════════════════════════════
+
+def _name_own_diary(char_name):
+    """让他用自己的口吻，给自己这本日记起个名字。返回一个短标题字符串。"""
+    try:
+        prompt = f'''你是{char_name}。你要给自己刚开始写的这本私人日记起一个名字——就写在封面上那种。
+以你自己的口吻和性格取名，几个字就好，别太正经、别像作文题目，像你会随手写下的那种。
+只输出这个名字本身，不要引号、不要解释、不要标点结尾。'''
+        resp = claude_client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=40,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+        name = resp.content[0].text.strip().strip('「」"\'。').strip()
+        # 兜底：太长就截断，空的就给个默认
+        if not name:
+            return f'{char_name}的日记'
+        return name[:20]
+    except Exception as e:
+        print(f'[diary] 取名失败：{e}')
         return None
 
 

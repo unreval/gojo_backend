@@ -94,6 +94,30 @@ async def remove_user_diary(diary_id: int, user_id: str = DEFAULT_USER):
     return JSONResponse({'ok': True})
 
 
+# ─────────── 日记本名字（A+C）───────────
+
+@router.get('/diary/book/{owner}')
+async def get_book(owner: str, user_id: str = DEFAULT_USER):
+    """取日记本名字。owner='user'=你那本；owner=角色id=他那本。"""
+    if owner == 'user':
+        default = '我的日记'
+    else:
+        default = f'{owner}的日记'
+    info = db_diary.get_book_title(user_id, owner, default)
+    return JSONResponse(info)
+
+
+@router.put('/diary/book/{owner}')
+async def rename_book(owner: str, data: dict):
+    """改名（你手动改；他那本你也能改）。"""
+    user_id = data.get('user_id', DEFAULT_USER)
+    title = (data.get('title') or '').strip()
+    if not title:
+        return JSONResponse({'error': 'empty title'}, status_code=400)
+    db_diary.set_book_title(user_id, owner, title[:20], named_by_self=False)
+    return JSONResponse({'ok': True, 'title': title[:20]})
+
+
 # ─────────── 补偿 & 调试 ───────────
 
 @router.post('/diary/catch_up')

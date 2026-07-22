@@ -5,6 +5,11 @@
   - 场景补充文字（故事模式/语音通话等）必须走 extra_suffix 参数传入，
     绝不能写成 build_system_blocks(...) + '字符串'（列表加字符串会直接 TypeError 崩溃）
   - 每次调用后 log_cache_usage 打印缓存命中，部署后看日志即可确认省了多少
+
+★ v-fix：预填 JSON（修"空循环"）
+  - 模型有时不输出 JSON、直接吐纯日语 → 解析失败 → 重试5次全废 → 落兜底"没听清"。
+  - 解法：在 messages 末尾预填一条 {'role':'assistant','content':'{'}，强制模型必须从 { 接着写 JSON，
+    拿到回复后把开头的 { 补回去再解析。所有产生 JSON 的端点都套用（见 _create_json）。
 """
 import threading
 import random
@@ -32,6 +37,22 @@ from task_dedup import find_similar_task   # ★ 模糊去重：同时段+意思
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+# ★ 预填：强制模型从 { 开始输出 JSON
+_PREFILL = {'role': 'assistant', 'content': '{'}
+
+
+def _create_json(model, max_tokens, system_blocks, messages):
+    """统一的"预填 JSON"调用：把回复强制成从 { 开始的合法 JSON。
+    返回 (raw_text, response)。raw_text 已把开头的 { 补回去。"""
+    response = claude_client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system_blocks,
+        messages=messages + [_PREFILL],
+    )
+    raw = ('{' + response.content[0].text).strip()
+    return raw, response
 
 
 def _parse_reply(raw: str):
@@ -83,18 +104,12 @@ async def chat_text(data: dict):
     system_blocks = build_system_blocks(user_id, character_id, recall_query)
 
     result = None
-    for attempt in range(5):
+    for attempt in range(3):
         try:
-            response = claude_client.messages.create(
-                model='claude-sonnet-4-6',
-                max_tokens=1500,                       # ★ 800→1500，避免回复被截断导致 JSON 不完整
-                system=system_blocks,
-                messages=messages
-            )
+            raw, response = _create_json('claude-sonnet-4-6', 1500, system_blocks, messages)
             log_cache_usage(f'chat:{character_id}', response)
-            raw = response.content[0].text.strip()
             print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
-            parsed = _parse_reply(raw)                  # ★ 宽松解析，能扛住 JSON 前的多余文字
+            parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
                     result = parsed
@@ -103,7 +118,6 @@ async def chat_text(data: dict):
             print(f'attempt {attempt+1} error: {e}')
 
     if not result:
-        # ★ 真失败时用随机小池，自然、不出戏、还能引导用户重发；不再是写死的"最强"
         fallback_pool = [
             {'jp': 'ん？ちょっと聞き取れなかった。もう一回言って。', 'zh': '嗯？没太听清，再说一遍。'},
             {'jp': 'さあ、なんだろうね。', 'zh': '谁知道呢。'},
@@ -134,7 +148,6 @@ async def chat_text(data: dict):
 
     print(f'[TTS:{TTS_PROVIDER}] {character_id} emotion={emotion} segs={len(msgs)} days={total_days}')
 
-    # ─── 处理取消提醒（先取消再新增）───
     cancelled_tasks = []
     if result.get('cancel_reminder'):
         cancel = result['cancel_reminder']
@@ -153,7 +166,6 @@ async def chat_text(data: dict):
         except Exception as e:
             print(f'取消提醒失败：{e}')
 
-    # ─── 处理新增提醒（带去重）───
     reminder_data = None
     if result.get('reminder'):
         rem = result['reminder']
@@ -164,7 +176,6 @@ async def chat_text(data: dict):
             'notification': rem.get('notification', ''),
         }
         try:
-            # ★ 先精确查，再模糊查（治"同一件事换个说法又建一条"）
             existing = find_duplicate_task(
                 user_id,
                 reminder_data['content'],
@@ -234,11 +245,6 @@ STORY_SCENE = '''
 
 @router.post('/chat/story')
 async def chat_story(data: dict):
-    """
-    长故事模式：生成一个完整的长故事，分成很多气泡，每条独立 TTS。
-    前端在检测到"讲故事"类请求时调用这个端点（而不是 /chat/text）。
-    声音质量靠和 /chat/text 完全相同的 per-bubble 合成保证（同 voice_id、同参数）。
-    """
     user_text    = data.get('text', '')
     user_id      = data.get('user_id', 'default')
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
@@ -260,20 +266,13 @@ async def chat_story(data: dict):
     if short_memories:
         recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
 
-    # ★ 场景文字走 extra_suffix（列表不能直接 + 字符串）
     system_blocks = build_system_blocks(user_id, character_id, recall_query, extra_suffix=STORY_SCENE)
 
     result = None
     for attempt in range(5):
         try:
-            response = claude_client.messages.create(
-                model='claude-sonnet-4-6',
-                max_tokens=4000,      # ★ 故事模式给更多 token
-                system=system_blocks,
-                messages=messages
-            )
+            raw, response = _create_json('claude-sonnet-4-6', 4000, system_blocks, messages)
             log_cache_usage(f'story:{character_id}', response)
-            raw = response.content[0].text.strip()
             print(f'[story] attempt {attempt+1}: {raw[:120]}...')
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
@@ -309,7 +308,6 @@ async def chat_story(data: dict):
                      args=(user_id, user_text, full_jp, character_id),
                      daemon=True).start()
 
-    # ★ 和 /chat/text 一样，每段日语单独合成（串行、同 voice_id，声音一致）
     voice_id = char.get('voice_id')
     for m in msgs:
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
@@ -355,14 +353,8 @@ async def chat_proactive(data: dict):
     result = None
     for attempt in range(3):
         try:
-            response = claude_client.messages.create(
-                model='claude-sonnet-4-6',
-                max_tokens=400,
-                system=system_blocks,
-                messages=messages
-            )
+            raw, response = _create_json('claude-sonnet-4-6', 400, system_blocks, messages)
             log_cache_usage(f'proactive:{character_id}', response)
-            raw = response.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 result = parsed
@@ -430,14 +422,8 @@ async def chat_voice_text(data: dict):
     result = None
     for attempt in range(3):
         try:
-            response = claude_client.messages.create(
-                model='claude-haiku-4-5-20251001',
-                max_tokens=500,
-                system=system_blocks,
-                messages=messages
-            )
+            raw, response = _create_json('claude-haiku-4-5-20251001', 500, system_blocks, messages)
             log_cache_usage(f'voice:{character_id}', response)
-            raw = response.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 result = parsed
@@ -455,8 +441,6 @@ async def chat_voice_text(data: dict):
     msgs = result.get('messages', [])
     for m in msgs:
         m['jp'] = sanitize_jp(m.get('jp', ''))
-    # ★ 修复：去掉强制截断，改用 merge_only_extreme_short（和 /chat/text 一致）
-    # 这样多气泡才能真正传到前端
     msgs = merge_only_extreme_short(msgs)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
@@ -491,10 +475,6 @@ VOICE_STORY_SCENE = '''
 
 @router.post('/chat/voice_story')
 async def chat_voice_story(data: dict):
-    """
-    语音通话里的长故事：用 Sonnet 生成完整故事，分成很多短气泡，每段独立 TTS。
-    前端按顺序播放（在 voice 通话中检测到"讲故事"类请求时调用）。
-    """
     user_text    = data.get('text', '')
     user_id      = data.get('user_id', 'default')
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
@@ -515,14 +495,8 @@ async def chat_voice_story(data: dict):
     result = None
     for attempt in range(5):
         try:
-            response = claude_client.messages.create(
-                model='claude-sonnet-4-6',
-                max_tokens=3000,
-                system=system_blocks,
-                messages=messages
-            )
+            raw, response = _create_json('claude-sonnet-4-6', 3000, system_blocks, messages)
             log_cache_usage(f'voice_story:{character_id}', response)
-            raw = response.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 3:
                 if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
@@ -575,7 +549,6 @@ async def chat_voice_story(data: dict):
 
 @router.post('/chat/voice/proactive')
 async def chat_voice_proactive(data: dict):
-    """语音通话主动开口：接通开场(greeting) / 沉默追问(idle/missed)"""
     user_id         = data.get('user_id', 'default')
     character_id    = data.get('character_id', DEFAULT_CHARACTER_ID)
     mode            = data.get('mode', 'idle')
@@ -585,7 +558,6 @@ async def chat_voice_proactive(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
-    # ★ greeting = 电话刚接通，顺着刚才文字聊的内容主动开口
     if mode == 'greeting':
         trigger = ('【系统：电话刚接通。请顺着你们刚才在文字里聊的内容（见上方对话历史），'
                    '像真的接起电话一样自然主动开口——把刚才的话题接上，或随口关心一句。'
@@ -630,14 +602,8 @@ async def chat_voice_proactive(data: dict):
     result = None
     for attempt in range(3):
         try:
-            response = claude_client.messages.create(
-                model='claude-haiku-4-5-20251001',
-                max_tokens=300,
-                system=system_blocks,
-                messages=messages
-            )
+            raw, response = _create_json('claude-haiku-4-5-20251001', 300, system_blocks, messages)
             log_cache_usage(f'voice_proactive:{character_id}', response)
-            raw = response.content[0].text.strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 result = parsed
@@ -662,7 +628,6 @@ async def chat_voice_proactive(data: dict):
     msgs = result.get('messages', [])
     for m in msgs:
         m['jp'] = sanitize_jp(m.get('jp', ''))
-    # 接通开场最多2条；沉默追问保持1条
     msgs = msgs[:2] if mode == 'greeting' else msgs[:1]
 
     full_jp = ' '.join(m['jp'] for m in msgs)

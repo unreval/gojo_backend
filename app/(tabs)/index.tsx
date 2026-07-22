@@ -4,6 +4,7 @@ import axios from 'axios';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Alert,
   ScrollView, StatusBar, StyleSheet, Text,
   TouchableOpacity, View,
 } from 'react-native';
@@ -12,6 +13,7 @@ import { C, SERVER_URL } from '../../constants/theme';
 
 const USER_ID_KEY    = 'gojo_user_id';
 const DAYS_CACHE_KEY = 'gojo_chat_days';   // ★ 只当离线缓存，真值以服务器为准
+const DIARY_CHARACTER = 'gojo';            // ★ 日记入口默认进 gojo 那本
 
 // ── 60条今日悟语，约2个月不重复 ──
 const DAILY_MSGS = [
@@ -78,7 +80,6 @@ const DAILY_MSGS = [
   { jp: '今日の君、なんかかわいいね。照れないでよ。', zh: '今天的你，感觉有点可爱呢。别害羞啊。' },
 ];
 
-// 按日期取，60天循环
 function getTodayMessage() {
   const now = new Date();
   const dayOfYear = Math.floor(
@@ -87,11 +88,13 @@ function getTodayMessage() {
   return DAILY_MSGS[dayOfYear % DAILY_MSGS.length];
 }
 
+// ★ 日记那格用 special 标记，点击时弹选单（Satoru的日记 / 我的日记），不是直接 push
 const TILES = [
   { route: '/chat',       icon: '💬', label: '聊天', sub: '跟悟说话',  color: '#5BC4FF' },
   { route: '/calendar',   icon: '📅', label: '日程', sub: '行程提醒',  color: '#A78BFA' },
   { route: '/accounting', icon: '💰', label: '记账', sub: '收支记录',  color: '#34D399' },
   { route: '/memory',     icon: '🧠', label: '记忆', sub: '悟记得的',  color: '#F59E0B' },
+  { route: '__diary__',   icon: '📔', label: '日记', sub: '悟的 & 你的', color: '#E8A0BF', special: 'diary' },
   { route: '/bedtime-story', icon: '🌙', label: '睡前故事', sub: '哄你入睡',  color: '#8B7FD6' },
 ];
 
@@ -100,35 +103,40 @@ export default function HomeScreen() {
   const [chatDays, setChatDays] = useState(0);
   const todayMsg = getTodayMessage();
 
-  // ★ 天数以服务器为准（/stats 返回"陪伴的日历天数"：从第一次聊天到今天，没说话的日子也算）
-  //   以前这里只读本机缓存 gojo_chat_days，而【全 app 已经没有任何代码在写这个键】——
-  //   于是永远显示很久以前存下的那个数字，怎么聊都不动。
   const loadDays = useCallback(async () => {
-    // 先用本机缓存垫一下，避免进页面闪 0
     try {
       const cached = await AsyncStorage.getItem(DAYS_CACHE_KEY);
       if (cached) setChatDays(Number(cached));
     } catch {}
-    // 再问服务器要真值
     try {
       const uid = (await AsyncStorage.getItem(USER_ID_KEY)) || 'default';
-      const res = await axios.get(`${SERVER_URL}/stats`, {
-        params: { user_id: uid },
-        timeout: 8000,
-      });
+      const res = await axios.get(`${SERVER_URL}/stats`, { params: { user_id: uid }, timeout: 8000 });
       const d = Number(res.data?.total_days);
       if (!isNaN(d) && d > 0) {
         setChatDays(d);
         AsyncStorage.setItem(DAYS_CACHE_KEY, String(d)).catch(() => {});
       }
     } catch (e: any) {
-      console.warn('load stats', e?.message);   // 离线时保持缓存值，不清零
+      console.warn('load stats', e?.message);
     }
   }, []);
 
   useEffect(() => { loadDays(); }, [loadDays]);
-  // 每次回到首页都刷新一下（跨零点、换设备都能自动对上）
   useFocusEffect(useCallback(() => { loadDays(); }, [loadDays]));
+
+  // ★ 点日记格 → 弹选单
+  const openDiary = () => {
+    Alert.alert('日记', '要看哪本？', [
+      { text: '📔 Satoru 的日记', onPress: () => router.push(`/diary/${DIARY_CHARACTER}` as any) },
+      { text: '🖊 我的日记',       onPress: () => router.push('/diary/mine' as any) },
+      { text: '取消', style: 'cancel' },
+    ]);
+  };
+
+  const onTilePress = (tile: typeof TILES[number]) => {
+    if (tile.special === 'diary') openDiary();
+    else router.push(tile.route as any);
+  };
 
   const todayLabel = (() => {
     const d = new Date();
@@ -144,7 +152,6 @@ export default function HomeScreen() {
     >
       <StatusBar barStyle="light-content" backgroundColor={C.bg} />
 
-      {/* 顶部：悟 + 天数 */}
       <View style={s.topRow}>
         <View style={s.spriteWrap}>
           <ChibiSprite pose="sit" size={120} />
@@ -160,7 +167,6 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* 今日悟语卡片 */}
       <View style={s.msgCard}>
         <View style={s.msgBar} />
         <View style={{ flex: 1 }}>
@@ -170,7 +176,6 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* 功能入口 */}
       <Text style={s.sectionTitle}>快捷入口</Text>
       <View style={s.grid}>
         {TILES.map(tile => (
@@ -178,7 +183,7 @@ export default function HomeScreen() {
             key={tile.route}
             style={s.tile}
             activeOpacity={0.75}
-            onPress={() => router.push(tile.route as any)}
+            onPress={() => onTilePress(tile)}
           >
             <View style={[s.tileDot, { backgroundColor: tile.color + '33' }]}>
               <Text style={s.tileIcon}>{tile.icon}</Text>
