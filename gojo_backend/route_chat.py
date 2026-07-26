@@ -94,7 +94,25 @@ def _salvage_japanese(raw: str):
         return None
     # 截断过长的（避免把一堆乱码全塞进去）
     jp = text[:200].strip()
-    return {'jp': jp, 'zh': ''}   # zh 留空，前端/TTS 用 jp 即可
+    # ★ 补一次中文翻译（之前留空 zh 导致"没中文字幕"）。用 Haiku 快、便宜。
+    zh = _quick_translate(jp)
+    return {'jp': jp, 'zh': zh}
+
+
+def _quick_translate(jp: str) -> str:
+    """把一句日语快速翻成中文（救援用）。失败就返回空串，不阻断主流程。"""
+    if not jp:
+        return ''
+    try:
+        resp = claude_client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=200,
+            messages=[{'role': 'user', 'content':
+                f'把下面这句日语忠实翻译成中文，只输出译文本身，不要解释、不要引号：\n{jp}'}],
+        )
+        return resp.content[0].text.strip().strip('「」"\'。 ').strip()
+    except Exception:
+        return ''
 
 @router.post('/chat/text')
 async def chat_text(data: dict):
