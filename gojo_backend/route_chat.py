@@ -188,6 +188,14 @@ async def chat_text(data: dict):
     threading.Thread(target=extract_and_save_memory,
                      args=(user_id, user_text, full_jp, character_id),
                      daemon=True).start()
+    # ★ 事件驱动日记：聊到大事时，他会因为"这事值得记"而写一篇（后台，不阻塞回复）
+    try:
+        import diary_engine
+        threading.Thread(target=diary_engine.maybe_write_diary_on_event,
+                         args=(character_id, user_id, user_text, full_jp),
+                         daemon=True).start()
+    except Exception:
+        pass
 
     voice_id = char.get('voice_id')
     for m in msgs:

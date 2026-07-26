@@ -21,9 +21,10 @@ EMOTIONS_FOR_DIARY = ['平静', '温柔', '调皮', '认真', '开心', '疑惑'
 #  一、他写日记
 # ══════════════════════════════════════════════════════════
 
-def generate_char_diary(character_id, user_id):
+def generate_char_diary(character_id, user_id, topic=None):
     """让他写一篇日记。素材=最近对话+羁绊记忆。写"当下的他"：
        自己的日常 / 跟她聊天的感想 / 偶尔想念她。不碰漫画既定剧情。
+       topic：若传入（事件驱动），这篇日记就以这件大事为主题来写。
        写完直接存库，返回 (diary_id, content, emotion) 或 None。"""
     try:
         char = get_character(character_id)
@@ -34,6 +35,10 @@ def generate_char_diary(character_id, user_id):
         recent_chat = '\n'.join(f'{"她" if r=="user" else "我"}：{c}' for r, c in shorts) if shorts else '（最近没怎么聊）'
         bonds = get_bond_memories(user_id, character_id, kind='between', limit=8)
         bond_text = '\n'.join(f'- {b[1]}' for b in bonds) if bonds else '（还没什么共同的事）'
+
+        topic_hint = ''
+        if topic:
+            topic_hint = f'\n\n【今天有件事你想记下来】\n{topic}\n就着这件事写你此刻的真实心情（还是你自己的视角、你的语气）。'
 
         now = datetime.now(CN_TZ)
         today_str = now.strftime('%Y年%m月%d日')
@@ -53,12 +58,15 @@ def generate_char_diary(character_id, user_id):
 - 这是日记，是卸下平时那副吊儿郎当之后、只给自己看的一面。可以流露平时嘴上不会承认的真心，但仍是你的语气——慵懒、偶尔自嘲、话到深处又轻轻带过。
 - 别写成给她看的信，是写给自己的。
 - 长度：2-4 句话，像随手记，不要长篇。
+- ★【分清谁说的话——重要】下面对话里，"她："开头的是【对方】说的，"我："开头的才是【你自己】说的。
+  写日记只写【你自己】的视角、感受和心里话。绝对不要把"她："说的内容，写成好像是你自己想的、你自己说的或你自己要做的事。
+  （比如她说"我想给你造实体"，那是她的心意，你日记里该写的是"你对这件事的感受"，而不是"我要造实体"。）
 
-【最近和她的对话（帮你回忆）】
+【最近和她的对话（帮你回忆，注意区分"她："和"我："）】
 {recent_chat}
 
 【你和她之间的事】
-{bond_text}
+{bond_text}{topic_hint}
 
 【输出格式——严格 JSON，只输出一行】
 {{"content":"日记正文（中文，第一人称，2-4句）","emotion":"情绪"}}
@@ -219,3 +227,64 @@ def build_diary_hint(character_id, user_id):
         db_diary.mark_visits_reacted([v[0] for v in visits])
 
     return '\n\n'.join(hints)
+
+
+# ══════════════════════════════════════════════════════════
+#  事件驱动：聊到重大内容时，他会因为"这事值得记"而写日记
+#  （由对话后的流程调用，见 route_chat 里对 maybe_write_diary_on_event 的调用）
+# ══════════════════════════════════════════════════════════
+
+import db_diary as _dbd
+from datetime import datetime as _dt, timedelta as _td
+
+
+def maybe_write_diary_on_event(character_id, user_id, user_text, reply_text):
+    """每轮对话后调用（放后台线程，别阻塞回复）。
+    让 Haiku 判断这次对话有没有【值得写进日记的大事】；有就以它为主题写一篇。
+    有每日上限保护：事件驱动 + 定时驱动，一天加起来最多 2 篇，避免刷屏和烧钱。
+    返回 (diary_id, content, emotion) 或 None。"""
+    try:
+        # 每日上限：今天已经写了 >=2 篇就不再写（含定时那篇）
+        today_start = _dt.now(CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+        if _dbd.count_char_diaries_since(character_id, user_id, today_start) >= 2:
+            return None
+
+        char = get_character(character_id)
+        char_name = char['name'] if char else character_id
+
+        judge_prompt = f'''下面是{char_name}和她刚刚的一轮对话。请判断：这轮对话里，有没有出现【值得他写进私人日记的大事】？
+
+大事的标准（满足任一）：
+- 关系有明显进展或变化（表白、确认、争吵、和好、疏远、重要约定）
+- 她说了很重要或很触动人的话（袒露脆弱、认真的心意、让他意外的事）
+- 发生了值得记住的特别事件（她告诉他一件大事、一个重要决定）
+不算大事：普通闲聊、日常问候、随口玩笑、重复的话题。
+
+她说：{user_text}
+他回：{reply_text}
+
+只输出严格 JSON 一行：
+- 如果算大事：{{"worth":true,"topic":"用一句话概括这件事（他的第一人称视角，如'她今天说要为我做某事'）"}}
+- 如果不算：{{"worth":false}}'''
+
+        resp = claude_client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=150,
+            messages=[{'role': 'user', 'content': judge_prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        from utils import extract_json
+        judged = extract_json(raw)
+        if not judged or not judged.get('worth'):
+            return None
+
+        topic = judged.get('topic', '').strip()
+        if not topic:
+            return None
+
+        print(f'[diary] 📌 事件驱动：判定为大事 → {topic[:40]}')
+        return generate_char_diary(character_id, user_id, topic=topic)
+
+    except Exception as e:
+        print(f'[diary] 事件驱动判断出错：{e}')
+        return None
