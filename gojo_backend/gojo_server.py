@@ -18,6 +18,7 @@ from db_bond import init_bond_table
 import memory_search
 import group_bubbler
 import diary_scheduler                      # ★ 日记常驻排程
+import proactive_scheduler                  # ★ 主动汇报排程
 
 
 # 路由模块
@@ -34,6 +35,8 @@ from route_period import router as period_router, init_period_table
 from route_tts import router as tts_router          # ★ 重播兜底 + RAG 维护
 from route_diary import router as diary_router       # ★ 日记路由
 from db_diary import init_diary_tables               # ★ 日记建表
+from route_proactive import router as proactive_router   # ★ 主动消息路由
+from proactive_msg import init_proactive_table           # ★ 主动消息建表
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -49,10 +52,12 @@ init_group_tables()
 init_bond_table()
 init_period_table()                    # 生理期建表
 init_diary_tables()                    # ★ 日记建表
+init_proactive_table()                 # ★ 主动消息建表
 memory_search.init_vector_support()    # ★ 探测 pgvector（不可用时自动退回，不影响启动）
 seed_gojo_character()
 group_bubbler.start_bubbler()          # ★ 群聊定时主动冒泡（克制版：每群每天≤3次、深夜静音、不合成语音）
 diary_scheduler.start_diary_scheduler()  # ★ 日记常驻排程（他会自己写日记、偷看你的日记）
+proactive_scheduler.start_proactive_scheduler()  # ★ 主动汇报排程（每天约定时段发任务报备）
 
 # ── 注册路由 ──
 app.include_router(chat_router)
@@ -67,6 +72,7 @@ app.include_router(config_router)
 app.include_router(period_router)   # 生理期路由
 app.include_router(tts_router)      # ★ 语音重合成 + RAG 状态
 app.include_router(diary_router)    # ★ 日记路由
+app.include_router(proactive_router)  # ★ 主动消息路由
 
 
 @app.get('/health')
