@@ -9,10 +9,22 @@ from fastapi.responses import JSONResponse
 
 import proactive_msg
 import proactive_scheduler
+import push_notify
 
 router = APIRouter()
 
 DEFAULT_USER = 'user_mofpiyd7442ia7'
+
+
+@router.post('/push/register')
+async def register_push(data: dict):
+    """前端注册推送 token。"""
+    user_id = data.get('user_id', DEFAULT_USER)
+    token = (data.get('token') or '').strip()
+    if not token:
+        return JSONResponse({'ok': False, 'error': 'no token'}, status_code=400)
+    push_notify.save_token(user_id, token)
+    return JSONResponse({'ok': True})
 
 
 @router.get('/proactive/pending')

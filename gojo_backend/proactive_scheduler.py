@@ -95,6 +95,19 @@ emotion 选：平静/自信/调皮/认真'''
             character_id, user_id, 'report', jp, zh, emotion, audio_b64, created_at=now
         )
         print(f'[proactive] ✅ {character_id} 主动汇报 #{mid}：{jp[:40]}')
+
+        # ★ 推送到手机（app 关着也能收到）
+        try:
+            import push_notify
+            push_notify.push_to_user(
+                user_id,
+                title=char_name if char else '五条悟',
+                body=zh or jp,   # 通知栏显示中文（没有就日文）
+                data={'type': 'proactive', 'character_id': character_id},
+            )
+        except Exception as _e:
+            print(f'[proactive] 推送跳过：{_e}')
+
         return mid, jp
     except Exception as e:
         print(f'[proactive] 生成任务汇报出错：{e}')

@@ -37,6 +37,7 @@ from route_diary import router as diary_router       # ★ 日记路由
 from db_diary import init_diary_tables               # ★ 日记建表
 from route_proactive import router as proactive_router   # ★ 主动消息路由
 from proactive_msg import init_proactive_table           # ★ 主动消息建表
+from push_notify import init_push_table                  # ★ 推送 token 建表
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -53,6 +54,7 @@ init_bond_table()
 init_period_table()                    # 生理期建表
 init_diary_tables()                    # ★ 日记建表
 init_proactive_table()                 # ★ 主动消息建表
+init_push_table()                      # ★ 推送 token 建表
 memory_search.init_vector_support()    # ★ 探测 pgvector（不可用时自动退回，不影响启动）
 seed_gojo_character()
 group_bubbler.start_bubbler()          # ★ 群聊定时主动冒泡（克制版：每群每天≤3次、深夜静音、不合成语音）
