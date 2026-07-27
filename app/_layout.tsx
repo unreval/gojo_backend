@@ -81,7 +81,10 @@ async function registerForPush() {
     });
     await pushDebug('注册成功');
   } catch (e: any) {
-    await pushDebug('出错:' + (e?.message || String(e)).slice(0, 100));
+    const msg = (e?.message || String(e));
+    await pushDebug('出错A:' + msg.slice(0, 150));
+    await pushDebug('出错B:' + msg.slice(150, 300));
+    await pushDebug('出错码:' + String(e?.code || 'none'));
   }
 }
 

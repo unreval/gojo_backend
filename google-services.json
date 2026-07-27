@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "675260180891",
+    "project_id": "gojo-ef76e",
+    "storage_bucket": "gojo-ef76e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:675260180891:android:e3d2d3c5d3d70459d9593e",
+        "android_client_info": {
+          "package_name": "com.ericakhor.GojoAssistant"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCjpJs5AtbpTp26PBMVVDXSyLTX8azd3io"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
