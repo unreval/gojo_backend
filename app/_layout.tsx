@@ -35,16 +35,22 @@ async function pushDebug(step: string) {
 async function registerForPush() {
   await pushDebug('开始注册');
   try {
+    // 建渠道单独包起来：就算失败也不能挡住后面"要权限"那步
     if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync('default', {
-        name: '五条悟的消息',
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 250, 250, 250],
-        sound: 'default',
-      });
-      await pushDebug('渠道已建');
+      try {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: '五条悟的消息',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          sound: 'default',
+        });
+        await pushDebug('渠道已建');
+      } catch (ce: any) {
+        await pushDebug('建渠道失败(不影响):' + (ce?.message || String(ce)).slice(0, 80));
+      }
     }
 
+    await pushDebug('准备要权限');
     const { status: existing } = await Notifications.getPermissionsAsync();
     let finalStatus = existing;
     await pushDebug('当前权限=' + existing);
