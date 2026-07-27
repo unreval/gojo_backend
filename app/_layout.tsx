@@ -1,7 +1,6 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import axios from 'axios';
 import Constants from 'expo-constants';
-import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -18,7 +17,6 @@ export const unstable_settings = {
 
 const FIXED_USER_ID = 'user_mofpiyd7442ia7';
 
-// 收到推送时怎么显示（前台也弹）
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -27,12 +25,16 @@ Notifications.setNotificationHandler({
   }),
 });
 
-// ★ 注册推送：拿到这台手机的 push token，发给后端存起来
-async function registerForPush() {
+// 把排查信息发回后端，这样看 Zeabur 日志就知道推送注册走到哪一步、为什么停
+async function pushDebug(step: string) {
   try {
-    if (!Device.isDevice) return; // 模拟器不支持推送
+    await axios.post(`${SERVER_URL}/push/debug`, { user_id: FIXED_USER_ID, step });
+  } catch {}
+}
 
-    // Android 建个通知渠道（不然通知不响/不弹）
+async function registerForPush() {
+  await pushDebug('开始注册');
+  try {
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync('default', {
         name: '五条悟的消息',
@@ -40,38 +42,40 @@ async function registerForPush() {
         vibrationPattern: [0, 250, 250, 250],
         sound: 'default',
       });
+      await pushDebug('渠道已建');
     }
 
-    // 要权限
     const { status: existing } = await Notifications.getPermissionsAsync();
     let finalStatus = existing;
+    await pushDebug('当前权限=' + existing);
     if (existing !== 'granted') {
       const { status } = await Notifications.requestPermissionsAsync();
       finalStatus = status;
+      await pushDebug('请求后权限=' + status);
     }
     if (finalStatus !== 'granted') {
-      console.warn('[push] 用户没给通知权限');
+      await pushDebug('没给权限，停止');
       return;
     }
 
-    // 拿 Expo push token（需要 projectId）
     const projectId =
-      Constants?.expoConfig?.extra?.eas?.projectId ??
-      Constants?.easConfig?.projectId;
+      (Constants as any)?.expoConfig?.extra?.eas?.projectId ??
+      (Constants as any)?.easConfig?.projectId;
+    await pushDebug('projectId=' + String(projectId));
+
     const tokenResp = await Notifications.getExpoPushTokenAsync(
       projectId ? { projectId } : undefined
     );
     const token = tokenResp.data;
-    console.log('[push] token:', token);
+    await pushDebug('拿到token=' + token.slice(0, 30));
 
-    // 发给后端
     await axios.post(`${SERVER_URL}/push/register`, {
       user_id: FIXED_USER_ID,
       token,
     });
-    console.log('[push] 已注册到后端');
+    await pushDebug('注册成功');
   } catch (e: any) {
-    console.warn('[push] 注册失败:', e?.message);
+    await pushDebug('出错:' + (e?.message || String(e)).slice(0, 100));
   }
 }
 

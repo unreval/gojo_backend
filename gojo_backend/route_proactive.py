@@ -24,6 +24,16 @@ async def register_push(data: dict):
     if not token:
         return JSONResponse({'ok': False, 'error': 'no token'}, status_code=400)
     push_notify.save_token(user_id, token)
+    print(f'[push] ✅ 收到并保存 token（{user_id}）：{token[:30]}...')
+    return JSONResponse({'ok': True})
+
+
+@router.post('/push/debug')
+async def push_debug(data: dict):
+    """前端把推送注册每一步发来，打进日志方便排查。"""
+    user_id = data.get('user_id', DEFAULT_USER)
+    step = data.get('step', '')
+    print(f'[pushDebug][{user_id}] {step}')
     return JSONResponse({'ok': True})
 
 
