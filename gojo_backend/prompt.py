@@ -1,6 +1,9 @@
 """Prompt 动态组装：把角色定义 + 用户记忆 + 羁绊记忆 + 角色背景 + 对话上下文拼起来
 ★ CANON_LOCK 按 character_id 从 characters_data/<id>/canon_lock.py 动态加载
 ★ v3 新增：注入"你们之间的事"(bond) 和"她告诉过你的事"(told) 两段羁绊记忆
+★ 记账升级新增：
+    - _accounts_block() 在动态尾里注入当前用户的账户列表(dynamic_tail,不缓存)
+    - OUTPUT_SPEC 末尾追加 pending_transaction 字段规范(静态,进缓存头)
 """
 from datetime import datetime, timedelta
 from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID
@@ -47,6 +50,27 @@ def get_time_context():
 时段：{period}
 {greeting_hint}{night_note}
 绝对不要根据自己的想象发早安/晚安，必须根据真实时段。'''
+
+
+# ══════════════════════════════════════════════
+#  ★ 账户列表:动态,注入 dynamic_tail
+# ══════════════════════════════════════════════
+def _accounts_block(user_id):
+    """把用户账户列表拼成文本,注入 prompt。没账户就返回空串,LLM 不会尝试记账。"""
+    try:
+        from accounting import list_accounts
+        accs = list_accounts(user_id)
+    except Exception as e:
+        print(f'[prompt] list_accounts 失败:{e}')
+        accs = []
+    if not accs:
+        return ''
+    names = ' / '.join(a['name'] for a in accs)
+    return f'''
+
+【★ 当前用户的账户列表(记账检测时从这里选)】
+{names}
+——如果检测到消费/收入,pending_transaction 里 account_hint 必须从这里选一个最合理的账户名字。'''
 
 
 OUTPUT_SPEC = '''【回复格式——多气泡像真人聊天】
@@ -138,7 +162,64 @@ cancel_reminder 字段格式：
 {{"emotion":"平静","messages":[{{"jp":"了解。","zh":"好的。"}}],"cancel_reminder":{{"latest":true}}}}
 
 对方："明天九点叫我起床改成十点吧" →
-{{"emotion":"调皮","messages":[{{"jp":"わかった、十時ね。","zh":"知道了，十点。"}}],"cancel_reminder":{{"keyword":"起床"}},"reminder":{{"date":"...","time":"10:00","content":"起床","notification":"..."}}}}'''
+{{"emotion":"调皮","messages":[{{"jp":"わかった、十時ね。","zh":"知道了，十点。"}}],"cancel_reminder":{{"keyword":"起床"}},"reminder":{{"date":"...","time":"10:00","content":"起床","notification":"..."}}}}
+
+【★ 记账检测——识别消费/收入并让用户确认】
+如果动态尾里出现了【当前用户的账户列表】那一段，说明她已经建了账户，你可以做记账检测。
+如果没有那一段，说明她还没建账户——绝不要生成 pending_transaction，也不要主动催她去建。
+
+触发条件（必须同时满足）：
+1. 有明确金额："80块""¥50""两百""1000"
+2. 有明确动作词："花了""买了""付了""收到""赚了""到账""充值"
+
+不能触发的情况：
+- 描述性数字："我30岁""3点吃饭""20公里""排第5"
+- 询问式："这个多少钱？""打折吗？"
+- 计划/假设："想买""打算花""如果买"
+
+★ 转账不要自动检测：
+她说"转账""从X转到Y"这类，不要生成 pending_transaction。让她自己去记账页面手动转账，
+你只在 messages 里自然带过，比如"转账你自己记一下吧，我怕搞错账户。"
+
+pending_transaction 字段格式：
+{{"pending_transaction":{{
+  "type":"out 或 in",
+  "category":"餐饮/购物/交通/娱乐/学习/医疗/其他（收入就写 收入）",
+  "amount": 数字,
+  "desc":"简短描述,如 吃饭/奶茶/地铁",
+  "account_hint":"从账户列表里选一个",
+  "date":"YYYY-MM-DD",
+  "time":"HH:MM 或 null"
+}}}}
+
+时间/日期推算：
+- "刚刚"/"现在" → 用当前时间的日期和时间
+- "早上/中午/下午/晚上" → date=今天, time= 08:00/12:00/15:00/19:00
+- "3点吃饭时花了20" → date=今天, time=15:00（下午更常见）
+- "昨天" → date=昨天, time=null
+- "上周三" → 推算实际日期, time=null
+- 完全没时间线索 → date=今天, time=null
+
+信息不完整时：
+"花了80"（没说买啥）→ 不要生成 pending_transaction。
+在 messages 里反问"花什么了？"，等她补充再检测。
+
+完整 JSON 例子：
+
+她："刚吃饭花了80" →
+{{"emotion":"平静","messages":[{{"jp":"へえ、そんなに使ったの？","zh":"喔，花了这么多？"}}],"pending_transaction":{{"type":"out","category":"餐饮","amount":80,"desc":"吃饭","account_hint":"现金","date":"2025-01-20","time":"12:35"}}}}
+
+她："下午买了个500块的耳机" →
+{{"emotion":"疑惑","messages":[{{"jp":"また新しいの？","zh":"又买新的？"}}],"pending_transaction":{{"type":"out","category":"购物","amount":500,"desc":"耳机","account_hint":"银行卡","date":"2025-01-20","time":"15:00"}}}}
+
+她："发工资了 8000到账" →
+{{"emotion":"开心","messages":[{{"jp":"よかったね。","zh":"不错嘛。"}}],"pending_transaction":{{"type":"in","category":"收入","amount":8000,"desc":"工资","account_hint":"银行卡","date":"2025-01-20","time":null}}}}
+
+她："花了30"（没说买啥）→
+{{"emotion":"疑惑","messages":[{{"jp":"何に使ったの？","zh":"花什么了？"}}]}}
+（不生成 pending_transaction）
+
+★ 记账、提醒、取消可以并存，该有的字段都给。绝不能因为加了 pending_transaction 就漏 reminder。'''
 
 def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message='', extra_suffix=''):
     # ── 1. 角色定义 ──
@@ -357,6 +438,9 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
         diary_hint = ''
     diary_hint_block = ('\n\n' + diary_hint) if diary_hint else ''
 
+    # ── ★ 账户列表（记账用,可能每次不同,放动态尾）──
+    accounts_text = _accounts_block(user_id)
+
     # ── ★ 角色专属铁律 ──
     canon_lock = load_canon_lock(character_id)
 
@@ -375,7 +459,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
     semi_static = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 
-    dynamic_tail = f"""{stage_text}{period_text}{recall_text}{diary_hint_block}{avoid_text}{no_repeat_text}
+    dynamic_tail = f"""{stage_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}
 

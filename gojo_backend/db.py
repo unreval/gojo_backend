@@ -11,7 +11,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # ── 角色表（核心新增）──
+    # ── 角色表(核心新增)──
     cur.execute('''CREATE TABLE IF NOT EXISTS characters (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -22,7 +22,7 @@ def init_db():
         greeting TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-    # ── 角色背景记忆表（替代 gojo_memory）──
+    # ── 角色背景记忆表(替代 gojo_memory)──
     cur.execute('''CREATE TABLE IF NOT EXISTS character_memory (
         id SERIAL PRIMARY KEY,
         character_id TEXT NOT NULL,
@@ -72,7 +72,39 @@ def init_db():
         last_completed_date TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-    # ── 老表自动加列（向后兼容）──
+    # ── ★ 记账·账户 ──
+    cur.execute('''CREATE TABLE IF NOT EXISTS accounts (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL DEFAULT 'default',
+        name TEXT NOT NULL,
+        initial_balance REAL DEFAULT 0,
+        icon TEXT DEFAULT '💰',
+        sort_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+    # ── ★ 记账·收支记录 ──
+    # type: 'in' 收入 / 'out' 支出。转账走 is_transfer=TRUE + transfer_id 配对。
+    cur.execute('''CREATE TABLE IF NOT EXISTS accounting_records (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL DEFAULT 'default',
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        category TEXT DEFAULT '其他',
+        description TEXT NOT NULL,
+        amount REAL NOT NULL,
+        record_date DATE NOT NULL,
+        record_time TEXT,
+        is_transfer BOOLEAN DEFAULT FALSE,
+        transfer_id TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+    # 查询多按 user + 日期倒序,加索引
+    cur.execute('''CREATE INDEX IF NOT EXISTS idx_accounting_records_user_date
+                   ON accounting_records (user_id, record_date DESC)''')
+    cur.execute('''CREATE INDEX IF NOT EXISTS idx_accounting_records_account
+                   ON accounting_records (account_id)''')
+
+    # ── 老表自动加列(向后兼容)──
     cur.execute("ALTER TABLE short_memory ADD COLUMN IF NOT EXISTS character_id TEXT DEFAULT 'gojo'")
     cur.execute("ALTER TABLE long_memory ADD COLUMN IF NOT EXISTS character_id TEXT DEFAULT 'gojo'")
     cur.execute("ALTER TABLE long_memory ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT NULL")
@@ -87,11 +119,10 @@ def init_db():
 
 
 def migrate_old_gojo_memory():
-    """如果存在老的 gojo_memory 表，把数据迁到 character_memory（id='gojo'）"""
+    """如果存在老的 gojo_memory 表,把数据迁到 character_memory(id='gojo')"""
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # 检查老表是否存在
         cur.execute("SELECT to_regclass('public.gojo_memory')")
         exists = cur.fetchone()[0]
         if not exists:
@@ -99,16 +130,14 @@ def migrate_old_gojo_memory():
             conn.close()
             return
 
-        # 检查新表是否已经有数据
         cur.execute("SELECT COUNT(*) FROM character_memory WHERE character_id = 'gojo'")
         new_count = cur.fetchone()[0]
         if new_count > 0:
-            print(f'[migrate] character_memory 已有 {new_count} 条 gojo 数据，跳过迁移')
+            print(f'[migrate] character_memory 已有 {new_count} 条 gojo 数据,跳过迁移')
             cur.close()
             conn.close()
             return
 
-        # 迁移
         cur.execute('''
             INSERT INTO character_memory (character_id, content, category, keywords, importance, timestamp)
             SELECT 'gojo', content, category, keywords, importance, timestamp FROM gojo_memory
@@ -117,7 +146,7 @@ def migrate_old_gojo_memory():
         conn.commit()
         print(f'[migrate] 已从 gojo_memory 迁移 {moved} 条到 character_memory')
     except Exception as e:
-        print(f'[migrate] 跳过：{e}')
+        print(f'[migrate] 跳过:{e}')
     finally:
         cur.close()
         conn.close()
