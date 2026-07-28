@@ -3,6 +3,9 @@
 ★ 本版改动（prompt 缓存）：
   - system 改用 build_system_blocks()（带 cache_control 分段）
   - 调用后 log_cache_usage 打印缓存命中
+
+★ 记账升级：LLM 返回 pending_transaction 时,后端只透传给前端(不写库),
+  由前端确认卡引导用户核对后再 POST /accounting/records 落库。
 """
 import threading
 import anthropic
@@ -28,6 +31,32 @@ from task_dedup import find_similar_task   # ★ 模糊去重：同时段+意思
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+
+# ★ 记账透传辅助:只做基本形状校验,不写库(前端确认后 POST /accounting/records)
+def _extract_pending_tx(result: dict, user_id: str):
+    pt = result.get('pending_transaction') if isinstance(result, dict) else None
+    if not pt:
+        return None
+    try:
+        amt = float(pt.get('amount', 0))
+        typ = pt.get('type')
+        desc = (pt.get('desc') or '').strip()
+        if amt > 0 and typ in ('in', 'out') and desc:
+            out = {
+                'type': typ,
+                'category': pt.get('category', '其他'),
+                'amount': amt,
+                'desc': desc,
+                'account_hint': pt.get('account_hint', ''),
+                'date': pt.get('date'),
+                'time': pt.get('time'),
+            }
+            print(f'[{user_id}] 💰 [image] 检测到待确认记账 {typ} ¥{amt} {desc}')
+            return out
+    except Exception as e:
+        print(f'[{user_id}] [image] pending_transaction 解析失败:{e}')
+    return None
 
 
 @router.post('/chat/image')
@@ -247,9 +276,14 @@ async def chat_image(data: dict):
         except Exception as e:
             print(f'提醒保存失败：{e}')
 
+    # ★ 记账透传（只透传给前端,不写库；前端确认卡引导用户核对账户后 POST /accounting/records）
+    pending_tx = _extract_pending_tx(result, user_id)
+
     resp = {'emotion': emotion, 'messages': msgs, 'total_days': total_days}
     if reminder_data:
         resp['reminder'] = reminder_data
     if cancelled_tasks:
         resp['cancelled_tasks'] = cancelled_tasks
+    if pending_tx:
+        resp['pending_transaction'] = pending_tx
     return JSONResponse(resp)

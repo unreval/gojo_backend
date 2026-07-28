@@ -10,6 +10,9 @@
   - 模型有时不输出 JSON、直接吐纯日语 → 解析失败 → 重试5次全废 → 落兜底"没听清"。
   - 解法：在 messages 末尾预填一条 {'role':'assistant','content':'{'}，强制模型必须从 { 接着写 JSON，
     拿到回复后把开头的 { 补回去再解析。所有产生 JSON 的端点都套用（见 _create_json）。
+
+★ 记账升级：/chat/text 里,LLM 返回 pending_transaction 时,后端只透传给前端(不写库),
+  由前端确认卡引导用户核对后再 POST /accounting/records 落库。其他 handler 一律不做记账检测。
 """
 import threading
 import random
@@ -113,6 +116,35 @@ def _quick_translate(jp: str) -> str:
         return resp.content[0].text.strip().strip('「」"\'。 ').strip()
     except Exception:
         return ''
+
+
+# ★ 记账透传辅助：只做基本形状校验,不写库(由前端确认后 POST /accounting/records)
+def _extract_pending_tx(result: dict, user_id: str, tag: str = 'chat'):
+    """从模型回复里抠出 pending_transaction 字段,校验后返回给前端。
+    校验失败或字段不存在都返回 None,不抛错(记账不应影响主对话)。"""
+    pt = result.get('pending_transaction') if isinstance(result, dict) else None
+    if not pt:
+        return None
+    try:
+        amt = float(pt.get('amount', 0))
+        typ = pt.get('type')
+        desc = (pt.get('desc') or '').strip()
+        if amt > 0 and typ in ('in', 'out') and desc:
+            out = {
+                'type': typ,
+                'category': pt.get('category', '其他'),
+                'amount': amt,
+                'desc': desc,
+                'account_hint': pt.get('account_hint', ''),
+                'date': pt.get('date'),
+                'time': pt.get('time'),
+            }
+            print(f'[{user_id}] 💰 [{tag}] 检测到待确认记账 {typ} ¥{amt} {desc}')
+            return out
+    except Exception as e:
+        print(f'[{user_id}] [{tag}] pending_transaction 解析失败:{e}')
+    return None
+
 
 @router.post('/chat/text')
 async def chat_text(data: dict):
@@ -274,11 +306,16 @@ async def chat_text(data: dict):
         except Exception as e:
             print(f'提醒保存失败：{e}')
 
+    # ★ 记账透传（只透传给前端,不写库；前端确认卡引导用户核对账户后 POST /accounting/records）
+    pending_tx = _extract_pending_tx(result, user_id, tag='chat')
+
     resp = {'emotion': emotion, 'messages': msgs, 'total_days': total_days}
     if reminder_data:
         resp['reminder'] = reminder_data
     if cancelled_tasks:
         resp['cancelled_tasks'] = cancelled_tasks
+    if pending_tx:
+        resp['pending_transaction'] = pending_tx
     return JSONResponse(resp)
 
 
