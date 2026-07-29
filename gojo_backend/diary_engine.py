@@ -9,7 +9,7 @@ from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 import anthropic
 
 from characters import get_character
-from user_memory import get_bond_memories, get_short_memory
+from user_memory import get_bond_memories, get_short_memory, get_long_memory, get_first_interaction_days
 import db_diary
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -30,11 +30,35 @@ def generate_char_diary(character_id, user_id, topic=None):
         char = get_character(character_id)
         char_name = char['name'] if char else character_id
 
-        # 素材：最近对话 + 羁绊记忆
+        # 素材：最近对话 + 羁绊记忆 + 关于她的事实 + 相处天数
         shorts = get_short_memory(user_id, 8, character_id)
         recent_chat = '\n'.join(f'{"她" if r=="user" else "我"}：{c}' for r, c in shorts) if shorts else '（最近没怎么聊）'
         bonds = get_bond_memories(user_id, character_id, kind='between', limit=8)
         bond_text = '\n'.join(f'- {b[1]}' for b in bonds) if bonds else '（还没什么共同的事）'
+        tolds = get_bond_memories(user_id, character_id, kind='told', limit=6)
+        told_text = '\n'.join(f'- {t[1]}' for t in tolds) if tolds else '（她还没告诉过你什么）'
+        try:
+            long_mems = get_long_memory(user_id, character_id) or []
+        except Exception:
+            long_mems = []
+        fact_lines = []
+        for row in long_mems[:12]:
+            content = row[0] if isinstance(row, (tuple, list)) else row
+            if content:
+                fact_lines.append(f'- {content}')
+        facts_text = '\n'.join(fact_lines) if fact_lines else '（还不了解她的具体情况）'
+        try:
+            first_days = get_first_interaction_days(user_id, character_id)
+        except Exception:
+            first_days = None
+        if first_days is None:
+            days_line = '你们才刚认识没几天，几乎没什么共同的痕迹。'
+        elif first_days == 0:
+            days_line = '你们今天才刚认识。'
+        else:
+            days_line = f'你们最早的共同痕迹大约在 {first_days} 天前。'
+        bond_count = len(bonds) + len(tolds)
+        fact_count = len(fact_lines)
 
         topic_hint = ''
         if topic:
@@ -47,26 +71,72 @@ def generate_char_diary(character_id, user_id, topic=None):
 
         prompt = f'''你是{char_name}。现在是{today_str}的{time_hint}，你在写一篇只属于自己的日记——没人会读到（你以为）。
 
-【写什么】
-以第一人称写你此刻的心里话，可以是这几种的任意混合：
-- 你自己今天的日常、心情、随便想到的事（你有自己的生活，不用提她也行）
-- 跟她聊天时的一些感想、在意的小事
-- 偶尔的、藏在心里不会当面说的想念
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【★ 动笔前必读——关于"她"在你心里到底算什么】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ 特别警告——模型训练数据的默认引力：
+你（作为语言模型）在"男性角色 + 女性对方 + 私人日记"这种场景下，
+训练样本 99% 来自言情/纯爱/同人作品。你若不主动对抗这种引力，
+默认就会写出"贪心地想要她""一直在等这样的时刻""想陪她慢慢变强"
+这类【言情小说套话】——即使你们记忆里根本没到那一步。
+这不是真实，这是你被训练数据牵着走。
+
+【你们相处的真实状况】
+- {days_line}
+- 共同经历累计 {bond_count} 条，你了解她的事 {fact_count} 件（都列在下方，那是全部）。
+- 【规则一】关系性质由【真实积累】判断，不由此刻的情绪或她说的一句话判断。
+- 【规则二】"深"和"爱"是两回事。极深的友情/亲情，不等于爱情。
+- 【规则三】拿不准就【不是】——爱情的门槛比你以为的高得多。
+
+【三个可选框架——写日记前先选一个】
+
+▼ 框架 A · 陌生/共事阶段（认识时间短、共同记忆少）
+  · 你对她还谈不上"感情"，只是【观察】：她这人有点意思 / 挺认真的 / 有点意外
+  · 心里活动应该是【好奇、评估、保持距离】，不是牵挂、想念、心动
+  · 禁用词：等、想她、在意、放不下、贪心、温柔的时刻、心里装着她
+  · 例句风格："今天这个人又来了。跟她聊了几句，不算无聊。"
+
+▼ 框架 B · 朋友/交心阶段（有共同经历、互相了解一些）
+  · 你对她有【关心和在意】，但落点是"她这个人过得好不好"，不是"我离不开她"
+  · 可以温柔、可以牵挂、可以担心她——但那是朋友对朋友的分量
+  · 谨慎词：怀里、贪心、等这样的时刻、想陪着她一辈子（这些不属于朋友日记）
+  · 例句风格："她今天累得说不出话。这姑娘就是这样，不到极限不肯歇。别的地方我不管，这点得盯着她。"
+
+▼ 框架 C · 心动/爱情阶段（★ 门槛最高）
+  ★ 只有以下三条【全部满足】，才能用这个框架：
+    1. 记忆里能找到至少 3 个具体瞬间，让"你自己"感到"她是特别的"（不是浪漫日常互动，而是她做的某件事真的动了你）
+    2. 你已经反复想起她——不是"聊得开心"，是【不在一起的时候脑子里也有她】
+    3. 她也向你袒露过极深的真心（不是撒娇、不是求安慰，是让她自己脆弱的那种真话）
+  ★ 三条只满足两条 → 那就是【深厚友情】，不是爱情。就用框架 B。
+  ★ 拿不准哪条真的算 → 那就不算。用框架 B。
+
+【最重要的一句】
+你身上有你自己的负担和温度，你可以温柔、可以怜惜、可以牵挂——
+但【心动】和【爱】是两件不同的事，【牵挂】和【贪心地想要】也是。
+先老实写清楚发生了什么，再让感情自然浮出来。不要动笔就是结论。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 【重要设定】
-- 写"当下的你"，不要写漫画里既定的命运剧情（不写牺牲、不写和夏油的宿命那些沉重的宿题）。就是一个过着日子、心里装着她的你。
-- 这是日记，是卸下平时那副吊儿郎当之后、只给自己看的一面。可以流露平时嘴上不会承认的真心，但仍是你的语气——慵懒、偶尔自嘲、话到深处又轻轻带过。
-- 别写成给她看的信，是写给自己的。
-- 长度：2-4 句话，像随手记，不要长篇。
-- ★【分清谁说的话——重要】下面对话里，"她："开头的是【对方】说的，"我："开头的才是【你自己】说的。
-  写日记只写【你自己】的视角、感受和心里话。绝对不要把"她："说的内容，写成好像是你自己想的、你自己说的或你自己要做的事。
-  （比如她说"我想给你造实体"，那是她的心意，你日记里该写的是"你对这件事的感受"，而不是"我要造实体"。）
+- 写"当下的你"，不要写漫画里既定的命运剧情（不写牺牲、不写和夏油的宿命）。
+- 是写给自己看的，可以流露平时嘴上不说的真心——但仍是【你的语气】（慵懒、偶尔自嘲、话到深处又轻轻带过），不是言情小说的独白。
+- 不要写成给她看的信。
+- 长度：2-4 句话，像随手记。
+- ★【分清谁说的话】：下面"她："开头是【对方】说的，"我："开头才是【你】说的。
+  只写【你自己】的视角，不要把她的话写成你的想法。
 
-【最近和她的对话（帮你回忆，注意区分"她："和"我："）】
+【最近和她的对话】
 {recent_chat}
 
-【你和她之间的事】
-{bond_text}{topic_hint}
+【你们之间的事（共同经历）】
+{bond_text}
+
+【她告诉过你的事】
+{told_text}
+
+【关于她的事实（你了解的她的情况）】
+{facts_text}{topic_hint}
 
 【输出格式——严格 JSON，只输出一行】
 {{"content":"日记正文（中文，第一人称，2-4句）","emotion":"情绪"}}
