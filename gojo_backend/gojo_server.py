@@ -5,6 +5,7 @@
 
 ★ 本版新增：日记模块（建表 + 路由 + 常驻排程）。
 ★ 记账升级新增：注册 accounting_router(账户 + 收支 + 转账 + 五条悟短评)。
+★ v7:注册 stats_router —— 提供 /stats(首页天数) + /characters_all(日记多角色列表)
 """
 import os
 import uvicorn
@@ -40,6 +41,7 @@ from route_proactive import router as proactive_router   # ★ 主动消息路�
 from proactive_msg import init_proactive_table           # ★ 主动消息建表
 from push_notify import init_push_table                  # ★ 推送 token 建表
 from route_accounting import router as accounting_router   # ★ 记账路由
+from route_stats import router as stats_router             # ★ 通用查询(天数 + 角色列表)
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -78,6 +80,7 @@ app.include_router(tts_router)      # ★ 语音重合成 + RAG 状态
 app.include_router(diary_router)    # ★ 日记路由
 app.include_router(proactive_router)  # ★ 主动消息路由
 app.include_router(accounting_router)  # ★ 记账路由
+app.include_router(stats_router)       # ★ 通用查询(天数 + 角色列表)
 
 
 @app.get('/health')
@@ -86,11 +89,11 @@ async def health():
         'status': 'ok',
         'tts_provider': TTS_PROVIDER,
         'db': 'postgresql',
-        'arch': 'modular-v6-accounting',
+        'arch': 'modular-v7-stats',
         'vector_ready': memory_search.is_vector_ready(),
     }
 
 
 if __name__ == '__main__':
-    print(f'GojoAssistant starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL | Cache + Group + Period + Diary + Accounting')
+    print(f'GojoAssistant starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL | Cache + Group + Period + Diary + Accounting + Stats')
     uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
