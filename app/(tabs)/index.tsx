@@ -11,8 +11,9 @@ import ChibiSprite from '../../components/ChibiSprite';
 import { C, SERVER_URL } from '../../constants/theme';
 
 const USER_ID_KEY    = 'gojo_user_id';
-const DAYS_CACHE_KEY = 'gojo_chat_days';   // ★ 只当离线缓存，真值以服务器为准
-const DIARY_CHARACTER = 'gojo';            // ★ 日记入口默认进 gojo 那本
+const FIXED_USER_ID  = 'user_mofpiyd7442ia7';
+const DAYS_CACHE_KEY = 'gojo_chat_days';  
+const DIARY_CHARACTER = 'gojo';   
 
 // ── 60条今日悟语，约2个月不重复 ──
 const DAILY_MSGS = [
@@ -108,10 +109,10 @@ export default function HomeScreen() {
       if (cached) setChatDays(Number(cached));
     } catch {}
     try {
-      const uid = (await AsyncStorage.getItem(USER_ID_KEY)) || 'default';
+      const uid = (await AsyncStorage.getItem(USER_ID_KEY)) || FIXED_USER_ID;
       const res = await axios.get(`${SERVER_URL}/stats`, { params: { user_id: uid }, timeout: 8000 });
       const d = Number(res.data?.total_days);
-      if (!isNaN(d) && d > 0) {
+      if (!isNaN(d)) {
         setChatDays(d);
         AsyncStorage.setItem(DAYS_CACHE_KEY, String(d)).catch(() => {});
       }

@@ -1,12 +1,14 @@
 // app/diary/mine.tsx
-// 「我的日记」：手写信纸质感 + 书名可改 + 写日记（可见/私密+密码）+ 他的访客记号。
-//   ★ 不对称：他偷看你日记必留访客记号；🔓=他"猜对密码"解开了私密篇（大事件）。
+// 「我的日记」:手写信纸质感 + 书名可改 + 写日记(可见/私密+密码)+ 他的访客记号。
+//   ★ 不对称:他偷看你日记必留访客记号;🔓=他"猜对密码"解开了私密篇(大事件)。
+// ★ v2 键盘修复:去掉 KeyboardAvoidingView,用手动监听键盘高度给 modal 加 marginBottom
+//   (MIUI/Redmi 上 KeyboardAvoidingView 的 'height' behavior 会怪异挤压 modal)
 import axios from 'axios';
 import { useFonts } from 'expo-font';
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, RefreshControl,
+  ActivityIndicator, Alert, Dimensions, Keyboard, Modal, Platform, RefreshControl,
   ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { SERVER_URL } from '../../constants/theme';
@@ -20,6 +22,24 @@ interface UserDiary {
   has_password: boolean; created_at: string | null; visits: Visit[];
 }
 
+// ★ 键盘高度 hook —— MIUI 也稳
+function useKeyboardHeight() {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    const screenH = Dimensions.get('window').height;
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvt, e => {
+      const screenY = e.endCoordinates.screenY ?? 0;
+      const reportedH = e.endCoordinates.height ?? 0;
+      setH(screenY > 0 ? Math.max(screenH - screenY, reportedH) : reportedH);
+    });
+    const hideSub = Keyboard.addListener(hideEvt, () => setH(0));
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, []);
+  return h;
+}
+
 function fmt(ts: string | null): string {
   if (!ts) return '';
   const d = new Date(ts.replace(' ', 'T') + (ts.includes('Z') ? '' : 'Z'));
@@ -31,6 +51,7 @@ export default function MyDiaryScreen() {
   const router = useRouter();
   const [fontsLoaded] = useFonts({ [HAND]: require('../../assets/fonts/LongCang-Regular.ttf') });
   const hand = fontsLoaded ? { fontFamily: HAND } : {};
+  const kbH = useKeyboardHeight();   // ★ 供三个 modal 共用
 
   const [bookTitle, setBookTitle] = useState('我的日记');
   const [diaries, setDiaries] = useState<UserDiary[]>([]);
@@ -105,7 +126,7 @@ export default function MyDiaryScreen() {
 
   const changeLock = (d: UserDiary) => {
     if (d.visibility === 'locked') {
-      Alert.alert('这篇是私密的', '要改成给他看，还是改密码？', [
+      Alert.alert('这篇是私密的', '要改成给他看,还是改密码?', [
         { text: '改成给他看', onPress: async () => {
           await axios.post(`${SERVER_URL}/diary/user/${d.id}/password`, { user_id: FIXED_USER_ID, password: '' });
           await load();
@@ -114,7 +135,7 @@ export default function MyDiaryScreen() {
         { text: '取消', style: 'cancel' },
       ]);
     } else {
-      Alert.alert('这篇他能看到', '要把它设成私密（上锁）吗？', [
+      Alert.alert('这篇他能看到', '要把它设成私密(上锁)吗?', [
         { text: '设为私密', onPress: () => { setPwModalFor(d); setNewPw(''); } },
         { text: '取消', style: 'cancel' },
       ]);
@@ -163,7 +184,7 @@ export default function MyDiaryScreen() {
           {diaries.length === 0 && (
             <View style={s.empty}>
               <Text style={s.emptyEmoji}>🖊</Text>
-              <Text style={[s.emptyText, hand]}>还没写日记。{'\n'}写一篇，看他会不会偷偷来看。</Text>
+              <Text style={[s.emptyText, hand]}>还没写日记。{'\n'}写一篇,看他会不会偷偷来看。</Text>
             </View>
           )}
 
@@ -198,14 +219,10 @@ export default function MyDiaryScreen() {
         </ScrollView>
       )}
 
-      {/* 写日记 */}
+      {/* 写日记 —— ★ 键盘弹起时整个 modalCard 上抬 */}
       <Modal visible={showWrite} animationType="slide" transparent statusBarTranslucent>
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
         <View style={s.modalBackdrop}>
-          <View style={s.modalCard}>
+          <View style={[s.modalCard, { marginBottom: kbH }]}>
             <Text style={s.modalTitle}>写日记</Text>
             <TextInput
               style={[s.modalInput, s.writeArea, hand]} value={content} onChangeText={setContent}
@@ -215,7 +232,7 @@ export default function MyDiaryScreen() {
               <View style={[s.checkbox, locked && s.checkboxOn]}>
                 <Text style={{ color: locked ? '#fff' : 'transparent', fontSize: 13 }}>✓</Text>
               </View>
-              <Text style={s.lockToggleText}>设为私密（上锁）—— 他默认看不到，除非"猜对密码"</Text>
+              <Text style={s.lockToggleText}>设为私密(上锁)—— 他默认看不到,除非"猜对密码"</Text>
             </TouchableOpacity>
             {locked && (
               <TextInput
@@ -233,13 +250,12 @@ export default function MyDiaryScreen() {
             </View>
           </View>
         </View>
-        </KeyboardAvoidingView>
       </Modal>
 
-      {/* 改书名 */}
+      {/* 改书名 —— ★ 同款键盘上抬 */}
       <Modal visible={renaming} animationType="fade" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={s.modalCard}>
+          <View style={[s.modalCard, { marginBottom: kbH }]}>
             <Text style={s.modalTitle}>给这本日记改个名</Text>
             <TextInput
               style={[s.modalInput, { minHeight: 0 }]} value={newTitle} onChangeText={setNewTitle}
@@ -257,10 +273,10 @@ export default function MyDiaryScreen() {
         </View>
       </Modal>
 
-      {/* 改密码 */}
+      {/* 改密码 —— ★ 同款键盘上抬 */}
       <Modal visible={!!pwModalFor} animationType="fade" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={s.modalCard}>
+          <View style={[s.modalCard, { marginBottom: kbH }]}>
             <Text style={s.modalTitle}>设置密码</Text>
             <TextInput
               style={[s.modalInput, { minHeight: 0 }]} value={newPw} onChangeText={setNewPw}

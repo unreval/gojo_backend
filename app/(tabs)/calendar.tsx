@@ -36,6 +36,12 @@ import ChibiSprite from '../../components/ChibiSprite';
 import { C, SERVER_URL } from '../../constants/theme';
 
 const { width, height } = Dimensions.get('window');
+
+// ★ 月历格子宽度:必须用 Math.floor 强制取整,不然 (width-56)/7 是小数,
+//   RN 底层向上取整时 7 个加起来会超容器宽度,最后一格被 flexWrap 挤到下一行,
+//   出现"7 天变 6 列"的锅。宁可右边留一点点空隙。
+const CELL_W_BIG = Math.floor((width - 56) / 7);   // 月历视图(月历 tab)
+const CELL_W_SM  = Math.floor((width - 24) / 7);   // 日期选择器 modal 里的小月历
 const USER_ID_KEY = 'gojo_user_id';
 
 Notifications.setNotificationHandler({
@@ -1474,9 +1480,9 @@ const s = StyleSheet.create({
     borderWidth:1, borderColor:C.border,
     paddingTop:14, paddingBottom:8,
   },
-  calCellBig: { width:(width-56)/7, height:52, alignItems:'center', justifyContent:'flex-start', paddingTop:2 },
+  calCellBig: { width: CELL_W_BIG, height:52, alignItems:'center', justifyContent:'flex-start', paddingTop:2 },
   weekRowM:   { flexDirection:'row', paddingHorizontal:12, marginBottom:4 },
-  weekLabelM: { color:C.textMute, fontSize:12, width:(width-56)/7, textAlign:'center' },
+  weekLabelM: { color:C.textMute, fontSize:12, width: CELL_W_BIG, textAlign:'center' },
   calDayWrapBig: { width:32, height:32, borderRadius:16, alignItems:'center', justifyContent:'center' },
   dotRow: { flexDirection:'row', gap:2, marginTop:2, alignItems:'center', height:6 },
   taskDot: { width:5, height:5, borderRadius:2.5 },
@@ -1560,9 +1566,9 @@ const s = StyleSheet.create({
   calHeaderTitle: { color:C.text, fontSize:17, fontWeight:'700' },
   calNav: { color:C.accent2||'#5BC4FF', fontSize:18, padding:4 },
   weekRow: { flexDirection:'row', paddingHorizontal:12, marginBottom:4 },
-  weekLabel: { color:C.textMute, fontSize:12, width:(width-24)/7, textAlign:'center' },
+  weekLabel: { color:C.textMute, fontSize:12, width: CELL_W_SM, textAlign:'center' },
   calGrid: { flexDirection:'row', flexWrap:'wrap', paddingHorizontal:12, marginBottom:12 },
-  calCell: { width:(width-24)/7, height:40, alignItems:'center', justifyContent:'center' },
+  calCell: { width: CELL_W_SM, height:40, alignItems:'center', justifyContent:'center' },
   calDayWrap: { width:34, height:34, borderRadius:17, alignItems:'center', justifyContent:'center' },
   calDayText: { color:C.text, fontSize:14 },
   quickRow: { flexDirection:'row', flexWrap:'wrap', paddingHorizontal:16, gap:8, marginBottom:16 },

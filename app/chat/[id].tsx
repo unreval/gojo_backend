@@ -6,9 +6,12 @@
 // 电话按钮：仅 id==='gojo' 时显示。
 // ★ 本版新增：
 //   - 群聊@功能：输入"@"弹成员面板；长按角色消息的头像/名字快速@；发送时自动传 mentioned_id
-//   - 图片头像：头部、消息行、@面板都支持 avatar_url 图片头像
+//   - 图片头像:头部、消息行、@面板都支持 avatar_url 图片头像
 //   - ★★ 发送防抖：2秒内同样内容不重复发（挡网络卡顿/重试导致的双发，顺便省一次 API+TTS）
 //   - ★★ 长按气泡 → 复制 / 删除（删除对用户和角色气泡都生效，只删本地画面+落盘，不动后端记忆）
+// ★ 记账升级：单聊里 LLM 检测到 pending_transaction → 塞一条卡片消息进对话
+//   - 每次进本页 focus 时刷新账户列表（在别的 tab 加了账户,回来立刻能用）
+//   - 卡片状态(pending/saved/dismissed)随 messages 一起持久化,重开 App 状态还在
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { Audio } from 'expo-av';
@@ -35,6 +38,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import PendingTransactionCard, { Account as AcctType } from '../../components/PendingTransactionCard'; // ★ 记账确认卡
 import VoiceCallModal from '../../components/VoiceCallModal';
 import { C, SERVER_URL, nowTime } from '../../constants/theme';
 import type { Message } from '../../types/message';
@@ -134,6 +138,9 @@ export default function ChatRoom() {
   const [searchMode, setSearchMode]   = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showFullTime, setShowFullTime] = useState(false); // 点击时间条切换完整/简短
+
+  // ★ 记账账户列表(给 pending_transaction 确认卡用)——单聊才拉
+  const [accounts, setAccounts] = useState<AcctType[]>([]);
 
   const audioCacheRef   = useRef<Record<string, string>>({});
   const scrollRef       = useRef<ScrollView>(null);
@@ -238,6 +245,11 @@ export default function ChatRoom() {
             const res = await axios.get(`${SERVER_URL}/characters/${chatId}`);
             setCharacter(res.data);
           } catch (e) { console.warn('load character error', e); }
+          // ★ 记账账户列表:提前拉,渲染前 accounts 就已就绪(旧的 pending 卡也能立刻可用)
+          try {
+            const accRes = await axios.get(`${SERVER_URL}/accounts?user_id=${FIXED_USER_ID}`);
+            setAccounts(accRes.data?.accounts || []);
+          } catch (e) { console.warn('load accounts error', e); }
           const saved = await AsyncStorage.getItem(STORAGE_KEY);
           if (saved) setMessages(JSON.parse(saved));
         }
@@ -302,6 +314,23 @@ export default function ChatRoom() {
       currentSoundRef.current = null;
     };
   }, [chatId, isGroup]));
+
+  // ★ 记账账户列表:进入/切回本页都刷新一次(别的 tab 加了账户,回来立刻能用)
+  useFocusEffect(useCallback(() => {
+    if (isGroup) return;
+    axios.get(`${SERVER_URL}/accounts?user_id=${FIXED_USER_ID}`)
+      .then(r => setAccounts(r.data?.accounts || []))
+      .catch(() => {});
+  }, [isGroup]));
+
+  // ★ 主动消息:进入本页拉一次,把服务器上生成的主动汇报塞进聊天列表
+  //   (proactive_scheduler 会存到 proactive_msg 表,前端进来才知道)
+  useFocusEffect(useCallback(() => {
+    if (!ready || isGroup) return;
+    // 稍延迟,让主 init 加载完成的 messages 先落地,避免和 fetchPendingProactive 的 setMessages 打架
+    const t = setTimeout(() => { fetchPendingProactive(); }, 300);
+    return () => clearTimeout(t);
+  }, [ready, chatId, isGroup]));
 
   // 五条单聊保留的"主动提醒"轮询
   useFocusEffect(useCallback(() => {
@@ -536,6 +565,100 @@ export default function ChatRoom() {
       } else {
         await scheduleReminder(data.reminder);
       }
+    }
+  };
+
+  // ★ 记账:把后端返回的 pending_transaction 塞成一条卡片消息
+  //   放在 appendSegments 之后调用,这样顺序是 [用户消息 → 角色的日语气泡 → 确认卡]
+  const insertPendingCard = (pt: any) => {
+    if (!pt || (pt.type !== 'in' && pt.type !== 'out')) return;
+    const cardMsg: Message = {
+      id: `${Date.now()}_pt_${Math.random().toString(36).slice(2, 8)}`,
+      role: 'gojo',
+      text: '',
+      timestamp: Date.now(),
+      pendingTx: {
+        type: pt.type,
+        category: pt.category || '其他',
+        amount: Number(pt.amount) || 0,
+        desc: pt.desc || '',
+        account_hint: pt.account_hint || '',
+        date: pt.date || null,
+        time: pt.time || null,
+      },
+      pendingStatus: 'pending',
+    };
+    if (focusedRef.current) {
+      setMessages(prev => [...prev, cardMsg]);
+      scrollRef.current?.scrollToEnd({ animated: true });
+    } else {
+      // 人已离开:静默写入,回来时能看到
+      messagesRef.current = [...messagesRef.current, cardMsg];
+      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messagesRef.current)).catch(() => {});
+    }
+    // 顺手刷账户列表,确认卡上的余额是最新的
+    axios.get(`${SERVER_URL}/accounts?user_id=${FIXED_USER_ID}`)
+      .then(r => setAccounts(r.data?.accounts || []))
+      .catch(() => {});
+  };
+
+  // ★ 主动消息:拉服务器上"未读的主动汇报/问候",塞进聊天列表 + 标记已读
+  //   —— 群聊不用;proactive_scheduler 只发给单聊角色
+  const fetchPendingProactive = async () => {
+    if (isGroup) return;
+    try {
+      const res = await axios.get(`${SERVER_URL}/proactive/pending`, {
+        params: { user_id: FIXED_USER_ID, character_id: chatId },
+        timeout: 10000,
+      });
+      const proactives: any[] = res.data?.messages || [];
+      if (proactives.length === 0) return;
+
+      const readIds: number[] = [];
+      const newMsgs: Message[] = [];
+      for (const p of proactives) {
+        const msgId = `proactive_${p.id}`;
+        // 保存语音文件,前端能点击重播
+        if (p.audio_b64 && p.audio_b64.length > 100) {
+          const audioUri = await saveAudioFile(msgId, p.audio_b64);
+          if (audioUri) audioCacheRef.current[msgId] = audioUri;
+        }
+        // 用服务器时间戳,不是 Date.now(),这样多条按真实先后顺序排
+        const ts = p.created_at
+          ? new Date(p.created_at.replace(' ', 'T') + (p.created_at.includes('Z') ? '' : 'Z')).getTime()
+          : Date.now();
+        const t = new Date(ts);
+        newMsgs.push({
+          id: msgId,
+          role: 'gojo',
+          text: p.jp || '',
+          subtitle: p.zh || undefined,
+          time: `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`,
+          timestamp: ts,
+        });
+        readIds.push(p.id);
+      }
+
+      // 合并去重(按 id) + 按时间戳排序(处理"离线期间生成的旧消息"这种情况)
+      setMessages(prev => {
+        const existing = new Set(prev.map(m => m.id));
+        const toAdd = newMsgs.filter(m => !existing.has(m.id));
+        if (toAdd.length === 0) return prev;
+        const merged = [...prev, ...toAdd].sort(
+          (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0)
+        );
+        return merged;
+      });
+
+      // 滚到底让新消息可见
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+
+      // 标记已读(失败也不管,反正下次进来还会拉,是幂等的)
+      if (readIds.length > 0) {
+        axios.post(`${SERVER_URL}/proactive/read`, { msg_ids: readIds }).catch(() => {});
+      }
+    } catch (e: any) {
+      console.warn('fetchPendingProactive', e?.message);
     }
   };
 
@@ -801,6 +924,8 @@ export default function ChatRoom() {
         const segments: Segment[] = res.data?.messages || [];
         if (segments.length === 0) { Alert.alert('回复异常', '没有收到有效回复'); return; }
         await appendSegments(segments, `${Date.now()}`);
+        // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
+        if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
       pruneAudioFiles();
     } catch (e: any) {
@@ -883,6 +1008,8 @@ export default function ChatRoom() {
         }
         if (segments.length === 0) { Alert.alert('回复异常', '没有收到有效回复'); return; }
         await appendSegments(segments, `${Date.now()}`);
+        // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
+        if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
       pruneAudioFiles();
     } catch (e: any) {
@@ -1104,6 +1231,48 @@ export default function ChatRoom() {
         )}
 
         {displayMessages.map((msg, idx) => {
+          const prevMsg = idx > 0 ? displayMessages[idx - 1] : null;
+          const showSep = shouldShowSeparator(msg, prevMsg);
+
+          // ★ 记账确认卡 —— 不走普通气泡渲染,单独用组件展示
+          if (msg.pendingTx) {
+            return (
+              <React.Fragment key={msg.id}>
+                {showSep && msg.timestamp && (
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => setShowFullTime(v => !v)}
+                    style={s.timeSepWrap}
+                  >
+                    <Text style={s.timeSepText}>
+                      {formatSeparatorTime(msg.timestamp, showFullTime)}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                <View style={{ marginBottom: 12 }}>
+                  <PendingTransactionCard
+                    userId={FIXED_USER_ID}
+                    transaction={msg.pendingTx}
+                    accounts={accounts}
+                    initialStatus={msg.pendingStatus || 'pending'}
+                    onStatusChange={(status) => {
+                      setMessages(prev => prev.map(m =>
+                        m.id === msg.id ? { ...m, pendingStatus: status } : m
+                      ));
+                    }}
+                    onSaved={() => {
+                      // 记账成功后刷余额,让下条卡的账户余额是最新的
+                      axios.get(`${SERVER_URL}/accounts?user_id=${FIXED_USER_ID}`)
+                        .then(r => setAccounts(r.data?.accounts || []))
+                        .catch(() => {});
+                    }}
+                  />
+                </View>
+              </React.Fragment>
+            );
+          }
+
+          // ── 下面是原来的普通消息渲染 ──
           // ★ 角色消息一律可重播：有本地音频直接放，没有就点了现场重合成
           const hasAudio = msg.role !== 'user' && !!msg.text;
           const isHighlighted = searchMode && searchQuery.trim() &&
@@ -1121,8 +1290,6 @@ export default function ChatRoom() {
               setInputText(prev => prev + '@' + msg.senderName + ' ');
             }
           };
-          const prevMsg = idx > 0 ? displayMessages[idx - 1] : null;
-          const showSep = shouldShowSeparator(msg, prevMsg);
 
           return (
             <React.Fragment key={msg.id}>

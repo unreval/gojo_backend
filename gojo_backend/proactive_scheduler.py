@@ -16,7 +16,7 @@ from config import CN_TZ, ANTHROPIC_KEY
 import anthropic
 
 from characters import get_character
-from user_memory import get_bond_memories
+from user_memory import get_bond_memories, save_short_memory
 import proactive_msg
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -96,7 +96,14 @@ emotion 选：平静/自信/调皮/认真'''
         )
         print(f'[proactive] ✅ {character_id} 主动汇报 #{mid}：{jp[:40]}')
 
-        # ★ 推送到手机（app 关着也能收到）
+        # ★ 关键:也塞进 short_memory,让 LLM 下次聊天时知道"我刚才已经报备过了"
+        #   不然会出现"报备了 + 又说'谁规定我要报备的'"这种自相矛盾
+        try:
+            save_short_memory(user_id, 'assistant', jp, character_id)
+        except Exception as _e:
+            print(f'[proactive] 写 short_memory 跳过:{_e}')
+
+        # ★ 推送到手机(app 关着也能收到)
         try:
             import push_notify
             push_notify.push_to_user(

@@ -1,24 +1,43 @@
-// app/diary/[cid].tsx —— 放进项目时去掉前缀，文件名就叫 [cid].tsx
-// 「他的日记」：手写信纸质感 + 日记本名字（他自己取，你也能改）+ 留言。
-//   ★ 不对称：你读他日记不留痕；只有你留言，他之后才会"发现"。
+// app/diary/[cid].tsx —— 放进项目时去掉前缀,文件名就叫 [cid].tsx
+// 「他的日记」:手写信纸质感 + 日记本名字(他自己取,你也能改)+ 留言。
+//   ★ 不对称:你读他日记不留痕;只有你留言,他之后才会"发现"。
+// ★ v2 键盘修复:两个 modal(留言/改名)都加了手动键盘上抬
 import axios from 'axios';
 import { useFonts } from 'expo-font';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, Alert,
+  ActivityIndicator, Alert, Dimensions, Keyboard,
   Modal, Platform, RefreshControl,
   ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View
 } from 'react-native';
 import { SERVER_URL } from '../../constants/theme';
 
 const FIXED_USER_ID = 'user_mofpiyd7442ia7';
-const HAND = 'LongCang';   // ★ 手写字体名，须与 assets/fonts/LongCang-Regular.ttf 对应
+const HAND = 'LongCang';   // ★ 手写字体名,须与 assets/fonts/LongCang-Regular.ttf 对应
 
 interface DiaryComment { id: number; content: string; created_at: string | null; }
 interface CharDiary {
   id: number; content: string; emotion: string;
   created_at: string | null; comments: DiaryComment[];
+}
+
+// ★ 键盘高度 hook —— MIUI 也稳
+function useKeyboardHeight() {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    const screenH = Dimensions.get('window').height;
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvt, e => {
+      const screenY = e.endCoordinates.screenY ?? 0;
+      const reportedH = e.endCoordinates.height ?? 0;
+      setH(screenY > 0 ? Math.max(screenH - screenY, reportedH) : reportedH);
+    });
+    const hideSub = Keyboard.addListener(hideEvt, () => setH(0));
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, []);
+  return h;
 }
 
 const EMOJI: Record<string, string> = {
@@ -37,6 +56,7 @@ export default function HisDiaryScreen() {
   const { cid: rawCid } = useLocalSearchParams<{ cid: string }>();
   const cid = (rawCid || 'gojo') as string;
   const router = useRouter();
+  const kbH = useKeyboardHeight();
 
   const [fontsLoaded] = useFonts({ [HAND]: require('../../assets/fonts/LongCang-Regular.ttf') });
 
@@ -98,7 +118,7 @@ export default function HisDiaryScreen() {
     <View style={{ flex: 1, backgroundColor: '#e8ddc7' }}>
       <StatusBar barStyle="dark-content" backgroundColor="#e8ddc7" />
 
-      {/* 顶部：书名（点一下改名） */}
+      {/* 顶部:书名(点一下改名) */}
       <View style={s.header}>
         <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
           <Text style={s.backText}>‹</Text>
@@ -124,7 +144,7 @@ export default function HisDiaryScreen() {
           {diaries.length === 0 && (
             <View style={s.empty}>
               <Text style={s.emptyEmoji}>📔</Text>
-              <Text style={[s.emptyText, hand]}>他还没写日记。{'\n'}他想写才写，等等看吧。</Text>
+              <Text style={[s.emptyText, hand]}>他还没写日记。{'\n'}他想写才写,等等看吧。</Text>
             </View>
           )}
 
@@ -149,7 +169,7 @@ export default function HisDiaryScreen() {
 
               <TouchableOpacity style={s.commentBtn} onPress={() => { setCommentFor(d); setCommentText(''); }}>
                 <Text style={s.commentBtnText}>
-                  {d.comments.length > 0 ? '＋ 再留一句' : '💬 留言（他会发现你看过）'}
+                  {d.comments.length > 0 ? '＋ 再留一句' : '💬 留言(他会发现你看过)'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -157,10 +177,10 @@ export default function HisDiaryScreen() {
         </ScrollView>
       )}
 
-      {/* 留言 */}
+      {/* 留言 —— ★ 键盘弹起时整个 modalCard 上抬 */}
       <Modal visible={!!commentFor} animationType="slide" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={s.modalCard}>
+          <View style={[s.modalCard, { marginBottom: kbH }]}>
             <Text style={s.modalTitle}>给这篇日记留言</Text>
             {commentFor && <Text style={[s.modalQuote, hand]} numberOfLines={2}>「{commentFor.content}」</Text>}
             <TextInput
@@ -179,10 +199,10 @@ export default function HisDiaryScreen() {
         </View>
       </Modal>
 
-      {/* 改名 */}
+      {/* 改名 —— ★ 同款键盘上抬 */}
       <Modal visible={renaming} animationType="fade" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={s.modalCard}>
+          <View style={[s.modalCard, { marginBottom: kbH }]}>
             <Text style={s.modalTitle}>给这本日记改个名</Text>
             <TextInput
               style={s.modalInput} value={newTitle} onChangeText={setNewTitle}
