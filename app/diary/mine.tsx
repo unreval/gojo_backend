@@ -153,6 +153,21 @@ export default function MyDiaryScreen() {
     } catch (e: any) { Alert.alert('设置失败', e?.message ?? '请重试'); }
   };
 
+  // ★ 清空整本"我的日记"(带上他的访客记号一起清)
+  const clearAll = () => {
+    Alert.alert('清空整本我的日记?', `会把「${bookTitle}」里的所有 ${diaries.length} 篇日记(和他留下的访客记号)全部删除,不能恢复。`, [
+      { text: '取消', style: 'cancel' },
+      { text: '全部清空', style: 'destructive', onPress: async () => {
+        try {
+          await axios.delete(`${SERVER_URL}/diary/user_all`, {
+            params: { user_id: FIXED_USER_ID },
+          });
+          await load();
+        } catch (e: any) { Alert.alert('清空失败', e?.message ?? '请重试'); }
+      }},
+    ]);
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: '#e8ddc7' }}>
       <StatusBar barStyle="dark-content" backgroundColor="#e8ddc7" />
@@ -168,6 +183,14 @@ export default function MyDiaryScreen() {
         >
           <Text style={[s.bookTitle, hand]} numberOfLines={1}>{bookTitle}</Text>
           <Text style={s.bookHint}>点标题可改名 · 他会偷看</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={clearAll}
+          disabled={diaries.length === 0}
+          style={s.clearHeaderBtn}
+          activeOpacity={0.7}
+        >
+          <Text style={[s.clearHeaderText, diaries.length === 0 && { opacity: 0.3 }]}>🗑</Text>
         </TouchableOpacity>
         <TouchableOpacity style={s.writeBtn} onPress={() => setShowWrite(true)}>
           <Text style={s.writeBtnText}>✎</Text>
@@ -305,6 +328,8 @@ const s = StyleSheet.create({
   bookHint: { color: '#a5946f', fontSize: 10, marginTop: 1 },
   writeBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: '#c0a058' },
   writeBtnText: { color: '#fff', fontSize: 16 },
+  clearHeaderBtn: { width: 34, paddingVertical: 4, alignItems: 'center', marginRight: 4 },
+  clearHeaderText: { fontSize: 18 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   empty: { alignItems: 'center', paddingTop: 90 },
   emptyEmoji: { fontSize: 44, marginBottom: 14 },

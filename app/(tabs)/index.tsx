@@ -2,7 +2,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ScrollView, StatusBar, StyleSheet, Text,
   TouchableOpacity, View
@@ -14,6 +14,7 @@ const USER_ID_KEY    = 'gojo_user_id';
 const FIXED_USER_ID  = 'user_mofpiyd7442ia7';
 const DAYS_CACHE_KEY = 'gojo_chat_days';  
 const DIARY_CHARACTER = 'gojo';   
+const STATS_THROTTLE_MS = 30_000;   // ★ 30 秒内不重复调 /stats
 
 // ── 60条今日悟语，约2个月不重复 ──
 const DAILY_MSGS = [
@@ -102,12 +103,19 @@ export default function HomeScreen() {
   const router = useRouter();
   const [chatDays, setChatDays] = useState(0);
   const todayMsg = getTodayMessage();
+  const lastStatsCallRef = useRef(0);   // ★ 上一次成功调 /stats 的时间戳
 
   const loadDays = useCallback(async () => {
     try {
       const cached = await AsyncStorage.getItem(DAYS_CACHE_KEY);
       if (cached) setChatDays(Number(cached));
     } catch {}
+    // ★ 节流:30 秒内已经调过就直接用缓存,不再打接口
+    const now = Date.now();
+    if (now - lastStatsCallRef.current < STATS_THROTTLE_MS) {
+      return;
+    }
+    lastStatsCallRef.current = now;
     try {
       const uid = (await AsyncStorage.getItem(USER_ID_KEY)) || FIXED_USER_ID;
       const res = await axios.get(`${SERVER_URL}/stats`, { params: { user_id: uid }, timeout: 8000 });
@@ -118,14 +126,17 @@ export default function HomeScreen() {
       }
     } catch (e: any) {
       console.warn('load stats', e?.message);
+      // ★ 失败允许下次立刻重试(不占节流窗口)
+      lastStatsCallRef.current = 0;
     }
   }, []);
 
   useEffect(() => { loadDays(); }, [loadDays]);
   useFocusEffect(useCallback(() => { loadDays(); }, [loadDays]));
 
-  // ★ 点日记格 → 进日记首页（列出两本，深色卡片，和聊天统一）
+  // ★ 点日记格 → 进日记首页
   const openDiary = () => {
+    console.log('[home] tap 日记 tile → /diary');
     router.push('/diary' as any);
   };
 

@@ -22,6 +22,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from config import DEFAULT_CHARACTER_ID
+from db import get_conn
 import db_diary
 import diary_engine
 import diary_scheduler
@@ -47,6 +48,72 @@ async def comment_char_diary(diary_id: int, data: dict):
         return JSONResponse({'error': 'empty comment'}, status_code=400)
     cid, created_at = db_diary.add_diary_comment(diary_id, user_id, content)
     return JSONResponse({'ok': True, 'comment_id': cid, 'created_at': str(created_at)})
+
+
+# ★ 删单篇他的日记(附带的 comment 也删掉)
+@router.delete('/diary/char_entry/{diary_id}')
+async def delete_char_diary_entry(diary_id: int, user_id: str = DEFAULT_USER):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('DELETE FROM char_diary_comment WHERE diary_id = %s', (diary_id,))
+        # 尝试带 user_id 过滤(如果 char_diary 有该列),失败则退回不带
+        try:
+            cur.execute('DELETE FROM char_diary WHERE id = %s AND user_id = %s',
+                        (diary_id, user_id))
+        except Exception:
+            conn.rollback()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM char_diary WHERE id = %s', (diary_id,))
+        rows = cur.rowcount
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    return JSONResponse({'ok': True, 'deleted': rows})
+
+
+# ★ 清空某角色的所有日记(慎用)
+@router.delete('/diary/char/{character_id}/all')
+async def clear_char_diaries(character_id: str, user_id: str = DEFAULT_USER):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # 先拿到要删的 id 列表,再删 comment,最后删 diary
+        try:
+            cur.execute(
+                'SELECT id FROM char_diary WHERE character_id = %s AND user_id = %s',
+                (character_id, user_id)
+            )
+        except Exception:
+            conn.rollback()
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT id FROM char_diary WHERE character_id = %s',
+                (character_id,)
+            )
+        ids = [r[0] for r in cur.fetchall()]
+        if ids:
+            cur.execute('DELETE FROM char_diary_comment WHERE diary_id = ANY(%s)', (ids,))
+        try:
+            cur.execute(
+                'DELETE FROM char_diary WHERE character_id = %s AND user_id = %s',
+                (character_id, user_id)
+            )
+        except Exception:
+            conn.rollback()
+            cur = conn.cursor()
+            cur.execute(
+                'DELETE FROM char_diary WHERE character_id = %s',
+                (character_id,)
+            )
+        rows = cur.rowcount
+        conn.commit()
+        print(f'[diary] 清空 {character_id} 全部日记:{rows} 条')
+    finally:
+        cur.close()
+        conn.close()
+    return JSONResponse({'ok': True, 'deleted': rows})
 
 
 # ─────────── 你的日记 ───────────
@@ -92,6 +159,29 @@ async def set_diary_password(diary_id: int, data: dict):
 async def remove_user_diary(diary_id: int, user_id: str = DEFAULT_USER):
     db_diary.delete_user_diary(diary_id, user_id)
     return JSONResponse({'ok': True})
+
+
+# ★ 清空你所有的日记(附带的访客记号也删掉)
+@router.delete('/diary/user_all')
+async def clear_all_user_diaries(user_id: str = DEFAULT_USER):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # 先删访客记号
+        try:
+            cur.execute('DELETE FROM diary_visit WHERE user_id = %s', (user_id,))
+        except Exception:
+            conn.rollback()
+            cur = conn.cursor()
+        # 再删日记本身
+        cur.execute('DELETE FROM user_diary WHERE user_id = %s', (user_id,))
+        rows = cur.rowcount
+        conn.commit()
+        print(f'[diary] 清空 {user_id} 全部我的日记:{rows} 条')
+    finally:
+        cur.close()
+        conn.close()
+    return JSONResponse({'ok': True, 'deleted': rows})
 
 
 # ─────────── 日记本名字（A+C）───────────

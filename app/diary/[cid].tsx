@@ -112,6 +112,36 @@ export default function HisDiaryScreen() {
     } catch (e: any) { Alert.alert('改名失败', e?.message ?? '请重试'); }
   };
 
+  // ★ 长按单篇日记 → 删这一篇(带上留言)
+  const deleteEntry = (d: CharDiary) => {
+    Alert.alert('删除这篇', d.content.slice(0, 40) + (d.content.length > 40 ? '…' : ''), [
+      { text: '取消', style: 'cancel' },
+      { text: '删除', style: 'destructive', onPress: async () => {
+        try {
+          await axios.delete(`${SERVER_URL}/diary/char_entry/${d.id}`, {
+            params: { user_id: FIXED_USER_ID },
+          });
+          await load();
+        } catch (e: any) { Alert.alert('删除失败', e?.message ?? '请重试'); }
+      }},
+    ]);
+  };
+
+  // ★ 顶部菜单 → 清空整本日记
+  const clearAll = () => {
+    Alert.alert('清空整本日记?', `会把「${bookTitle}」里的所有 ${diaries.length} 篇日记(和你留过的言)全部删除,不能恢复。`, [
+      { text: '取消', style: 'cancel' },
+      { text: '全部清空', style: 'destructive', onPress: async () => {
+        try {
+          await axios.delete(`${SERVER_URL}/diary/char/${cid}/all`, {
+            params: { user_id: FIXED_USER_ID },
+          });
+          await load();
+        } catch (e: any) { Alert.alert('清空失败', e?.message ?? '请重试'); }
+      }},
+    ]);
+  };
+
   const hand = fontsLoaded ? { fontFamily: HAND } : {};
 
   return (
@@ -129,9 +159,16 @@ export default function HisDiaryScreen() {
           activeOpacity={0.7}
         >
           <Text style={[s.bookTitle, hand]} numberOfLines={1}>{bookTitle || '　'}</Text>
-          <Text style={s.bookHint}>点标题可改名</Text>
+          <Text style={s.bookHint}>点标题可改名 · 长按日记可删</Text>
         </TouchableOpacity>
-        <View style={{ width: 34 }} />
+        <TouchableOpacity
+          onPress={clearAll}
+          disabled={diaries.length === 0}
+          style={s.moreBtn}
+          activeOpacity={0.7}
+        >
+          <Text style={[s.moreText, diaries.length === 0 && { opacity: 0.3 }]}>🗑</Text>
+        </TouchableOpacity>
       </View>
 
       {loading ? (
@@ -149,7 +186,13 @@ export default function HisDiaryScreen() {
           )}
 
           {diaries.map(d => (
-            <View key={d.id} style={s.paper}>
+            <TouchableOpacity
+              key={d.id}
+              activeOpacity={0.95}
+              onLongPress={() => deleteEntry(d)}
+              delayLongPress={500}
+              style={s.paper}
+            >
               <View style={s.paperTop}>
                 <Text style={s.emotion}>{EMOJI[d.emotion] || '🖊'}</Text>
                 <Text style={s.date}>{fmt(d.created_at)}</Text>
@@ -172,7 +215,7 @@ export default function HisDiaryScreen() {
                   {d.comments.length > 0 ? '＋ 再留一句' : '💬 留言(他会发现你看过)'}
                 </Text>
               </TouchableOpacity>
-            </View>
+            </TouchableOpacity>
           ))}
         </ScrollView>
       )}
@@ -227,6 +270,8 @@ const s = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingTop: Platform.OS === 'ios' ? 52 : 42, paddingBottom: 12 },
   backBtn: { width: 34, paddingVertical: 4 },
   backText: { color: '#5a4d33', fontSize: 30, lineHeight: 32, fontWeight: '300' },
+  moreBtn: { width: 34, paddingVertical: 4, alignItems: 'center' },
+  moreText: { fontSize: 18 },
   bookTitle: { color: '#3d3320', fontSize: 26, letterSpacing: 2 },
   bookHint: { color: '#a5946f', fontSize: 10, marginTop: 1 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
