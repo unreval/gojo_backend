@@ -509,51 +509,166 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     }
   };
 
+  // ★ B档流式:XHR + onprogress 逐行解析 NDJSON,音频入队边收边播
+  //   老的 axios.post + 完整 JSON 兜底见下方 sendToGojoLegacy
   const sendToGojo = async (text: string) => {
     if (!activeRef.current) return;
-    try {
-      const res = await axios.post(`${SERVER_URL}/chat/voice_text`, {
-        text,
-        user_id: userId,
-      });
-      if (!activeRef.current) return;
 
-      setPhaseSync('responding');
-
-      const segments = Array.isArray(res.data?.messages)
-        ? res.data.messages
-        : res.data?.jp
-          ? [{ jp: res.data.jp, zh: res.data.zh || '', audio_b64: res.data.audio_b64 || '' }]
-          : [];
-
-      for (let i = 0; i < segments.length; i++) {
-        if (!activeRef.current) break;
-        const seg = segments[i];
-        const gojoMsg: CallMsg = {
-          id: `g_${Date.now()}_${i}`, role: 'gojo',
-          jp: seg.jp, zh: seg.zh, time: nowTime(),
-        };
-        setCallMsgs(prev => [...prev, gojoMsg]);
-        setSubtitle(seg.zh || seg.jp || '');
-        scrollRef.current?.scrollToEnd({ animated: true });
-
-        if (seg.audio_b64 && seg.audio_b64.length > 100) {
-          await playAudio(seg.audio_b64);
-        } else {
-          await sleep(800);
-        }
-      }
-
-      lastActiveTimeRef.current = Date.now();
-      proactiveCountRef.current = 0;
-
-    } catch (e) {
-      console.warn('sendToGojo error', e);
-    } finally {
-      setSubtitle('');
-      setDebugText('');
-      if (activeRef.current) await resumeListening();
+    interface AudioChunk {
+      seq: number; jp: string; zh: string; emotion: string; audio_b64: string;
     }
+
+    await new Promise<void>((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${SERVER_URL}/chat/voice_stream`);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+
+      let lastPos = 0;
+      let buffer = '';
+      const audioQueue: AudioChunk[] = [];
+      let streamDone = false;
+      let playIndex = 0;
+      let playing = false;
+      let finalized = false;
+
+      const finalize = () => {
+        if (finalized) return;
+        finalized = true;
+        setSubtitle('');
+        setDebugText('');
+        lastActiveTimeRef.current = Date.now();
+        proactiveCountRef.current = 0;
+        if (activeRef.current) {
+          resumeListening().finally(() => resolve());
+        } else {
+          resolve();
+        }
+      };
+
+      const drainQueue = async () => {
+        if (playing) return;
+        playing = true;
+        try {
+          while (activeRef.current && playIndex < audioQueue.length) {
+            const chunk = audioQueue[playIndex++];
+            setPhaseSync('responding');
+            const gojoMsg: CallMsg = {
+              id: `g_${Date.now()}_${chunk.seq}`,
+              role: 'gojo',
+              jp: chunk.jp,
+              zh: chunk.zh,
+              time: nowTime(),
+            };
+            setCallMsgs(prev => [...prev, gojoMsg]);
+            setSubtitle(chunk.zh || chunk.jp || '');
+            scrollRef.current?.scrollToEnd({ animated: true });
+
+            if (chunk.audio_b64 && chunk.audio_b64.length > 100) {
+              await playAudio(chunk.audio_b64);
+            } else {
+              await sleep(600);
+            }
+          }
+        } finally {
+          playing = false;
+        }
+        // 队列播完 + 服务端也 done 了 → 收尾
+        if (streamDone && playIndex >= audioQueue.length) {
+          finalize();
+        }
+      };
+
+      const processEvent = (evt: any) => {
+        if (!evt || typeof evt !== 'object') return;
+        if (evt.type === 'text_jp') {
+          // 字幕预显示——暂不用,避免和真正播放时的字幕跳来跳去
+          return;
+        }
+        if (evt.type === 'audio') {
+          audioQueue.push(evt as AudioChunk);
+          drainQueue();  // 非阻塞触发
+          return;
+        }
+        if (evt.type === 'done') {
+          streamDone = true;
+          drainQueue();  // 有可能音频都播完了,靠这个触发 finalize
+          return;
+        }
+        if (evt.type === 'error') {
+          console.warn('[voice_stream] server error:', evt.msg);
+          setDebugText(`❌ ${evt.msg}`);
+          setTimeout(() => setDebugText(''), 3000);
+          streamDone = true;
+          drainQueue();
+          return;
+        }
+      };
+
+      xhr.onprogress = () => {
+        try {
+          const newChunk = xhr.responseText.substring(lastPos);
+          lastPos = xhr.responseText.length;
+          buffer += newChunk;
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';   // 最后一段可能是半行
+          for (const raw of lines) {
+            const line = raw.trim();
+            if (!line) continue;
+            try {
+              const evt = JSON.parse(line);
+              processEvent(evt);
+            } catch (e) {
+              console.warn('[voice_stream] parse fail:', line.slice(0, 80));
+            }
+          }
+        } catch (e) {
+          console.warn('[voice_stream] onprogress err:', e);
+        }
+      };
+
+      xhr.onload = () => {
+        // flush 剩下的
+        if (buffer.trim()) {
+          try {
+            processEvent(JSON.parse(buffer.trim()));
+          } catch {}
+          buffer = '';
+        }
+        streamDone = true;
+        drainQueue();
+      };
+
+      xhr.onerror = () => {
+        console.warn('[voice_stream] xhr error');
+        setDebugText('❌ 流式连接失败');
+        setTimeout(() => setDebugText(''), 3000);
+        streamDone = true;
+        drainQueue();
+        // 就算队列空,也强制 finalize 避免卡死
+        if (playIndex >= audioQueue.length) finalize();
+      };
+
+      xhr.ontimeout = () => {
+        console.warn('[voice_stream] xhr timeout');
+        setDebugText('❌ 流式超时');
+        streamDone = true;
+        drainQueue();
+        if (playIndex >= audioQueue.length) finalize();
+      };
+
+      xhr.timeout = 60000;   // 60 秒兜底
+
+      try {
+        xhr.send(JSON.stringify({
+          text,
+          user_id: userId,
+          character_id: 'gojo',
+        }));
+      } catch (e) {
+        console.warn('[voice_stream] send err:', e);
+        finalize();
+      }
+    });
   };
 
   const resumeListening = async () => {

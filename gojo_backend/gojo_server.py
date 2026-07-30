@@ -1,11 +1,7 @@
 """GojoAssistant 后端入口
 
-注意：Zeabur 配置认这个文件名，请保留 gojo_server.py。
-所有业务逻辑都在同目录其他文件里。
-
-★ 本版新增：日记模块（建表 + 路由 + 常驻排程）。
-★ 记账升级新增：注册 accounting_router(账户 + 收支 + 转账 + 五条悟短评)。
-★ v7:注册 stats_router —— 提供 /stats(首页天数) + /characters_all(日记多角色列表)
+★ v8:注册 voice_stream_router —— B档半流式语音通话 /chat/voice_stream
+   (老的 /chat/voice_text 保留,前端可以自由切换或做灰度)
 """
 import os
 import uvicorn
@@ -19,8 +15,8 @@ from characters import seed_gojo_character
 from db_bond import init_bond_table
 import memory_search
 import group_bubbler
-import diary_scheduler                      # ★ 日记常驻排程
-import proactive_scheduler                  # ★ 主动汇报排程
+import diary_scheduler
+import proactive_scheduler
 
 
 # 路由模块
@@ -34,14 +30,15 @@ from route_group import router as group_router
 from route_avatar import router as avatar_router
 from route_config import router as config_router
 from route_period import router as period_router, init_period_table
-from route_tts import router as tts_router          # ★ 重播兜底 + RAG 维护
-from route_diary import router as diary_router       # ★ 日记路由
-from db_diary import init_diary_tables               # ★ 日记建表
-from route_proactive import router as proactive_router   # ★ 主动消息路由
-from proactive_msg import init_proactive_table           # ★ 主动消息建表
-from push_notify import init_push_table                  # ★ 推送 token 建表
-from route_accounting import router as accounting_router   # ★ 记账路由
-from route_stats import router as stats_router             # ★ 通用查询(天数 + 角色列表)
+from route_tts import router as tts_router
+from route_diary import router as diary_router
+from db_diary import init_diary_tables
+from route_proactive import router as proactive_router
+from proactive_msg import init_proactive_table
+from push_notify import init_push_table
+from route_accounting import router as accounting_router
+from route_stats import router as stats_router
+from route_voice_stream import router as voice_stream_router   # ★ B档:流式语音通话
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -55,15 +52,15 @@ init_db()
 migrate_old_gojo_memory()
 init_group_tables()
 init_bond_table()
-init_period_table()                    # 生理期建表
-init_diary_tables()                    # ★ 日记建表
-init_proactive_table()                 # ★ 主动消息建表
-init_push_table()                      # ★ 推送 token 建表
-memory_search.init_vector_support()    # ★ 探测 pgvector（不可用时自动退回，不影响启动）
+init_period_table()
+init_diary_tables()
+init_proactive_table()
+init_push_table()
+memory_search.init_vector_support()
 seed_gojo_character()
-group_bubbler.start_bubbler()          # ★ 群聊定时主动冒泡（克制版：每群每天≤3次、深夜静音、不合成语音）
-diary_scheduler.start_diary_scheduler()  # ★ 日记常驻排程（他会自己写日记、偷看你的日记）
-proactive_scheduler.start_proactive_scheduler()  # ★ 主动汇报排程（每天约定时段发任务报备）
+group_bubbler.start_bubbler()
+diary_scheduler.start_diary_scheduler()
+proactive_scheduler.start_proactive_scheduler()
 
 # ── 注册路由 ──
 app.include_router(chat_router)
@@ -72,15 +69,16 @@ app.include_router(tasks_router)
 app.include_router(character_router)
 app.include_router(image_router)
 app.include_router(story_router)
-app.include_router(group_router)    # 群聊路由
-app.include_router(avatar_router)   # 头像路由
+app.include_router(group_router)
+app.include_router(avatar_router)
 app.include_router(config_router)
-app.include_router(period_router)   # 生理期路由
-app.include_router(tts_router)      # ★ 语音重合成 + RAG 状态
-app.include_router(diary_router)    # ★ 日记路由
-app.include_router(proactive_router)  # ★ 主动消息路由
-app.include_router(accounting_router)  # ★ 记账路由
-app.include_router(stats_router)       # ★ 通用查询(天数 + 角色列表)
+app.include_router(period_router)
+app.include_router(tts_router)
+app.include_router(diary_router)
+app.include_router(proactive_router)
+app.include_router(accounting_router)
+app.include_router(stats_router)
+app.include_router(voice_stream_router)   # ★ B档流式语音
 
 
 @app.get('/health')
@@ -89,11 +87,11 @@ async def health():
         'status': 'ok',
         'tts_provider': TTS_PROVIDER,
         'db': 'postgresql',
-        'arch': 'modular-v7-stats',
+        'arch': 'modular-v8-voice-stream',
         'vector_ready': memory_search.is_vector_ready(),
     }
 
 
 if __name__ == '__main__':
-    print(f'GojoAssistant starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL | Cache + Group + Period + Diary + Accounting + Stats')
+    print(f'GojoAssistant starting... TTS: {TTS_PROVIDER} | DB: PostgreSQL | Voice Stream')
     uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
