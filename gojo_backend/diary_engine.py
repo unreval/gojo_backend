@@ -10,6 +10,7 @@ import anthropic
 
 from characters import get_character
 from user_memory import get_bond_memories, get_short_memory, get_long_memory, get_first_interaction_days
+from character_relations import get_relations_text
 import db_diary
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -69,8 +70,23 @@ def generate_char_diary(character_id, user_id, topic=None):
         hour = now.hour
         time_hint = '深夜' if hour < 5 or hour >= 23 else ('清晨' if hour < 9 else ('白天' if hour < 18 else '晚上'))
 
+        # ★ 该角色世界里的重要人物,写日记时正确写出身份,别搞混
+        relations_block = get_relations_text(character_id)
+        relations_intro = (f'\n{relations_block}\n' if relations_block else '')
+
         prompt = f'''你是{char_name}。现在是{today_str}的{time_hint}，你在写一篇只属于自己的日记——没人会读到（你以为）。
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【★ 主语规则——铁律,必须遵守】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+你【就是】{char_name}。写日记时,你【绝对不能】用自己的名字来指代自己。
+- ❌ 错误:"悟今天在跟她聊天时…"、"五条悟觉得…"、"{char_name}发现自己…"
+- ✅ 正确:"我今天…"、"我觉得…"、"我发现自己…"
+
+日记是第一人称写给自己看的,不是新闻报道,不是第三视角小说。
+你的名字这两个字【绝对不能】在日记正文里出现——你是那个"我"。
+{relations_intro}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【★ 动笔前必读——关于"她"在你心里到底算什么】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

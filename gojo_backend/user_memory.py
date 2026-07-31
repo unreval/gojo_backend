@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
 from utils import extract_json
+from character_relations import get_relations_text
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
@@ -536,6 +537,10 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
         existing_bond = get_bond_memories(user_id, character_id, limit=20)
         bond_text = '\n'.join(f'- {r[1]}' for r in existing_bond) if existing_bond else '（暂无）'
 
+        # ★ 该角色世界里的重要人物 —— 让 Haiku 知道名字对应的身份,别把"杰"猜成学生
+        relations_block = get_relations_text(character_id)
+        relations_intro = (f'\n{relations_block}\n' if relations_block else '')
+
         response = claude_client.messages.create(
             model='claude-haiku-4-5-20251001',
             max_tokens=400,
@@ -546,7 +551,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
 【对话双方】
 - "她" = 用户
 - "{char_name}" = 角色（她的聊天对象）
-
+{relations_intro}
 【今天日期】{today_str}（{weekday_cn}）{correction_hint}
 
 【已记录的她的事实】
@@ -622,6 +627,14 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
       ✅ 她等着我回话（如果发生了）；否则不记
     ▸ 【判断标准】：写完 bond 后自查——把内容读一遍，"这句话是否像言情小说的旁白？"
       像 → 重写成流水账；不像 → OK。宁可平实到无聊，也不要暧昧文艺。
+
+11. ★【遇到人名先查上面的"重要人物"表——非常重要】
+    你可能不熟悉"{char_name}"这个角色的世界里谁是谁。当对话里出现名字时:
+    - 先看上方【★ 你世界里的重要人物】那段(如果有的话)
+    - 记忆里必须写对身份 —— 例:"她说杰是叛徒"应该写"她说我挚友是叛徒"(因为杰=我的挚友),
+      不是"她说学生是叛徒"或"她说某人是叛徒"
+    - 【禁止】在不知道对方是谁时,瞎猜身份("学生""同事""朋友")——那会写错记忆
+    - 关系表里没有的名字 → 直接用原名,别猜(例:"她说小张是叛徒" → "她说小张是叛徒",别改成"她说朋友是叛徒")
 
 【输出格式——严格 JSON，只输出一行】
 {{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}}}}
