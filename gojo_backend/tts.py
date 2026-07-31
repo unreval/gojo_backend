@@ -50,25 +50,38 @@ def traditional_to_simplified(text: str) -> str:
 TTS_TEMPERATURE = 0.4
 TTS_TOP_P       = 0.7
 
+# ★ Fish Audio 模型选择(通过 HTTP header 传)
+#   常见 model ID(以 Fish 官方文档为准,不同账号可能不同):
+#   - speech-1.5 / speech-1.6:老一代,便宜
+#   - s1:v2 主力,质量好
+#   - s1-mini:s1 的低成本版
+#   - s2.1-pro / speech-2.1-pro:新的 pro 档
+#
+#   ★ 如果你的账号支持的 model ID 是"s2.1-pro"/"speech-2.1-pro"或者别的写法,
+#     去 Fish Audio 后台 Playground 里看下具体字符串,替换到这里。
+FISH_MODEL = 's2 Pro'
+
 
 # ★ 情绪 → 语速 + 音量映射
 #   Fish Audio 是语音克隆,没有原生情绪合成能力,但可以用 speed+volume 模拟一部分情绪感。
-#   speed:  越大越快(1.0 = 正常)
+#   speed:  越大越快(1.0 = 慢, 1.15 = 参考声, 1.5 = 快)
 #   volume: 相对分贝(0 = 参考声,正数更响,负数更轻)
 #
-#   之前把中文 tag 塞进文字前缀让 Fish 念出来是完全没用的,只会多念几个字。改成这里。
+#   ★ v2 修正:愤怒/激动之类高唤醒情绪必须【快+响】,不是【慢+响】——
+#     慢+响在人耳里是"严肃/凝重/温柔",不是"愤怒"。
+#     和"温柔(1.00, -2)"要拉开明显差距,不然听着都差不多。
 EMOTION_PROSODY = {
     '平静': (1.15, 0),
     '温柔': (1.00, -2),
-    '悲伤': (0.90, -3),
-    '认真': (1.05, 0),
-    '疑惑': (1.10, 0),
-    '开心': (1.25, 1),
-    '调皮': (1.30, 1),
-    '自信': (1.15, 1),
-    '嘲讽': (1.20, 1),
-    '激动': (1.35, 3),
-    '愤怒': (1.05, 4),   # 压着的怒火:稍慢但音量大
+    '悲伤': (0.90, -4),
+    '认真': (1.15, 1),
+    '疑惑': (1.15, 0),
+    '开心': (1.30, 2),
+    '调皮': (1.30, 2),
+    '自信': (1.20, 2),
+    '嘲讽': (1.25, 2),
+    '激动': (1.45, 5),
+    '愤怒': (1.30, 6),   # 明显快 + 明显响,和"温柔"形成 30% 语速差 + 8dB 音量差
 }
 
 
@@ -92,6 +105,7 @@ def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
         headers={
             'Authorization': f'Bearer {FISH_KEY}',
             'Content-Type': 'application/json',
+            'model': FISH_MODEL,   # ★ 指定用哪个模型
         },
         json={
             'text': final_text,
