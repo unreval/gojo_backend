@@ -51,10 +51,30 @@ TTS_TEMPERATURE = 0.4
 TTS_TOP_P       = 0.7
 
 
+# ★ 情绪 → 语速 + 音量映射
+#   Fish Audio 是语音克隆,没有原生情绪合成能力,但可以用 speed+volume 模拟一部分情绪感。
+#   speed:  越大越快(1.0 = 正常)
+#   volume: 相对分贝(0 = 参考声,正数更响,负数更轻)
+#
+#   之前把中文 tag 塞进文字前缀让 Fish 念出来是完全没用的,只会多念几个字。改成这里。
+EMOTION_PROSODY = {
+    '平静': (1.15, 0),
+    '温柔': (1.00, -2),
+    '悲伤': (0.90, -3),
+    '认真': (1.05, 0),
+    '疑惑': (1.10, 0),
+    '开心': (1.25, 1),
+    '调皮': (1.30, 1),
+    '自信': (1.15, 1),
+    '嘲讽': (1.20, 1),
+    '激动': (1.35, 3),
+    '愤怒': (1.05, 4),   # 压着的怒火:稍慢但音量大
+}
+
+
 def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
-    tag = EMOTION_TAGS.get(emotion, '')
-    prefix = '。 '
-    final_text = f'{prefix}{tag} {text}' if tag else f'{prefix}{text}'
+    # ★ 不再往文字里塞 tag —— Fish 会念出来。只保留 "。 " 做暖场,避开首字被切
+    final_text = f'。 {text}'
 
     text_len = len(text)
     if text_len < 15:
@@ -65,6 +85,7 @@ def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
         chunk_length = 200
 
     actual_voice_id = voice_id or FISH_VOICE_ID
+    speed, volume = EMOTION_PROSODY.get(emotion, (1.15, 0))
 
     response = requests.post(
         'https://api.fish.audio/v1/tts',
@@ -82,8 +103,8 @@ def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
             'top_p': TTS_TOP_P,
             'mp3_bitrate': 128,
             'prosody': {
-                'speed': 1.15,
-                'volume': 0,
+                'speed': speed,
+                'volume': volume,
             },
         },
         stream=True,
