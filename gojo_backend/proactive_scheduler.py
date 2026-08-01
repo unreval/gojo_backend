@@ -1,13 +1,17 @@
-"""主动消息常驻排程（第一层：任务汇报）。
+"""主动消息常驻排程 —— 【承诺驱动】版
 
-现阶段关系＝记录员↔被记录，五条按你们约定的时间（默认 00:50）
-主动发一条【任务汇报】——公事性质的报备，不是嘘寒问暖（陌生人阶段不越界）。
+架构变了:
+- 老版本:硬编码每天 00:50 发一条任务汇报,不管什么关系状态
+- 新版本:读 proactive_promise 表,只有【真的存在约定】的用户才收到主动消息
 
-★ 生成时会把【真实当前时间】传给模型，让他知道自己是在深夜/白天报备，话才合时宜。
-★ 每天最多 1 条任务汇报。以后关系变深，再在这里加"问候/想念"等更亲密的主动（另做）。
+具体流程:
+1. Scheduler 每 10 分钟醒来一次
+2. 查 proactive_promise 表里所有【该触发但没触发过】的活跃承诺
+3. 对每条承诺,让 LLM 生成一条 gojo 的话 → 存 proactive_msg + 推送
+4. 标记这条承诺"已触发"(一次性 → is_fired=true;每天 → 更新 last_fired_at)
 
-仿 diary_scheduler：后台常驻线程，每隔一段时间醒来看"到点没"。
-真推送下一轮接；现在生成的消息存进 proactive_msg 表，前端拉 /proactive/pending。
+★ 陌生用户没有承诺 → scheduler 静默跳过,不打扰
+★ 承诺的生成时机由 LLM 判断当时的关系状态,可能非常冷,也可能非常暖
 """
 import threading
 import time
@@ -16,18 +20,12 @@ from config import CN_TZ, ANTHROPIC_KEY
 import anthropic
 
 from characters import get_character
-from user_memory import get_bond_memories, save_short_memory
+from user_memory import get_bond_memories, save_short_memory, get_short_memory
+from character_relations import get_relations_text
 import proactive_msg
+import db_promise
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-# 自用阶段：就你一个人、gojo 一个角色。以后扩展改这里。
-TARGET_USER = 'user_mofpiyd7442ia7'
-REPORT_CHARACTER = 'gojo'
-
-# 约定的汇报时段（按你们聊天记录：半夜 00:50）。到这个点后的一小时内触发一次。
-REPORT_HOUR = 0
-REPORT_MINUTE = 50
 
 _thread = None
 _stop = False
@@ -37,113 +35,171 @@ def _now():
     return datetime.now(CN_TZ)
 
 
-def _today_start():
-    n = _now()
-    return n.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def generate_task_report(character_id, user_id):
-    """让五条生成一条任务汇报，存进 proactive_msg。返回 (id, jp) 或 None。"""
+def generate_from_promise(promise, now):
+    """根据一条 promise,让 gojo 生成他要说的话。存 proactive_msg + 推送。返回 (msg_id, jp) 或 None。"""
     try:
+        character_id = promise['character_id']
+        user_id = promise['user_id']
+        context = promise['context']
+        kind = promise['trigger_kind']
+        origin_text = promise.get('origin_text', '')
+
         char = get_character(character_id)
-        char_name = char['name'] if char else character_id
-        voice_id = char.get('voice_id') if char else None
+        if not char:
+            print(f'[promise] 角色 {character_id} 不存在,跳过 promise #{promise["id"]}')
+            return None
+        char_name = char['name']
+        voice_id = char.get('voice_id')
 
-        now = _now()
-        time_str = now.strftime('%H:%M')
-        hour = now.hour
-        time_hint = '深夜' if (hour < 5 or hour >= 23) else ('清晨' if hour < 9 else ('白天' if hour < 18 else '晚上'))
+        time_str = now.strftime('%Y年%m月%d日 %H:%M')
 
-        # 关系背景：这一层是"陌生人/共事"，公事公办、不嘘寒问暖
-        prompt = f'''你是{char_name}。你和她现在的关系是【工作关系】——她是记录员，负责记录你的任务，你们才刚认识、还不熟。
-你们约好：你做完任务后，主动来跟她【报备任务过程】，她记录。
+        # 拉最近对话给 LLM 一点感觉(判断当前关系状态用)
+        try:
+            shorts = get_short_memory(user_id, 4, character_id)
+            recent = '\n'.join(f'{"她" if r=="user" else "我"}：{c}' for r, c in shorts) if shorts else '(最近没聊)'
+        except Exception:
+            recent = '(拉最近对话失败)'
 
-现在是【{time_str}（{time_hint}）】，你刚结束一个任务，来跟她报备。请生成这条主动消息：
-- 内容：简短讲一下你这次任务的过程/见闻/结果（你是最强咒术师，任务多是降咒、出勤这类，可以有具体的场面或吐槽）。
-- 语气：【公事公办 + 你本来的慵懒调侃】。是"跟记录员报备工作"，【不是】关心她、不嘘寒问暖、不说"早点睡"这类话——你们还不熟，别越界。
-- 贴合当前时间：现在是{time_hint}（{time_str}），如果是深夜，可以自然带一句"这个点还来报备"之类，但别去关心她作息。
-- 长度：1-2 句，简短自然，像随手发的消息。
+        # 关系背景
+        try:
+            bonds = get_bond_memories(user_id, character_id, kind='between', limit=6)
+            bond_text = '\n'.join(f'- {b[1]}' for b in bonds) if bonds else '(还没什么共同的事)'
+        except Exception:
+            bond_text = '(拉共同经历失败)'
 
-只输出严格 JSON 一行：{{"jp":"日语","zh":"中文翻译","emotion":"情绪"}}
-emotion 选：平静/自信/调皮/认真'''
+        # 角色重要人物表
+        relations_block = get_relations_text(character_id)
+        relations_intro = (f'\n{relations_block}\n' if relations_block else '')
+
+        # ★ 关键:告诉 LLM 这个是【你之前答应过的事】,现在到点了,你要不要开口说,
+        #   完全按你【当前对她的态度】决定。
+        prompt = f'''你是{char_name}。现在是 {time_str}。
+
+【★ 触发场景】
+之前的对话里,你答应过 / 记下了这件事:
+「{context}」
+{f"(她当时的原话大致是: 「{origin_text}」)" if origin_text else ""}
+
+现在到了这个时刻,你【可能】要主动开口说点什么。
+{relations_intro}
+【你们最近聊过什么】
+{recent}
+
+【你们之间累计的事】
+{bond_text}
+
+【★ 你要判断】
+根据当前你对她的真实态度(读上面的记忆),你要不要说、说什么、怎么说:
+- 关系深、有感情积累 → 你可能会自然带上关心("加油"、"别紧张")
+- 关系还浅、公事化 → 简短提醒一下就好,不越界
+- 你对她反感 / 完全陌生 → 你可以选择【什么都不说】,输出 {{"skip": true, "reason": "..."}}
+  (关系浅 + 只是普通承诺时,尤其可能选择跳过,或者只说非常冷的一句)
+
+【铁律】
+- 你的措辞由【当前记忆里的关系】决定,不是由这条承诺当初的语气决定
+- 不要为了"温暖"而暖,不要为了"冷淡"而冷 —— 按此刻真实的你
+- 【严禁】"付き合ってやった"这种傲娇陪伴腔,更不要"陪你一会儿"这类
+- 不熟就短,别脑补场景细节
+
+【输出格式(严格 JSON,一行)】
+如果你决定说 → {{"jp":"日语","zh":"中文","emotion":"情绪"}}
+如果决定跳过 → {{"skip": true, "reason": "简要原因"}}
+emotion 选: 平静/自信/调皮/认真/温柔/冷淡'''
 
         resp = claude_client.messages.create(
             model='claude-haiku-4-5-20251001',
-            max_tokens=300,
+            max_tokens=400,
             messages=[{'role': 'user', 'content': prompt}],
         )
         raw = resp.content[0].text.strip()
         from utils import extract_json
         parsed = extract_json(raw)
-        if not parsed or not parsed.get('jp'):
-            print(f'[proactive] 任务汇报解析失败：{raw[:80]}')
+        if not parsed:
+            print(f'[promise] #{promise["id"]} 解析失败: {raw[:80]}')
             return None
 
-        jp = parsed['jp'].strip()
-        zh = parsed.get('zh', '').strip()
-        emotion = parsed.get('emotion', '平静')
+        if parsed.get('skip'):
+            reason = parsed.get('reason', '')
+            print(f'[promise] #{promise["id"]} gojo 决定跳过: {reason}')
+            # 无论 once/daily,都 mark 一下,避免这个 tick 反复触发
+            db_promise.mark_fired(promise['id'], now)
+            return None
 
-        # 合成语音（跟正常消息一致，前端能点重播）
+        jp = (parsed.get('jp') or '').strip()
+        zh = (parsed.get('zh') or '').strip()
+        emotion = parsed.get('emotion', '平静')
+        if not jp:
+            print(f'[promise] #{promise["id"]} jp 为空,跳过')
+            return None
+
+        # 合成语音
         audio_b64 = ''
         try:
             from tts import tts_to_b64
             audio_b64 = tts_to_b64(jp, emotion, voice_id) or ''
-        except Exception:
-            pass
+        except Exception as e:
+            print(f'[promise] TTS 出错: {e}')
 
+        # 存 proactive_msg (kind 用 'promise' 区分)
         mid, ts = proactive_msg.add_proactive_msg(
-            character_id, user_id, 'report', jp, zh, emotion, audio_b64, created_at=now
+            character_id, user_id, 'promise', jp, zh, emotion, audio_b64, created_at=now
         )
-        print(f'[proactive] ✅ {character_id} 主动汇报 #{mid}：{jp[:40]}')
+        print(f'[promise] ✅ #{promise["id"]} → msg #{mid}: {jp[:40]}')
 
-        # ★ 关键:也塞进 short_memory,让 LLM 下次聊天时知道"我刚才已经报备过了"
-        #   不然会出现"报备了 + 又说'谁规定我要报备的'"这种自相矛盾
+        # 也塞短记忆,避免上下文异常
         try:
             save_short_memory(user_id, 'assistant', jp, character_id)
-        except Exception as _e:
-            print(f'[proactive] 写 short_memory 跳过:{_e}')
+        except Exception as e:
+            print(f'[promise] 写 short_memory 跳过: {e}')
 
-        # ★ 推送到手机(app 关着也能收到)
+        # 推送
         try:
             import push_notify
             push_notify.push_to_user(
                 user_id,
-                title=char_name if char else '五条悟',
-                body=zh or jp,   # 通知栏显示中文（没有就日文）
-                data={'type': 'proactive', 'character_id': character_id},
+                title=char_name,
+                body=zh or jp,
+                data={'type': 'proactive', 'character_id': character_id, 'promise_id': promise['id']},
             )
-        except Exception as _e:
-            print(f'[proactive] 推送跳过：{_e}')
+        except Exception as e:
+            print(f'[promise] 推送跳过: {e}')
 
+        # 标记已触发
+        db_promise.mark_fired(promise['id'], now)
         return mid, jp
+
     except Exception as e:
-        print(f'[proactive] 生成任务汇报出错：{e}')
+        print(f'[promise] 生成出错: {e}')
         return None
 
 
-def _maybe_report():
-    """到了约定时段、且今天还没发过，就发一条任务汇报。"""
+def _tick():
+    """一次扫描,把该触发的 promise 全部处理掉。"""
     now = _now()
-    # 只在 [REPORT_HOUR:REPORT_MINUTE, +1 小时) 这个窗口内触发
-    target = now.replace(hour=REPORT_HOUR, minute=REPORT_MINUTE, second=0, microsecond=0)
-    delta_min = (now - target).total_seconds() / 60
-    if not (0 <= delta_min < 60):
+    try:
+        due = db_promise.get_due_promises(now)
+    except Exception as e:
+        print(f'[promise] 查 due 出错: {e}')
         return
-    # 今天已发过就不再发
-    if proactive_msg.count_reports_since(REPORT_CHARACTER, TARGET_USER, _today_start()) >= 1:
+    if not due:
         return
-    generate_task_report(REPORT_CHARACTER, TARGET_USER)
+    print(f'[promise] tick: 有 {len(due)} 条到期')
+    for p in due:
+        try:
+            generate_from_promise(p, now)
+        except Exception as e:
+            print(f'[promise] 处理 #{p["id"]} 出错: {e}')
 
 
 def _loop():
     global _stop
-    time.sleep(90)  # 启动后稍等，别和其它初始化抢
+    time.sleep(90)  # 启动后稍等,别抢初始化
     while not _stop:
         try:
-            _maybe_report()
+            _tick()
         except Exception as e:
-            print(f'[proactive] tick 出错：{e}')
-        time.sleep(600)  # 每 10 分钟检查一次是否到点
+            print(f'[promise] tick 出错: {e}')
+        time.sleep(600)  # 每 10 分钟检查一次
 
 
 def start_proactive_scheduler():
@@ -152,4 +208,4 @@ def start_proactive_scheduler():
         return
     _thread = threading.Thread(target=_loop, daemon=True)
     _thread.start()
-    print('[proactive] 主动汇报排程已启动（每天约定时段发一条任务报备）')
+    print('[promise] 承诺驱动的主动排程已启动')

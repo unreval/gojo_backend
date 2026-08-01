@@ -35,6 +35,7 @@ from route_diary import router as diary_router
 from db_diary import init_diary_tables
 from route_proactive import router as proactive_router
 from proactive_msg import init_proactive_table
+from db_promise import init_promise_table
 from push_notify import init_push_table
 from route_accounting import router as accounting_router
 from route_stats import router as stats_router
@@ -55,6 +56,7 @@ init_bond_table()
 init_period_table()
 init_diary_tables()
 init_proactive_table()
+init_promise_table()   # ★ 承诺表(承诺驱动的主动消息)
 init_push_table()
 memory_search.init_vector_support()
 seed_gojo_character()

@@ -309,6 +309,38 @@ async def chat_text(data: dict):
     # ★ 记账透传（只透传给前端,不写库；前端确认卡引导用户核对账户后 POST /accounting/records）
     pending_tx = _extract_pending_tx(result, user_id, tag='chat')
 
+    # ★ 承诺处理:LLM 决定"以后要主动开口"时,存到 proactive_promise 表,scheduler 到时候触发
+    saved_promise = None
+    if result.get('proactive_promise'):
+        try:
+            import db_promise
+            from datetime import datetime as _dt
+            pp = result['proactive_promise']
+            kind = pp.get('trigger_kind')
+            context_ = (pp.get('context') or '').strip()
+            if kind == 'once' and pp.get('trigger_at') and context_:
+                # 解析 YYYY-MM-DD HH:MM
+                trigger_at = _dt.strptime(pp['trigger_at'], '%Y-%m-%d %H:%M')
+                pid = db_promise.add_promise(
+                    character_id=character_id, user_id=user_id,
+                    trigger_kind='once', trigger_at=trigger_at,
+                    context=context_, origin_text=user_text[:200]
+                )
+                saved_promise = {'id': pid, 'kind': 'once', 'trigger_at': pp['trigger_at'], 'context': context_}
+                print(f'[{user_id}] 🤝 记下承诺 #{pid} once @ {pp["trigger_at"]}: {context_}')
+            elif kind == 'daily' and pp.get('trigger_time') and context_:
+                pid = db_promise.add_promise(
+                    character_id=character_id, user_id=user_id,
+                    trigger_kind='daily', trigger_time=pp['trigger_time'],
+                    context=context_, origin_text=user_text[:200]
+                )
+                saved_promise = {'id': pid, 'kind': 'daily', 'trigger_time': pp['trigger_time'], 'context': context_}
+                print(f'[{user_id}] 🤝 记下承诺 #{pid} daily @ {pp["trigger_time"]}: {context_}')
+            else:
+                print(f'[{user_id}] proactive_promise 字段不全,跳过:{pp}')
+        except Exception as e:
+            print(f'[{user_id}] proactive_promise 保存失败:{e}')
+
     resp = {'emotion': emotion, 'messages': msgs, 'total_days': total_days}
     if reminder_data:
         resp['reminder'] = reminder_data
@@ -316,6 +348,8 @@ async def chat_text(data: dict):
         resp['cancelled_tasks'] = cancelled_tasks
     if pending_tx:
         resp['pending_transaction'] = pending_tx
+    if saved_promise:
+        resp['saved_promise'] = saved_promise
     return JSONResponse(resp)
 
 
@@ -651,14 +685,22 @@ async def chat_voice_proactive(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     if mode == 'greeting':
-        trigger = ('【系统：电话刚接通。请顺着你们刚才在文字里聊的内容（见上方对话历史），'
-                   '像真的接起电话一样自然主动开口——把刚才的话题接上，或随口关心一句。'
-                   '1-2句，简短自然。如果之前没怎么聊过，就用你的风格随意打个招呼。】')
+        trigger = ('【系统:电话刚接通。'
+                   '按你此刻对她的【真实态度】开口——不是"客服接通"式打招呼,不是默认关心。'
+                   '如果记忆里你们【几乎不认识】(短记忆里没什么东西),你的反应应该像"陌生人突然打进来电话"——警觉/不解/追问"是谁""什么事",按你的人设自然反应。'
+                   '如果之前刚吵过、刚被冒犯过、话题正憋着气,那就【带着那股气】开口,不要装没事。'
+                   '如果之前聊得正常,就顺着上一句自然接下去(别复述)。'
+                   '1-2 句,自然口语。'
+                   '★ 严禁默认"想听你声音"/"来了啊"/"怎么打过来了想我了"这类熟人调情腔——除非你们真的到那一步。】')
         scene = '''
 
 【★ 语音通话·接通开场】
-你刚接起和对方的电话。主动开口，自然口语化，1-2句。
-如果上方有刚才的聊天内容，就顺着那个话题接上去（别一字不差地重复，像继续聊）。'''
+你刚接起对方的电话。你的【第一反应】完全取决于:
+1. 记忆里你们是什么关系?(陌生 / 有过几次接触 / 熟 / 亲近)
+2. 上一次对话是什么气氛?(和平 / 有摩擦 / 你还带着气 / 温和收线)
+
+按这两点决定开口方式,不要走"接电话默认打招呼"的自动化剧本。
+1-2 句,自然口语。'''
         n_recent = 6
     elif mode == 'missed' or silence_seconds > 60:
         trigger = '【系统：对方已经很久没说话了，可能在发呆或者走神了。你主动问她在干嘛，语气慵懒带点调侃，一两句就好。】'
