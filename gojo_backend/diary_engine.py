@@ -11,6 +11,7 @@ import anthropic
 from characters import get_character
 from user_memory import get_bond_memories, get_short_memory, get_long_memory, get_first_interaction_days
 from character_relations import get_relations_text
+from shared_relation_prompt import build_relation_rules
 import db_diary
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -66,15 +67,22 @@ def generate_char_diary(character_id, user_id, topic=None):
             topic_hint = f'\n\n【今天有件事你想记下来】\n{topic}\n就着这件事写你此刻的真实心情（还是你自己的视角、你的语气）。'
 
         now = datetime.now(CN_TZ)
-        today_str = now.strftime('%Y年%m月%d日')
-        hour = now.hour
-        time_hint = '深夜' if hour < 5 or hour >= 23 else ('清晨' if hour < 9 else ('白天' if hour < 18 else '晚上'))
+        # ★ 用具体钟点,不再用"深夜"这种模糊描述——LLM 拿到"深夜"就会脑补"凌晨三点"
+        today_str = now.strftime('%Y年%m月%d日 %H:%M')
 
         # ★ 该角色世界里的重要人物,写日记时正确写出身份,别搞混
         relations_block = get_relations_text(character_id)
         relations_intro = (f'\n{relations_block}\n' if relations_block else '')
 
-        prompt = f'''你是{char_name}。现在是{today_str}的{time_hint}，你在写一篇只属于自己的日记——没人会读到（你以为）。
+        # ★ 关系判断规则(A~G 段) —— 和 chat prompt 共享,防止 gojo 在聊天和日记里人格分裂
+        relation_rules_block = build_relation_rules(first_days, bond_count, fact_count)
+
+        prompt = f'''你是{char_name}。现在是{today_str},你在写一篇只属于自己的日记——没人会读到(你以为)。
+
+⚠️ 【★ 时间铁律】此刻是【{today_str}】。写日记时如果要提到时间,以这个为准。
+- 如果要说"昨晚""刚才""今早",按这个当前时间去回推
+- 【不要凭"深夜"两个字自己脑补"凌晨三点"这种具体钟点】——除非记忆里明确写了那个时间
+- 引用记忆里的时间时,用【记忆里带的时间标签】(比如"【今天20:47】"),别自己造
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【★ 主语规则——铁律,必须遵守】
@@ -87,6 +95,7 @@ def generate_char_diary(character_id, user_id, topic=None):
 日记是第一人称写给自己看的,不是新闻报道,不是第三视角小说。
 你的名字这两个字【绝对不能】在日记正文里出现——你是那个"我"。
 {relations_intro}
+{relation_rules_block}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【★ 动笔前必读——关于"她"在你心里到底算什么】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
