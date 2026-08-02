@@ -57,6 +57,24 @@ def _create_json(model, max_tokens, system_blocks, messages):
     return raw, response
 
 
+def _msg_has_json_debris(m: dict) -> bool:
+    """检测消息 dict 里的 jp/zh 是否含 JSON 结构残骸(如 `","messages":"jp":"`)。
+    True = 消息脏了,不该用。用于所有 LLM 消息数组验证。"""
+    jp = str(m.get('jp', ''))
+    zh = str(m.get('zh', ''))
+    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"'):
+        if kw in jp or kw in zh:
+            return True
+    return False
+
+
+def _valid_msg(m: dict) -> bool:
+    """统一验证:jp/zh 都非空 + 没 JSON 残骸。"""
+    if not str(m.get('jp', '')).strip() or not str(m.get('zh', '')).strip():
+        return False
+    return not _msg_has_json_debris(m)
+
+
 def _parse_reply(raw: str):
     """把模型回复解析成 JSON。
     先用 extract_json；失败就宽松地从第一个 { 抠到最后一个 } 再解析——
@@ -85,8 +103,20 @@ def _salvage_japanese(raw: str):
     import re
     if not raw:
         return None
-    # 去掉可能的 JSON 残骸/代码块符号/花括号碎片
     text = raw.strip().strip('`').strip()
+
+    # ★ 强化:如果原文里出现【多个】JSON 字段名残骸,说明这是【JSON 结构坏了】,
+    #   不能当"纯日语"救,否则会把 `调皮","messages":"jp":"...` 直接塞给用户看
+    #   (那种脏数据比默认兜底更糟)
+    json_field_hits = 0
+    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"'):
+        if kw in text:
+            json_field_hits += 1
+    if json_field_hits >= 2:
+        # 2 个及以上字段名残骸 = 明显是坏 JSON 泄露,不救
+        print(f'[salvage] 检测到 JSON 结构泄露({json_field_hits} 个字段名),放弃救援')
+        return None
+
     text = re.sub(r'^\s*\{?\s*"?(emotion|messages|jp|zh)"?\s*:?', '', text)
     text = text.replace('{', '').replace('}', '').replace('[', '').replace(']', '').strip()
     text = text.strip('"\'，, 。').strip()
@@ -95,9 +125,13 @@ def _salvage_japanese(raw: str):
     # 必须含有假名/日文汉字，才认为是"他真说了话"，否则宁可走兜底
     if not re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', text):
         return None
+    # ★ 再一次防御:救援后的文本里如果还包含 `"jp":`、`"zh":`、`"emotion"` 这些残骸,也算失败
+    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"'):
+        if kw in text:
+            print(f'[salvage] 救援后仍含 JSON 残骸 {kw},放弃')
+            return None
     # 截断过长的（避免把一堆乱码全塞进去）
     jp = text[:200].strip()
-    # ★ 补一次中文翻译（之前留空 zh 导致"没中文字幕"）。用 Haiku 快、便宜。
     zh = _quick_translate(jp)
     return {'jp': jp, 'zh': zh}
 
@@ -182,7 +216,7 @@ async def chat_text(data: dict):
                 last_raw = raw
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
+                if all(_valid_msg(m) for m in parsed['messages']):
                     result = parsed
                     break
         except Exception as e:
@@ -402,7 +436,7 @@ async def chat_story(data: dict):
             print(f'[story] attempt {attempt+1}: {raw[:120]}...')
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
+                if all(_valid_msg(m) for m in parsed['messages']):
                     result = parsed
                     break
         except Exception as e:
@@ -483,8 +517,9 @@ async def chat_proactive(data: dict):
             log_cache_usage(f'proactive:{character_id}', response)
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                result = parsed
-                break
+                if all(_valid_msg(m) for m in parsed['messages']):
+                    result = parsed
+                    break
         except Exception as e:
             print(f'[proactive] attempt {attempt+1} error: {e}')
 
@@ -552,8 +587,9 @@ async def chat_voice_text(data: dict):
             log_cache_usage(f'voice:{character_id}', response)
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                result = parsed
-                break
+                if all(_valid_msg(m) for m in parsed['messages']):
+                    result = parsed
+                    break
         except Exception as e:
             print(f'[voice_text] attempt {attempt+1} error: {e}')
 
@@ -625,7 +661,7 @@ async def chat_voice_story(data: dict):
             log_cache_usage(f'voice_story:{character_id}', response)
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 3:
-                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
+                if all(_valid_msg(m) for m in parsed['messages']):
                     result = parsed
                     break
         except Exception as e:
@@ -740,8 +776,9 @@ async def chat_voice_proactive(data: dict):
             log_cache_usage(f'voice_proactive:{character_id}', response)
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                result = parsed
-                break
+                if all(_valid_msg(m) for m in parsed['messages']):
+                    result = parsed
+                    break
         except Exception as e:
             print(f'[voice_proactive] attempt {attempt+1} error: {e}')
 
