@@ -11,6 +11,7 @@ import {
   ActivityIndicator, Alert, Dimensions, Keyboard, Modal, Platform, RefreshControl,
   ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context'; // ★ 底部三键 / 手势条适配
 import { SERVER_URL } from '../../constants/theme';
 
 const FIXED_USER_ID = 'user_mofpiyd7442ia7';
@@ -51,7 +52,8 @@ export default function MyDiaryScreen() {
   const router = useRouter();
   const [fontsLoaded] = useFonts({ [HAND]: require('../../assets/fonts/LongCang-Regular.ttf') });
   const hand = fontsLoaded ? { fontFamily: HAND } : {};
-  const kbH = useKeyboardHeight();   // ★ 供三个 modal 共用
+  const kbH = useKeyboardHeight();
+  const insets = useSafeAreaInsets();   // ★ 底部三键 / 手势条   // ★ 供三个 modal 共用
 
   const [bookTitle, setBookTitle] = useState('我的日记');
   const [diaries, setDiaries] = useState<UserDiary[]>([]);
@@ -245,7 +247,7 @@ export default function MyDiaryScreen() {
       {/* 写日记 —— ★ 键盘弹起时整个 modalCard 上抬 */}
       <Modal visible={showWrite} animationType="slide" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={[s.modalCard, { marginBottom: kbH }]}>
+          <View style={[s.modalCard, { marginBottom: Math.max(kbH, insets.bottom) }]}>
             <Text style={s.modalTitle}>写日记</Text>
             <TextInput
               style={[s.modalInput, s.writeArea, hand]} value={content} onChangeText={setContent}
@@ -278,7 +280,7 @@ export default function MyDiaryScreen() {
       {/* 改书名 —— ★ 同款键盘上抬 */}
       <Modal visible={renaming} animationType="fade" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={[s.modalCard, { marginBottom: kbH }]}>
+          <View style={[s.modalCard, { marginBottom: Math.max(kbH, insets.bottom) }]}>
             <Text style={s.modalTitle}>给这本日记改个名</Text>
             <TextInput
               style={[s.modalInput, { minHeight: 0 }]} value={newTitle} onChangeText={setNewTitle}
@@ -299,7 +301,7 @@ export default function MyDiaryScreen() {
       {/* 改密码 —— ★ 同款键盘上抬 */}
       <Modal visible={!!pwModalFor} animationType="fade" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={[s.modalCard, { marginBottom: kbH }]}>
+          <View style={[s.modalCard, { marginBottom: Math.max(kbH, insets.bottom) }]}>
             <Text style={s.modalTitle}>设置密码</Text>
             <TextInput
               style={[s.modalInput, { minHeight: 0 }]} value={newPw} onChangeText={setNewPw}

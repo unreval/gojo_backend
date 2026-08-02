@@ -11,6 +11,7 @@ import {
   Modal, Platform, RefreshControl,
   ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context'; // ★ 底部三键 / 手势条适配
 import { SERVER_URL } from '../../constants/theme';
 
 const FIXED_USER_ID = 'user_mofpiyd7442ia7';
@@ -57,6 +58,7 @@ export default function HisDiaryScreen() {
   const cid = (rawCid || 'gojo') as string;
   const router = useRouter();
   const kbH = useKeyboardHeight();
+  const insets = useSafeAreaInsets();   // ★ 底部三键 / 手势条
 
   const [fontsLoaded] = useFonts({ [HAND]: require('../../assets/fonts/LongCang-Regular.ttf') });
 
@@ -223,7 +225,7 @@ export default function HisDiaryScreen() {
       {/* 留言 —— ★ 键盘弹起时整个 modalCard 上抬 */}
       <Modal visible={!!commentFor} animationType="slide" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={[s.modalCard, { marginBottom: kbH }]}>
+          <View style={[s.modalCard, { marginBottom: Math.max(kbH, insets.bottom) }]}>
             <Text style={s.modalTitle}>给这篇日记留言</Text>
             {commentFor && <Text style={[s.modalQuote, hand]} numberOfLines={2}>「{commentFor.content}」</Text>}
             <TextInput
@@ -245,7 +247,7 @@ export default function HisDiaryScreen() {
       {/* 改名 —— ★ 同款键盘上抬 */}
       <Modal visible={renaming} animationType="fade" transparent statusBarTranslucent>
         <View style={s.modalBackdrop}>
-          <View style={[s.modalCard, { marginBottom: kbH }]}>
+          <View style={[s.modalCard, { marginBottom: Math.max(kbH, insets.bottom) }]}>
             <Text style={s.modalTitle}>给这本日记改个名</Text>
             <TextInput
               style={s.modalInput} value={newTitle} onChangeText={setNewTitle}

@@ -1,19 +1,42 @@
 // app/(tabs)/accounting.tsx — 记账页(账户系统 + 后端持久化 + 转账 + 五条悟短评)
+// ★ v2 修复:两个 modal 里的输入被键盘遮挡的问题
+//   —— 手动监听键盘高度,给 modalBox 加 marginBottom,MIUI 也稳
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform,
+  ActivityIndicator, Alert, Dimensions, Keyboard, Modal, Platform,
   Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput,
   TouchableOpacity, View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context'; // ★ 底部三键 / 手势条适配
 import ChibiSprite from '../../components/ChibiSprite';
 import { C, CATEGORIES, SERVER_URL } from '../../constants/theme';
 
 const USER_ID_KEY  = 'gojo_user_id';
 const INSIGHT_CACHE_KEY = 'gojo_accounting_insight_v1';
 const INSIGHT_TTL_MS    = 30 * 60 * 1000;   // 30 分钟内不重复请求
+
+// ══════════════════════════════════════════════
+//  ★ 键盘高度 hook —— 手动监听,MIUI 上比 KeyboardAvoidingView 靠谱得多
+// ══════════════════════════════════════════════
+function useKeyboardHeight() {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    const screenH = Dimensions.get('window').height;
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvt, e => {
+      const screenY = e.endCoordinates.screenY ?? 0;
+      const reportedH = e.endCoordinates.height ?? 0;
+      setH(screenY > 0 ? Math.max(screenH - screenY, reportedH) : reportedH);
+    });
+    const hideSub = Keyboard.addListener(hideEvt, () => setH(0));
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, []);
+  return h;
+}
 
 // ══════════════════════════════════════════════
 //  类型
@@ -350,6 +373,8 @@ function AddRecordModal({
   accounts: Account[]; userId: string;
   defaultAccountId: number | null; onSaved: () => void;
 }) {
+  const kbH = useKeyboardHeight();
+  const insets = useSafeAreaInsets();   // ★ 底部三键 / 手势条   // ★ 键盘高度
   const [mode, setMode] = useState<AddMode>('out');
   const [amount, setAmount] = useState('');
   const [desc, setDesc]     = useState('');
@@ -417,112 +442,115 @@ function AddRecordModal({
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.overlay}>
+      <View style={s.overlay}>
         <Pressable style={{ flex: 1 }} onPress={onClose} />
-        <View style={s.modalBox}>
+        {/* ★ marginBottom: Math.max(kbH, insets.bottom) —— 键盘弹起时整个 modal 上抬 */}
+        <View style={[s.modalBox, { marginBottom: Math.max(kbH, insets.bottom), maxHeight: '85%' }]}>
           <Text style={s.modalTitle}>添加记录</Text>
 
-          {/* 支出/收入/转账 切换 */}
-          <View style={s.modeSwitch}>
-            {([
-              { key: 'out',      label: '支出', color: C.expense },
-              { key: 'in',       label: '收入', color: C.income  },
-              { key: 'transfer', label: '转账', color: C.accent  },
-            ] as const).map(m => (
-              <TouchableOpacity key={m.key}
-                style={[s.modeBtn, mode === m.key && { backgroundColor: m.color }]}
-                onPress={() => setMode(m.key)}>
-                <Text style={[s.modeText, mode === m.key && { color: '#fff' }]}>{m.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            {/* 支出/收入/转账 切换 */}
+            <View style={s.modeSwitch}>
+              {([
+                { key: 'out',      label: '支出', color: C.expense },
+                { key: 'in',       label: '收入', color: C.income  },
+                { key: 'transfer', label: '转账', color: C.accent  },
+              ] as const).map(m => (
+                <TouchableOpacity key={m.key}
+                  style={[s.modeBtn, mode === m.key && { backgroundColor: m.color }]}
+                  onPress={() => setMode(m.key)}>
+                  <Text style={[s.modeText, mode === m.key && { color: '#fff' }]}>{m.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
 
-          <TextInput style={s.modalInput}
-            placeholder="金额" placeholderTextColor={C.textMute}
-            value={amount} onChangeText={setAmount}
-            keyboardType="decimal-pad" />
-
-          {mode !== 'transfer' && (
             <TextInput style={s.modalInput}
-              placeholder="描述(如:奶茶)" placeholderTextColor={C.textMute}
-              value={desc} onChangeText={setDesc} />
-          )}
+              placeholder="金额" placeholderTextColor={C.textMute}
+              value={amount} onChangeText={setAmount}
+              keyboardType="decimal-pad" />
 
-          {mode !== 'transfer' && mode === 'out' && (
-            <>
-              <Text style={s.modalLabel}>分类</Text>
-              <View style={s.chipRow}>
-                {CATEGORIES.filter(c => c !== '收入').map(c => (
-                  <TouchableOpacity key={c}
-                    style={[s.chip, category === c && s.chipActive]}
-                    onPress={() => setCategory(c)}>
-                    <Text style={[s.chipText, category === c && s.chipTextActive]}>{c}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </>
-          )}
-
-          <Text style={s.modalLabel}>{mode === 'transfer' ? '转出账户' : '账户'}</Text>
-          <View style={s.chipRow}>
-            {accounts.map(a => (
-              <TouchableOpacity key={a.id}
-                style={[s.chip, accountId === a.id && s.chipActive]}
-                onPress={() => setAccountId(a.id)}>
-                <Text style={[s.chipText, accountId === a.id && s.chipTextActive]}>
-                  {a.icon} {a.name}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {mode === 'transfer' && (
-            <>
-              <Text style={s.modalLabel}>转入账户</Text>
-              <View style={s.chipRow}>
-                {accounts.filter(a => a.id !== accountId).map(a => (
-                  <TouchableOpacity key={a.id}
-                    style={[s.chip, toAccountId === a.id && s.chipActive]}
-                    onPress={() => setToAccountId(a.id)}>
-                    <Text style={[s.chipText, toAccountId === a.id && s.chipTextActive]}>
-                      {a.icon} {a.name}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+            {mode !== 'transfer' && (
               <TextInput style={s.modalInput}
-                placeholder="备注(可选)" placeholderTextColor={C.textMute}
+                placeholder="描述(如:奶茶)" placeholderTextColor={C.textMute}
                 value={desc} onChangeText={setDesc} />
-            </>
-          )}
+            )}
 
-          {/* 日期时间 */}
-          <View style={s.dateTimeRow}>
-            <View style={{ flex: 2 }}>
-              <Text style={s.modalLabel}>日期</Text>
-              <TextInput style={s.modalInput} value={date} onChangeText={setDate}
-                placeholder="YYYY-MM-DD" placeholderTextColor={C.textMute} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={s.modalLabel}>时间</Text>
-              <TextInput style={s.modalInput} value={time} onChangeText={setTime}
-                placeholder="HH:MM" placeholderTextColor={C.textMute} />
-            </View>
-          </View>
+            {mode !== 'transfer' && mode === 'out' && (
+              <>
+                <Text style={s.modalLabel}>分类</Text>
+                <View style={s.chipRow}>
+                  {CATEGORIES.filter(c => c !== '收入').map(c => (
+                    <TouchableOpacity key={c}
+                      style={[s.chip, category === c && s.chipActive]}
+                      onPress={() => setCategory(c)}>
+                      <Text style={[s.chipText, category === c && s.chipTextActive]}>{c}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </>
+            )}
 
-          <View style={s.btnRow}>
-            <TouchableOpacity style={s.cancelBtn} onPress={onClose}>
-              <Text style={s.cancelText}>取消</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[s.confirmBtn, (!canSubmit || busy) && { opacity: 0.4 }]}
-              disabled={!canSubmit || busy}
-              onPress={onSubmit}>
-              <Text style={s.confirmText}>{busy ? '保存中...' : '确定'}</Text>
-            </TouchableOpacity>
-          </View>
+            <Text style={s.modalLabel}>{mode === 'transfer' ? '转出账户' : '账户'}</Text>
+            <View style={s.chipRow}>
+              {accounts.map(a => (
+                <TouchableOpacity key={a.id}
+                  style={[s.chip, accountId === a.id && s.chipActive]}
+                  onPress={() => setAccountId(a.id)}>
+                  <Text style={[s.chipText, accountId === a.id && s.chipTextActive]}>
+                    {a.icon} {a.name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {mode === 'transfer' && (
+              <>
+                <Text style={s.modalLabel}>转入账户</Text>
+                <View style={s.chipRow}>
+                  {accounts.filter(a => a.id !== accountId).map(a => (
+                    <TouchableOpacity key={a.id}
+                      style={[s.chip, toAccountId === a.id && s.chipActive]}
+                      onPress={() => setToAccountId(a.id)}>
+                      <Text style={[s.chipText, toAccountId === a.id && s.chipTextActive]}>
+                        {a.icon} {a.name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <TextInput style={s.modalInput}
+                  placeholder="备注(可选)" placeholderTextColor={C.textMute}
+                  value={desc} onChangeText={setDesc} />
+              </>
+            )}
+
+            {/* 日期时间 */}
+            <View style={s.dateTimeRow}>
+              <View style={{ flex: 2 }}>
+                <Text style={s.modalLabel}>日期</Text>
+                <TextInput style={s.modalInput} value={date} onChangeText={setDate}
+                  placeholder="YYYY-MM-DD" placeholderTextColor={C.textMute} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={s.modalLabel}>时间</Text>
+                <TextInput style={s.modalInput} value={time} onChangeText={setTime}
+                  placeholder="HH:MM" placeholderTextColor={C.textMute} />
+              </View>
+            </View>
+
+            <View style={s.btnRow}>
+              <TouchableOpacity style={s.cancelBtn} onPress={onClose}>
+                <Text style={s.cancelText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.confirmBtn, (!canSubmit || busy) && { opacity: 0.4 }]}
+                disabled={!canSubmit || busy}
+                onPress={onSubmit}>
+                <Text style={s.confirmText}>{busy ? '保存中...' : '确定'}</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
         </View>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }
@@ -536,6 +564,8 @@ function AccountsManageModal({
   visible: boolean; onClose: () => void;
   accounts: Account[]; userId: string; onChanged: () => void;
 }) {
+  const kbH = useKeyboardHeight();
+  const insets = useSafeAreaInsets();   // ★ 底部三键 / 手势条   // ★ 键盘高度
   const [name, setName] = useState('');
   const [balance, setBalance] = useState('');
   const [icon, setIcon] = useState('💰');
@@ -592,12 +622,13 @@ function AccountsManageModal({
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.overlay}>
+      <View style={s.overlay}>
         <Pressable style={{ flex: 1 }} onPress={onClose} />
-        <View style={[s.modalBox, { maxHeight: '85%' }]}>
+        {/* ★ marginBottom: Math.max(kbH, insets.bottom) —— 键盘弹起时整个 modal 上抬 */}
+        <View style={[s.modalBox, { marginBottom: Math.max(kbH, insets.bottom), maxHeight: '85%' }]}>
           <Text style={s.modalTitle}>{editingId ? '编辑账户' : '添加账户'}</Text>
 
-          <ScrollView>
+          <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
             <TextInput style={s.modalInput}
               placeholder="账户名(如:现金、支付宝、银行卡)"
               placeholderTextColor={C.textMute}
@@ -657,13 +688,13 @@ function AccountsManageModal({
                 ))}
               </>
             )}
-          </ScrollView>
 
-          <TouchableOpacity onPress={onClose} style={{ marginTop: 12, alignItems: 'center' }}>
-            <Text style={{ color: C.textDim }}>关闭</Text>
-          </TouchableOpacity>
+            <TouchableOpacity onPress={onClose} style={{ marginTop: 12, alignItems: 'center', paddingVertical: 8 }}>
+              <Text style={{ color: C.textDim }}>关闭</Text>
+            </TouchableOpacity>
+          </ScrollView>
         </View>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }

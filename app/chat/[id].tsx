@@ -38,6 +38,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context'; // ★ 底部三键 / 手势条适配
 import PendingTransactionCard, { Account as AcctType } from '../../components/PendingTransactionCard'; // ★ 记账确认卡
 import VoiceCallModal from '../../components/VoiceCallModal';
 import { C, SERVER_URL, nowTime } from '../../constants/theme';
@@ -115,6 +116,7 @@ function formatToday(): string {
 export default function ChatRoom() {
   const { id: rawId } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();   // ★ 三键 / 手势条 / 刘海 底部安全区
 
   const chatId = (rawId || '') as string;
   const isGroup = chatId.startsWith('group_');
@@ -1420,7 +1422,7 @@ export default function ChatRoom() {
         </View>
       )}
 
-      <View style={[s.inputBar, { marginBottom: keyboardHeight }]}>
+      <View style={[s.inputBar, { marginBottom: Math.max(keyboardHeight, insets.bottom) }]}>
         <TouchableOpacity style={s.attachBtn} onPress={showImagePicker} disabled={loading}>
           <Text style={s.attachBtnText}>📎</Text>
         </TouchableOpacity>
