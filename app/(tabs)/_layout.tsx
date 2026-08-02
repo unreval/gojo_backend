@@ -1,9 +1,14 @@
 // app/(tabs)/_layout.tsx
+// ★ tab bar 底部适配三键/手势条:用 useSafeAreaInsets 拿真实高度,
+//   不再 hardcode(旧版本 Android 分支写死 8px,三键 48px 完全罩不住)
 import { Tabs } from 'expo-router';
-import { Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C } from '../../constants/theme';
 
 export default function TabLayout() {
+  const insets = useSafeAreaInsets();
+  const bottomInset = insets.bottom;   // 三键机 ~48, 手势机 ~20, 无按键 0
+
   return (
     <Tabs screenOptions={{
       headerShown: false,
@@ -11,9 +16,10 @@ export default function TabLayout() {
         backgroundColor: C.card,
         borderTopColor: C.border,
         borderTopWidth: 1,
-        paddingBottom: Platform.OS === 'ios' ? 24 : 8,
+        // 底部空间 = 安全区 + 常规内边距;height 也把安全区加进去,不然内容会被裁掉
+        paddingBottom: bottomInset + 8,
         paddingTop: 8,
-        height: Platform.OS === 'ios' ? 84 : 60,
+        height: 60 + bottomInset,
       },
       tabBarActiveTintColor: C.accent2,
       tabBarInactiveTintColor: C.textMute,
