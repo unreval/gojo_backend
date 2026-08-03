@@ -12,7 +12,7 @@ import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID
+from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
 from db import get_conn
 from utils import extract_json, sanitize_jp, merge_only_extreme_short
 from tts import tts_to_b64
@@ -154,7 +154,7 @@ async def chat_image(data: dict):
     for attempt in range(5):
         try:
             response = claude_client.messages.create(
-                model='claude-sonnet-4-6',
+                model=MODEL_MAIN,
                 max_tokens=800,
                 system=system_blocks,
                 messages=messages,

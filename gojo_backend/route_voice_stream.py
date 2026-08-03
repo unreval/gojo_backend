@@ -25,7 +25,7 @@ import anthropic
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID
+from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
 from tts import tts_to_b64
 from prompt import build_system_blocks
 from user_memory import save_short_memory, get_short_memory, extract_and_save_memory
@@ -160,7 +160,7 @@ async def chat_voice_stream(data: dict):
 
         try:
             async with async_claude.messages.stream(
-                model='claude-haiku-4-5-20251001',
+                model=MODEL_JP_AUX,
                 max_tokens=500,
                 system=system_blocks,
                 messages=messages,

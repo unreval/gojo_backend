@@ -391,12 +391,10 @@ def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
         today_str = now.strftime('%Y-%m-%d')
         weekday_cn = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][now.weekday()]
 
-        response = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=300,
-            messages=[{
-                'role': 'user',
-                'content': f'''你是记忆纠错助手。用户正在纠正自己之前说过的错误信息，你要找出哪些旧记忆需要删除。
+        # ★ 纠错扫描:纯中文结构化任务,走 MODEL_CN_AUX
+        from ai_client import create_chat
+        from config import MODEL_CN_AUX
+        correction_prompt = f'''你是记忆纠错助手。用户正在纠正自己之前说过的错误信息，你要找出哪些旧记忆需要删除。
 
 【今天日期】{today_str}（{weekday_cn}）
 
@@ -420,10 +418,12 @@ def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
 【输出格式——严格 JSON，只输出一行】
 要删除：{{"action":"delete","ids":[1,2]}}
 不删除：{{"action":"none","ids":[]}}'''
-            }]
+        raw, _usage = create_chat(
+            model=MODEL_CN_AUX, max_tokens=300,
+            messages=[{'role': 'user', 'content': correction_prompt}],
         )
-        raw = response.content[0].text.strip()
-        print(f'[{user_id}] 纠错扫描：{raw[:120]}')
+        raw = raw.strip()
+        print(f'[{user_id}] 纠错扫描 ({MODEL_CN_AUX}): {raw[:120]}')
 
         parsed = extract_json(raw)
         if not parsed:
@@ -541,12 +541,10 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
         relations_block = get_relations_text(character_id)
         relations_intro = (f'\n{relations_block}\n' if relations_block else '')
 
-        response = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=400,
-            messages=[{
-                'role': 'user',
-                'content': f'''你是记忆整理助手。从下面这轮对话中提取值得长期记住的信息，分成三类。
+        # ★ 记忆提取:纯中文结构化任务,走 MODEL_CN_AUX(默认 deepseek-chat 便宜好用)
+        from ai_client import create_chat
+        from config import MODEL_CN_AUX
+        prompt_content = f'''你是记忆整理助手。从下面这轮对话中提取值得长期记住的信息，分成三类。
 
 【对话双方】
 - "她" = 用户
@@ -657,10 +655,12 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
 没有的类填 null，例如全都没有：
 {{"user_fact":null,"bond":null,"told":null}}
 category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
-            }]
+        raw, _usage = create_chat(
+            model=MODEL_CN_AUX, max_tokens=400,
+            messages=[{'role': 'user', 'content': prompt_content}],
         )
-        raw = response.content[0].text.strip()
-        print(f'[{user_id}][{character_id}] Haiku：{raw[:150]}')
+        raw = raw.strip()
+        print(f'[{user_id}][{character_id}] {MODEL_CN_AUX}: {raw[:150]}')
 
         parsed = extract_json(raw)
         if not parsed:
@@ -727,12 +727,10 @@ def extract_and_save_group_memory(user_id, user_text, round_transcript, members)
         existing = get_long_memory(user_id, SHARED_CHARACTER_ID)
         existing_text = '\n'.join(f'- {m[0]}' for m in existing) if existing else '（暂无）'
 
-        response = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=350,
-            messages=[{
-                'role': 'user',
-                'content': f'''你是记忆整理助手。下面是一个群聊的一轮对话记录。
+        # ★ 群聊记忆提取:纯中文结构化任务,走 MODEL_CN_AUX
+        from ai_client import create_chat
+        from config import MODEL_CN_AUX
+        group_prompt = f'''你是记忆整理助手。下面是一个群聊的一轮对话记录。
 
 【群里的说话人】
 - "群主" = 用户本人（她）——你【只能】从她的发言里提取
@@ -774,10 +772,12 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
 【输出格式——严格 JSON，只输出一行】
 {{"user_fact":{{"content":"她XXX","category":"喜好"}},"told":{{"target":"角色名","content":"她说过XXX"}},"char_bonds":[{{"target":"角色名","content":"我XXX"}}]}}
 没有的类填 null（char_bonds 没有就填 []）。category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
-            }]
+        raw, _usage = create_chat(
+            model=MODEL_CN_AUX, max_tokens=350,
+            messages=[{'role': 'user', 'content': group_prompt}],
         )
-        raw = response.content[0].text.strip()
-        print(f'[{user_id}][group] Haiku：{raw[:150]}')
+        raw = raw.strip()
+        print(f'[{user_id}][group] {MODEL_CN_AUX}: {raw[:150]}')
 
         parsed = extract_json(raw)
         if not parsed:

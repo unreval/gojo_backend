@@ -21,7 +21,7 @@ import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID
+from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
 from db import get_conn
 from utils import extract_json, sanitize_jp, merge_only_extreme_short
 from tts import tts_to_b64, transcribe_audio_b64
@@ -142,7 +142,7 @@ def _quick_translate(jp: str) -> str:
         return ''
     try:
         resp = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model=MODEL_JP_AUX,
             max_tokens=200,
             messages=[{'role': 'user', 'content':
                 f'把下面这句日语忠实翻译成中文，只输出译文本身，不要解释、不要引号：\n{jp}'}],
@@ -209,7 +209,7 @@ async def chat_text(data: dict):
     last_raw = ''   # ★ 记住最后一次模型原始回复，用于"纯日语救援"
     for attempt in range(3):
         try:
-            raw, response = _create_json('claude-sonnet-4-6', 1500, system_blocks, messages)
+            raw, response = _create_json(MODEL_MAIN, 1500, system_blocks, messages)
             log_cache_usage(f'chat:{character_id}', response)
             print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
             if raw:
@@ -431,7 +431,7 @@ async def chat_story(data: dict):
     result = None
     for attempt in range(5):
         try:
-            raw, response = _create_json('claude-sonnet-4-6', 4000, system_blocks, messages)
+            raw, response = _create_json(MODEL_MAIN, 4000, system_blocks, messages)
             log_cache_usage(f'story:{character_id}', response)
             print(f'[story] attempt {attempt+1}: {raw[:120]}...')
             parsed = _parse_reply(raw)
@@ -513,7 +513,7 @@ async def chat_proactive(data: dict):
     result = None
     for attempt in range(3):
         try:
-            raw, response = _create_json('claude-sonnet-4-6', 400, system_blocks, messages)
+            raw, response = _create_json(MODEL_MAIN, 400, system_blocks, messages)
             log_cache_usage(f'proactive:{character_id}', response)
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
@@ -583,7 +583,7 @@ async def chat_voice_text(data: dict):
     result = None
     for attempt in range(3):
         try:
-            raw, response = _create_json('claude-haiku-4-5-20251001', 500, system_blocks, messages)
+            raw, response = _create_json(MODEL_JP_AUX, 500, system_blocks, messages)
             log_cache_usage(f'voice:{character_id}', response)
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
@@ -657,7 +657,7 @@ async def chat_voice_story(data: dict):
     result = None
     for attempt in range(5):
         try:
-            raw, response = _create_json('claude-sonnet-4-6', 3000, system_blocks, messages)
+            raw, response = _create_json(MODEL_MAIN, 3000, system_blocks, messages)
             log_cache_usage(f'voice_story:{character_id}', response)
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 3:
@@ -772,7 +772,7 @@ async def chat_voice_proactive(data: dict):
     result = None
     for attempt in range(3):
         try:
-            raw, response = _create_json('claude-haiku-4-5-20251001', 300, system_blocks, messages)
+            raw, response = _create_json(MODEL_JP_AUX, 300, system_blocks, messages)
             log_cache_usage(f'voice_proactive:{character_id}', response)
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:

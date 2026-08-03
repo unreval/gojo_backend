@@ -6,7 +6,7 @@ import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID
+from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
 from accounting import (
     list_accounts, create_account, update_account, delete_account,
     list_records, create_record, delete_record, create_transfer,
@@ -205,7 +205,7 @@ async def get_insights(user_id: str = 'default',
     for attempt in range(3):
         try:
             response = claude_client.messages.create(
-                model='claude-haiku-4-5-20251001',
+                model=MODEL_JP_AUX,
                 max_tokens=300,
                 system=system_prompt,
                 messages=[{'role': 'user', 'content': user_prompt}],

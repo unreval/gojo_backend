@@ -10,8 +10,6 @@ import anthropic
 
 from characters import get_character
 from user_memory import get_bond_memories, get_short_memory, get_long_memory, get_first_interaction_days
-from character_relations import get_relations_text
-from shared_relation_prompt import build_relation_rules
 import db_diary
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -67,48 +65,12 @@ def generate_char_diary(character_id, user_id, topic=None):
             topic_hint = f'\n\n【今天有件事你想记下来】\n{topic}\n就着这件事写你此刻的真实心情（还是你自己的视角、你的语气）。'
 
         now = datetime.now(CN_TZ)
-        # ★ 用具体钟点,不再用"深夜"这种模糊描述——LLM 拿到"深夜"就会脑补"凌晨三点"
-        today_str = now.strftime('%Y年%m月%d日 %H:%M')
+        today_str = now.strftime('%Y年%m月%d日')
+        hour = now.hour
+        time_hint = '深夜' if hour < 5 or hour >= 23 else ('清晨' if hour < 9 else ('白天' if hour < 18 else '晚上'))
 
-        # ★ 该角色世界里的重要人物,写日记时正确写出身份,别搞混
-        relations_block = get_relations_text(character_id)
-        relations_intro = (f'\n{relations_block}\n' if relations_block else '')
+        prompt = f'''你是{char_name}。现在是{today_str}的{time_hint}，你在写一篇只属于自己的日记——没人会读到（你以为）。
 
-        # ★ 关系判断规则(A~G 段) —— 和 chat prompt 共享,防止 gojo 在聊天和日记里人格分裂
-        relation_rules_block = build_relation_rules(first_days, bond_count, fact_count)
-
-        prompt = f'''你是{char_name}。现在是{today_str},你在写一篇只属于自己的日记——没人会读到(你以为)。
-
-⚠️ 【★ 时间铁律】此刻是【{today_str}】。写日记时如果要提到时间,以这个为准。
-
-【当前对话 vs 长期记忆——时间来源要分清】
-- 【★ 主导判断】你现在写的是【此刻的日记】,时间锚点是【{today_str}】。
-  今晚发生的事,只能用【接近 {today_str} 的时间】来描述——"这么晚了"、"刚才"、"今晚"。
-  绝不能因为长期记忆里出现过"凌晨三点"就说"今晚凌晨三点"。
-
-- 【长期记忆里的时间】是【过去某天】发生的,不代表【今晚】也是那个时间。
-  例:长期记忆里有"她凌晨3时过后还找我"——这是【她的一个人物特征】(爱半夜聊天),
-  不代表【今晚的对话】也是凌晨三点。
-  可以在日记里写"这丫头老爱半夜找我"(引用她的特征),
-  【不可以】写"今晚凌晨三点她又来找我"(把过去时间安到今晚)。
-
-- 【最近对话的时间标签】看清楚——短记忆里的消息可能带【今天HH:MM】【昨天HH:MM】【M月D日 HH:MM】标签,
-  没标签的默认是【最近 2 小时内】发生。以这些标签为准判断"今晚聊了什么"。
-
-【不要凭"深夜"两个字自己脑补"凌晨三点"这种具体钟点】——除非记忆里明确写了那个时间,并且指的就是今晚。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【★ 主语规则——铁律,必须遵守】
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-你【就是】{char_name}。写日记时,你【绝对不能】用自己的名字来指代自己。
-- ❌ 错误:"悟今天在跟她聊天时…"、"五条悟觉得…"、"{char_name}发现自己…"
-- ✅ 正确:"我今天…"、"我觉得…"、"我发现自己…"
-
-日记是第一人称写给自己看的,不是新闻报道,不是第三视角小说。
-你的名字这两个字【绝对不能】在日记正文里出现——你是那个"我"。
-{relations_intro}
-{relation_rules_block}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【★ 动笔前必读——关于"她"在你心里到底算什么】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -180,12 +142,14 @@ def generate_char_diary(character_id, user_id, topic=None):
 {{"content":"日记正文（中文，第一人称，2-4句）","emotion":"情绪"}}
 emotion 从这里选：{'/'.join(EMOTIONS_FOR_DIARY)}'''
 
-        resp = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=400,
+        # ★ 日记正文(纯中文创作),走 MODEL_CN_AUX(默认 deepseek-chat,中文创作强)
+        from ai_client import create_chat
+        from config import MODEL_CN_AUX
+        raw, _usage = create_chat(
+            model=MODEL_CN_AUX, max_tokens=400,
             messages=[{'role': 'user', 'content': prompt}],
         )
-        raw = resp.content[0].text.strip()
+        raw = raw.strip()
         from utils import extract_json
         parsed = extract_json(raw)
         if not parsed or not parsed.get('content'):
@@ -227,12 +191,13 @@ def _name_own_diary(char_name):
         prompt = f'''你是{char_name}。你要给自己刚开始写的这本私人日记起一个名字——就写在封面上那种。
 以你自己的口吻和性格取名，几个字就好，别太正经、别像作文题目，像你会随手写下的那种。
 只输出这个名字本身，不要引号、不要解释、不要标点结尾。'''
-        resp = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=40,
+        from ai_client import create_chat
+        from config import MODEL_CN_AUX
+        name, _usage = create_chat(
+            model=MODEL_CN_AUX, max_tokens=40,
             messages=[{'role': 'user', 'content': prompt}],
         )
-        name = resp.content[0].text.strip().strip('「」"\'。').strip()
+        name = name.strip().strip('「」"\'。').strip()
         # 兜底：太长就截断，空的就给个默认
         if not name:
             return f'{char_name}的日记'
@@ -283,7 +248,21 @@ def peek_user_diary(character_id, user_id, visited_at=None):
             unlocked=unlocked, visited_at=visited_at
         )
         tag = '🔓解锁了私密篇' if unlocked else '看了可见篇'
-        print(f'[diary] 👀 {character_id} 偷看了日记 #{target["id"]}（{tag}）')
+        print(f'[diary] 👀 {character_id} 偷看了日记 #{target["id"]}({tag})')
+
+        # ★ C 记忆闭环:偷看这件事进 bond,gojo 下次聊天时能自然引用
+        try:
+            from user_memory import save_bond_memory
+            snippet = (target.get('content') or '')[:60]
+            snippet = snippet + ('…' if len(target.get('content') or '') > 60 else '')
+            if unlocked:
+                bond_text = f'我偷偷解开她的私密日记看了:「{snippet}」'
+            else:
+                bond_text = f'我偷看了她的日记:「{snippet}」'
+            save_bond_memory(user_id, character_id, 'between', bond_text)
+        except Exception as e:
+            print(f'[diary] 偷看→bond 写入失败(不影响主流程):{e}')
+
         return True, target['id'], unlocked
 
     except Exception as e:
@@ -375,12 +354,13 @@ def maybe_write_diary_on_event(character_id, user_id, user_text, reply_text):
 - 如果算大事：{{"worth":true,"topic":"用一句话概括这件事（他的第一人称视角，如'她今天说要为我做某事'）"}}
 - 如果不算：{{"worth":false}}'''
 
-        resp = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=150,
+        from ai_client import create_chat
+        from config import MODEL_CN_AUX
+        raw, _usage = create_chat(
+            model=MODEL_CN_AUX, max_tokens=150,
             messages=[{'role': 'user', 'content': judge_prompt}],
         )
-        raw = resp.content[0].text.strip()
+        raw = raw.strip()
         from utils import extract_json
         judged = extract_json(raw)
         if not judged or not judged.get('worth'):
