@@ -59,6 +59,8 @@ export default function MyDiaryScreen() {
   const [diaries, setDiaries] = useState<UserDiary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // ★ character_id → 角色名 映射,给"访客记号"显示是谁看的
+  const [charNames, setCharNames] = useState<Record<string, string>>({});
 
   const [showWrite, setShowWrite] = useState(false);
   const [content, setContent] = useState('');
@@ -74,12 +76,19 @@ export default function MyDiaryScreen() {
 
   const load = async () => {
     try {
-      const [bookRes, listRes] = await Promise.all([
+      const [bookRes, listRes, charsRes] = await Promise.all([
         axios.get(`${SERVER_URL}/diary/book/user`, { params: { user_id: FIXED_USER_ID } }),
         axios.get(`${SERVER_URL}/diary/user`, { params: { user_id: FIXED_USER_ID } }),
+        axios.get(`${SERVER_URL}/characters_all`).catch(() => ({ data: { characters: [] } })),
       ]);
       setBookTitle(bookRes.data?.title || '我的日记');
       setDiaries(listRes.data?.diaries || []);
+      // ★ 建 id→name 映射
+      const map: Record<string, string> = {};
+      for (const c of (charsRes.data?.characters || [])) {
+        if (c?.id && c?.name) map[c.id] = c.name;
+      }
+      setCharNames(map);
     } catch (e: any) { console.warn('load my diary', e?.message); }
   };
 
@@ -223,11 +232,16 @@ export default function MyDiaryScreen() {
 
               {d.visits.length > 0 && (
                 <View style={s.visitBox}>
-                  {d.visits.map((v, i) => (
-                    <Text key={i} style={[s.visitText, v.unlocked && s.visitUnlocked]}>
-                      {v.unlocked ? '🔓 他解开了这篇私密日记' : '👀 他看过'} · {fmt(v.visited_at)}
-                    </Text>
-                  ))}
+                  {d.visits.map((v, i) => {
+                    const visitorName = charNames[v.character_id] || '他';
+                    return (
+                      <Text key={i} style={[s.visitText, v.unlocked && s.visitUnlocked]}>
+                        {v.unlocked
+                          ? `🔓 ${visitorName} 解开了这篇私密日记`
+                          : `👀 ${visitorName} 看过`} · {fmt(v.visited_at)}
+                      </Text>
+                    );
+                  })}
                 </View>
               )}
 
