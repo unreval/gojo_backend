@@ -50,7 +50,27 @@ def get_time_context():
 当前时间：{now.strftime("%Y年%m月%d日 %H:%M")}（{weekday_jp}）
 时段：{period}
 {greeting_hint}{night_note}
-绝对不要根据自己的想象发早安/晚安，必须根据真实时段。'''
+绝对不要根据自己的想象发早安/晚安，必须根据真实时段。
+
+【★ 时间算数铁律——非常重要】
+当对方提到"还剩多久""快到了没""几点开始"这类涉及【时间差】的话题时,
+你【必须先真正做一次减法】,不能凭感觉说"快了""还早"这种。
+
+具体做法:
+1. 当前时刻是 {now.strftime("%H:%M")}(以此为准,别脑补)
+2. 目标时刻是对方说的那个时间(比如 9:00 就是 21:00)
+3. 差 = 目标 - 当前 = N 分钟(自己算清楚)
+4. 回复里的时间描述,必须和这个差值一致——
+   · 差 8 分钟就说"还有八分钟",不说"还剩三分钟"
+   · 差 -5 分钟(已过)就说"已经过了",不说"快到了"
+   · 别乱说"到点了"——除非你算出来差值 ≤ 1 分钟
+
+【常见错误——严禁】
+❌ 差 8 分钟却说"还剩三分钟"(脑补时间)
+❌ 差 9 分钟却说"九点了"(把未来时间说成现在)
+❌ 差 -3 分钟(过了)却说"还有几分钟"(方向搞反)
+
+如果你不确定,就【明说具体数字】:"现在 20:52,离九点还有 8 分钟"——不要给"三分钟""快到了"这种含糊的话。'''
 
 
 # ══════════════════════════════════════════════
@@ -374,6 +394,25 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
         bonds = memory_search.search_bond_memory(user_id, character_id, 'between', user_message, top_k=6)
     if bonds is None:
         bonds = get_bond_memories(user_id, character_id, kind='between', limit=20)
+
+    # ★ 关键词硬命中:用户提到"日记"时,强制把所有"日记"相关的 bond 塞进 prompt,不走向量
+    #   避免"我偷看了她的日记"这条被 top_k 挤出去导致角色装傻
+    _diary_keywords = ('日记', '日記', 'diary', '偷看', '看到我', '看了我', '记号', '访客')
+    if any(kw in user_message for kw in _diary_keywords):
+        try:
+            all_bonds = get_bond_memories(user_id, character_id, kind='between', limit=50)
+            existing_ids = {b[0] for b in bonds} if bonds else set()
+            diary_related = [
+                b for b in all_bonds
+                if b[0] not in existing_ids and any(
+                    kw in (b[1] or '') for kw in ('日记', '日記', '偷看', '留言', '访客', '记号')
+                )
+            ]
+            if diary_related:
+                bonds = list(bonds or []) + diary_related[:5]
+                print(f'[prompt] {character_id} 检测到日记话题,追加 {len(diary_related[:5])} 条相关 bond')
+        except Exception as _e:
+            print(f'[prompt] 日记关键词硬命中失败(不影响主流程):{_e}')
     bond_text = ''
     if bonds:
         bond_lines = []
