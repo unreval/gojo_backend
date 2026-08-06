@@ -364,6 +364,21 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
                 continue
         fresh_memories.append((content, ts, category))
     long_memories = fresh_memories
+
+    # ★ 身份类记忆(名字/称呼/生日/家乡等)必须【每次都在】,不能被向量 top_k 挤掉
+    #   ——角色忘了对方叫什么,是最伤的体验 bug
+    try:
+        _all_facts = get_long_memory(user_id, character_id)
+        _existing = {c for c, _t, _cat in long_memories}
+        _identity = [
+            (c, t, cat) for c, t, cat in _all_facts
+            if cat == '身份' and c not in _existing
+        ]
+        if _identity:
+            long_memories = list(long_memories) + _identity
+            print(f'[prompt] {character_id} 强制注入 {len(_identity)} 条身份记忆(名字/称呼等)')
+    except Exception as _e:
+        print(f'[prompt] 身份记忆强制注入失败(不影响主流程):{_e}')
     memory_text = ''
     if long_memories:
         memory_lines = []
