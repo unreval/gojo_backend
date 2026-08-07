@@ -357,6 +357,13 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
         conn.close()
 
     _bg_embed('bond_memory', new_id, new_content)
+    # ★ 合并删掉了旧条目,通知检索层清缓存,免得捞到已经不存在的记忆
+    try:
+        import memory_search
+        if memory_search.is_vector_ready():
+            memory_search.invalidate_cache('bond_memory')
+    except Exception:
+        pass
     return True, deleted
 
 

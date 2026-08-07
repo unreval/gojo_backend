@@ -59,6 +59,7 @@ init_proactive_table()
 init_promise_table()   # ★ 承诺表(承诺驱动的主动消息)
 init_push_table()
 memory_search.init_vector_support()
+memory_search.start_auto_backfill()   # ★ 后台自动补 embedding,不用手动跑 /rag/backfill
 seed_gojo_character()
 group_bubbler.start_bubbler()
 diary_scheduler.start_diary_scheduler()

@@ -59,6 +59,38 @@ async def list_all_characters():
     })
 
 
+@router.get('/rag/status')
+async def rag_status():
+    """看 RAG 现在什么状态:开没开、补了多少向量、缓存多少条。"""
+    import memory_search
+    return JSONResponse(memory_search.rag_status())
+
+
+@router.post('/rag/backfill')
+async def rag_backfill(data: dict = None):
+    """给历史记忆补 embedding。老记忆没向量就搜不到,启用 RAG 后必须跑一次。
+
+    body(可选): {"limit": 500}  —— 一次补多少条,默认 500
+    条数多的话多调用几次,直到 remaining 变 0。
+    """
+    import memory_search
+    limit = 500
+    if isinstance(data, dict) and data.get('limit'):
+        try:
+            limit = max(1, min(2000, int(data['limit'])))
+        except (ValueError, TypeError):
+            pass
+    return JSONResponse(memory_search.backfill_embeddings(limit=limit))
+
+
+@router.post('/rag/invalidate')
+async def rag_invalidate():
+    """强制重载向量缓存(手动改过数据库时用)。"""
+    import memory_search
+    memory_search.invalidate_cache()
+    return JSONResponse({'ok': True, 'note': '缓存已清,下次检索时重载'})
+
+
 @router.post('/memory/merge')
 async def manual_merge_memory(data: dict):
     """★ 手动合并羁绊记忆:把几条碎片替换成一条完整的。
