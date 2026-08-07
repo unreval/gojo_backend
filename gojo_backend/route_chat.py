@@ -194,7 +194,7 @@ async def chat_text(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     total_days = update_chat_days(user_id)
-    short_memories = get_short_memory(user_id, 6, character_id)
+    short_memories = get_short_memory(user_id, 16, character_id)
 
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
@@ -417,7 +417,7 @@ async def chat_story(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     total_days = update_chat_days(user_id)
-    short_memories = get_short_memory(user_id, 6, character_id)
+    short_memories = get_short_memory(user_id, 16, character_id)
 
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
@@ -574,7 +574,7 @@ async def chat_voice_text(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
-    short_memories = get_short_memory(user_id, 6, character_id)
+    short_memories = get_short_memory(user_id, 16, character_id)
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 

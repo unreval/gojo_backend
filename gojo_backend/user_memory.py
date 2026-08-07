@@ -19,7 +19,7 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 # ────────── 当前对话上下文范围（短期记忆喂给模型的部分）──────────
 SHORT_MEMORY_HOURS = 24   # 把最近这么多小时的对话当"当前上下文"（想要两天就改 48）
-SHORT_MEMORY_MAX   = 20   # 最多带这么多条，保护速度和 API 成本（嫌贵调小，想记更多调大）
+SHORT_MEMORY_MAX   = 40   # ★ 20→40:聊得多时 20 条只能覆盖两三小时,导致"11 小时前聊的机械体"被挤掉
 
 # ★ 跨角色共享的"用户事实"桶。
 SHARED_CHARACTER_ID = 'shared'
@@ -466,14 +466,24 @@ def _clean_content(raw_content):
     return (raw_content or '').strip().strip('「」"\'').rstrip('。.')
 
 
-def _valid_user_fact(user_id, content, char_names):
-    """用户事实：必须"她"开头、不含任何角色名（角色相关的应归入 bond/told）。"""
-    if not content or content == '无' or len(content) < 4:
+def _valid_user_fact(user_id, content, char_names, category=''):
+    """用户事实：必须"她"开头、不含任何角色名（角色相关的应归入 bond/told）。
+
+    ★ 修复:
+      - 原来 len<4 会【静默】丢弃,"她叫琳"(3字)直接消失且没有日志 → 降到 3 并打日志
+      - 原来任何含角色名的都拒 → 但"她让五条悟叫她琳"这种【称呼类身份信息】
+        天然会带角色名,不该被拒。category='身份' 时豁免角色名检查。
+    """
+    if not content or content == '无':
+        return False
+    if len(content) < 3:
+        print(f'[{user_id}] ❌ user_fact 拒绝（太短 {len(content)} 字）：{content}')
         return False
     if not content.startswith('她'):
         print(f'[{user_id}] ❌ user_fact 拒绝（非"她"开头）：{content}')
         return False
-    forbidden = ['AI', 'ai', '机器人'] + char_names
+    # ★ 身份类(名字/称呼)豁免角色名检查——"她让我叫她琳"这种必然会提到角色
+    forbidden = ['AI', '机器人'] if category == '身份' else (['AI', '机器人'] + char_names)
     for word in forbidden:
         if word and word in content:
             print(f'[{user_id}] ❌ user_fact 拒绝（含违禁词 {word}）：{content}')
@@ -687,10 +697,11 @@ category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
             messages=[{'role': 'user', 'content': prompt_content}],
         )
         raw = raw.strip()
-        print(f'[{user_id}][{character_id}] {MODEL_CN_AUX}: {raw[:150]}')
+        print(f'[{user_id}][{character_id}] 提取器({MODEL_CN_AUX}) 完整输出: {raw}')
 
         parsed = extract_json(raw)
         if not parsed:
+            print(f'[{user_id}] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢: {raw[:200]}')
             return
 
         # A. 用户事实 → shared 桶
@@ -700,7 +711,7 @@ category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
             category = (uf.get('category') or '其他').strip()
             if category not in VALID_CATS:
                 category = '其他'
-            if _valid_user_fact(user_id, content, char_names):
+            if _valid_user_fact(user_id, content, char_names, category):
                 # ★ 单聊里说的只有这个角色知道（谁在场谁知道）；群聊说的才进 shared
                 if save_long_memory(user_id, content, category, character_id):
                     print(f'[{user_id}] ✅ 用户事实 [{category}]（{character_id} 专属）：{content}')
