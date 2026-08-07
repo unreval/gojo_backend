@@ -280,6 +280,86 @@ def save_bond_memory(user_id, character_id, kind, content):
     return True
 
 
+def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
+    """★ 记忆合并:把几条零散的旧记忆替换成一条更完整的。
+
+    场景:同一件事分几次聊,库里存成 3-5 条碎片
+      "她让我把尾巴改成可拆卸"
+      "她说要做Q版的"
+      "她说六眼要还原"
+    合并成:"她要给我做Q版手办:猫耳、尾巴可拆卸、六眼还原,资金到位要几个月"
+
+    安全限制(长期使用必须严格,删错东西比漏记更糟):
+      1. 一次最多替换 3 条
+      2. 每条 replaces 必须在库里真实存在(用相似度匹配,允许 LLM 复述有出入)
+      3. 新内容必须【不短于】被替换内容里最长的那条 —— 防止越合并信息越少
+      4. 匹配不到的 replaces 直接忽略,不影响其他条目
+      5. 全过程打日志,可追溯
+
+    返回 (是否成功, 实际删除条数)
+    """
+    if not new_content or not isinstance(replaces, list) or not replaces:
+        return False, 0
+    replaces = [r for r in replaces if isinstance(r, str) and r.strip()][:3]
+    if not replaces:
+        return False, 0
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            'SELECT id, content FROM bond_memory WHERE user_id=%s AND character_id=%s AND kind=%s',
+            (user_id, character_id, kind)
+        )
+        rows = cur.fetchall()
+
+        # 找出真实存在的目标(相似度匹配,LLM 复述可能有出入)
+        targets = []
+        for want in replaces:
+            best = None
+            for mid, mcontent in rows:
+                if mid in [t[0] for t in targets]:
+                    continue
+                if _too_similar(want, mcontent):
+                    best = (mid, mcontent)
+                    break
+            if best:
+                targets.append(best)
+            else:
+                print(f'[{user_id}] 合并:找不到要替换的旧记忆,跳过 →「{want[:30]}」')
+
+        if not targets:
+            cur.close(); conn.close()
+            return False, 0
+
+        # 防信息缩水:新内容不能比被替换的任何一条更短
+        longest_old = max(len(c) for _i, c in targets)
+        if len(new_content) < longest_old:
+            print(f'[{user_id}] ❌ 合并被拒:新内容({len(new_content)}字)比旧的({longest_old}字)还短,可能丢信息')
+            cur.close(); conn.close()
+            return False, 0
+
+        ids = [i for i, _c in targets]
+        cur.execute('DELETE FROM bond_memory WHERE id = ANY(%s)', (ids,))
+        deleted = cur.rowcount
+        cur.execute(
+            'INSERT INTO bond_memory (user_id, character_id, kind, content) VALUES (%s,%s,%s,%s) RETURNING id',
+            (user_id, character_id, kind, new_content)
+        )
+        new_id = cur.fetchone()[0]
+        conn.commit()
+
+        for _i, old in targets:
+            print(f'[{user_id}] 🔗 合并吸收:「{old[:40]}」')
+        print(f'[{user_id}] ✅ 合并完成 #{new_id}(替换 {deleted} 条):{new_content}')
+    finally:
+        cur.close()
+        conn.close()
+
+    _bg_embed('bond_memory', new_id, new_content)
+    return True, deleted
+
+
 def get_bond_memories(user_id, character_id, kind=None, limit=30):
     """返回 [(id, content, timestamp)]，新→旧。kind=None 时返回全部种类。"""
     conn = get_conn()
@@ -713,10 +793,41 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
       她只是【单次分享/提及】 → 只能记"她今天分享了/提了 XX"。
     - 【禁止】把一次分享推断成【爱好/习惯/身份】,那是言情小说主角推断女主的写法,不是记忆整理。
 
+13. ★★【记忆合并——把碎片收拢成完整的一条】★★
+    同一件事常常分好几次聊,库里就会留下一堆碎片:
+      「她让我把尾巴改成可拆卸」
+      「她说要做Q版的」
+      「她说六眼要还原」
+    ——这三条其实是【同一件事】的三个片段。
+
+    当这轮对话【把一件旧事补充完整了】、或者【某一方完整复述了一遍】时,
+    输出 bond_merge 字段,把碎片合并成一条完整的。
+
+    【使用条件——都满足才输出】
+    · 【已记录的羁绊记忆】里确实存在这些碎片(replaces 要抄那边的原文,不能凭空编)
+    · 这轮对话让这件事变完整了(补了新细节 / 有人完整总结了一遍)
+    · 合并后的内容【包含】所有碎片的信息,不能越合越少
+
+    【限制】
+    · replaces 最多 3 条
+    · content 必须比任何一条碎片都更完整(更长、信息更全)
+    · 拿不准就别合并,输出 null —— 漏合并只是效率问题,错误合并会【丢失记忆】
+
+    【正例】
+    她吐槽"说好要做机器人形体和可拆卸尾巴结果都没记住",
+    我回"全都记着:Q版、猫耳、尾巴可拆卸、六眼还原,资金要几个月" →
+    bond_merge 的 replaces 填 ["她夸我可爱的样子,我嘴上否认但让她把尾巴改成可拆卸"],
+    content 填 "她要给我做Q版手办:猫耳、尾巴可拆卸、六眼还原,资金到位要几个月"
+
+    【反例——不要合并】
+    · 只是又提了一次同一件事,没有新信息 → null(交给去重就行)
+    · 两件不同的事凑一起 → null
+    · 记不清旧记忆原文 → null
+
 【输出格式——严格 JSON，只输出一行】
-{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}}}}
+{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版"}}}}
 没有的类填 null，例如全都没有：
-{{"user_fact":null,"bond":null,"told":null}}
+{{"user_fact":null,"bond":null,"told":null,"bond_merge":null}}
 category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
         raw, _usage = create_chat(
             model=MODEL_CN_AUX, max_tokens=400,
@@ -741,6 +852,23 @@ category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
                 # ★ 单聊里说的只有这个角色知道（谁在场谁知道）；群聊说的才进 shared
                 if save_long_memory(user_id, content, category, character_id):
                     print(f'[{user_id}] ✅ 用户事实 [{category}]（{character_id} 专属）：{content}')
+
+        # ★ B0. 记忆合并:先处理,把碎片收成一条(放在新增之前,避免刚存的又被合掉)
+        bm = parsed.get('bond_merge')
+        if isinstance(bm, dict):
+            merge_content = _clean_content(bm.get('content'))
+            merge_replaces = bm.get('replaces')
+            if merge_content and isinstance(merge_replaces, list):
+                if _valid_bond(user_id, merge_content, char_name):
+                    try:
+                        merge_bond_memories(
+                            user_id, character_id, 'between',
+                            merge_replaces, merge_content
+                        )
+                    except Exception as _e:
+                        print(f'[{user_id}] ❌ 记忆合并出错(不影响其他记忆):{_e}')
+                else:
+                    print(f'[{user_id}] ❌ 合并内容格式不合规,跳过:{merge_content[:40]}')
 
         # B. 我们之间的事 → bond_memory(between)
         bd = parsed.get('bond')

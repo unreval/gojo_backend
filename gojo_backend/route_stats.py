@@ -1,6 +1,7 @@
 """通用查询路由:
 - /stats?user_id=X          → 首页要展示的"陪伴天数"等统计
 - /characters_all           → 列出所有角色(给日记列表页动态铺卡片用)
+- /reset_memory (POST)      → 清空用户在指定角色的所有对话记忆(不动角色/账户/日程/日记)
 
 用了 /characters_all 这种带下划线的名字是为了避开 route_character.py 里
 已经存在的 GET /characters/{id}——放同名字面路径可能会互相盖住,分开省心。
@@ -55,4 +56,106 @@ async def list_all_characters():
     conn.close()
     return JSONResponse({
         'characters': [{'id': r[0], 'name': r[1], 'avatar_url': r[2]} for r in rows],
+    })
+
+
+@router.post('/memory/merge')
+async def manual_merge_memory(data: dict):
+    """★ 手动合并羁绊记忆:把几条碎片替换成一条完整的。
+
+    body: {
+      "user_id": "...",
+      "character_id": "gojo",
+      "replaces": ["旧记忆原文1", "旧记忆原文2"],
+      "content": "合并后的完整版"
+    }
+
+    走和自动合并同一套安全检查(最多3条、必须真实存在、不能信息缩水)。
+    """
+    from user_memory import merge_bond_memories
+    user_id = (data.get('user_id') or '').strip()
+    character_id = (data.get('character_id') or 'gojo').strip()
+    replaces = data.get('replaces')
+    content = (data.get('content') or '').strip()
+
+    if not user_id or not content or not isinstance(replaces, list) or not replaces:
+        return JSONResponse(
+            {'error': '需要 user_id / replaces(数组) / content'}, status_code=400)
+
+    try:
+        ok, deleted = merge_bond_memories(
+            user_id, character_id, 'between', replaces, content)
+    except Exception as e:
+        return JSONResponse({'ok': False, 'error': str(e)}, status_code=500)
+
+    return JSONResponse({
+        'ok': ok,
+        'deleted': deleted,
+        'content': content if ok else None,
+        'note': '成功' if ok else '未执行:目标找不到 或 新内容比旧的短(防信息缩水)',
+    })
+
+
+@router.post('/reset_memory')
+async def reset_memory(data: dict):
+    """★ 清空指定用户的对话记忆(short + long + bond + 主动消息)。
+    ★ 不动:角色定义、账户/记账、日程任务、日记本身、生理期、群聊消息。
+    ★ 只清"对话上下文"这一块,让 gojo"重新认识"你。
+
+    参数:
+    - user_id (必填):要清哪个用户
+    - character_id (可选):只清对某个角色的记忆;不传就清所有角色的
+    - include_proactive (可选,默认 true):是否也清主动消息队列
+    """
+    user_id = (data.get('user_id') or '').strip()
+    if not user_id or user_id == 'default':
+        return JSONResponse({'error': 'user_id required (不能是 default)'}, status_code=400)
+
+    character_id = (data.get('character_id') or '').strip() or None
+    include_proactive = data.get('include_proactive', True)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    deleted = {}
+
+    # 三张核心记忆表都按 user_id 清
+    tables = ['short_memory', 'long_memory', 'bond_memory']
+    for tbl in tables:
+        try:
+            if character_id:
+                cur.execute(
+                    f'DELETE FROM {tbl} WHERE user_id = %s AND character_id = %s',
+                    (user_id, character_id)
+                )
+            else:
+                cur.execute(f'DELETE FROM {tbl} WHERE user_id = %s', (user_id,))
+            deleted[tbl] = cur.rowcount
+        except Exception as e:
+            deleted[tbl] = f'error: {e}'
+
+    # 顺手清没读完的主动消息(不然清完记忆后又冒出老队列里的报备)
+    if include_proactive:
+        try:
+            if character_id:
+                cur.execute(
+                    'DELETE FROM proactive_msg WHERE user_id = %s AND character_id = %s',
+                    (user_id, character_id)
+                )
+            else:
+                cur.execute('DELETE FROM proactive_msg WHERE user_id = %s', (user_id,))
+            deleted['proactive_msg'] = cur.rowcount
+        except Exception as e:
+            deleted['proactive_msg'] = f'error: {e}'
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    print(f'[reset_memory] 清空 {user_id}'
+          f'{" 关于 " + character_id if character_id else "(全部角色)"}: {deleted}')
+    return JSONResponse({
+        'ok': True,
+        'user_id': user_id,
+        'character_id': character_id,
+        'deleted': deleted,
     })
