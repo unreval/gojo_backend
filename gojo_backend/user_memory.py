@@ -166,13 +166,9 @@ def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARA
     )
     existing = cur.fetchall()
     for (e,) in existing:
-        if content == e:
+        if _too_similar(content, e):
             cur.close(); conn.close()
-            print(f'[{user_id}] 记忆完全重复，跳过：{content}')
-            return False
-        if abs(len(content) - len(e)) < 5 and (content in e or e in content):
-            cur.close(); conn.close()
-            print(f'[{user_id}] 记忆高度重复，跳过：{content}（已有：{e}）')
+            print(f'[{user_id}] 记忆重复，跳过：{content}（已有：{e}）')
             return False
     cur.execute(
         'INSERT INTO long_memory (user_id, character_id, content, category) VALUES (%s, %s, %s, %s) RETURNING id',
@@ -228,6 +224,36 @@ def delete_long_memory(memory_id):
 
 # ────────── 第 2/3 层：羁绊记忆（我们之间的事 / 她告诉我的事）──────────
 
+def _too_similar(a: str, b: str) -> bool:
+    """判断两条记忆是不是在说同一件事。
+
+    原来只做子串匹配,导致这种情况全部漏网:
+      "她主动给了我新的昵称琳,我答应了用这个名字叫她"
+      "她把专属称呼琳给了我"
+    意思一样但不是子串 → 两条都存 → 同一件事占掉多个检索位置。
+
+    改成【字符重合率】:去掉标点后,较短那条有多少字出现在较长那条里。
+    重合率 ≥ 0.75 就认为是同一件事。中文按字比较,这个粗粒度方法够用。
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # 用集合过滤,避免引号字符放进正则字符类里把字符串提前截断
+    _punc = set('，。,.、！!？?「」：:；;“”‘’\'" \t\n')
+    ca = ''.join(ch for ch in a if ch not in _punc)
+    cb = ''.join(ch for ch in b if ch not in _punc)
+    if not ca or not cb:
+        return False
+    short, long_ = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+    # 长度差太悬殊的不算重复(一句话 vs 一大段,信息量不同)
+    if len(short) / len(long_) < 0.35:
+        return False
+    hit = sum(1 for ch in set(short) if ch in long_)
+    ratio = hit / len(set(short))
+    return ratio >= 0.62
+
+
 def save_bond_memory(user_id, character_id, kind, content):
     """kind='between'（我们之间）或 'told'（她告诉我的）。带去重。"""
     conn = get_conn()
@@ -238,9 +264,9 @@ def save_bond_memory(user_id, character_id, kind, content):
     )
     existing = cur.fetchall()
     for (e,) in existing:
-        if content == e or (abs(len(content) - len(e)) < 5 and (content in e or e in content)):
+        if _too_similar(content, e):
             cur.close(); conn.close()
-            print(f'[{user_id}] 羁绊记忆重复，跳过：{content}')
+            print(f'[{user_id}] 羁绊记忆重复，跳过：{content}（已有：{e}）')
             return False
     cur.execute(
         'INSERT INTO bond_memory (user_id, character_id, kind, content) VALUES (%s, %s, %s, %s) RETURNING id',

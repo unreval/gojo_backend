@@ -408,7 +408,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
     if memory_search.is_vector_ready():
         bonds = memory_search.search_bond_memory(user_id, character_id, 'between', user_message, top_k=6)
     if bonds is None:
-        bonds = get_bond_memories(user_id, character_id, kind='between', limit=20)
+        bonds = get_bond_memories(user_id, character_id, kind='between', limit=30)
 
     # ★ 关键词硬命中:用户提到"日记"时,强制把所有"日记"相关的 bond 塞进 prompt,不走向量
     #   避免"我偷看了她的日记"这条被 top_k 挤出去导致角色装傻
