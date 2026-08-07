@@ -146,7 +146,7 @@ emotion 从这里选：{'/'.join(EMOTIONS_FOR_DIARY)}'''
         from ai_client import create_chat
         from config import MODEL_CN_AUX
         raw, _usage = create_chat(
-            model=MODEL_CN_AUX, max_tokens=400,
+            model=MODEL_CN_AUX, max_tokens=2000,
             messages=[{'role': 'user', 'content': prompt}],
         )
         raw = raw.strip()
@@ -194,7 +194,7 @@ def _name_own_diary(char_name):
         from ai_client import create_chat
         from config import MODEL_CN_AUX
         name, _usage = create_chat(
-            model=MODEL_CN_AUX, max_tokens=40,
+            model=MODEL_CN_AUX, max_tokens=800,
             messages=[{'role': 'user', 'content': prompt}],
         )
         name = name.strip().strip('「」"\'。').strip()
@@ -357,7 +357,7 @@ def maybe_write_diary_on_event(character_id, user_id, user_text, reply_text):
         from ai_client import create_chat
         from config import MODEL_CN_AUX
         raw, _usage = create_chat(
-            model=MODEL_CN_AUX, max_tokens=150,
+            model=MODEL_CN_AUX, max_tokens=1200,
             messages=[{'role': 'user', 'content': judge_prompt}],
         )
         raw = raw.strip()

@@ -110,12 +110,29 @@ def _call_deepseek(model, messages, system, max_tokens, temperature):
         raise RuntimeError(f'DeepSeek API {resp.status_code}: {resp.text[:300]}')
     data = resp.json()
     try:
-        text = data['choices'][0]['message']['content']
+        choice = data['choices'][0]
+        msg = choice.get('message', {})
+        text = msg.get('content') or ''
+        finish = choice.get('finish_reason', '')
+
+        # ★ 推理模型(deepseek-v4-flash 等)会先吐一大段 reasoning_content,
+        #   思考把 max_tokens 吃光后 content 就空了 / 被截断。
+        #   这里显式暴露出来,不然日志里只看到"模型什么都没输出"完全没头绪。
+        reasoning = msg.get('reasoning_content') or ''
+        if reasoning and not text.strip():
+            print(f'[ai_client] ⚠️ {model} 的 token 全被思考吃掉了'
+                  f'(思考 {len(reasoning)} 字, 正文 0 字, finish={finish})'
+                  f' → 请调大 max_tokens')
+        elif finish == 'length':
+            print(f'[ai_client] ⚠️ {model} 输出被 max_tokens 截断'
+                  f'(正文 {len(text)} 字{", 思考 " + str(len(reasoning)) + " 字" if reasoning else ""})'
+                  f' → 请调大 max_tokens')
     except (KeyError, IndexError):
         raise RuntimeError(f'DeepSeek 响应结构异常: {json.dumps(data)[:300]}')
     usage = data.get('usage', {})
     return text, {
         'input_tokens': usage.get('prompt_tokens', 0),
         'output_tokens': usage.get('completion_tokens', 0),
+        'finish_reason': finish,
         'provider': 'deepseek',
     }

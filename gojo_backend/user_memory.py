@@ -532,7 +532,7 @@ def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
 要删除：{{"action":"delete","ids":[1,2]}}
 不删除：{{"action":"none","ids":[]}}'''
         raw, _usage = create_chat(
-            model=MODEL_CN_AUX, max_tokens=300,
+            model=MODEL_CN_AUX, max_tokens=1500,
             messages=[{'role': 'user', 'content': correction_prompt}],
         )
         raw = raw.strip()
@@ -837,13 +837,34 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
 {{"user_fact":null,"bond":null,"told":null,"bond_merge":null}}
 category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
         raw, _usage = create_chat(
-            model=MODEL_CN_AUX, max_tokens=400,
+            model=MODEL_CN_AUX, max_tokens=2000,
             messages=[{'role': 'user', 'content': prompt_content}],
         )
         raw = raw.strip()
         print(f'[{user_id}][{character_id}] 提取器({MODEL_CN_AUX}) 完整输出: {raw}')
 
         parsed = extract_json(raw)
+
+        # ★ 解析失败重试一次:一次抽风就丢掉整轮记忆太亏。
+        #   重试时加一句硬约束,压掉推理模型的思考冲动。
+        if not parsed:
+            print(f'[{user_id}] ⚠️ 首次解析失败,重试一次...')
+            try:
+                raw2, _u2 = create_chat(
+                    model=MODEL_CN_AUX, max_tokens=2000,
+                    messages=[{
+                        'role': 'user',
+                        'content': prompt_content +
+                        '\n\n【⚠️ 重要】不要输出任何思考过程、解释、markdown 代码块标记。'
+                        '直接输出那一行 JSON,第一个字符必须是 {,最后一个字符必须是 }。'
+                    }],
+                )
+                raw2 = raw2.strip()
+                print(f'[{user_id}] 重试输出: {raw2}')
+                parsed = extract_json(raw2)
+            except Exception as _re:
+                print(f'[{user_id}] 重试也失败:{_re}')
+
         if not parsed:
             print(f'[{user_id}] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢: {raw[:200]}')
             return
@@ -972,7 +993,7 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
 {{"user_fact":{{"content":"她XXX","category":"喜好"}},"told":{{"target":"角色名","content":"她说过XXX"}},"char_bonds":[{{"target":"角色名","content":"我XXX"}}]}}
 没有的类填 null（char_bonds 没有就填 []）。category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
         raw, _usage = create_chat(
-            model=MODEL_CN_AUX, max_tokens=350,
+            model=MODEL_CN_AUX, max_tokens=2000,
             messages=[{'role': 'user', 'content': group_prompt}],
         )
         raw = raw.strip()
