@@ -224,34 +224,83 @@ def delete_long_memory(memory_id):
 
 # ────────── 第 2/3 层：羁绊记忆（我们之间的事 / 她告诉我的事）──────────
 
+def _loosely_matches(a: str, b: str) -> bool:
+    """宽松匹配,只用于【找合并目标】,不用于去重。
+
+    LLM 在 bond_merge.replaces 里复述旧记忆时经常有出入,
+    严格匹配会让合并请求全部落空。这里放宽到"大致是那条"就行,
+    误配的风险由 merge_bond_memories 里"新内容不能比旧的短"那道防线兜住。
+    """
+    if not a or not b:
+        return False
+    ca, cb = _clean_for_compare(a), _clean_for_compare(b)
+    if not ca or not cb:
+        return False
+    if ca == cb or ca in cb or cb in ca:
+        return True
+    ga, gb = _bigrams(ca), _bigrams(cb)
+    if not ga or not gb:
+        return False
+    # 阈值 0.2:实测完全无关的记忆二元组重合都是 0.00,
+    # 而 LLM 复述同一条记忆最低也有 0.22 —— 中间空档很大,不会误配。
+    return len(ga & gb) / min(len(ga), len(gb)) >= 0.2
+
+
 def _too_similar(a: str, b: str) -> bool:
-    """判断两条记忆是不是在说同一件事。
+    """判断两条记忆是不是【几乎一模一样】。
 
-    原来只做子串匹配,导致这种情况全部漏网:
-      "她主动给了我新的昵称琳,我答应了用这个名字叫她"
-      "她把专属称呼琳给了我"
-    意思一样但不是子串 → 两条都存 → 同一件事占掉多个检索位置。
+    ★ 分工:
+      · 语义重复(意思一样但措辞不同)→ 交给提取器 LLM 判断。
+        它在 prompt 里能看到【已记录的羁绊记忆】和【已记录的她的事实】,
+        判断"这件事记过没有"是它的活,比数字符靠谱得多。
+      · 这个函数只拦【近乎完全相同】的:标点差异、多一个字、重复提交。
 
-    改成【字符重合率】:去掉标点后,较短那条有多少字出现在较长那条里。
-    重合率 ≥ 0.75 就认为是同一件事。中文按字比较,这个粗粒度方法够用。
+    ★ 为什么阈值这么严:
+      之前设 0.62 想帮 LLM 兜底,结果误杀了真·新记忆——
+        「她今天在家改程序」vs「她今天因腰酸没改成程序」
+        单字重合 75% 被判重复,但这是两件事(一件在改,一件没改成)。
+      中文单字太容易撞。误删是永久丢失,漏拦只是多一条,
+      所以宁可让 LLM 去做语义判断,这里只做最后一道防线。
     """
     if not a or not b:
         return False
     if a == b:
         return True
-    # 用集合过滤,避免引号字符放进正则字符类里把字符串提前截断
-    _punc = set('，。,.、！!？?「」：:；;“”‘’\'" \t\n')
-    ca = ''.join(ch for ch in a if ch not in _punc)
-    cb = ''.join(ch for ch in b if ch not in _punc)
+
+    ca, cb = _clean_for_compare(a), _clean_for_compare(b)
     if not ca or not cb:
         return False
+    if ca == cb:          # 只是标点/空格不同
+        return True
+
     short, long_ = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
-    # 长度差太悬殊的不算重复(一句话 vs 一大段,信息量不同)
-    if len(short) / len(long_) < 0.35:
+    # 长度差超过 15% 就不算"几乎一样"
+    if len(short) / len(long_) < 0.85:
         return False
-    hit = sum(1 for ch in set(short) if ch in long_)
-    ratio = hit / len(set(short))
-    return ratio >= 0.62
+
+    # 单字几乎全同
+    char_ratio = sum(1 for ch in set(short) if ch in long_) / len(set(short))
+    if char_ratio < 0.95:
+        return False
+
+    # 二元组也几乎全同(保证语序一致,不是同样的字换个顺序)
+    ga, gb = _bigrams(ca), _bigrams(cb)
+    if not ga or not gb:
+        return True
+    return len(ga & gb) / min(len(ga), len(gb)) >= 0.9
+
+
+def _clean_for_compare(s: str) -> str:
+    """比较前去掉标点空白,只留实义字符。"""
+    punc = set('，。,.、！!？?「」：:；;“”‘’\'" \t\n——…')
+    return ''.join(ch for ch in s if ch not in punc)
+
+
+def _bigrams(s: str) -> set:
+    """相邻两字组成的集合。中文里二元组比单字更能代表语义。"""
+    if len(s) < 2:
+        return {s} if s else set()
+    return {s[i:i + 2] for i in range(len(s) - 1)}
 
 
 def save_bond_memory(user_id, character_id, kind, content):
@@ -313,14 +362,18 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
         )
         rows = cur.fetchall()
 
-        # 找出真实存在的目标(相似度匹配,LLM 复述可能有出入)
+        # 找出真实存在的目标。
+        # ★ 这里用【宽松匹配】,不用 _too_similar ——
+        #   LLM 复述旧记忆时常有出入(漏字、改标点、换语序),
+        #   严格匹配会导致合并请求全部落空。
+        #   宽松没关系:后面还有"不能信息缩水"那道防线兜着。
         targets = []
         for want in replaces:
             best = None
             for mid, mcontent in rows:
                 if mid in [t[0] for t in targets]:
                     continue
-                if _too_similar(want, mcontent):
+                if _loosely_matches(want, mcontent):
                     best = (mid, mcontent)
                     break
             if best:
@@ -627,7 +680,28 @@ def _valid_told(user_id, content):
     return True
 
 
-VALID_CATS = ('喜好', '厌恶', '身份', '状态', '经历', '关系', '其他')
+VALID_CATS = ('喜好', '厌恶', '身份', '状态', '经历', '关系', '健康', '其他')
+
+# 模型爱自创分类名,映射到合法值,别一律降级成"其他"
+CAT_ALIAS = {
+    '健康状况': '健康', '身体': '健康', '身体状况': '健康', '疾病': '健康', '病史': '健康',
+    '情绪': '状态', '近况': '状态', '当前状态': '状态',
+    '爱好': '喜好', '兴趣': '喜好', '偏好': '喜好',
+    '讨厌': '厌恶', '反感': '厌恶',
+    '个人信息': '身份', '基本信息': '身份', '职业': '身份', '专业': '身份',
+    '人际': '关系', '人际关系': '关系',
+    '往事': '经历', '过去': '经历',
+}
+
+
+def _norm_category(cat: str) -> str:
+    """把模型输出的分类名归一化到合法值。"""
+    cat = (cat or '').strip()
+    if cat in VALID_CATS:
+        return cat
+    if cat in CAT_ALIAS:
+        return CAT_ALIAS[cat]
+    return '其他'
 
 
 # ────────── ★ 统一三桶提取（私聊）──────────
@@ -732,7 +806,33 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
 4. "确认了认识多少天"这类元对话不要提取；"讨论了是什么关系"只有当某一方给出了值得记住的正式表态时才记，且主语写对。
 5. 时间换算成绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
 6. user_fact 和 told 必须以"她"开头；bond 以"我""我们"或"她"开头（第一人称，"我"={char_name}）。
-7. 与已记录内容重复或【意思相近】的，绝不再提——宁可漏记不可重复。
+7. ★★【查重是你的活——每次输出前都要对照上面的已记录列表】★★
+   系统只拦【一字不差】的重复,【意思一样但换了说法】必须由你来判断。
+
+   【判断方法】把要写的内容和上面【已记录的...】逐条对照,问自己:
+     "这条如果加进去,会不会让人觉得同一件事记了两遍?"
+     会 → 填 null(或者用 bond_merge 合并)
+     不会 → 正常输出
+
+   【★ 关键:别把"看起来像"当成"是同一件事"】
+   下面这些【字面很像但是不同的事】,必须照常记:
+     · 已有「她今天在家改程序」← 新的「她因腰酸没改成程序」
+       → 【不同】:一件是在改,一件是没改成。要记。
+     · 已有「她说要买手办」← 新的「她说手办涨价了不买了」
+       → 【不同】:计划变了。要记。
+     · 已有「她昨天熬夜」← 新的「她今天早睡了」
+       → 【不同】:是新的状态。要记。
+   判断看【说的是不是同一件事实】,不是看用了多少相同的字。
+
+   【真正该跳过的重复长这样】
+     · 已有「她主动给我起了昵称琳」← 新的「她给了我专属称呼琳」
+       → 【同一件事】,换了个说法而已 → null
+     · 已有「她学计算机专业」← 新的「她是学计算机的」
+       → 【同一件事】→ null
+
+   【状态类记忆的特殊规则】
+   「她今天在改程序」这种带时间的状态,第二天又聊到时【要记新的】,
+   不要因为"上次记过改程序"就跳过 —— 状态会变,记录的是不同时刻的她。
 7.5 所有记忆都必须是【简短的一句话】（30 字以内），只记事实和事件本身。
     禁止引用原文对话、禁止附翻译、禁止补充解说和背景铺垫——那是聊天记录该干的事，不是记忆。
 8. 某类没有就填 null。日常闲聊确实多数是 null,这很正常——
@@ -835,7 +935,7 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
 {{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版"}}}}
 没有的类填 null，例如全都没有：
 {{"user_fact":null,"bond":null,"told":null,"bond_merge":null}}
-category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
+category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         raw, _usage = create_chat(
             model=MODEL_CN_AUX, max_tokens=2000,
             messages=[{'role': 'user', 'content': prompt_content}],
@@ -874,8 +974,7 @@ category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
         if isinstance(uf, dict):
             content = _clean_content(uf.get('content'))
             category = (uf.get('category') or '其他').strip()
-            if category not in VALID_CATS:
-                category = '其他'
+            category = _norm_category(category)
             if _valid_user_fact(user_id, content, char_names, category):
                 # ★ 单聊里说的只有这个角色知道（谁在场谁知道）；群聊说的才进 shared
                 if save_long_memory(user_id, content, category, character_id):
@@ -991,7 +1090,7 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
 
 【输出格式——严格 JSON，只输出一行】
 {{"user_fact":{{"content":"她XXX","category":"喜好"}},"told":{{"target":"角色名","content":"她说过XXX"}},"char_bonds":[{{"target":"角色名","content":"我XXX"}}]}}
-没有的类填 null（char_bonds 没有就填 []）。category 只能选：喜好/厌恶/身份/状态/经历/关系/其他'''
+没有的类填 null（char_bonds 没有就填 []）。category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         raw, _usage = create_chat(
             model=MODEL_CN_AUX, max_tokens=2000,
             messages=[{'role': 'user', 'content': group_prompt}],
@@ -1008,8 +1107,7 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
         if isinstance(uf, dict):
             content = _clean_content(uf.get('content'))
             category = (uf.get('category') or '其他').strip()
-            if category not in VALID_CATS:
-                category = '其他'
+            category = _norm_category(category)
             if _valid_user_fact(user_id, content, char_names_all):
                 if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID):
                     print(f'[{user_id}][group] ✅ 用户事实 [{category}]：{content}')
