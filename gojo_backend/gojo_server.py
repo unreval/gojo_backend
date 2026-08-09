@@ -40,6 +40,8 @@ from push_notify import init_push_table
 from route_accounting import router as accounting_router
 from route_stats import router as stats_router
 from route_voice_stream import router as voice_stream_router   # ★ B档:流式语音通话
+from route_chatlog import router as chatlog_router              # ★ 聊天记录云端同步
+from db_chatlog import init_chatlog_table
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -57,6 +59,7 @@ init_period_table()
 init_diary_tables()
 init_proactive_table()
 init_promise_table()   # ★ 承诺表(承诺驱动的主动消息)
+init_chatlog_table()   # ★ 聊天记录表(卸载重装/换手机都不丢)
 init_push_table()
 memory_search.init_vector_support()
 memory_search.start_auto_backfill()   # ★ 后台自动补 embedding,不用手动跑 /rag/backfill
@@ -82,6 +85,7 @@ app.include_router(proactive_router)
 app.include_router(accounting_router)
 app.include_router(stats_router)
 app.include_router(voice_stream_router)   # ★ B档流式语音
+app.include_router(chatlog_router)        # ★ 聊天记录同步
 
 
 @app.get('/health')

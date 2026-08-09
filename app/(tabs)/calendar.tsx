@@ -43,6 +43,9 @@ const { width, height } = Dimensions.get('window');
 const CELL_W_BIG = Math.floor((width - 56) / 7);   // 月历视图(月历 tab)
 const CELL_W_SM  = Math.floor((width - 24) / 7);   // 日期选择器 modal 里的小月历
 const USER_ID_KEY = 'gojo_user_id';
+// ★ 兜底:新装的机器 AsyncStorage 是空的,没有这个兜底 userId 会一直是空字符串,
+//   导致所有带 `if (!userId) return` 的操作(记录生理期等)静默失效
+const FIXED_USER_ID = 'user_mofpiyd7442ia7';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -201,12 +204,14 @@ export default function CalendarScreen() {
   };
 
   const recordPeriod = async (startDate: string, endDate?: string | null) => {
-    if (!userId) return;
+    // ★ 不再静默 return —— userId 万一还没就绪就用兜底值,
+    //   之前这里直接 return 导致"点了完全没反应",连错误提示都没有
+    const uid = userId || FIXED_USER_ID;
     try {
       await axios.post(`${SERVER_URL}/period/record`, {
-        user_id: userId, start_date: startDate, end_date: endDate || '',
+        user_id: uid, start_date: startDate, end_date: endDate || '',
       });
-      await loadPeriod(userId);
+      await loadPeriod(uid);
     } catch (e: any) {
       Alert.alert('记录失败', e?.response?.data?.error ?? e?.message ?? '检查后端是否已更新');
     }
@@ -218,7 +223,7 @@ export default function CalendarScreen() {
       { text: '删除', style: 'destructive', onPress: async () => {
         try {
           await axios.delete(`${SERVER_URL}/period/record/${rid}`);
-          await loadPeriod(userId);
+          await loadPeriod(userId || FIXED_USER_ID);
         } catch {}
       }},
     ]);
@@ -244,8 +249,15 @@ export default function CalendarScreen() {
           vibrationPattern: [0, 250, 250, 250],
         });
       }
-      const uid = await AsyncStorage.getItem(USER_ID_KEY);
-      if (uid) { setUserId(uid); await loadTasks(uid); loadPeriod(uid); }
+      let uid = await AsyncStorage.getItem(USER_ID_KEY);
+      if (!uid) {
+        // 首次安装/换机:AsyncStorage 为空,用固定 id 并写回去
+        uid = FIXED_USER_ID;
+        try { await AsyncStorage.setItem(USER_ID_KEY, uid); } catch {}
+      }
+      setUserId(uid);
+      await loadTasks(uid);
+      loadPeriod(uid);
       setLoading(false);
     })();
   }, []);
