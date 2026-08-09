@@ -70,6 +70,9 @@ const CHATLOG_SYNCED_KEY = (id: string) => `chatlog_synced_${id}`;
 function toServerMsg(m: any) {
   return {
     client_msg_id: String(m.id || ''),
+    // ★ 带上消息真实时间。之前没传,补传的 200 条 ts 全是同一刻,
+    //   按时间排序会乱套。
+    ts: m.timestamp ? new Date(m.timestamp).toISOString() : undefined,
     role: m.role === 'user' ? 'user' : 'gojo',
     text: m.text || '',
     subtitle: m.subtitle || '',
@@ -332,7 +335,7 @@ export default function ChatRoom() {
               // ★ 本地有、服务器没有 → 补传上去(老用户首次升级的迁移)
               const syncedFlag = await AsyncStorage.getItem(CHATLOG_SYNCED_KEY(chatId));
               if (!syncedFlag && localMsgs.length > 0) {
-                const toMigrate = localMsgs.slice(-200);
+                const toMigrate = localMsgs.slice(-500);   // 尽量多传,别再漏
                 toMigrate.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
                 syncToServer(FIXED_USER_ID, chatId, toMigrate)
                   .then(() => AsyncStorage.setItem(CHATLOG_SYNCED_KEY(chatId), '1'))
@@ -373,12 +376,26 @@ export default function ChatRoom() {
     };
   }, []);
 
+  // ★ 本地缓存只留最近这么多条。
+  //   教训:之前无上限地整体覆写,数组撑大后 AsyncStorage 写入静默失败,
+  //   本地记录在 8/3 就停止更新且六天无人察觉。
+  //   服务器已有完整历史,本地只是为了打开快,留 120 条足够。
+  const LOCAL_CACHE_MAX = 120;
+
   useEffect(() => {
     if (!ready) return;
     messagesRef.current = messages;
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
+
+    // ★ 写入失败必须能看见 —— 不再 .catch(() => {}) 静默吞掉
+    const toCache = messages.length > LOCAL_CACHE_MAX
+      ? messages.slice(-LOCAL_CACHE_MAX)
+      : messages;
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(toCache)).catch((e: any) => {
+      console.warn('[本地缓存] 写入失败(服务器仍有记录):', e?.message);
+    });
 
     // ★ 同步新消息到服务器(群聊本来就在服务器上,不用重复存)
+    //   注意:这段【不依赖】上面的本地写入,本地坏了服务器照常收
     if (!isGroup && messages.length > 0) {
       const pending = messages.filter(m => {
         const mid = String((m as any).id || '');

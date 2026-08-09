@@ -61,22 +61,41 @@ def append_messages(user_id, chat_id, msgs):
             role = (m.get('role') or '').strip()
             if role not in ('user', 'gojo'):
                 continue
-            cur.execute(
-                '''INSERT INTO chat_log
-                     (user_id, chat_id, client_msg_id, role, text, subtitle,
-                      emotion, kind, extra, has_audio)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT DO NOTHING''',
-                (user_id, chat_id,
-                 (m.get('client_msg_id') or '')[:120],
-                 role,
-                 (m.get('text') or '')[:4000],
-                 (m.get('subtitle') or '')[:4000],
-                 (m.get('emotion') or '')[:20],
-                 (m.get('kind') or 'text')[:20],
-                 (m.get('extra') or '')[:2000],
-                 bool(m.get('has_audio')))
-            )
+            # ★ 前端传了真实时间就用它,没传才用当前时间。
+            #   补传历史消息时这个很关键,不然全挤在同一时刻。
+            ts = (m.get('ts') or '').strip()
+            if ts:
+                cur.execute(
+                    '''INSERT INTO chat_log
+                         (user_id, chat_id, client_msg_id, role, text, subtitle,
+                          emotion, kind, extra, has_audio, created_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT DO NOTHING''',
+                    (user_id, chat_id,
+                     (m.get('client_msg_id') or '')[:120], role,
+                     (m.get('text') or '')[:4000],
+                     (m.get('subtitle') or '')[:4000],
+                     (m.get('emotion') or '')[:20],
+                     (m.get('kind') or 'text')[:20],
+                     (m.get('extra') or '')[:2000],
+                     bool(m.get('has_audio')), ts)
+                )
+            else:
+                cur.execute(
+                    '''INSERT INTO chat_log
+                         (user_id, chat_id, client_msg_id, role, text, subtitle,
+                          emotion, kind, extra, has_audio)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT DO NOTHING''',
+                    (user_id, chat_id,
+                     (m.get('client_msg_id') or '')[:120], role,
+                     (m.get('text') or '')[:4000],
+                     (m.get('subtitle') or '')[:4000],
+                     (m.get('emotion') or '')[:20],
+                     (m.get('kind') or 'text')[:20],
+                     (m.get('extra') or '')[:2000],
+                     bool(m.get('has_audio')))
+                )
             written += cur.rowcount
         conn.commit()
     finally:

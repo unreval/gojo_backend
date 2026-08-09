@@ -55,6 +55,74 @@ async def clear_chatlog(user_id: str, chat_id: str):
     return JSONResponse({'ok': True, 'deleted': n})
 
 
+@router.post('/chatlog/rescue_from_short_memory')
+async def rescue_from_short_memory(data: dict):
+    """★ 救援:把 short_memory 里的对话导进 chat_log。
+
+    用途:前端本地缓存坏掉、聊天记录断层时,short_memory 里还留着
+    最近 24 小时的对话文本,用这个补回聊天页。
+
+    局限:short_memory 只有纯文本(角色的日语原文),没有中文翻译、
+    没有情绪标记、没有音频。补回来的记录会比正常的简陋一些,
+    但至少内容还在。
+
+    body: {user_id, character_id, dry_run?}
+      dry_run=true 时只统计不写入,先看看会导多少条。
+    """
+    from db import get_conn
+    user_id = (data.get('user_id') or '').strip()
+    character_id = (data.get('character_id') or 'gojo').strip()
+    dry_run = bool(data.get('dry_run'))
+    if not user_id:
+        return JSONResponse({'error': '需要 user_id'}, status_code=400)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT role, content, timestamp FROM short_memory
+               WHERE user_id=%s AND character_id=%s
+               ORDER BY timestamp ASC''',
+            (user_id, character_id))
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+    if not rows:
+        return JSONResponse({'ok': True, 'found': 0,
+                             'note': 'short_memory 里没有记录'})
+
+    msgs = []
+    for role, content, ts in rows:
+        if not content:
+            continue
+        # 用时间戳做 client_msg_id,重复跑这个接口不会写重复
+        key = f'rescue_{int(ts.timestamp() * 1000)}' if ts else f'rescue_{len(msgs)}'
+        msgs.append({
+            'client_msg_id': key,
+            'role': 'user' if role == 'user' else 'gojo',
+            'text': content,
+            'subtitle': '',
+            'kind': 'text',
+            'ts': ts.isoformat() if ts else None,
+        })
+
+    if dry_run:
+        return JSONResponse({
+            'ok': True, 'dry_run': True, 'found': len(msgs),
+            'earliest': msgs[0]['ts'] if msgs else None,
+            'latest': msgs[-1]['ts'] if msgs else None,
+            'preview': [m['text'][:40] for m in msgs[:3]],
+        })
+
+    written = db_chatlog.append_messages(user_id, character_id, msgs)
+    return JSONResponse({
+        'ok': True, 'found': len(msgs), 'written': written,
+        'note': f'导入 {written} 条(重复的自动跳过)',
+    })
+
+
 @router.get('/chatlog/count')
 async def chatlog_count(user_id: str, chat_id: str):
     return JSONResponse({'count': db_chatlog.count_messages(user_id, chat_id)})
