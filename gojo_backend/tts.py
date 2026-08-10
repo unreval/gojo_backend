@@ -59,7 +59,7 @@ TTS_TOP_P       = 0.7
 #
 #   ★ 如果你的账号支持的 model ID 是"s2.1-pro"/"speech-2.1-pro"或者别的写法,
 #     去 Fish Audio 后台 Playground 里看下具体字符串,替换到这里。
-FISH_MODEL = 's2 Pro'
+FISH_MODEL = 's2.1 Pro Free'
 
 
 # ★ 情绪 → 语速 + 音量映射
