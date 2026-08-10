@@ -76,6 +76,50 @@ def _call_anthropic(model, messages, system, max_tokens, temperature):
     }
 
 
+def _salvage_from_reasoning(reasoning: str) -> str:
+    """从 reasoning_content 里抠出 JSON。
+
+    推理模型有时会正常结束(finish=stop)但 content 留空,
+    把结论写在了思考过程里。这时候答案其实还在,只是位置不对。
+    与其整轮丢掉,不如把 JSON 捞回来。
+
+    找【最外层完整的花括号块】,用括号配平判断,能扛住嵌套。
+    """
+    if not reasoning:
+        return ''
+    start = reasoning.find('{')
+    if start < 0:
+        return ''
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(reasoning)):
+        ch = reasoning[i]
+        if esc:
+            esc = False
+            continue
+        if ch == '\\':
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = reasoning[start:i + 1]
+                try:
+                    json.loads(candidate)      # 能解析才算数
+                    return candidate
+                except Exception:
+                    return ''
+    return ''
+
+
 def _call_deepseek(model, messages, system, max_tokens, temperature):
     if not DEEPSEEK_KEY:
         raise RuntimeError('DEEPSEEK_KEY 未配置,无法调用 DeepSeek')
@@ -115,18 +159,36 @@ def _call_deepseek(model, messages, system, max_tokens, temperature):
         text = msg.get('content') or ''
         finish = choice.get('finish_reason', '')
 
-        # ★ 推理模型(deepseek-v4-flash 等)会先吐一大段 reasoning_content,
-        #   思考把 max_tokens 吃光后 content 就空了 / 被截断。
-        #   这里显式暴露出来,不然日志里只看到"模型什么都没输出"完全没头绪。
+        # ★ 推理模型(deepseek-v4-flash 等)会把思考过程放在 reasoning_content。
+        #   有两种失败方式,处理方式完全不同:
+        #     finish=length → 真的被 max_tokens 截断,要调大额度
+        #     finish=stop   → 正常结束,但模型把答案写进了 reasoning、content 留空
+        #                     这时候答案其实还在,去 reasoning 里捞回来
         reasoning = msg.get('reasoning_content') or ''
+
         if reasoning and not text.strip():
-            print(f'[ai_client] ⚠️ {model} 的 token 全被思考吃掉了'
-                  f'(思考 {len(reasoning)} 字, 正文 0 字, finish={finish})'
-                  f' → 请调大 max_tokens')
+            if finish == 'length':
+                print(f'[ai_client] ⚠️ {model} 被 max_tokens({max_tokens}) 截断,'
+                      f'思考占了 {len(reasoning)} 字、正文 0 字 → 需要调大额度')
+            else:
+                # 正常结束却没正文 → 答案多半藏在思考里,尝试抠出来
+                salvaged = _salvage_from_reasoning(reasoning)
+                if salvaged:
+                    print(f'[ai_client] ♻️ {model} 正文为空(finish={finish}),'
+                          f'已从思考内容里救回 {len(salvaged)} 字')
+                    text = salvaged
+                else:
+                    print(f'[ai_client] ⚠️ {model} 正文为空且思考里也没有可用结果'
+                          f'(finish={finish}, 思考 {len(reasoning)} 字): {reasoning[:200]}')
         elif finish == 'length':
             print(f'[ai_client] ⚠️ {model} 输出被 max_tokens 截断'
                   f'(正文 {len(text)} 字{", 思考 " + str(len(reasoning)) + " 字" if reasoning else ""})'
                   f' → 请调大 max_tokens')
+        elif not text.strip():
+            # ★ 既不是截断也没有思考内容,却什么都没返回 —— 把原始响应整个打出来,
+            #   不然完全没法判断是内容过滤、限流、还是别的什么
+            print(f'[ai_client] ❌ {model} 返回空内容且原因不明,'
+                  f'finish={finish},完整响应: {json.dumps(data, ensure_ascii=False)[:800]}')
     except (KeyError, IndexError):
         raise RuntimeError(f'DeepSeek 响应结构异常: {json.dumps(data)[:300]}')
     usage = data.get('usage', {})
