@@ -8,7 +8,7 @@ import threading
 import requests
 import tempfile
 
-from config import FISH_KEY, FISH_VOICE_ID, GROQ_KEY, EMOTION_TAGS
+from config import FISH_KEY, FISH_VOICE_ID, GROQ_KEY
 
 
 # ═══════════════════════════════════════
@@ -59,17 +59,70 @@ TTS_TOP_P       = 0.7
 #
 #   ★ 如果你的账号支持的 model ID 是"s2.1-pro"/"speech-2.1-pro"或者别的写法,
 #     去 Fish Audio 后台 Playground 里看下具体字符串,替换到这里。
-FISH_MODEL = 's2.1 Pro Free'
+FISH_MODEL = 's2.1-pro'
 
 
-# ★ 情绪 → 语速 + 音量映射
-#   Fish Audio 是语音克隆,没有原生情绪合成能力,但可以用 speed+volume 模拟一部分情绪感。
+# ★ 情绪 → Fish Audio 内联标签
+#   S2.1 Pro 支持 [angry] 这种方括号标签直接写在文本里(实测有效,不会被念出来)。
+#   平静不加标签 —— 参考声本身就是平的,加了反而可能被误导。
+FISH_EMOTION_TAG = {
+    '平静': '',
+    '温柔': '[gentle]',
+    '悲伤': '[sad]',
+    '认真': '[serious]',
+    '疑惑': '[confused]',
+    '开心': '[happy]',
+    '调皮': '[playful]',
+    '自信': '[confident]',
+    '嘲讽': '[sarcastic]',
+    '激动': '[excited]',
+    '愤怒': '[angry]',
+}
+
+# 超过这个字数就要在句子之间补一次标签。
+# 实测:长句只在开头放一个标签,后半段情绪会衰减回参考声的平淡。
+TAG_REPEAT_EVERY = 22
+
+
+def _inject_emotion_tags(text: str, tag: str) -> str:
+    """把情绪标签插进文本,长文本按句子重复插。
+
+    为什么要重复:
+      Fish 的情绪标签作用范围有限,一段长文本只在开头放一个,
+      念到后半段就衰减回平淡了。实测在句子边界补第二、第三个,
+      整段的情绪才能维持住。
+
+    做法:开头放一个,之后每累计约 TAG_REPEAT_EVERY 字、
+    且正好在句子边界时,再补一个。
+    """
+    if not tag or not text:
+        return text
+
+    # 按日语/中文句末标点切分,保留标点
+    import re as _re
+    parts = _re.split(r'(?<=[。！？!?…])', text)
+    parts = [p for p in parts if p.strip()]
+    if not parts:
+        return f'{tag} {text}'
+
+    out = [f'{tag} {parts[0]}']
+    acc = len(parts[0])
+    for p in parts[1:]:
+        if acc >= TAG_REPEAT_EVERY:
+            out.append(f' {tag} {p}')     # 攒够长度了,补一个标签
+            acc = len(p)
+        else:
+            out.append(p)
+            acc += len(p)
+    return ''.join(out)
+
+
+# ★ 情绪 → 语速 + 音量映射(和标签配合使用,不是替代)
 #   speed:  越大越快(1.0 = 慢, 1.15 = 参考声, 1.5 = 快)
 #   volume: 相对分贝(0 = 参考声,正数更响,负数更轻)
 #
 #   ★ v2 修正:愤怒/激动之类高唤醒情绪必须【快+响】,不是【慢+响】——
 #     慢+响在人耳里是"严肃/凝重/温柔",不是"愤怒"。
-#     和"温柔(1.00, -2)"要拉开明显差距,不然听着都差不多。
 EMOTION_PROSODY = {
     '平静': (1.15, 0),
     '温柔': (1.00, -2),
@@ -86,8 +139,11 @@ EMOTION_PROSODY = {
 
 
 def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
-    # ★ 不再往文字里塞 tag —— Fish 会念出来。只保留 "。 " 做暖场,避开首字被切
-    final_text = f'。 {text}'
+    # ★ 情绪标签 + prosody 双管齐下:
+    #   标签负责音色/语气的情绪,prosody 负责语速音量,两者叠加效果最明显。
+    tag = FISH_EMOTION_TAG.get(emotion, '')
+    tagged = _inject_emotion_tags(text, tag)
+    final_text = f'。 {tagged}'   # 开头的"。"是暖场,避开首字被切掉
 
     text_len = len(text)
     if text_len < 15:
