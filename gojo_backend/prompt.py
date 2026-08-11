@@ -519,6 +519,30 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
    （她赌气你就接住那个气、她撒娇你就接住那份撒娇），只要说的是新的内容。
 3. 第一句要回应她【这次】说的话，别答非所问。'''
 
+# ── ★ 3.8 你此刻在做什么（来自角色自己的日程表）──
+    #   不注入的话，问他"在干嘛"他只能瞎编，和日程页显示的对不上。
+    schedule_text = ''
+    try:
+        import db_schedule as _dbs
+        _act = _dbs.get_current_activity(character_id, user_id, datetime.now(CN_TZ))
+        if _act:
+            _where = f'（在{_act["location"]}）' if _act.get('location') else ''
+            _note = f'\n你当时的想法：{_act["note"]}' if _act.get('note') else ''
+            _busy = '' if _act['can_reply'] else (
+                '\n★ 这段时间你其实走不开，语气可以带点分心、简短一些。')
+            schedule_text = f'''
+
+【你此刻正在做的事——这是你自己安排的，不是设定，是真的在做】
+{_act["start_time"]}~{_act["end_time"]} {_act["title"]}{_where}{_note}{_busy}
+
+用法：
+- 她问"在干嘛"就照实说这件事，别另编一个。
+- 不用每句话都提，但语气要和这件事对得上
+  （在开会就带点不耐烦，在吃甜品就轻松些）。
+- 这是【你的】日程，不是她的。别搞混。'''
+    except Exception as _e:
+        print(f'[prompt] 日程注入跳过：{_e}')
+
     # ── ★ 日记线索：他发现你留言 / 他偷看你日记后的反应 ──
     #   放进动态尾（每次可能不同，且取出即标记已处理，不能进缓存段）
     diary_hint = ''
@@ -550,7 +574,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
     semi_static = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 
-    dynamic_tail = f"""{stage_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
+    dynamic_tail = f"""{stage_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}
 

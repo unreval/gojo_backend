@@ -42,6 +42,24 @@ def init_chatlog_table():
     cur.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_chatlog_client
                    ON chat_log (user_id, chat_id, client_msg_id)
                    WHERE client_msg_id IS NOT NULL AND client_msg_id <> \'\'''')
+    # ★ 时区修复(幂等,已经是 timestamptz 就跳过)
+    #   原来 timestamp without time zone 存不住时区:
+    #   前端 toISOString() 传来的是 UTC,Z 被丢掉;读出来没有偏移量,
+    #   前端 new Date() 当本地时间解析 → 差 8 小时。
+    #   改成 timestamptz 后 Postgres 自己管转换,isoformat() 会带 +00:00。
+    try:
+        cur.execute("""SELECT data_type FROM information_schema.columns
+                       WHERE table_name='chat_log' AND column_name='created_at'""")
+        row = cur.fetchone()
+        if row and row[0] == 'timestamp without time zone':
+            cur.execute("""ALTER TABLE chat_log
+                           ALTER COLUMN created_at TYPE timestamptz
+                           USING created_at AT TIME ZONE 'UTC'""")
+            conn.commit()
+            print('[init] chat_log.created_at 迁移为 timestamptz(修时区差 8 小时)')
+    except Exception as e:
+        conn.rollback()
+        print(f'[init] chat_log 时区迁移跳过：{e}')
     conn.commit()
     cur.close()
     conn.close()

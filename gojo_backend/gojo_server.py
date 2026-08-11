@@ -2,6 +2,7 @@
 
 ★ v8:注册 voice_stream_router —— B档半流式语音通话 /chat/voice_stream
    (老的 /chat/voice_text 保留,前端可以自由切换或做灰度)
+★ 角色日程:char_schedule 表 + /schedule 路由 + 日程驱动的主动分享
 """
 import os
 import uvicorn
@@ -44,6 +45,7 @@ from route_chatlog import router as chatlog_router              # ★ 聊天记�
 from route_schedule import router as schedule_router            # ★ 角色自己的日程
 from db_schedule import init_schedule_table
 from db_chatlog import init_chatlog_table
+from schedule_share import start_schedule_share                 # ★ 日程驱动的主动分享
 
 
 app = FastAPI(title='GojoAssistant Backend')
@@ -67,9 +69,12 @@ init_push_table()
 memory_search.init_vector_support()
 memory_search.start_auto_backfill()   # ★ 后台自动补 embedding,不用手动跑 /rag/backfill
 seed_gojo_character()
+
+# ── 后台常驻线程 ──
 group_bubbler.start_bubbler()
 diary_scheduler.start_diary_scheduler()
 proactive_scheduler.start_proactive_scheduler()
+start_schedule_share()   # ★ 他在探店/翘班时,可能顺手发条消息(发不发由他按关系判断)
 
 # ── 注册路由 ──
 app.include_router(chat_router)

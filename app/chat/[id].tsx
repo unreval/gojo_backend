@@ -87,6 +87,9 @@ function toServerMsg(m: any) {
 function fromServerMsg(m: any): any {
   let extra: any = {};
   try { extra = m.extra ? JSON.parse(m.extra) : {}; } catch {}
+  let tsStr = m.ts || '';
+  if (tsStr && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(tsStr)) tsStr += 'Z';
+  const d = tsStr ? new Date(tsStr) : new Date();
   const d = m.ts ? new Date(m.ts) : new Date();
   return {
     id: m.client_msg_id || `srv_${m.id}`,
