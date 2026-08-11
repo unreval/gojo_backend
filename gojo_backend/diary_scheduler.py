@@ -309,12 +309,29 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
         print(f'[diary_scheduler] 留言反应生成出错: {e}')
 
 
+def _maybe_generate_schedule(character_id):
+    """★ 每天给角色生成一份日程。已有就跳过,所以一天只会真正生成一次。
+
+    挂在 diary_scheduler 的 tick 里(每 3 小时一次),
+    比单开一个线程省事 —— 反正一天生成一次,早几小时晚几小时无所谓。
+    """
+    try:
+        import schedule_engine
+        schedule_engine.ensure_today(character_id, TARGET_USER)
+    except Exception as e:
+        print(f'[diary_scheduler] {character_id} 生成日程出错:{e}')
+
+
 def _tick():
     """一次 tick:遍历所有角色,每人各自 3 种行为"""
     char_ids = _get_active_character_ids()
     if not char_ids:
         return
     for cid in char_ids:
+        try:
+            _maybe_generate_schedule(cid)     # ★ 先确保今天有日程
+        except Exception as e:
+            print(f'[diary_scheduler] {cid} 日程 tick 出错:{e}')
         try:
             _maybe_write_diary(cid)
         except Exception as e:

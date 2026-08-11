@@ -15,6 +15,10 @@ import ChibiSprite from '../../components/ChibiSprite';
 import { C, CATEGORIES, SERVER_URL } from '../../constants/theme';
 
 const USER_ID_KEY  = 'gojo_user_id';
+// ★ 兜底:AsyncStorage 是异步的,首帧读不到。
+//   之前初值写 'default',导致每个接口都被 user_id=default 白打一遍
+//   (/accounting/insights 那次还要跑 LLM,是花钱的)。
+const FIXED_USER_ID = 'user_mofpiyd7442ia7';
 const INSIGHT_CACHE_KEY = 'gojo_accounting_insight_v1';
 const INSIGHT_TTL_MS    = 30 * 60 * 1000;   // 30 分钟内不重复请求
 
@@ -74,7 +78,7 @@ const nowHHMM  = () => {
 
 // ══════════════════════════════════════════════
 export default function AccountingScreen() {
-  const [userId, setUserId] = useState<string>('default');
+  const [userId, setUserId] = useState<string>('');   // '' = 还没从 AsyncStorage 读出来
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [records, setRecords]   = useState<Record[]>([]);
   const [filterAccountId, setFilterAccountId] = useState<number | null>(null); // null = 全部
@@ -91,11 +95,19 @@ export default function AccountingScreen() {
 
   // ── 拉取用户 ID ──
   useEffect(() => {
-    AsyncStorage.getItem(USER_ID_KEY).then(v => { if (v) setUserId(v); });
+    (async () => {
+      let uid = await AsyncStorage.getItem(USER_ID_KEY);
+      if (!uid) {
+        uid = FIXED_USER_ID;
+        try { await AsyncStorage.setItem(USER_ID_KEY, uid); } catch {}
+      }
+      setUserId(uid);
+    })();
   }, []);
 
   // ── 每次进 tab 刷新数据 + 五条悟短评 ──
   useFocusEffect(useCallback(() => {
+    if (!userId) return;   // ★ 还没就绪就别打接口,免得用 default 白跑一轮
     (async () => {
       await loadData(userId);
       loadInsight(userId).catch(() => {});

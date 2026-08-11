@@ -193,6 +193,49 @@ async def chat_text(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    # ★ 角色日程:他现在可能真的走不开(上课/出任务/洗澡)。
+    #   走不开就【只已读不回】,并排一条 promise 等忙完再回 ——
+    #   这比秒回一句"我在忙"更像真人。
+    try:
+        import db_schedule, db_promise
+        from datetime import datetime as _dt, timedelta as _td
+        from config import CN_TZ as _CN_TZ
+        _now_dt = _dt.now(_CN_TZ)
+        act = db_schedule.get_current_activity(character_id, user_id, _now_dt)
+        if act and not act['can_reply']:
+            # 先把这句话存进短期记忆,不然他忙完回来不知道你说了啥
+            save_short_memory(user_id, 'user', user_text, character_id)
+
+            free_at = db_schedule.get_next_free_time(character_id, user_id, _now_dt) or act['end_time']
+            try:
+                hh, mm = free_at.split(':')
+                trigger_at = _now_dt.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+                if trigger_at <= _now_dt:          # 跨到明天了
+                    trigger_at += _td(days=1)
+                db_promise.add_promise(
+                    character_id=character_id, user_id=user_id,
+                    trigger_kind='once', trigger_at=trigger_at,
+                    context=(f'刚才我在{act["title"]}(走不开),没能回她。'
+                             f'她当时说:「{user_text[:150]}」。'
+                             f'现在忙完了,回一下她 —— 可以顺口提一句刚才在忙什么。'),
+                    origin_text=user_text[:200],
+                )
+                print(f'[{user_id}] 📵 {character_id} 正在「{act["title"]}」,只已读,{free_at} 忙完再回')
+            except Exception as _e:
+                print(f'[{user_id}] 排延迟回复失败:{_e}')
+
+            return JSONResponse({
+                'busy': True,
+                'activity': act['title'],
+                'location': act.get('location', ''),
+                'until': act['end_time'],
+                'free_at': free_at,
+                'total_days': update_chat_days(user_id),
+            })
+    except Exception as _e:
+        print(f'[{user_id}] 日程检查跳过(不影响聊天):{_e}')
+
+
     total_days = update_chat_days(user_id)
     short_memories = get_short_memory(user_id, 16, character_id)
 
