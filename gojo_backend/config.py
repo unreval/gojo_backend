@@ -5,7 +5,7 @@ from datetime import timezone, timedelta
 #  模型分配(可通过环境变量覆盖)
 # ═══════════════════════════════════════
 # MODEL_MAIN: 角色扮演主体(chat/voice/story/group/image)—— Anthropic 家族,保留 prompt cache
-MODEL_MAIN = os.getenv('MODEL_MAIN', 'claude-sonnet-4-6')
+MODEL_MAIN = os.getenv('MODEL_MAIN', 'claude-opus-4-6')
 
 # MODEL_JP_AUX: 日语辅助任务(流式语音/提醒/scheduler 反应/主动消息)—— Haiku 便宜快
 MODEL_JP_AUX = os.getenv('MODEL_JP_AUX', 'claude-haiku-4-5-20251001')
