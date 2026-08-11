@@ -25,6 +25,8 @@ def _now():
 # ── 忙碌配额配置 ──
 MAX_BUSY_SLOTS = 4        # 一天最多几段走不开
 MAX_BUSY_MINUTES = 240    # 走不开总时长上限(分钟),不含睡眠
+MIN_BUSY_PRIORITY = 4     # 优先级低于这个的活动一律算"能回消息"
+                          #   (起床洗漱/换衣服 = 2 分,再闲也能回消息)
 SLEEP_CAN_REPLY = True    # ★ 睡觉时能不能回。默认 True ——
                           #   深夜常常正是用户想聊天的时候,睡死了 App 就废了。
                           #   当作他半夜醒着刷手机 / 睡得浅。
@@ -203,32 +205,69 @@ def _sanitize(raw_items, character_id=None):
     window = get_sleep_window(character_id) if character_id else None
     if window:
         want_start, want_end = window
+
+        def _in_sleep(t):
+            # 跨午夜的窗口(04:00-07:00 不跨,23:00-07:00 跨)
+            if want_start <= want_end:
+                return want_start <= t < want_end
+            return t >= want_start or t < want_end
+
         sleeps = [it for it in ok if any(k in it['title'] for k in SLEEP_KEYWORDS)]
-        for it in sleeps:
-            if it['start_time'] != want_start or it['end_time'] != want_end:
-                print(f'[schedule] 睡眠时段纠正:'
-                      f'{it["start_time"]}-{it["end_time"]} → {want_start}-{want_end}')
-                it['start_time'] = want_start
-                it['end_time'] = want_end
-        # 被睡眠覆盖掉的时段要清掉,否则会和睡眠重叠
+
         if sleeps:
-            def _in_sleep(t):
-                # 跨午夜的窗口(04:00-07:00 不跨,23:00-07:00 跨)
-                if want_start <= want_end:
-                    return want_start <= t < want_end
-                return t >= want_start or t < want_end
-            ok = [it for it in ok
-                  if any(k in it['title'] for k in SLEEP_KEYWORDS)
-                  or not (_in_sleep(it['start_time']) and _in_sleep(it['end_time']))]
+            # 排了但时间不对 → 纠正
+            for it in sleeps:
+                if it['start_time'] != want_start or it['end_time'] != want_end:
+                    print(f'[schedule] 睡眠时段纠正:'
+                          f'{it["start_time"]}-{it["end_time"]} → {want_start}-{want_end}')
+                    it['start_time'] = want_start
+                    it['end_time'] = want_end
+        else:
+            # ★ 压根没排睡眠 → 自动补一格。
+            #   实测 LLM 有时会整段漏掉就寝,导致角色"一天不睡觉",
+            #   之前这里直接跳过,等于睡不睡全看 LLM 心情。
+            print(f'[schedule] LLM 没排睡眠,自动补 {want_start}-{want_end}')
+            ok.append({
+                'start_time': want_start, 'end_time': want_end,
+                'title': '就寝', 'location': '',
+                'note': '', 'can_reply': SLEEP_CAN_REPLY,
+            })
+            sleeps = [ok[-1]]
+
+        # 把落在睡眠窗口里的其他时段清掉,避免重叠
+        ok = [it for it in ok
+              if any(k in it['title'] for k in SLEEP_KEYWORDS)
+              or not (_in_sleep(it['start_time']) and _in_sleep(it['end_time']))]
+
+        # ★ 有的时段会"压"到睡眠窗口里(比如 23:00-04:00),把结尾截到就寝时刻
+        for it in ok:
+            if any(k in it['title'] for k in SLEEP_KEYWORDS):
+                continue
+            if not _in_sleep(it['start_time']) and _in_sleep(it['end_time']):
+                if it['end_time'] != want_start:
+                    print(f'[schedule] 「{it["title"]}」压到睡眠时间,'
+                          f'结束时间 {it["end_time"]} → {want_start}')
+                    it['end_time'] = want_start
 
     ok.sort(key=lambda x: x['start_time'])
 
     # ── 忙碌配额:按"有多不可能回消息"排优先级,不是先到先得 ──
     # 之前是先到先得,结果"起床洗漱"这种占掉配额,
     # "咒灵讨伐"反而被挤出去变成能回 —— 完全本末倒置。
+    #
+    # ★ 另外:优先级低于 MIN_BUSY_PRIORITY 的活动一律不算"走不开",
+    #   哪怕配额还有富余 —— 刷牙、换衣服、走路这种本来就能回消息,
+    #   LLM 有时会把它们标成 false,不该照单全收。
     busy = [it for it in ok
             if not it['can_reply']
             and not any(k in it['title'] for k in SLEEP_KEYWORDS)]
+
+    for it in list(busy):
+        if _busy_priority(it['title']) < MIN_BUSY_PRIORITY:
+            print(f'[schedule] 「{it["title"]}」不足以让人失联,改成可回复')
+            it['can_reply'] = True
+            busy.remove(it)
+
     busy.sort(key=lambda it: (-_busy_priority(it['title']), -_dur(it)))
 
     kept_count = 0
