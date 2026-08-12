@@ -7,6 +7,11 @@
 
 一张表：proactive_msg
   kind: 'report'（任务汇报）/ 'greeting' / 'miss' 等，方便以后扩展。
+
+★ v-dedup：新增 has_similar_recent() —— 主动消息写入前的最后一道去重网。
+  之前遇到 scheduler 重启抖动 / promise 批量到期 / life_share 掷骰子过关，
+  会一次写 4-5 条内容几乎一样的主动消息,用户打开就被刷屏。
+  现在所有写入方在 add_proactive_msg 之前应先调 has_similar_recent 兜一手。
 """
 from datetime import datetime
 from config import CN_TZ
@@ -107,3 +112,38 @@ def count_reports_since(character_id, user_id, since_dt):
     cur.close()
     conn.close()
     return n
+
+
+# ─────────────────── ★ 复读兜底 ───────────────────
+
+def has_similar_recent(user_id, character_id, jp, within_minutes=180, head_len=12):
+    """最近 within_minutes 分钟内,同一 user+character 有没有内容高度相似的主动消息。
+    有 → 说明是复读,调用方应该跳过写入。
+
+    判断方式:取 jp 前 head_len 个字符做前缀匹配。
+    - 12 字符对日语来说足够挡开头一样的复读("一級任務は終わった。"这种都会命中)
+    - 又短到不会因为标点差异误判
+    - 3 小时窗口对"生活分享/任务汇报"这类主动消息够用了,更长的话正常复发也会被挡
+    """
+    if not jp:
+        return False
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """SELECT jp FROM proactive_msg
+               WHERE user_id=%s AND character_id=%s
+                 AND created_at >= NOW() - (INTERVAL '1 minute' * %s)
+               ORDER BY created_at DESC LIMIT 10""",
+            (user_id, character_id, within_minutes)
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+    head = jp[:head_len]
+    for (existing,) in rows:
+        if existing and existing[:head_len] == head:
+            return True
+    return False

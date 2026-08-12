@@ -13,6 +13,15 @@
   跟 proactive_scheduler 一样,宁可不发也不要发得尴尬。
 
 独立线程,不依赖 diary_scheduler,只需要在 gojo_server.py 加一行 start_schedule_share()。
+
+★ v-fix (2026-08):踩过的坑
+  1. SHARE_CHANCE=0.5 太激进:每 45min 有一半概率发,一天累积 4 条铁定刷屏。
+     调到 0.15 —— 沉默是默认,发是意外。
+  2. 没有进程内 last_tick 冷却:进程重启/多线程重入时会立刻再跑一遍,
+     翻倍写入。加 _MIN_TICK_GAP_SEC 兜一手。
+  3. 写库前没做内容级去重:同一个活动可能连续两次 tick 都判"值得分享",
+     生成的 jp 差不多,但 tick 里的 _sent_today 只挡数量,挡不了复读。
+     加 proactive_msg.has_similar_recent() 做最后一道网。
 """
 import threading
 import time
@@ -26,13 +35,17 @@ import proactive_msg
 TARGET_USER = 'user_mofpiyd7442ia7'
 
 # ── 节奏控制 ──
-# ★ 这些只是【防刷屏的技术上限】,不是目标值。
+# ★ 这些是【防刷屏的技术上限】,不是目标值。
 #   真正决定发不发的是角色自己 —— 关系浅他会一直 skip,
 #   关系深了才越来越愿意说。频率曲线由他的判断自然产生,不靠数值卡。
-TICK_SECONDS = 45 * 60      # 每 45 分钟看一眼
-SHARE_CHANCE = 0.5          # 掷骰子(不是每次遇到有趣的事都非说不可)
-MAX_PER_DAY = 4             # 硬上限,防止极端情况刷屏
-MIN_GAP_HOURS = 2           # 两条之间至少隔多久
+TICK_SECONDS = 90 * 60      # 每 90 分钟看一眼(原来 45min 太密,配 0.5 概率一天必刷屏)
+SHARE_CHANCE = 0.15         # 掷骰子(原来 0.5 太激进 —— 真人生活里"想跟你说一句"没那么频繁)
+MAX_PER_DAY = 2             # 硬上限,防止极端情况刷屏(原来 4 条,实际测下来太多)
+MIN_GAP_HOURS = 3           # 两条之间至少隔 3 小时(原来 2 小时略短)
+
+# ── 进程内防抖:两次 tick 至少间隔这么久,防止重启/线程抖动时立刻重跑 ──
+_MIN_TICK_GAP_SEC = 30 * 60
+_last_tick_at = {}          # character_id → 上次 tick 的时间戳(float)
 
 # ── 什么活动值得分享 ──
 # 有这些关键词才可能发 —— 开会、写文件、通勤没什么好说的。
@@ -201,6 +214,12 @@ def _generate_share(character_id, user_id, activity):
         if not jp:
             return False
 
+        # ★ 写库前最后一道去重网:3 小时内已经发过开头一样的主动消息就跳过。
+        #   这是防线,不是主控 —— MAX_PER_DAY 挡数量,这里挡内容重复。
+        if proactive_msg.has_similar_recent(user_id, character_id, jp, within_minutes=180):
+            print(f'[life_share] {character_id} 3h 内已发过相似开头,跳过复读。jp={jp[:30]}')
+            return False
+
         audio_b64 = ''
         try:
             from tts import tts_to_b64
@@ -234,6 +253,14 @@ def _generate_share(character_id, user_id, activity):
 
 def _tick_character(character_id):
     now = _now()
+
+    # ★ 进程内防抖:同一角色两次 tick 至少间隔 _MIN_TICK_GAP_SEC
+    #   防止 scheduler 重启抖动 / 线程重入时立刻重跑,写出双份
+    now_ts = time.time()
+    last_ts = _last_tick_at.get(character_id)
+    if last_ts and (now_ts - last_ts) < _MIN_TICK_GAP_SEC:
+        return
+    _last_tick_at[character_id] = now_ts
 
     act = db_schedule.get_current_activity(character_id, TARGET_USER, now)
     if not _worth_sharing(act):

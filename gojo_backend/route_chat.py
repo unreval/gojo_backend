@@ -212,15 +212,49 @@ async def chat_text(data: dict):
                 trigger_at = _now_dt.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
                 if trigger_at <= _now_dt:          # 跨到明天了
                     trigger_at += _td(days=1)
-                db_promise.add_promise(
-                    character_id=character_id, user_id=user_id,
-                    trigger_kind='once', trigger_at=trigger_at,
-                    context=(f'刚才我在{act["title"]}(走不开),没能回她。'
-                             f'她当时说:「{user_text[:150]}」。'
-                             f'现在忙完了,回一下她 —— 可以顺口提一句刚才在忙什么。'),
-                    origin_text=user_text[:200],
-                )
-                print(f'[{user_id}] 📵 {character_id} 正在「{act["title"]}」,只已读,{free_at} 忙完再回')
+
+                # ★ 关键去重:用户在你忙的期间连发几条,不要每条都建 promise ——
+                #   否则你"忙完"那一刻 scheduler 会一次触发多条 promise,
+                #   生成 4-5 条内容相似的复读消息(实测踩过的坑,图2 的锅)。
+                #   做法:查一下最近 6h 内有没有还没触发的 once promise,
+                #   有 → 合并进那条的 context;没有 → 才新建。
+                _conn = get_conn()
+                _cur = _conn.cursor()
+                try:
+                    _cur.execute(
+                        """SELECT id, context FROM proactive_promise
+                           WHERE character_id=%s AND user_id=%s
+                             AND trigger_kind='once'
+                             AND is_fired=FALSE AND is_active=TRUE
+                             AND created_at >= NOW() - INTERVAL '6 hours'
+                           ORDER BY created_at DESC LIMIT 1""",
+                        (character_id, user_id))
+                    _row = _cur.fetchone()
+                    if _row:
+                        # 已经有一条待触发的 promise → 追加这句进去,并把触发时间刷成最新的 free_at
+                        _pid, _existing_ctx = _row
+                        _new_ctx = (_existing_ctx or '') + f'\n她后来又说:「{user_text[:150]}」'
+                        _cur.execute(
+                            """UPDATE proactive_promise
+                               SET context=%s, trigger_at=%s
+                               WHERE id=%s""",
+                            (_new_ctx, trigger_at, _pid))
+                        _conn.commit()
+                        print(f'[{user_id}] 📵 追加到已有 promise #{_pid},合并回复不复读')
+                    else:
+                        db_promise.add_promise(
+                            character_id=character_id, user_id=user_id,
+                            trigger_kind='once', trigger_at=trigger_at,
+                            context=(f'刚才我在{act["title"]}(走不开),没能回她。'
+                                     f'她当时说:「{user_text[:150]}」。'
+                                     f'现在忙完了,回一下她 —— 可以顺口提一句刚才在忙什么。'
+                                     f'如果她期间还说了别的事,把话头拢起来一起回,别逐条应答。'),
+                            origin_text=user_text[:200],
+                        )
+                        print(f'[{user_id}] 📵 {character_id} 正在「{act["title"]}」,只已读,{free_at} 忙完再回')
+                finally:
+                    _cur.close()
+                    _conn.close()
             except Exception as _e:
                 print(f'[{user_id}] 排延迟回复失败:{_e}')
 

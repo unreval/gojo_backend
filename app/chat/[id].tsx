@@ -58,6 +58,15 @@ const MAX_AUDIO_ENTRIES = 30;
 const PROACTIVE_KEY  = 'gojo_proactive_state';
 const MSG_DELAY_MS   = 800;
 
+// ★ 用来替代 Alert.alert('回复异常', ...) 这种出戏弹窗 ——
+//   后端返回空 / 网络挂了都当他自己走神,塞条角色气泡糊过去
+const FALLBACK_LINES: { jp: string; zh: string }[] = [
+  { jp: 'ん…ちょっと今手が離せない。あとでな。', zh: '嗯…现在有点脱不开身，等等再说。' },
+  { jp: 'あー、ごめん。何だっけ？',              zh: '啊，抱歉，你刚说什么来着？' },
+  { jp: 'ちょっと聞き逃した。もう一回言ってくれる？', zh: '刚才没听清，能再说一遍吗？' },
+  { jp: 'んー、電波悪いっぽい。もう一回。',      zh: '嗯…信号好像不太好，再来一次。' },
+];
+
 // 每个会话独立的存储 key（按 id 隔离）
 const msgStorageKey = (id: string) => `chat_msgs_${id}`;
 
@@ -90,7 +99,6 @@ function fromServerMsg(m: any): any {
   let tsStr = m.ts || '';
   if (tsStr && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(tsStr)) tsStr += 'Z';
   const d = tsStr ? new Date(tsStr) : new Date();
-  const d = m.ts ? new Date(m.ts) : new Date();
   return {
     id: m.client_msg_id || `srv_${m.id}`,
     role: m.role === 'user' ? 'user' : 'gojo',
@@ -970,6 +978,23 @@ export default function ChatRoom() {
     pruneAudioFiles();
   };
 
+  // ★ 兜底气泡:后端返回空 segments / 网络挂时用,不再弹系统 Alert
+  //   Alert.alert('回复异常', ...) 会瞬间把角色扮演那层皮撕开,
+  //   塞条 "没听清,再说一遍" 的气泡当他自己走神,沉浸感不断。
+  const appendFallbackBubble = () => {
+    const line = FALLBACK_LINES[Math.floor(Math.random() * FALLBACK_LINES.length)];
+    const msg: Message = {
+      id: `fallback_${Date.now()}`,
+      role: 'gojo',
+      text: line.jp,
+      subtitle: line.zh,
+      time: nowTime(),
+      timestamp: Date.now(),
+    };
+    setMessages(prev => [...prev, msg]);
+    scrollRef.current?.scrollToEnd({ animated: true });
+  };
+
   // ── 发送（统一入口）──
   const sendImage = async (
     base64: string, mediaType: string, localUri: string, caption: string,
@@ -1044,14 +1069,16 @@ export default function ChatRoom() {
           { timeout: video ? 90000 : 60000 });
         await processResponseExtras(res.data);
         const segments: Segment[] = res.data?.messages || [];
-        if (segments.length === 0) { Alert.alert('回复异常', '没有收到有效回复'); return; }
+        if (segments.length === 0) { appendFallbackBubble(); return; }
         await appendSegments(segments, `${Date.now()}`);
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
       pruneAudioFiles();
     } catch (e: any) {
-      Alert.alert('发送失败', e?.message ?? '请确认服务器正常运行');
+      // ★ 不弹 Alert.alert('发送失败') —— 出戏。塞条角色气泡替代,当他自己走神/信号差
+      console.warn('[sendImage] failed:', e?.message);
+      appendFallbackBubble();
     } finally { setLoading(false); }
   };
 
@@ -1128,14 +1155,16 @@ export default function ChatRoom() {
         } else if (res.data?.jp) {
           segments = [{ jp: res.data.jp, zh: res.data.zh ?? '', audio_b64: res.data.audio_b64 ?? '' }];
         }
-        if (segments.length === 0) { Alert.alert('回复异常', '没有收到有效回复'); return; }
+        if (segments.length === 0) { appendFallbackBubble(); return; }
         await appendSegments(segments, `${Date.now()}`);
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
       pruneAudioFiles();
     } catch (e: any) {
-      Alert.alert('连接失败', e?.message ?? '请确认服务器正常运行');
+      // ★ 不弹 Alert.alert('连接失败') —— 出戏。塞条角色气泡替代,当他自己走神/信号差
+      console.warn('[sendText] failed:', e?.message);
+      appendFallbackBubble();
     } finally { setLoading(false); }
   };
 
