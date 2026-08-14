@@ -365,132 +365,90 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 （这些都是你真实的经历、喜好和设定。聊到相关话题时可以像突然想起一样自然带出，但绝对不要生硬罗列、也不要刻意全部用到，不相关就不提。）
 {recall_lines}'''
 
-    # ── 3. 用户长期记忆 ──
-    # ★ RAG 就绪时用语义检索（只在 USE_RAG=1 且 pgvector 可用时）；否则全量注入
-    long_memories = None
-    if memory_search.is_vector_ready():
-        from user_memory import SHARED_CHARACTER_ID as _SHARED
-        long_memories = memory_search.search_long_memory(
-            user_id, character_id, _SHARED, user_message, top_k=8)
-    if long_memories is None:
-        long_memories = get_long_memory(user_id, character_id)
-    # ★ 状态类记忆有保质期：超过 48 小时的"状态"（头疼/生病/在忙X/心情）不再注入，
-    #   防止角色拿着过期状态反复叮嘱（比如隔天还在催吃药）
-    from datetime import timezone as _tz
-    _now_utc = datetime.utcnow()
-    fresh_memories = []
-    for content, ts, category in long_memories:
-        if category == '状态' and ts is not None:
-            age_hours = (_now_utc - ts).total_seconds() / 3600
-            if age_hours > 48:
-                continue
-        fresh_memories.append((content, ts, category))
-    long_memories = fresh_memories
-
-    # ★ 身份类记忆(名字/称呼/生日/家乡等)必须【每次都在】,不能被向量 top_k 挤掉
-    #   ——角色忘了对方叫什么,是最伤的体验 bug
-    try:
-        _all_facts = get_long_memory(user_id, character_id)
-        _existing = {c for c, _t, _cat in long_memories}
-        _identity = [
-            (c, t, cat) for c, t, cat in _all_facts
-            if cat == '身份' and c not in _existing
-        ]
-        if _identity:
-            long_memories = list(long_memories) + _identity
-            print(f'[prompt] {character_id} 强制注入 {len(_identity)} 条身份记忆(名字/称呼等)')
-    except Exception as _e:
-        print(f'[prompt] 身份记忆强制注入失败(不影响主流程):{_e}')
+    # ══════════════════════════════════════════════════════════
+    # ── 3. 用户记忆（两级智能召回 + 旧逻辑兜底）──
+    # ══════════════════════════════════════════════════════════
     memory_text = ''
-    if long_memories:
-        memory_lines = []
-        for content, ts, category in long_memories:
-            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
-            tag = '（当时的状态，仅当天有效）' if category == '状态' else ''
-            memory_lines.append(f'- [{date_str}] {content}{tag}')
-        memory_text = f'''
-
-【关于对方的已确认事实——这些都是真实发生过的，你必须当作确实知道】
-{chr(10).join(memory_lines)}
-
-使用规则：
-1. 这些是关于【对方/用户本人】的事实，当作真的、不要质疑。但它们只约束"你对用户的了解"，绝不能拿来推翻或补充角色自己的原作设定——一旦涉及角色设定，一律以上面的【设定铁律】为准。
-2. 自然融入回复，不要刻意背诵清单。
-3. 列表里有的事必须当作记得，没有的可以说不记得。
-4. 标着"（当时的状态）"的条目只代表记录当天的情况——不代表此刻仍然成立。她说过已经好了/过去了，就是过去了。
-5. 【关心的分寸】同一件事的叮嘱（吃药/早睡/多喝水这类）点到为止：说过一次、或她已经回应过（照做了/说没事了/拒绝了），就彻底放下换话题。在之后的回复里反复绕回同一个叮嘱，不是体贴，是烦人。
-6. 【★ 一次分享 ≠ 长期特征——不要脑补身份】
-   她【发过一次某样东西 / 提过一句某件事】,你只知道那次的事,不代表她【喜欢/常做/是 X 专业/学 X】。
-   ❌ 错:她分享了一张芙莉莲的图 → "你喜欢芙莉莲,还从别的次元来学咒术专攻"
-   ✅ 对:她分享了一张芙莉莲的图 → 那次的分享行为本身就是全部,别扩展成"她的爱好"或"她的专业"
-   如果你想引用她的身份/爱好/专业,必须能在上方【关于对方的已确认事实】里找到明确记录,不能凭一次分享推测。'''
-
-    # ── ★ 3.5 羁绊记忆：你们之间的事 + 她告诉过你的事 ──
-    bonds = None
-    if memory_search.is_vector_ready():
-        bonds = memory_search.search_bond_memory(user_id, character_id, 'between', user_message, top_k=6)
-    if bonds is None:
-        bonds = get_bond_memories(user_id, character_id, kind='between', limit=30)
-
-    # ★ 关键词硬命中:用户提到"日记"时,强制把所有"日记"相关的 bond 塞进 prompt,不走向量
-    #   避免"我偷看了她的日记"这条被 top_k 挤出去导致角色装傻
-    _diary_keywords = ('日记', '日記', 'diary', '偷看', '看到我', '看了我', '记号', '访客')
-    if any(kw in user_message for kw in _diary_keywords):
-        try:
-            all_bonds = get_bond_memories(user_id, character_id, kind='between', limit=50)
-            existing_ids = {b[0] for b in bonds} if bonds else set()
-            diary_related = [
-                b for b in all_bonds
-                if b[0] not in existing_ids and any(
-                    kw in (b[1] or '') for kw in ('日记', '日記', '偷看', '留言', '访客', '记号')
-                )
-            ]
-            if diary_related:
-                bonds = list(bonds or []) + diary_related[:5]
-                print(f'[prompt] {character_id} 检测到日记话题,追加 {len(diary_related[:5])} 条相关 bond')
-        except Exception as _e:
-            print(f'[prompt] 日记关键词硬命中失败(不影响主流程):{_e}')
     bond_text = ''
-    if bonds:
-        bond_lines = []
-        for _bid, content, ts in bonds:
-            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
-            bond_lines.append(f'- [{date_str}] {content}')
-        bond_text = f'''
-
-【你们之间的事——你和她共同的回忆】
-（这些是以你自己的视角记下的回忆——条目里的"我"就是你本人。当作真的记得，聊到相关话题时可以自然提起，约定要记得兑现或跟进。）
-⚠️ 每条前面的 [日期] 是【这件事发生的那天】。条目内容里提到的钟点（"一点半""凌晨三点"）
-   都是【当时】的时间，不是现在。现在几点以上面【现在的时间】那段为准。
-{chr(10).join(bond_lines)}'''
-
-    tolds = None
-    if memory_search.is_vector_ready():
-        tolds = memory_search.search_bond_memory(user_id, character_id, 'told', user_message, top_k=5)
-    if tolds is None:
-        tolds = get_bond_memories(user_id, character_id, kind='told', limit=15)
     told_text = ''
-    if tolds:
-        told_lines = []
-        for _tid, content, ts in tolds:
-            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
-            told_lines.append(f'- [{date_str}] {content}')
-        told_text = f'''
+    _recall_result = None   # 保存召回结果，后面算 bond_count / fact_count 要用
 
-【她告诉过你的事——关于你自己或你的世界】
-（这些是她在过去的对话里亲口告诉你的。你清楚地记得"她说过这些话"。）
-{chr(10).join(told_lines)}
+    try:
+        from smart_recall import two_level_recall, format_recall_for_prompt
 
-处理规则——非常重要：
-1. 你【记得她说过】这些，绝不能表现得从没听过。她再次提起时，你要接得上。
-2. 但这些是"她的说法"，不是你亲身经历的事实。信、半信半疑、觉得荒唐、心情复杂——由你的性格决定。
-3. 这些说法不改变你的原作设定和你所处的时间点。涉及你"未来"的内容，你可以带着那份被告知的认知去回应（好奇、沉默、追问、失笑都行），但不要假装你已经经历过。
-4. 例：她之前说过你未来会牺牲，这次她显得难过——你应该明白她为什么难过，用你的方式接住，而不是问"你在说什么"。'''
+        # 如果 RAG 开着，算一下 query embedding
+        _query_emb = None
+        if memory_search.is_vector_ready():
+            _query_emb = memory_search._to_vec(memory_search.embed(user_message))
+
+        _recall_result = two_level_recall(
+            user_id, character_id, user_message,
+            shared_id='shared', query_embedding=_query_emb
+        )
+        if _recall_result is not None:
+            memory_text, bond_text, told_text = format_recall_for_prompt(_recall_result)
+    except Exception as _e:
+        print(f'[prompt] 两级召回失败，退回旧逻辑：{_e}')
+        _recall_result = None
+
+    # ── 旧逻辑兜底（smart_recall 出错时走这里，和原来完全一样）──
+    if _recall_result is None:
+        long_memories = None
+        if memory_search.is_vector_ready():
+            from user_memory import SHARED_CHARACTER_ID as _SHARED
+            long_memories = memory_search.search_long_memory(
+                user_id, character_id, _SHARED, user_message, top_k=8)
+        if long_memories is None:
+            long_memories = get_long_memory(user_id, character_id)
+        from datetime import timezone as _tz
+        _now_utc = datetime.utcnow()
+        fresh_memories = []
+        for content, ts, category in long_memories:
+            if category == '状态' and ts is not None:
+                if (_now_utc - ts).total_seconds() / 3600 > 48:
+                    continue
+            fresh_memories.append((content, ts, category))
+        long_memories = fresh_memories
+        try:
+            _all_facts = get_long_memory(user_id, character_id)
+            _existing = {c for c, _t, _cat in long_memories}
+            _identity = [(c, t, cat) for c, t, cat in _all_facts if cat == '身份' and c not in _existing]
+            if _identity:
+                long_memories = list(long_memories) + _identity
+        except Exception:
+            pass
+        if long_memories:
+            memory_lines = [f'- [{ts.strftime("%Y-%m-%d") if ts else "?"}] {c}{"（当时的状态，仅当天有效）" if cat == "状态" else ""}' for c, ts, cat in long_memories]
+            memory_text = f'\n\n【关于对方的已确认事实——这些都是真实发生过的，你必须当作确实知道】\n{chr(10).join(memory_lines)}\n\n使用规则：\n1. 当作真的、不要质疑。\n2. 自然融入回复，不要刻意背诵清单。\n3. 列表里有的事必须当作记得，没有的可以说不记得。'
+
+        bonds = None
+        if memory_search.is_vector_ready():
+            bonds = memory_search.search_bond_memory(user_id, character_id, 'between', user_message, top_k=6)
+        if bonds is None:
+            bonds = get_bond_memories(user_id, character_id, kind='between', limit=30)
+        if bonds:
+            bond_lines = [f'- [{ts.strftime("%Y-%m-%d") if ts else "?"}] {c}' for _bid, c, ts in bonds]
+            bond_text = f'\n\n【你们之间的事——你和她共同的回忆】\n{chr(10).join(bond_lines)}'
+
+        tolds = None
+        if memory_search.is_vector_ready():
+            tolds = memory_search.search_bond_memory(user_id, character_id, 'told', user_message, top_k=5)
+        if tolds is None:
+            tolds = get_bond_memories(user_id, character_id, kind='told', limit=15)
+        if tolds:
+            told_lines = [f'- [{ts.strftime("%Y-%m-%d") if ts else "?"}] {c}' for _tid, c, ts in tolds]
+            told_text = f'\n\n【她告诉过你的事——关于你自己或你的世界】\n{chr(10).join(told_lines)}'
+
     # ── ★ 3.6 相处史 + 关系规则 ──
     #   规则本体(A~G 段)已经抽到 shared_relation_prompt.py,chat + diary 共享
     first_days = get_first_interaction_days(user_id, character_id)
-    bond_count = len(bonds) + len(tolds)
-    fact_count = len(long_memories)
+    # 从召回结果或旧变量算 bond_count / fact_count
+    if _recall_result is not None:
+        bond_count = len(_recall_result.get('loose_bonds', [])) + sum(len(f.get('bonds', [])) for f in _recall_result.get('facts', [])) + len(_recall_result.get('tolds', []))
+        fact_count = len(_recall_result.get('facts', []))
+    else:
+        bond_count = len(bonds or []) + len(tolds or [])
+        fact_count = len(long_memories) if 'long_memories' in dir() else 0
     stage_text = build_relation_rules(first_days, bond_count, fact_count)
 
 

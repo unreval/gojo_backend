@@ -14,6 +14,7 @@ from db import init_db, migrate_old_gojo_memory
 from db_group import init_group_tables
 from characters import seed_gojo_character
 from db_bond import init_bond_table
+from migrate_two_level_recall import migrate_two_level   # ★ 两级召回迁移
 import memory_search
 import group_bubbler
 import diary_scheduler
@@ -59,6 +60,7 @@ init_db()
 migrate_old_gojo_memory()
 init_group_tables()
 init_bond_table()
+migrate_two_level()   # ★ 两级召回：给 long_memory / bond_memory 加评分列
 init_period_table()
 init_diary_tables()
 init_proactive_table()

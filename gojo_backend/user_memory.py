@@ -322,6 +322,18 @@ def save_bond_memory(user_id, character_id, kind, content):
         (user_id, character_id, kind, content)
     )
     new_id = cur.fetchone()[0]
+
+    # ★ 两级召回：尝试关联到一条 long_memory
+    try:
+        from smart_recall import link_bond_to_fact
+        fact_id = link_bond_to_fact(user_id, character_id, content)
+        if fact_id:
+            cur.execute('UPDATE bond_memory SET linked_fact_id = %s WHERE id = %s',
+                        (fact_id, new_id))
+            print(f'[{user_id}] 🔗 bond #{new_id} 关联到 fact #{fact_id}')
+    except Exception:
+        pass  # 关联失败不影响存入
+
     conn.commit()
     cur.close()
     conn.close()
@@ -1012,6 +1024,13 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
             if _valid_told(user_id, content):
                 if save_bond_memory(user_id, character_id, 'told', content):
                     print(f'[{user_id}] ✅ 告知记忆（{character_id}）：{content}')
+
+        # ★ 两级召回：强化被提起的记忆（mention_count + 1）
+        try:
+            from smart_recall import reinforce_mentioned_facts
+            reinforce_mentioned_facts(user_id, character_id, user_text)
+        except Exception:
+            pass
 
     except Exception as e:
         print(f'记忆提取失败：{e}')
