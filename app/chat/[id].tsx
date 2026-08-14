@@ -101,6 +101,9 @@ function fromServerMsg(m: any): any {
   const d = tsStr ? new Date(tsStr) : new Date();
   return {
     id: m.client_msg_id || `srv_${m.id}`,
+    // ★ 保留服务端原始数字 ID —— 分页用 before_id 时要用它,
+    //   不然拿 client_msg_id("1723..." 这种时间戳字符串)传过去会出错
+    serverId: typeof m.id === 'number' ? m.id : undefined,
     role: m.role === 'user' ? 'user' : 'gojo',
     text: m.text || '',
     subtitle: m.subtitle || undefined,
@@ -321,16 +324,18 @@ export default function ChatRoom() {
           let loaded = false;
           try {
             const logRes = await axios.get(`${SERVER_URL}/chatlog`, {
-              params: { user_id: FIXED_USER_ID, chat_id: chatId, limit: 200 },
-              timeout: 10000,
+              params: { user_id: FIXED_USER_ID, chat_id: chatId, limit: 500 },  // ★ 200→500,覆盖几个月的日常聊天
+              timeout: 15000,
             });
             const srv = (logRes.data?.messages || []).map(fromServerMsg);
             if (srv.length > 0) {
               // 从服务器来的都算已同步,别再传回去
               srv.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
-              setMessages(srv);
+              // ★ server 数据没有 readAt 字段,从本地 sidecar 合并回来,不然重进会丢已读
+              const withRead = await applyReadStatusFromStorage(srv);
+              setMessages(withRead);
               setHasMore(!!logRes.data?.has_more);
-              AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(srv)).catch(() => {});
+              AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(withRead)).catch(() => {});
               loaded = true;
             }
           } catch (e: any) {
@@ -342,7 +347,9 @@ export default function ChatRoom() {
             const saved = await AsyncStorage.getItem(STORAGE_KEY);
             if (saved) {
               const localMsgs = JSON.parse(saved);
-              setMessages(localMsgs);
+              // ★ 本地缓存有可能存了 readAt(旧路径),但为了统一,还是走一遍 sidecar 合并
+              const withRead = await applyReadStatusFromStorage(localMsgs);
+              setMessages(withRead);
               // ★ 本地有、服务器没有 → 补传上去(老用户首次升级的迁移)
               const syncedFlag = await AsyncStorage.getItem(CHATLOG_SYNCED_KEY(chatId));
               if (!syncedFlag && localMsgs.length > 0) {
@@ -537,34 +544,76 @@ export default function ChatRoom() {
     } catch (e) { console.warn('sendProactive error', e); }
   };
 
-  // ★ 群聊：往前翻更早的聊天记录（服务器永久保存，随便翻）
+  // ★ 往前翻更早的聊天记录（服务器永久保存,随便翻）—— 群聊和单聊都走这个
   const loadEarlier = async () => {
-    if (!isGroup || groupId == null || loadingMore) return;
-    const oldest = messages.find(m => m.id.startsWith('g_'));
-    if (!oldest) return;
-    const beforeId = parseInt(oldest.id.replace('g_', ''), 10);
-    if (!beforeId) return;
+    if (loadingMore) return;
+
+    // ── 群聊分支（原逻辑保留）──
+    if (isGroup) {
+      if (groupId == null) return;
+      const oldest = messages.find(m => m.id.startsWith('g_'));
+      if (!oldest) return;
+      const beforeId = parseInt(oldest.id.replace('g_', ''), 10);
+      if (!beforeId) return;
+      try {
+        setLoadingMore(true);
+        const res = await axios.get(`${SERVER_URL}/group/${groupId}/history`, {
+          params: { before_id: beforeId, limit: 30 },
+        });
+        const older: Message[] = (res.data?.messages || []).map((m: any) => ({
+          id: m.msg_id != null ? `g_${m.msg_id}` : `srv_${m.ts || Math.random()}`,
+          role: m.sender_type === 'user' ? 'user' : 'gojo',
+          text: m.sender_type === 'user' ? (m.zh || '') : (m.jp || m.zh || ''),
+          subtitle: m.sender_type === 'user' ? undefined : (m.zh || undefined),
+          time: m.ts
+            ? `${String(new Date(m.ts).getHours()).padStart(2, '0')}:${String(new Date(m.ts).getMinutes()).padStart(2, '0')}`
+            : '',
+          timestamp: m.ts || Date.now(),
+          senderId: m.sender_id,
+          senderName: m.sender_type === 'user' ? undefined : m.sender_name,
+        }));
+        if (older.length > 0) setMessages(prev => [...older, ...prev]);
+        setHasMore(!!res.data?.has_more);
+      } catch (e: any) {
+        console.warn('loadEarlier(group)', e?.message);
+      } finally {
+        setLoadingMore(false);
+      }
+      return;
+    }
+
+    // ── 单聊分支 ──
+    //   用当前 messages 里最小的 serverId 作为分页锚点。
+    //   本地新发的消息没 serverId,只看从 server 拉下来那批。
+    let oldestSrvId: number | null = null;
+    for (const m of messages) {
+      const sid = (m as any).serverId;
+      if (typeof sid === 'number') {
+        if (oldestSrvId === null || sid < oldestSrvId) oldestSrvId = sid;
+      }
+    }
+    if (oldestSrvId === null) return;   // 没有 server 消息可翻(全是本地新的)
+
     try {
       setLoadingMore(true);
-      const res = await axios.get(`${SERVER_URL}/group/${groupId}/history`, {
-        params: { before_id: beforeId, limit: 30 },
+      const res = await axios.get(`${SERVER_URL}/chatlog`, {
+        params: {
+          user_id: FIXED_USER_ID, chat_id: chatId,
+          before_id: oldestSrvId, limit: 200,   // 一次翻 200 条,后端硬顶 500
+        },
+        timeout: 15000,
       });
-      const older: Message[] = (res.data?.messages || []).map((m: any) => ({
-        id: m.msg_id != null ? `g_${m.msg_id}` : `srv_${m.ts || Math.random()}`,
-        role: m.sender_type === 'user' ? 'user' : 'gojo',
-        text: m.sender_type === 'user' ? (m.zh || '') : (m.jp || m.zh || ''),
-        subtitle: m.sender_type === 'user' ? undefined : (m.zh || undefined),
-        time: m.ts
-          ? `${String(new Date(m.ts).getHours()).padStart(2, '0')}:${String(new Date(m.ts).getMinutes()).padStart(2, '0')}`
-          : '',
-        timestamp: m.ts || Date.now(),
-        senderId: m.sender_id,
-        senderName: m.sender_type === 'user' ? undefined : m.sender_name,
-      }));
-      if (older.length > 0) setMessages(prev => [...older, ...prev]);
+      const older = (res.data?.messages || []).map(fromServerMsg);
+      if (older.length > 0) {
+        // ★ 已读状态从 sidecar 合并
+        const olderWithRead = await applyReadStatusFromStorage(older);
+        // 标记为已同步,避免被 sync 补传回去
+        olderWithRead.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
+        setMessages(prev => [...olderWithRead, ...prev]);
+      }
       setHasMore(!!res.data?.has_more);
     } catch (e: any) {
-      console.warn('loadEarlier', e?.message);
+      console.warn('loadEarlier(single)', e?.message);
     } finally {
       setLoadingMore(false);
     }
@@ -783,6 +832,12 @@ export default function ChatRoom() {
       // 滚到底让新消息可见
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
 
+      // ★ 已读时机:他通过 proactive 发消息了 = 他"忙完/上线"看到了之前的消息 →
+      //   把之前所有未读的 user 消息标已读。这正是"他忙完再回你"的自然时机。
+      if (newMsgs.length > 0) {
+        markPendingUserMessagesRead();
+      }
+
       // 标记已读(失败也不管,反正下次进来还会拉,是幂等的)
       if (readIds.length > 0) {
         axios.post(`${SERVER_URL}/proactive/read`, { msg_ids: readIds }).catch(() => {});
@@ -998,11 +1053,42 @@ export default function ChatRoom() {
   // ★ 已读标记:把所有还没读的 user 消息标为"对方已读"
   //   语义 = 微信:后端返回 200(不管是正常回复还是 busy=true),都算他"看到了"。
   //   什么时候不标:HTTP 失败/超时 —— 那说明消息压根没送到,还是"未读"。
-  const markPendingUserMessagesRead = () => {
+  //
+  //   ★ 时机:加 800-2000ms 随机延迟,让"读"这个动作看起来自然,
+  //     不然 busy 响应几百毫秒就回来,已读瞬间亮起来很出戏。
+  //   ★ 持久化:同时写一份到本地 sidecar(read_at_${chatId})。
+  //     重进聊天时 server 数据没这个字段,得从 sidecar 合并回来才不会丢。
+  const READ_AT_KEY = (id: string) => `read_at_${id}`;
+
+  const markPendingUserMessagesRead = async () => {
+    // 自然一点的"读"延迟 —— 别让人觉得对面是台机器
+    await sleep(800 + Math.floor(Math.random() * 1200));
     const now = Date.now();
-    setMessages(prev => prev.map(m =>
-      m.role === 'user' && !m.readAt ? { ...m, readAt: now } : m
-    ));
+    setMessages(prev => {
+      const updated = prev.map(m =>
+        m.role === 'user' && !m.readAt ? { ...m, readAt: now } : m
+      );
+      // 顺手落地到 sidecar,重进不会丢
+      const readAtMap: Record<string, number> = {};
+      updated.forEach(m => {
+        if (m.role === 'user' && m.readAt) readAtMap[m.id] = m.readAt;
+      });
+      AsyncStorage.setItem(READ_AT_KEY(chatId), JSON.stringify(readAtMap)).catch(() => {});
+      return updated;
+    });
+  };
+
+  // ★ 从 sidecar 读回已读状态,合并到当前 messages 上。
+  //   在任何一次 setMessages(来自 server/local/history)之后调用。
+  const applyReadStatusFromStorage = async (msgs: Message[]): Promise<Message[]> => {
+    try {
+      const saved = await AsyncStorage.getItem(READ_AT_KEY(chatId));
+      if (!saved) return msgs;
+      const readAtMap: Record<string, number> = JSON.parse(saved);
+      return msgs.map(m =>
+        m.role === 'user' && readAtMap[m.id] ? { ...m, readAt: readAtMap[m.id] } : m
+      );
+    } catch { return msgs; }
   };
 
   // ── 发送（统一入口）──
@@ -1078,8 +1164,10 @@ export default function ChatRoom() {
         const res = await axios.post(`${SERVER_URL}/chat/image`, payload,
           { timeout: video ? 90000 : 60000 });
         await processResponseExtras(res.data);
-        // ★ 拿到后端 200 响应就算他"看到了",标已读(即使 busy=true 也算)
-        markPendingUserMessagesRead();
+        // ★ 同上:busy 时他没看,别秒已读
+        if (!res.data?.busy) {
+          markPendingUserMessagesRead();
+        }
         const segments: Segment[] = res.data?.messages || [];
         if (segments.length === 0) { appendFallbackBubble(); return; }
         await appendSegments(segments, `${Date.now()}`);
@@ -1163,8 +1251,12 @@ export default function ChatRoom() {
           text, user_id: FIXED_USER_ID, character_id: chatId,
         });
         await processResponseExtras(res.data);
-        // ★ 拿到后端 200 响应就算他"看到了",标已读(即使 busy=true 也算)
-        markPendingUserMessagesRead();
+        // ★ 已读的语义:【他真的看到并回复了】才算已读。
+        //   busy=true 时他正忙着,消息进了 promise 队列,他自己都没看 —— 不该秒已读。
+        //   等他忙完通过 proactive 或下次交互回复时,那时候才会通过其他路径标已读。
+        if (!res.data?.busy) {
+          markPendingUserMessagesRead();
+        }
         let segments: Segment[] = [];
         if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
           segments = res.data.messages;
@@ -1386,8 +1478,8 @@ export default function ChatRoom() {
         contentContainerStyle={s.chatContent}
         onContentSizeChange={() => { if (!searchMode) scrollRef.current?.scrollToEnd({ animated: true }); }}
       >
-        {/* ★ 群聊：载入更早（聊天记录永久保存在服务器，不占 token） */}
-        {isGroup && hasMore && !searchMode && (
+        {/* ★ 载入更早(单聊 + 群聊都有,聊天记录永久存在服务器,不占 token) */}
+        {hasMore && !searchMode && (
           <TouchableOpacity style={s.loadMoreBtn} onPress={loadEarlier} disabled={loadingMore}>
             {loadingMore
               ? <ActivityIndicator size="small" color={C.accent2 || '#5BC4FF'} />
