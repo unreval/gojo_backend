@@ -995,6 +995,16 @@ export default function ChatRoom() {
     scrollRef.current?.scrollToEnd({ animated: true });
   };
 
+  // ★ 已读标记:把所有还没读的 user 消息标为"对方已读"
+  //   语义 = 微信:后端返回 200(不管是正常回复还是 busy=true),都算他"看到了"。
+  //   什么时候不标:HTTP 失败/超时 —— 那说明消息压根没送到,还是"未读"。
+  const markPendingUserMessagesRead = () => {
+    const now = Date.now();
+    setMessages(prev => prev.map(m =>
+      m.role === 'user' && !m.readAt ? { ...m, readAt: now } : m
+    ));
+  };
+
   // ── 发送（统一入口）──
   const sendImage = async (
     base64: string, mediaType: string, localUri: string, caption: string,
@@ -1068,6 +1078,8 @@ export default function ChatRoom() {
         const res = await axios.post(`${SERVER_URL}/chat/image`, payload,
           { timeout: video ? 90000 : 60000 });
         await processResponseExtras(res.data);
+        // ★ 拿到后端 200 响应就算他"看到了",标已读(即使 busy=true 也算)
+        markPendingUserMessagesRead();
         const segments: Segment[] = res.data?.messages || [];
         if (segments.length === 0) { appendFallbackBubble(); return; }
         await appendSegments(segments, `${Date.now()}`);
@@ -1125,6 +1137,8 @@ export default function ChatRoom() {
           mentioned_id: mentionedId,
           allow_interaction: false,
         });
+        // ★ 群聊拿到 200 也算已读(哪怕没人接话)
+        markPendingUserMessagesRead();
         const replies: GroupReply[] = res.data?.replies || [];
         if (replies.length === 0) {
           const sys: Message = {
@@ -1149,6 +1163,8 @@ export default function ChatRoom() {
           text, user_id: FIXED_USER_ID, character_id: chatId,
         });
         await processResponseExtras(res.data);
+        // ★ 拿到后端 200 响应就算他"看到了",标已读(即使 busy=true 也算)
+        markPendingUserMessagesRead();
         let segments: Segment[] = [];
         if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
           segments = res.data.messages;
@@ -1513,6 +1529,10 @@ export default function ChatRoom() {
                 </TouchableOpacity>
                 <View style={s.msgBottom}>
                   <Text style={s.msgTime}>{msg.time}</Text>
+                  {/* ★ 已读标识:只在 user 消息且拿到 readAt 后显示 —— 微信语义,对方看到了就亮 */}
+                  {msg.role === 'user' && msg.readAt && (
+                    <Text style={s.msgReadMark}>已读</Text>
+                  )}
                 </View>
               </View>
             </View>
@@ -1675,6 +1695,7 @@ const s = StyleSheet.create({
   replayHint:      { color: C.accent, fontSize: 11, marginTop: 6, opacity: 0.7 },
   msgBottom:       { flexDirection: 'row', alignItems: 'center', marginTop: 4, marginHorizontal: 2 },
   msgTime:         { color: C.textMute, fontSize: 10 },
+  msgReadMark:     { color: C.textMute, fontSize: 10, marginLeft: 6, opacity: 0.7 },
 
   timeSepWrap:     { alignSelf: 'center', marginVertical: 12, paddingHorizontal: 14, paddingVertical: 4, borderRadius: 10, backgroundColor: C.card },
   timeSepText:     { color: C.textMute, fontSize: 11 },
