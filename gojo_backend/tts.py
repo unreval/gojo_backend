@@ -134,8 +134,8 @@ def _inject_emotion_tags(text: str, tag: str) -> str:
 #     慢+响在人耳里是"严肃/凝重/温柔",不是"愤怒"。
 EMOTION_PROSODY = {
     '平静': (1.15, 0),
-    '温柔': (1.15, -2),
-    '悲伤': (1.15, -4),
+    '温柔': (1.00, -2),
+    '悲伤': (1.10, -4),
     '认真': (1.15, 1),
     '疑惑': (1.15, 0),
     '开心': (1.30, 2),
@@ -148,6 +148,14 @@ EMOTION_PROSODY = {
 
 
 def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
+    # ★ 修:去掉开头的省略号/连续句号,Fish 会把它读成怪声
+    #   开头的 "。。。。。。" / "……" / "..." / "・・・" → 静音处理
+    #   长句中间的省略号保留(Fish 会自然停顿,不会发怪声)
+    import re as _re
+    text = _re.sub(r'^\s*[。．\.…・]{2,}\s*', '', text).strip()
+    if not text:
+        raise Exception('TTS 内容为空(全是省略号)')
+
     # ★ 情绪标签 + prosody 双管齐下:
     #   标签负责音色/语气的情绪,prosody 负责语速音量,两者叠加效果最明显。
     tag = FISH_EMOTION_TAG.get(emotion, '')

@@ -1,3 +1,22 @@
+# ═══════════════════════════════════════════════════════════════════
+# ★★★ 这份是【BACKEND 私仓版】user_memory.py ★★★
+#
+# 用途:  推到你 backend 私仓 (你自己的完整版仓库)
+# 路径:  你的_backend/gojo_backend/user_memory.py (或对应的 backend 目录)
+# 行数:  ~1160 行
+# 基底:  backend 私仓原版 (1157 行) + 时间阈值降到 10 分
+#
+# 包含:  ✅ backend 私仓原版所有功能全部保留 (没删任何东西)
+#        ✅ 时间阈值 10 分钟 (修凌晨 1:59 问抽血 bug)
+#
+# ⚠️  【只改了 1 处】: get_short_memory 里的 gap_hours>=2 → gap_seconds>=600
+#     其他地方一字未动
+#
+# ⚠️  这份【不能】推到 pub
+#     — 是 backend 私仓自己代码基础上打的补丁
+#     — pub 用另一份文件 PUB_user_memory.py
+# ═══════════════════════════════════════════════════════════════════
+
 """用户记忆 v3（短期 + 长期 + 羁绊 + 统一三桶提取 + 自动纠错）
 
 记忆四层结构：
@@ -99,8 +118,11 @@ def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
         if ts is not None:
             # 数据库存的是 UTC，换算到北京时间再判断
             ts_cn = ts.replace(tzinfo=timezone.utc).astimezone(CN_TZ)
-            gap_hours = (now - ts_cn).total_seconds() / 3600
-            if gap_hours >= 2:
+            gap_seconds = (now - ts_cn).total_seconds()
+            # ★ 修时间判断 bug: 阈值从 2h 降到 10 分钟
+            #   老代码只在 ≥2h 时标时间戳,导致 13 分钟前说的晚安、
+            #   现在再打招呼,LLM 完全看不到时间差,可能误以为已经隔了一觉。
+            if gap_seconds >= 600:
                 d = ts_cn.date()
                 if d == today:
                     day_label = '今天'
