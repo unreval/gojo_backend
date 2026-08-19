@@ -201,7 +201,7 @@ export default function ChatRoom() {
   const syncedIdsRef = useRef<Set<string>>(new Set());
   const [inputText, setInputText] = useState('');
   const [loading, setLoading]     = useState(false);
-  const inputText Ref = useRef('');   // ★ IME 双写:发送时从 ref 读最新值,防 composition 未 commit 截断
+  const inputTextRef = useRef('');   // ★ IME 双写:发送时从 ref 读最新值,防 composition 未 commit 截断
   const [ready, setReady]         = useState(false);
   const [showCall, setShowCall]   = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);  // ★ 手动监听键盘高度
