@@ -46,6 +46,9 @@ from route_chatlog import router as chatlog_router              # ★ 聊天记�
 from route_schedule import router as schedule_router            # ★ 角色自己的日程
 from db_schedule import init_schedule_table
 from db_chatlog import init_chatlog_table
+from route_grumble import router as grumble_router               # ★ 便利贴吐槽
+from route_game import router as game_router                     # ★ 游戏(五子棋对战说话)
+from db_grumble import init_grumble_table   
 from schedule_share import start_schedule_share                 # ★ 日程驱动的主动分享
 
 
@@ -68,6 +71,7 @@ init_promise_table()   # ★ 承诺表(承诺驱动的主动消息)
 init_chatlog_table()   # ★ 聊天记录表(卸载重装/换手机都不丢)
 init_schedule_table()  # ★ 角色日程表(忙的时候只已读不回)
 init_push_table()
+init_grumble_table()   # ★ 便利贴吐槽表
 memory_search.init_vector_support()
 memory_search.start_auto_backfill()   # ★ 后台自动补 embedding,不用手动跑 /rag/backfill
 seed_gojo_character()
@@ -97,6 +101,8 @@ app.include_router(stats_router)
 app.include_router(voice_stream_router)   # ★ B档流式语音
 app.include_router(chatlog_router)        # ★ 聊天记录同步
 app.include_router(schedule_router)       # ★ 角色日程
+app.include_router(grumble_router)
+app.include_router(game_router)
 
 
 @app.get('/health')

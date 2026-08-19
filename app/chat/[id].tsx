@@ -201,6 +201,7 @@ export default function ChatRoom() {
   const syncedIdsRef = useRef<Set<string>>(new Set());
   const [inputText, setInputText] = useState('');
   const [loading, setLoading]     = useState(false);
+  const inputText Ref = useRef('');   // ★ IME 双写:发送时从 ref 读最新值,防 composition 未 commit 截断
   const [ready, setReady]         = useState(false);
   const [showCall, setShowCall]   = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);  // ★ 手动监听键盘高度
@@ -1200,6 +1201,7 @@ export default function ChatRoom() {
     }
     if (loading) return;
     setInputText('');
+    inputTextRef.current = '';   // ★ 顺手清 ref
     setShowMention(false);
     if (searchMode) { setSearchMode(false); setSearchQuery(''); }
 
@@ -1276,18 +1278,27 @@ export default function ChatRoom() {
     } finally { setLoading(false); }
   };
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (loading) return;
+
+    // ★★ IME 截断修复:
+    //   中文输入法在拼音候选还没选字确认时,TextInput state 可能没接住最后一次 keystroke。
+    //   Keyboard.dismiss() 强制 IME commit,sleep 让 state 追上,再从 ref 读最新值。
+    Keyboard.dismiss();
+    await sleep(80);
+    const latestText = inputTextRef.current || inputText;
+
     if (pendingImage) {
-      const caption = inputText.trim();
+      const caption = latestText.trim();
       const img = pendingImage;
       setPendingImage(null);
       setInputText('');
+      inputTextRef.current = '';
       if (searchMode) { setSearchMode(false); setSearchQuery(''); }
       sendImage(img.base64, img.mediaType, img.uri, caption,
                 img.isVideo && img.frames ? { frames: img.frames } : undefined);
     } else {
-      sendText();
+      sendText(latestText);   // ★ 显式传入,不再让 sendText 从 state 读
     }
   };
 

@@ -340,6 +340,16 @@ async def chat_text(data: dict):
     except Exception:
         pass
 
+    # ★ 便利贴吐槽:这一轮聊完,他心里可能会嘀咕一句(不发出来,只写便利贴)
+    #   完全后台,失败也不影响主对话
+    try:
+        import grumble_engine
+        threading.Thread(target=grumble_engine.maybe_write_grumble,
+                         args=(character_id, user_id, user_text, full_jp),
+                         daemon=True).start()
+    except Exception:
+        pass
+
     voice_id = char.get('voice_id')
     for m in msgs:
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)

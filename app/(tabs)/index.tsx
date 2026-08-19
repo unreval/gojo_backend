@@ -98,6 +98,8 @@ const TILES = [
   { route: '__diary__',   icon: '📔', label: '日记', sub: '悟的 & 你的', color: '#E8A0BF', special: 'diary' },
   { route: '/bedtime-story', icon: '🌙', label: '睡前故事', sub: '哄你入睡',  color: '#8B7FD6' },
   { route: '/schedule',   icon: '🗓️', label: 'TA的一天', sub: '他今天在忙啥', color: '#5BC4FF' },
+  { route: '/games',      icon: '🎮', label: '游戏',    sub: '和 TA 下一盘',   color: '#FF7EB6' },
+  { route: '/grumbles',   icon: '📝', label: '便利贴',  sub: 'TA 心里的碎碎念', color: '#FFD166' },
 ];
 
 export default function HomeScreen() {
