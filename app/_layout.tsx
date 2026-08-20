@@ -102,6 +102,8 @@ export default function RootLayout() {
         <Stack.Screen name="chat" options={{ headerShown: false }} />
         <Stack.Screen name="diary" options={{ headerShown: false }} />
         <Stack.Screen name="schedule/index" options={{ headerShown: false }} /> 
+        <Stack.Screen name="games" options={{ headerShown: false }} />
+        <Stack.Screen name="grumbles" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
         <Stack.Screen name="bedtime-story" options={{ title: '睡前故事' }} />
       </Stack>
