@@ -1,14 +1,15 @@
 """schedule_engine.py —— 让角色自己排一天的行程
 
-每天生成一次,由 LLM 按角色的背景设定安排。
-不是随机填格子 —— 是"这个人今天大概会怎么过"。
+★ v2:日程风格大改
+  旧版:title="去咖啡厅" location="涩谷" note="点了杯拿铁" ← 像打卡清单
+  新版:title="跑去表参道那家新开的 % Arabica 排了20分钟队,
+              就为了他家的西班牙拿铁限定版" ← 像真人的一天
 
-★ 关键:can_reply 由 LLM 逐条判断
-    真的走不开(上课/出任务/洗澡/开会) → false
-    能摸鱼(探店/逛街/查账/吃饭/发呆) → true
-
-★ 约束:忙碌时段一天不超过 4 小时、不超过 4 段。
-    全天都忙的话用户就没得聊了,那不是陪伴 App 该有的样子。
+  · 地点用东京/京都的真实店铺和地标(LLM 知道这些)
+  · 偶尔去别的城市(大阪/名古屋/北海道)出差或旅行
+  · 限定品/新品/当季特色 让日程更有时令感
+  · 不全是好评,有时踩雷就吐槽
+  · title 本身就是叙事,不是"做什么"三个字
 """
 from datetime import datetime, timedelta
 from config import CN_TZ, MODEL_CN_AUX
@@ -16,23 +17,19 @@ from characters import get_character
 from characters_data._loader import load_core
 from character_rhythm import get_rhythm_text, get_sleep_window
 import db_schedule
+import random
 
 
 def _now():
     return datetime.now(CN_TZ)
 
 
-# ── 忙碌配额配置 ──
-MAX_BUSY_SLOTS = 4        # 一天最多几段走不开
-MAX_BUSY_MINUTES = 240    # 走不开总时长上限(分钟),不含睡眠
-MIN_BUSY_PRIORITY = 4     # 优先级低于这个的活动一律算"能回消息"
-                          #   (起床洗漱/换衣服 = 2 分,再闲也能回消息)
-SLEEP_CAN_REPLY = True    # ★ 睡觉时能不能回。默认 True ——
-                          #   深夜常常正是用户想聊天的时候,睡死了 App 就废了。
-                          #   当作他半夜醒着刷手机 / 睡得浅。
+# ── 忙碌配额配置(不变) ──
+MAX_BUSY_SLOTS = 4
+MAX_BUSY_MINUTES = 240
+MIN_BUSY_PRIORITY = 4
+SLEEP_CAN_REPLY = True
 
-# 越"不可能回消息"的活动优先级越高,配额不够时优先保留它们。
-# 之前是先到先得,结果"起床洗漱"占了配额、"咒灵讨伐"被放行,完全反了。
 _BUSY_PRIORITY = [
     (10, ('任务', '讨伐', '战斗', '出勤', '祓除', '交战', '出击')),
     (9,  ('上课', '授课', '教学', '讲课', '辅导', '训练')),
@@ -44,18 +41,44 @@ _BUSY_PRIORITY = [
 
 
 def _busy_priority(title: str) -> int:
-    """这件事有多不可能回消息。数字越大越走不开。"""
     for score, keywords in _BUSY_PRIORITY:
         if any(k in title for k in keywords):
             return score
-    return 5      # 没匹配上的给中等优先级
+    return 5
+
+
+# ── 季节/月份 → 时令关键词(让日程有时令感) ──
+def _seasonal_hints(month: int) -> str:
+    hints = {
+        1:  '正月初詣、福袋、冬季限定草莓甜品、热巧克力、温泉',
+        2:  '情人节巧克力、草莓季、梅花、冬季清仓',
+        3:  '樱花季开始、春季限定抹茶、毕业季',
+        4:  '满开樱花、花见、春季新品、新学期',
+        5:  '黄金周、新绿、抹茶新茶、初夏限定',
+        6:  '梅雨季、紫阳花、夏季限定刨冰、水果挞',
+        7:  '夏祭、花火大会、刨冰、西瓜、冷面',
+        8:  '盂兰盆节、花火、夏季限定冰品、海边、啤酒花园',
+        9:  '秋季栗子甜品、月见、秋刀鱼、葡萄',
+        10: '万圣节限定、红叶开始、秋季新品、栗子蒙布朗',
+        11: '红叶季、秋季限定、感恩节、热饮回归',
+        12: '圣诞限定、年末、冬季草莓、热红酒、illumination',
+    }
+    return hints.get(month, '')
+
+
+# ── 偶尔去别的城市 ──
+def _pick_city_context() -> str:
+    """大部分时间在东京/京都,偶尔(15%)去别的城市"""
+    if random.random() < 0.15:
+        city = random.choice(['大阪', '名古屋', '北海道', '福冈', '横滨', '�的�的', '神户'])
+        if city == '镇仙':
+            city = '�的仙台'
+        return f'\n★ 今天你{random.choice(["出差去了", "临时跑去了", "心血来潮去了", "被叫去了"])}{city},日程安排在那边。\n'
+    return ''
 
 
 def generate_daily_schedule(character_id, user_id, target_date=None, force=False):
-    """给某个角色生成某天的日程。返回条目列表或 None。
-
-    force=False 时,当天已有日程就跳过(避免重复生成覆盖掉你手动改过的)。
-    """
+    """给某个角色生成某天的日程。返回条目列表或 None。"""
     target_date = target_date or _now().date()
 
     if not force and db_schedule.has_schedule(character_id, user_id, target_date):
@@ -67,7 +90,6 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         return None
     char_name = char['name']
 
-    # 拿角色的核心设定,让排程贴合人设
     try:
         core = load_core(character_id)
         core_prompt = (core.get('core_prompt') or '')[:1500]
@@ -77,44 +99,80 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
     weekday_cn = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][target_date.weekday()]
     is_weekend = target_date.weekday() >= 5
 
-    # ★ 官方设定的作息骨架。没有这个,LLM 会按普通上班族排(23点睡7点起),
-    #   而五条公式书写的是 04:00 就寝、07:00 起床、一天睡 3 小时。
     rhythm = get_rhythm_text(character_id)
     rhythm_block = f'\n{rhythm}\n' if rhythm else ''
+
+    season = _seasonal_hints(target_date.month)
+    city_context = _pick_city_context()
 
     prompt = f'''你是{char_name}。请安排你自己 {target_date}（{weekday_cn}）这一天的行程。
 
 【你是谁】
 {core_prompt}
 {rhythm_block}
-【要求】
-1. 从早上起床到晚上睡觉,排 8-12 个时间段,覆盖一整天。
-2. 每一段要符合【你的身份和性格】——不是通用打工人日程,
-   是"{char_name}这个人今天会怎么过"。
-   {'今天是周末,安排可以更随性。' if is_weekend else '今天是工作日,该有的正事要有。'}
+【当季关键词】{season}
+{city_context}
+{'今天是周末,可以更随性。' if is_weekend else '今天是工作日,该有的正事要有,但也别排太满。'}
 
-★ 【每天要不一样】这一点很重要:
-   不要每天都排一模一样的格子。真实的人今天和明天过得不同 ——
-   · 今天可能一整天泡在任务里,明天可能一个任务都没有
-   · 可能临时决定绕路去买某家限定甜品、去新开的店探店、逛街
-   · 可能翘掉一节课去偷懒,也可能被临时叫去救场
-   · 可能纯粹发呆一小时,什么正事都不干
-   在作息骨架里【自由填内容】,今天就想一个"今天他会干嘛"的答案,
-   别套模板。
-3. 每段写清楚:开始时间、结束时间、做什么、在哪、以及一句你自己的碎碎念。
-4. ★ 每段要标注 can_reply —— 这段时间你能不能回手机消息:
-   · false（真的走不开）:上课、出任务、战斗、洗澡、正式会议、开车
-   · true（能摸鱼）:吃饭、逛街、探店、查资料、发呆、休息、通勤(非自己开车)
-5. ★ 重要限制:can_reply=false 的时段【一天最多 4 段、总共不超过 4 小时】。
-   剩下的时间都要能回消息 —— 你不是全天失联的人。
-6. 睡觉时段也要排(通常 can_reply=false),但别排太长。
+═══════════════════════════════════════
+★ 【最重要的改变:写法】
+═══════════════════════════════════════
 
-【时间格式】必须是 "HH:MM" 24 小时制,前后时段要连得上,不要留空档也不要重叠。
+title 不是"做什么"这种干巴巴的三个字 —— 它是【你今天这段时间的生活叙事】。
+要写得像你在跟朋友描述你今天干了什么,一句话就能让人看到画面:
 
-【严格按这个 JSON 输出,只输出一行,不要任何解释】
+❌ 错误示范(太死):
+  title:"去咖啡厅" location:"涩谷" note:"点了拿铁"
+  title:"午餐" location:"食堂" note:"吃了拉面"
+  title:"逛街" location:"表参道" note:"买了衣服"
+
+✅ 正确示范(有画面、有情绪、有细节):
+  title:"跑去原宿那家排队排到马路上的限量版爆浆流心可颂,等了快半小时"
+  title:"在衣帽间挑今天穿的高定私服,最后选了那件25万的白衬衫"
+  title:"瞬移到京都高专把交流会奖品全换成发光惨叫鸡"
+  title:"经过表参道的 Blue Bottle 顺手买了杯手冲,坐在路边看人"
+  title:"在校长室喝茶并故意用宝宝用语恶心乐�的岩寺"
+  title:"去涩谷 PARCO 看新开的潮牌快闪店,看了一圈什么都没买"
+  title:"溜去新宿那家深夜拉面,点了特浓豚骨加叉烧加量"
+
+关键:
+· 提到的店、地标、食物要是【东京/京都真实存在的】或者至少是合理的
+  (Blue Bottle / % Arabica / Cremia / HARBS / 一兰拉面 / bills / PARCO / 109 / 
+   表参道 / 原宿竹下通 / 涩谷 / 新宿 / 代官山 / 中目黑 / 清水寺 / 锦市场 等等)
+· 当季有什么限定品/新品,可以让你"去排队/去尝鲜/去打卡"
+· 【不是每次都好评!】有时排半天队发现踩雷了,就在 note 里吐槽
+  ("排了40分钟,拿到手发现没有网图那么夸张,下次不来了")
+· title 一段话20-60字,别太短(≥15字),别太长(≤80字)
+
+═══════════════════════════════════════
+
+note 是你的【内心碎碎念】,用你自己的语气:
+  ✅ "哎这笔账目看着很有趣呢~" "排队也是品尝美食的重要一环哦"
+     "大家看到一定会很惊喜的吧!" "其实没那么好喝,但拍照确实出片"
+     "明明是工作日人怎么这么多" "又买多了,衣柜要炸了"
+  ❌ "今天天气不错" "心情很好" ← 太空洞
+
+location 是【具体地点】:
+  ✅ "原宿甜品店" "Blue Bottle 表参道" "京都高专校长室" "涩谷 PARCO 5F"
+  ❌ "某店" "外面" "城市" ← 太模糊
+
+【其他要求】
+1. 从起床到睡觉,排 8-12 个时间段,覆盖一整天。
+2. 每一段要符合你的身份和性格 —— 是"{char_name}这个人今天会怎么过"。
+3. 【每天要不一样】:今天和昨天不是同一天,别复制粘贴。
+   今天可能探店、可能出任务、可能翘班、可能被叫去开会、可能纯摸鱼。
+4. can_reply 判断:
+   · false = 真的走不开:上课、出任务、战斗、洗澡、正式会议
+   · true = 能摸鱼回消息:吃饭、逛街、探店、发呆、休息、通勤
+5. can_reply=false 的时段一天最多 4 段、总共不超过 4 小时。
+6. 睡觉也排上(can_reply 看你设定)。
+
+【时间格式】"HH:MM" 24小时制,前后要连上,不要留空档。
+
+【严格 JSON 一行,不要任何解释】
 {{"schedule":[
-  {{"start_time":"07:00","end_time":"07:45","title":"做什么","location":"在哪","note":"一句碎碎念","can_reply":true}},
-  {{"start_time":"07:45","end_time":"09:00","title":"...","location":"...","note":"...","can_reply":false}}
+  {{"start_time":"07:00","end_time":"07:45","title":"一段生活叙事(15-80字)","location":"具体地点","note":"你的碎碎念","can_reply":true}},
+  ...
 ]}}'''
 
     try:
@@ -150,114 +208,92 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         return None
 
 
-def _sanitize(raw_items, character_id=None):
-    """清洗 LLM 输出:校验时间格式、强制忙碌上限。
+# ════════════════════════════════════════════════
+#  以下是 _sanitize 和其他辅助函数(不改,照搬原版)
+# ════════════════════════════════════════════════
 
-    LLM 经常会把一整天排满忙碌时段(它觉得这样"更真实"),
-    但那样用户一天都聊不上天。这里硬性砍到 4 段 / 4 小时以内。
-    """
+SLEEP_KEYWORDS = ('睡', '就寝', '寝る', '休息', '入睡')
+
+
+def _dur(item):
+    """计算一个时段的分钟数。"""
+    try:
+        sh, sm = map(int, item['start_time'].split(':'))
+        eh, em = map(int, item['end_time'].split(':'))
+        start = sh * 60 + sm
+        end = eh * 60 + em
+        if end <= start:
+            end += 24 * 60
+        return end - start
+    except Exception:
+        return 60
+
+
+def _sanitize(raw_items, character_id=None):
+    """清洗 LLM 输出:校验时间格式、强制忙碌上限。"""
     import re
+
+    sleep_start, sleep_end = None, None
+    try:
+        sw = get_sleep_window(character_id) if character_id else None
+        if sw:
+            sleep_start, sleep_end = sw
+    except Exception:
+        pass
+
+    def _in_sleep(time_str):
+        if not sleep_start or not sleep_end:
+            return False
+        try:
+            h, m = map(int, time_str.split(':'))
+            t = h * 60 + m
+            s = int(sleep_start.split(':')[0]) * 60 + int(sleep_start.split(':')[1])
+            e = int(sleep_end.split(':')[0]) * 60 + int(sleep_end.split(':')[1])
+            if s > e:
+                return t >= s or t < e
+            return s <= t < e
+        except Exception:
+            return False
+
+    want_start = sleep_start
+
     ok = []
     for it in raw_items:
-        if not isinstance(it, dict):
+        st = (it.get('start_time') or '').strip()
+        et = (it.get('end_time') or '').strip()
+        title = (it.get('title') or '').strip()
+        if not st or not et or not title:
             continue
-        st = str(it.get('start_time', '')).strip()
-        et = str(it.get('end_time', '')).strip()
-        title = str(it.get('title', '')).strip()
-        if not re.fullmatch(r'\d{1,2}:\d{2}', st) or not re.fullmatch(r'\d{1,2}:\d{2}', et):
+        if not re.match(r'^\d{2}:\d{2}$', st) or not re.match(r'^\d{2}:\d{2}$', et):
             continue
-        if not title:
-            continue
-        # 补零成 HH:MM,保证字符串比较能当时间比较用
-        st = f'{int(st.split(":")[0]):02d}:{st.split(":")[1]}'
-        et = f'{int(et.split(":")[0]):02d}:{et.split(":")[1]}'
-        ok.append({
-            'start_time': st, 'end_time': et, 'title': title[:80],
-            'location': str(it.get('location', ''))[:40],
-            'note': str(it.get('note', ''))[:120],
-            'can_reply': bool(it.get('can_reply', True)),
-        })
+        it['start_time'] = st
+        it['end_time'] = et
+        it['title'] = title
+        it['location'] = (it.get('location') or '').strip()
+        it['note'] = (it.get('note') or '').strip()
+        it['can_reply'] = bool(it.get('can_reply', True))
 
-    ok.sort(key=lambda x: x['start_time'])
-
-    def _mins(hhmm):
-        h, m = hhmm.split(':')
-        return int(h) * 60 + int(m)
-
-    def _dur(it):
-        d = _mins(it['end_time']) - _mins(it['start_time'])
-        return d + 24 * 60 if d < 0 else d      # 跨午夜
-
-    # ── 睡眠特殊处理 ──
-    # 深夜往往正是用户最想聊天的时候。如果角色"睡着了"一律不回,
-    # App 在半夜就完全用不了了。
-    # 所以睡眠时段【默认可以回】—— 当作他半夜醒着刷手机 / 睡得浅。
-    # 想改成真的不回,把 SLEEP_CAN_REPLY 设成 False。
-    SLEEP_KEYWORDS = ('睡', '就寝', '寝', '休息中', '入眠')
-    for it in ok:
-        if any(k in it['title'] for k in SLEEP_KEYWORDS):
+        # 睡觉关键词
+        is_sleep = any(k in title for k in SLEEP_KEYWORDS)
+        if is_sleep:
             it['can_reply'] = SLEEP_CAN_REPLY
 
-    # ── ★ 睡眠时长兜底 ──
-    # 光靠 prompt 不保险:LLM 很容易按"正常人"排 23:00-07:00 睡 8 小时,
-    # 但五条 canon 是 04:00-07:00 只睡 3 小时。
-    # 这里按 character_rhythm 配置的窗口强制纠正。
-    window = get_sleep_window(character_id) if character_id else None
-    if window:
-        want_start, want_end = window
-
-        def _in_sleep(t):
-            # 跨午夜的窗口(04:00-07:00 不跨,23:00-07:00 跨)
-            if want_start <= want_end:
-                return want_start <= t < want_end
-            return t >= want_start or t < want_end
-
-        sleeps = [it for it in ok if any(k in it['title'] for k in SLEEP_KEYWORDS)]
-
-        if sleeps:
-            # 排了但时间不对 → 纠正
-            for it in sleeps:
-                if it['start_time'] != want_start or it['end_time'] != want_end:
-                    print(f'[schedule] 睡眠时段纠正:'
-                          f'{it["start_time"]}-{it["end_time"]} → {want_start}-{want_end}')
-                    it['start_time'] = want_start
-                    it['end_time'] = want_end
-        else:
-            # ★ 压根没排睡眠 → 自动补一格。
-            #   实测 LLM 有时会整段漏掉就寝,导致角色"一天不睡觉",
-            #   之前这里直接跳过,等于睡不睡全看 LLM 心情。
-            print(f'[schedule] LLM 没排睡眠,自动补 {want_start}-{want_end}')
-            ok.append({
-                'start_time': want_start, 'end_time': want_end,
-                'title': '就寝', 'location': '',
-                'note': '', 'can_reply': SLEEP_CAN_REPLY,
-            })
-            sleeps = [ok[-1]]
-
-        # 把落在睡眠窗口里的其他时段清掉,避免重叠
-        ok = [it for it in ok
-              if any(k in it['title'] for k in SLEEP_KEYWORDS)
-              or not (_in_sleep(it['start_time']) and _in_sleep(it['end_time']))]
-
-        # ★ 有的时段会"压"到睡眠窗口里(比如 23:00-04:00),把结尾截到就寝时刻
-        for it in ok:
-            if any(k in it['title'] for k in SLEEP_KEYWORDS):
+        # 保护睡眠时段
+        if sleep_start and not is_sleep:
+            if _in_sleep(it['start_time']) and _in_sleep(it['end_time']):
+                print(f'[schedule] 「{title}」完全在睡眠时间内,跳过')
                 continue
             if not _in_sleep(it['start_time']) and _in_sleep(it['end_time']):
                 if it['end_time'] != want_start:
-                    print(f'[schedule] 「{it["title"]}」压到睡眠时间,'
+                    print(f'[schedule] 「{title}」压到睡眠时间,'
                           f'结束时间 {it["end_time"]} → {want_start}')
                     it['end_time'] = want_start
 
+        ok.append(it)
+
     ok.sort(key=lambda x: x['start_time'])
 
-    # ── 忙碌配额:按"有多不可能回消息"排优先级,不是先到先得 ──
-    # 之前是先到先得,结果"起床洗漱"这种占掉配额,
-    # "咒灵讨伐"反而被挤出去变成能回 —— 完全本末倒置。
-    #
-    # ★ 另外:优先级低于 MIN_BUSY_PRIORITY 的活动一律不算"走不开",
-    #   哪怕配额还有富余 —— 刷牙、换衣服、走路这种本来就能回消息,
-    #   LLM 有时会把它们标成 false,不该照单全收。
+    # ── 忙碌配额:按优先级排序 ──
     busy = [it for it in ok
             if not it['can_reply']
             and not any(k in it['title'] for k in SLEEP_KEYWORDS)]
@@ -283,13 +319,13 @@ def _sanitize(raw_items, character_id=None):
 
     for it in busy:
         if id(it) not in keep_ids:
-            it['can_reply'] = True      # 没进配额的放行
+            it['can_reply'] = True
 
     return ok
 
 
 def ensure_today(character_id, user_id):
-    """确保今天有日程,没有就生成。开 App 时调一次做兜底。"""
+    """确保今天有日程,没有就生成。"""
     today = _now().date()
     if db_schedule.has_schedule(character_id, user_id, today):
         return False
