@@ -67,14 +67,72 @@ def algo_move(board):
     return best if best else (7, 7)
 
 
+def algo_move_weak(board):
+    """故意下弱一点:从前 5 名候选里随机挑一个(不一定最优)。
+    看起来像"没看到最优位置",不像故意让。"""
+    candidates = []
+    for y in range(SIZE):
+        for x in range(SIZE):
+            if board[y][x] != 0: continue
+            hasN = False
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    nx2, ny2 = x + dx, y + dy
+                    if 0 <= nx2 < SIZE and 0 <= ny2 < SIZE and board[ny2][nx2] != 0:
+                        hasN = True; break
+                if hasN: break
+            if not hasN: continue
+            sc = _eval_pos(board, x, y, 2) + _eval_pos(board, x, y, 1) * 0.9
+            candidates.append((sc, x, y))
+    if not candidates:
+        return (7, 7)
+    candidates.sort(key=lambda c: -c[0])
+    # 从前 5 名里随机挑,但排除第 1 名(最优解)
+    # 如果候选不足 3 个就正常下(局面太紧张,让不了)
+    if len(candidates) < 3:
+        return (candidates[0][1], candidates[0][2])
+    import random
+    pick = random.choice(candidates[1:min(5, len(candidates))])
+    return (pick[1], pick[2])
+
+
+# 撒娇/求饶关键词:检测到就有概率"手软"
+_MERCY_KEYWORDS = [
+    '让我', '求你', '拜托', '让一下', '放水', '手下留情', '你让', '让让',
+    '撒娇', '嘛', '好不好', '人家', '呜呜', '哼', '不要赢', '让我赢',
+    '太难了', '太厉害', '打不过', '好强', '不公平', '欺负', '你好坏',
+    '讨厌', '哇啊', '呜', '你故意的', '耍赖',
+]
+
+def _detect_mercy(chat_history: list) -> bool:
+    """检测最近聊天里有没有撒娇/求饶。有 → 60% 概率手软。"""
+    import random
+    recent = chat_history[-5:] if chat_history else []
+    user_texts = ' '.join(
+        (m.get('text') or m.get('zh') or '')
+        for m in recent
+        if m.get('role') == 'user'
+    )
+    if any(kw in user_texts for kw in _MERCY_KEYWORDS):
+        return random.random() < 0.6   # 60% 概率心软
+    return False
+
+
 @router.post('/game/gomoku/move')
 async def gomoku_move(data: dict):
-    """算法决定落子。快/强/不花钱。"""
+    """算法决定落子。检测到撒娇时可能手软。"""
     board = data.get('board', [])
+    chat_history = data.get('chat_history', [])
     if not board or len(board) != SIZE:
         return JSONResponse({'x': 7, 'y': 7})
-    x, y = algo_move(board)
-    return JSONResponse({'x': x, 'y': y})
+
+    mercy = _detect_mercy(chat_history)
+    if mercy:
+        x, y = algo_move_weak(board)
+        print(f'[gomoku] 💕 检测到撒娇,手软了一下: ({x},{y})')
+    else:
+        x, y = algo_move(board)
+    return JSONResponse({'x': x, 'y': y, 'mercy': mercy})
 
 
 # ────────────────── AI 说话 ──────────────────
