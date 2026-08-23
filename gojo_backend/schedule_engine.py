@@ -113,12 +113,10 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 1. 从起床到睡觉,排 8-12 个时间段,覆盖一整天。
 2. 每一段要符合这个角色的身份和性格。
 
-3. title 要生活化但【简短】(10-25字),手机屏幕一行要能看完:
-   ✅ "去原宿网红店排队买限量可颂"
-   ✅ "挑今天穿的高定私服"
-   ✅ "溜去涩谷PARCO看潮牌快闪"
-   ✅ "去代官山Ivy Place吃早午餐"
-   ❌ "去咖啡厅" ← 太干  ❌ 超过25字 ← 太长
+3. title【极短】(5-15字),手机一行看完,细节放 note:
+   ✅ "去Ivy Place吃brunch" ✅ "原宿买限量可颂"
+   ✅ "溜去PARCO看快闪" ✅ "备课" ✅ "泡澡刷手机"
+   ❌ 超过15字 = 失败。描述性的长句写进 note 不要写进 title。
 
 4. location 要具体:
    ✅ "原宿甜品店" "Blue Bottle 表参道" "涩谷 PARCO 5F"

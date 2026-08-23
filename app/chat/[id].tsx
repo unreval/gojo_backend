@@ -206,8 +206,11 @@ export default function ChatRoom() {
   const [showCall, setShowCall]   = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);  // ★ 手动监听键盘高度
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
+  const [replyingTo, setReplyingTo] = useState<any | null>(null);   // ★ 引用回复
   const [searchMode, setSearchMode]   = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [serverSearchResults, setServerSearchResults] = useState<Message[]>([]);  // ★ 服务器全量搜索结果
+  const [searchLoading, setSearchLoading] = useState(false);                      // ★ 搜索中
   const [showFullTime, setShowFullTime] = useState(false); // 点击时间条切换完整/简短
 
   // ★ 记账账户列表(给 pending_transaction 确认卡用)——单聊才拉
@@ -224,6 +227,7 @@ export default function ChatRoom() {
   const focusedRef = useRef(true);            // ★ 人是否还在这个页面
   const [hasMore, setHasMore] = useState(false);      // ★ 群聊：还有更早的消息
   const [loadingMore, setLoadingMore] = useState(false);
+  const justLoadedEarlierRef = useRef(false);   // ★ 加载历史时禁止滚到底
   const messagesRef = useRef<Message[]>([]);  // ★ 消息镜像（离开后仍能落盘）
   const lastSentRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });  // ★ 防抖：挡网络卡顿导致的重复发送
 
@@ -478,6 +482,30 @@ export default function ChatRoom() {
     }
   }, [ready, chatId, isGroup]));
 
+  // ★ 搜索走服务器:能搜到全部历史(不只是本地 500 条),500ms 防抖
+  useEffect(() => {
+    if (!searchMode || !searchQuery.trim() || isGroup) {
+      setServerSearchResults([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setSearchLoading(true);
+      try {
+        const res = await axios.get(`${SERVER_URL}/chatlog/search`, {
+          params: { user_id: FIXED_USER_ID, chat_id: chatId, keyword: searchQuery.trim(), limit: 100 },
+          timeout: 10000,
+        });
+        const results = (res.data?.results || []).map(fromServerMsg);
+        setServerSearchResults(results);
+      } catch (e: any) {
+        console.warn('[search] server search failed, fallback to local:', e?.message);
+        setServerSearchResults([]);
+      }
+      setSearchLoading(false);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [searchQuery, searchMode, chatId, isGroup]);
+
   const checkProactiveTasks = async () => {
     if (loading || checkingProactiveRef.current) return;
     checkingProactiveRef.current = true;
@@ -573,7 +601,10 @@ export default function ChatRoom() {
           senderId: m.sender_id,
           senderName: m.sender_type === 'user' ? undefined : m.sender_name,
         }));
-        if (older.length > 0) setMessages(prev => [...older, ...prev]);
+        if (older.length > 0) {
+          justLoadedEarlierRef.current = true;   // ★ 加载历史时禁止滚到底
+          setMessages(prev => [...older, ...prev]);
+        }
         setHasMore(!!res.data?.has_more);
       } catch (e: any) {
         console.warn('loadEarlier(group)', e?.message);
@@ -610,6 +641,7 @@ export default function ChatRoom() {
         const olderWithRead = await applyReadStatusFromStorage(older);
         // 标记为已同步,避免被 sync 补传回去
         olderWithRead.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
+        justLoadedEarlierRef.current = true;   // ★ 加载历史时禁止滚到底
         setMessages(prev => [...olderWithRead, ...prev]);
       }
       setHasMore(!!res.data?.has_more);
@@ -1205,7 +1237,10 @@ export default function ChatRoom() {
     setShowMention(false);
     if (searchMode) { setSearchMode(false); setSearchQuery(''); }
 
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now() };
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now(),
+      ...(replyingTo ? { replyTo: { id: replyingTo.id, text: replyingTo.subtitle || replyingTo.text || '', name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')) } } : {}),
+    };
+    setReplyingTo(null);   // ★ 发送后清掉引用
     setMessages(prev => [...prev, userMsg]);
     if (isGroup) bumpRead(1);
     setLoading(true);
@@ -1357,10 +1392,13 @@ export default function ChatRoom() {
     ]);
   };
 
-  // ★ 长按气泡：复制 or 删除
+  // ★ 长按气泡：复制 / 引用 / 删除
   const onBubbleLongPress = (msg: Message) => {
     Alert.alert('这条消息', '', [
       { text: '📋 复制', onPress: () => copyMessage(msg) },
+      { text: '💬 引用', onPress: () => {
+        setReplyingTo(msg);
+      }},
       { text: '🗑 删除', style: 'destructive', onPress: () => deleteMessage(msg) },
       { text: '取消', style: 'cancel' },
     ]);
@@ -1396,11 +1434,13 @@ export default function ChatRoom() {
     ? (group ? `${group.members.length} 个成员` : '加载中...')
     : (chatId === 'gojo' ? '最强的男人' : '');
 
-  // 渲染过滤
+  // ★ 渲染过滤:搜索时优先用服务器全量结果,兜底用本地过滤
   const displayMessages = searchMode && searchQuery.trim()
-    ? messages.filter(m =>
-        m.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (m.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase()))
+    ? (serverSearchResults.length > 0
+        ? serverSearchResults
+        : messages.filter(m =>
+            m.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            (m.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase())))
     : messages;
 
   const canSend = !loading && (inputText.trim().length > 0 || !!pendingImage);
@@ -1479,7 +1519,9 @@ export default function ChatRoom() {
 
       {searchMode && searchQuery.trim() && (
         <View style={s.searchResultBar}>
-          <Text style={s.searchResultText}>找到 {displayMessages.length} 条结果</Text>
+          <Text style={s.searchResultText}>
+            {searchLoading ? '搜索中...' : `找到 ${displayMessages.length} 条结果`}
+          </Text>
         </View>
       )}
 
@@ -1487,7 +1529,13 @@ export default function ChatRoom() {
         ref={scrollRef}
         style={s.chatArea}
         contentContainerStyle={s.chatContent}
-        onContentSizeChange={() => { if (!searchMode) scrollRef.current?.scrollToEnd({ animated: true }); }}
+        onContentSizeChange={() => {
+          if (justLoadedEarlierRef.current) {
+            justLoadedEarlierRef.current = false;
+            return;   // ★ 加载历史时不跳到底
+          }
+          if (!searchMode) scrollRef.current?.scrollToEnd({ animated: true });
+        }}
       >
         {/* ★ 载入更早(单聊 + 群聊都有,聊天记录永久存在服务器,不占 token) */}
         {hasMore && !searchMode && (
@@ -1612,6 +1660,16 @@ export default function ChatRoom() {
                     msg.role === 'user' ? s.bubbleUser : s.bubbleGojo,
                     isHighlighted && s.bubbleHighlight,
                   ]}>
+                    {/* ★ 引用的消息显示 */}
+                    {(msg as any).replyTo && (
+                      <View style={s.quotedMsg}>
+                        <View style={s.quotedLine} />
+                        <View style={{ flex: 1 }}>
+                          <Text style={s.quotedName} numberOfLines={1}>{(msg as any).replyTo.name || ''}</Text>
+                          <Text style={s.quotedText} numberOfLines={2}>{(msg as any).replyTo.text || ''}</Text>
+                        </View>
+                      </View>
+                    )}
                     {msg.imageUri && (
                       <Image source={{ uri: msg.imageUri }} style={s.bubbleImage} resizeMode="cover" />
                     )}
@@ -1655,6 +1713,24 @@ export default function ChatRoom() {
           </View>
         )}
       </ScrollView>
+
+      {/* ★ 引用回复预览条 */}
+      {replyingTo && (
+        <View style={s.replyBar}>
+          <View style={s.replyBarLine} />
+          <View style={{ flex: 1 }}>
+            <Text style={s.replyBarName} numberOfLines={1}>
+              {replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || ''))}
+            </Text>
+            <Text style={s.replyBarText} numberOfLines={1}>
+              {replyingTo.subtitle || replyingTo.text || ''}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={() => setReplyingTo(null)} style={s.replyBarClose}>
+            <Text style={s.replyBarCloseText}>✕</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {pendingImage && (
         <View style={s.pendingBar}>
@@ -1829,6 +1905,19 @@ const s = StyleSheet.create({
   mentionName:       { color: C.text, fontSize: 14 },
 
   inputBar:        { flexDirection: 'row', alignItems: 'flex-end', backgroundColor: C.card, paddingHorizontal: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.border, gap: 8 },
+
+  // ★ 引用回复
+  replyBar:        { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 6, borderTopWidth: 1, borderTopColor: C.border, gap: 8 },
+  replyBarLine:    { width: 3, height: '100%', backgroundColor: C.accent, borderRadius: 2, minHeight: 30 },
+  replyBarName:    { color: C.accent, fontSize: 12, fontWeight: '600', marginBottom: 2 },
+  replyBarText:    { color: C.textMute, fontSize: 12 },
+  replyBarClose:   { width: 24, height: 24, borderRadius: 12, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.border },
+  replyBarCloseText: { color: C.textMute, fontSize: 13, fontWeight: '600' },
+
+  quotedMsg:       { flexDirection: 'row', marginBottom: 8, gap: 6 },
+  quotedLine:      { width: 2.5, backgroundColor: C.accent, borderRadius: 2, minHeight: 20 },
+  quotedName:      { color: C.accent, fontSize: 11, fontWeight: '600', marginBottom: 1 },
+  quotedText:      { color: C.textMute, fontSize: 11, lineHeight: 15 },
   input:           { flex: 1, backgroundColor: C.bg, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, color: C.text, fontSize: 14, maxHeight: 100, borderWidth: 1, borderColor: C.border },
   sendBtn:         { borderRadius: 20, paddingHorizontal: 18, paddingVertical: 10, minWidth: 60, alignItems: 'center' },
   sendBtnText:     { color: '#fff', fontWeight: '600', fontSize: 14 },
