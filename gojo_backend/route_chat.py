@@ -350,6 +350,27 @@ async def chat_text(data: dict):
     except Exception:
         pass
 
+    # ★ 感情判断系统 v4：异步更新关系状态，不阻塞主聊天
+    #   process_turn 内部会连一次数据库 + 调一次 DeepSeek，全部放后台线程；
+    #   出错只打日志，绝不能让关系判断的问题影响正常聊天。
+    #   下面两行 print 是临时调试用的，等确认稳定跑通之后可以删掉。
+    def _fire_and_forget_relationship_update():
+        try:
+            from relationship_engine import process_turn
+            from relationship_reader import build_state_summary
+            result = process_turn(
+                user_id=user_id,
+                character_id=character_id,
+                user_message=user_text,
+                character_reply=full_jp,
+            )
+            print(f'[rel_update] ok: {result}')
+            print(f'[rel_update] state: {build_state_summary(user_id, character_id)}')
+        except Exception as e:
+            print(f'[rel_update] failed: {e}')
+
+    threading.Thread(target=_fire_and_forget_relationship_update, daemon=True).start()
+
     voice_id = char.get('voice_id')
     for m in msgs:
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
