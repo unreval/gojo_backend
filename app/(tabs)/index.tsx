@@ -100,6 +100,7 @@ const TILES = [
   { route: '/schedule',   icon: '🗓️', label: 'TA的一天', sub: '他今天在忙啥', color: '#5BC4FF' },
   { route: '/games',      icon: '🎮', label: '游戏',    sub: '和 TA 下一盘',   color: '#FF7EB6' },
   { route: '/grumbles',   icon: '📝', label: '便利贴',  sub: 'TA 心里的碎碎念', color: '#FFD166' },
+  { route: '/explore', icon: '🗺️', label: '探店地图', sub: 'TA 去过的店', color: '#EF4444' },
 ];
 
 export default function HomeScreen() {

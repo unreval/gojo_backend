@@ -1,11 +1,12 @@
 """schedule_engine.py —— 让角色自己排一天的行程
 
-★ v3 修复:Claude 通过中转拒绝角色扮演
-  根因:prompt 直接写"你是五条悟",触发 Claude 的 roleplay 拒绝。
-  修法:用 system 参数框定为"虚构角色的日程安排 App 功能",
-       user message 里只给角色设定和要求,不说"你是 XXX"。
+★ v4:接入真实店铺
+  · 生成前先用 places_engine 搜 5 个真实店铺(Overpass API,免费)
+  · 把店铺列表喂给 LLM,让它挑几家安排进日程
+  · 生成完成后,把日程里用到的真实店铺自动写入 char_visited_places(地图打点)
+  · 用 system prompt 框定为创意写作任务,避免 Claude 拒绝角色扮演
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 from config import CN_TZ, MODEL_CN_AUX
 from characters import get_character
 from characters_data._loader import load_core
@@ -58,6 +59,40 @@ def _seasonal_hints(month: int) -> str:
     return hints.get(month, '')
 
 
+def _fetch_real_places(city='tokyo'):
+    """调 places_engine 搜真实店铺。失败返回空列表(不阻断日程生成)。"""
+    try:
+        import places_engine
+        places = places_engine.get_schedule_places(city, count=5)
+        return places
+    except Exception as e:
+        print(f'[schedule] 搜真实店铺失败(不影响日程生成): {e}')
+        return []
+
+
+def _save_visited_places(character_id, user_id, items, real_places, target_date):
+    """日程生成后,把用到的真实店铺写入探店记录(地图打点用)。"""
+    if not real_places:
+        return
+    try:
+        import db_visited_places
+        # 把真实店名做个 set,检查日程 title/location 里有没有用到
+        place_map = {p['name']: p for p in real_places}
+        for item in items:
+            text = (item.get('title', '') + ' ' + item.get('location', '')).strip()
+            for name, place in place_map.items():
+                if name in text:
+                    review = item.get('note', '')
+                    db_visited_places.add_visited(
+                        character_id, user_id, place,
+                        review=review, visit_date=target_date
+                    )
+                    print(f'[schedule] 📍 {character_id} 探店: {name}')
+                    break  # 一个时段最多匹配一家店
+    except Exception as e:
+        print(f'[schedule] 保存探店记录失败(不影响日程): {e}')
+
+
 def generate_daily_schedule(character_id, user_id, target_date=None, force=False):
     target_date = target_date or _now().date()
 
@@ -84,21 +119,37 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 
     season = _seasonal_hints(target_date.month)
 
+    # ★ 偶尔去别的城市(15%)
+    main_city = 'tokyo'
     city_note = ''
     if random.random() < 0.15:
-        city = random.choice(['大阪', '名古屋', '北海道', '福冈', '横滨', '仙台', '神户'])
-        city_note = f'\n★ 今天这个角色{random.choice(["出差去了", "临时跑去了", "心血来潮去了"])}{city},日程安排在那边。\n'
+        other = random.choice(['osaka', 'kyoto', 'yokohama', 'fukuoka', 'nagoya', 'sapporo', 'kobe'])
+        city_names = {'osaka': '大阪', 'kyoto': '京都', 'yokohama': '横滨', 'fukuoka': '福冈',
+                      'nagoya': '名古屋', 'sapporo': '北海道', 'kobe': '神户'}
+        main_city = other
+        city_note = f'\n★ 今天角色{random.choice(["出差去了", "临时跑去了", "心血来潮去了"])}{city_names.get(other, other)},日程安排在那边。\n'
 
-    # ★★★ 关键修复:用 system 参数框定任务性质 ★★★
-    system_prompt = f'''你是一个创意写作助手。你的任务是为一个虚拟陪伴 App 生成虚构角色的每日行程表。
+    # ★ 搜真实店铺
+    real_places = _fetch_real_places(main_city)
+    places_block = ''
+    if real_places:
+        lines = []
+        for p in real_places:
+            lines.append(f'  · {p["name"]}({p["category_label"]}) — {p["address"] or p["city"]}')
+        places_block = f'''
+【今天可以安排去的真实店铺(从中挑 1-3 家放进日程,不必全用)】
+{chr(10).join(lines)}
+用到的店请在 title 或 location 里写上【完整店名】(必须和上面一字不差),这样系统才能在地图上标记。
+没用到的就不写。也可以不用任何一家(去其他虚构地点)。
+'''
 
+    # ★ system prompt 框定为创意写作任务
+    system_prompt = '''你是一个创意写作助手。你的任务是为一个虚拟陪伴 App 生成虚构角色的每日行程表。
 这是 App 的一个功能模块:用户可以查看角色"今天在干什么"。
 你需要根据角色设定,生成一份符合角色性格和背景的日程。
-
 这是纯粹的创意写作/内容生成任务,不是角色扮演。
 请直接输出 JSON 格式的日程数据,不需要任何解释或前言。'''
 
-    # user message 里只给角色资料和格式要求,不说"你是 XXX"
     prompt = f'''请为以下虚构角色生成 {target_date}（{weekday_cn}）的日程。
 
 【角色资料】
@@ -107,11 +158,12 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 {rhythm_block}
 【当季关键词】{season}
 {city_note}
-{'今天是周末,安排可以更随性。' if is_weekend else '今天是工作日,该有的正事要有。'}
+{'今天是周末,安排可以更随性。' if is_weekend else '今天是工作日。'}
+{places_block}
 
-【日程要求】
-1. 从起床到睡觉,排 8-12 个时间段,覆盖一整天。
-2. 每一段要符合这个角色的身份和性格。
+【日程写法要求】
+1. 从起床到睡觉,排 8-12 个时间段。
+2. 符合角色身份和性格。
 
 3. title【极短】(5-15字),手机一行看完,细节放 note:
    ✅ "去Ivy Place吃brunch" ✅ "原宿买限量可颂"
@@ -119,28 +171,24 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
    ❌ 超过15字 = 失败。描述性的长句写进 note 不要写进 title。
 
 4. location 要具体:
-   ✅ "原宿甜品店" "Blue Bottle 表参道" "涩谷 PARCO 5F"
-   ❌ "某店" "外面"
+   ✅ "Blue Bottle 表参道" "涩谷PARCO" ❌ "某店" "外面"
 
-5. note 是角色口吻的碎碎念:
-   ✅ "排队也是品尝美食的重要一环哦" "又买多了,衣柜要炸了"
+5. note 是角色口吻的碎碎念,有趣/有画面:
+   ✅ "排了40分钟结果踩雷了,下次不来" "拍照确实出片"
    ❌ "心情不错" ← 太空
 
-6. 提到的店铺、地标要是东京/京都真实存在的或合理的。
-   不全是好评!有时踩雷就吐槽。
+6. 不全是好评!有时踩雷就吐槽。
 
-7. can_reply 标注(这段时间角色能不能回手机消息):
-   false = 走不开:上课、出任务、战斗、洗澡、正式会议
-   true = 能摸鱼:吃饭、逛街、探店、发呆、休息
-   can_reply=false 的时段一天最多 4 段、总共不超过 4 小时。
+7. can_reply 标注(能不能回手机消息):
+   false = 走不开:上课、出任务、战斗、洗澡
+   true = 能摸鱼:吃饭、逛街、探店、休息
+   can_reply=false 一天最多 4 段,总共不超 4 小时。
 
-8. 每天要不一样,不要套模板。
+8. 每天要不一样。
 
-【时间格式】"HH:MM" 24小时制,前后要连上。
-
-【输出格式:严格 JSON 一行,不要任何解释】
+【输出:严格 JSON 一行,不要解释】
 {{"schedule":[
-  {{"start_time":"07:00","end_time":"07:45","title":"生活化叙事","location":"具体地点","note":"角色碎碎念","can_reply":true}},
+  {{"start_time":"07:00","end_time":"07:45","title":"5-15字","location":"具体地点","note":"碎碎念","can_reply":true}},
   ...
 ]}}'''
 
@@ -149,7 +197,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         raw, _usage = create_chat(
             model=MODEL_CN_AUX,
             max_tokens=3000,
-            system=system_prompt,       # ★ 用 system 参数
+            system=system_prompt,
             messages=[{'role': 'user', 'content': prompt}],
         )
         raw = (raw or '').strip()
@@ -169,6 +217,10 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
             return None
 
         db_schedule.save_schedule(character_id, user_id, target_date, items)
+
+        # ★ 自动保存探店记录(地图打点)
+        _save_visited_places(character_id, user_id, items, real_places, target_date)
+
         busy = [i for i in items if not i['can_reply']]
         print(f'[schedule] ✅ {char_name} {target_date} 共 {len(items)} 段,'
               f'其中走不开 {len(busy)} 段')
@@ -179,7 +231,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         return None
 
 
-# ═══════════════ _sanitize 和辅助函数(不改) ═══════════════
+# ═══════════════ _sanitize(不改) ═══════════════
 
 SLEEP_KEYWORDS = ('睡', '就寝', '寝る', '休息', '入睡')
 
