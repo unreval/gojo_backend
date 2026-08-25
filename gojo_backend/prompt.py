@@ -449,7 +449,8 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
     else:
         bond_count = len(bonds or []) + len(tolds or [])
         fact_count = len(long_memories) if 'long_memories' in dir() else 0
-    stage_text = build_relation_rules(first_days, bond_count, fact_count)
+        stage_text = build_relation_rules(first_days, bond_count, fact_count,
+                                      user_id=user_id, character_id=character_id)
 
 
 
