@@ -26,7 +26,7 @@ from relationship_config import (
 )
 from relationship_state import (
     load_state as _load_state,
-    apply_warmth, apply_intimacy, apply_trust,
+    apply_warmth, apply_intimacy, apply_trust, apply_attachment,
     apply_commitment, apply_passion, apply_friction,
     update_pending_passion,
     push_hypothesis_evidence, promote_hypothesis, cleanup_hypotheses,
@@ -157,6 +157,16 @@ def _route_signal(user_id: str, character_id: str, sig: Dict,
         return _apply_offensive(user_id, character_id, conf, conf_mult, attrs, sig)
 
     # ─── 角色方的信号 ─────────────────────────────
+    if stype in ('small_care', 'genuine_care') and actor == 'character':
+        # ★ 角色主动关心用户 —— 双向都是关系变深的证据
+        #   除了给 W 加分（角色对用户的在意），也给 Attachment 一点
+        #   (因为"愿意花心思关心一个人"是依恋的表现)
+        return _apply_character_care(user_id, character_id, stype, conf, conf_mult, sig)
+
+    if stype == 'self_disclosure' and actor == 'character':
+        # 角色主动向用户暴露自己 → I 加分，且比用户暴露更有意义
+        return _apply_character_self_disclosure(user_id, character_id, conf, conf_mult, attrs, sig)
+
     if stype == 'character_stance_declared' and actor == 'character':
         content = attrs.get('content', '')
         stance_type = attrs.get('stance_type', 'other')
@@ -280,6 +290,66 @@ def _handle_boundary_hit(user_id, character_id, conf, attrs, sig):
         intentional=intentional, confidence=conf,
         evidence_ref=sig.get('brief', ''),
     )
+
+
+def _apply_character_care(user_id, character_id, stype, conf, conf_mult, sig):
+    """★ 角色主动关心用户 —— 双向关系变深的证据
+    比用户方 care 更重要：模型主动写出的"角色在意用户"是很扎实的正证据。
+    W + Attachment 同时加，且 Attachment 加的比例更高。
+    """
+    base = BASE_DELTA[stype]
+    delta = base * conf_mult
+    if delta <= 0:
+        push_hypothesis_evidence(user_id, character_id,
+                                 hypothesis_type='pattern_char_care',
+                                 evidence={'signal': stype, 'conf': conf,
+                                           'brief': sig.get('brief', ''),
+                                           'ts': _now_iso()})
+        _check_hypothesis_activation(user_id, character_id, 'pattern_char_care')
+        return {'action': 'hypothesis_only'}
+
+    apply_warmth(user_id, character_id, delta,
+                 signal_type=f'char_{stype}', confidence=conf,
+                 rule='warmth_from_character_care',
+                 note=sig.get('brief', ''))
+    # 角色愿意主动关心 = attachment 在长
+    apply_attachment(user_id, character_id, delta * 0.7,
+                     signal_type=f'char_{stype}', confidence=conf,
+                     rule='attachment_from_character_care',
+                     note=sig.get('brief', ''))
+    return {'action': 'warmth+attachment+', 'delta': delta}
+
+
+def _apply_character_self_disclosure(user_id, character_id, conf, conf_mult, attrs, sig):
+    """★ 角色主动向用户暴露自己 —— 强 Intimacy 证据
+    比用户暴露更重量，角色愿意说自己的事 = 关系真的进了一层。
+    core 层暴露还额外加 Attachment 和 Trust。
+    """
+    depth = attrs.get('depth', 'outer')
+    layer_mult = INTIMACY_LAYER_MULTIPLIER.get(depth, 1.0)
+    base = BASE_DELTA['self_disclosure']
+    # 角色暴露比用户暴露权重更高（乘 1.3）
+    delta = base * conf_mult * layer_mult * 1.3
+    if delta <= 0:
+        push_hypothesis_evidence(user_id, character_id,
+                                 hypothesis_type='pattern_char_opening_up',
+                                 evidence={'signal': 'char_self_disclosure',
+                                           'depth': depth, 'conf': conf,
+                                           'ts': _now_iso()})
+        _check_hypothesis_activation(user_id, character_id, 'pattern_char_opening_up')
+        return {'action': 'hypothesis_only'}
+
+    apply_intimacy(user_id, character_id, delta,
+                   signal_type='char_self_disclosure', confidence=conf,
+                   rule=f'intimacy_from_char_disclosure_{depth}',
+                   note=sig.get('brief', ''))
+    if depth in ('middle', 'core'):
+        # 中/深层暴露 → attachment 也长
+        apply_attachment(user_id, character_id, delta * 0.5,
+                         signal_type='char_self_disclosure', confidence=conf,
+                         rule='attachment_from_char_deep_disclosure',
+                         note=sig.get('brief', ''))
+    return {'action': 'char_intimacy+attachment+', 'delta': delta, 'depth': depth}
 
 
 def _handle_rejection(user_id, character_id, conf, conf_mult):
