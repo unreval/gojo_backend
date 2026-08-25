@@ -366,10 +366,13 @@ async def chat_text(data: dict):
             )
             print(f'[rel_update] ok: {result}')
             print(f'[rel_update] state: {build_state_summary(user_id, character_id)}')
-        except Exception as e:
+        except Exception :
+            import traceback
             print(f'[rel_update] failed: {e}')
+            traceback.print_exc()
 
     threading.Thread(target=_fire_and_forget_relationship_update, daemon=True).start()
+    print(f'[rel_update] thread started for {user_id}/{character_id}')
 
     voice_id = char.get('voice_id')
     for m in msgs:
