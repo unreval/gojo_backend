@@ -17,10 +17,9 @@ import re
 from typing import Dict, List, Optional
 
 from ai_client import create_chat
-from config import MODEL_CN_AUX
+from config import MODEL_MAIN
 from relationship_config import (
     SIGNAL_EXTRACTOR_MAX_TOKENS,
-    SIGNAL_EXTRACTOR_TEMPERATURE,
 )
 
 
@@ -144,7 +143,7 @@ def extract_signals(
         character_reply: 角色本轮回复（可选；分析用户单独发言时可传 None）
         character_core_snippet: 角色 core prompt 的前若干字（帮理解语气；不要塞太多）
         recent_context: 最近若干轮的 {role, content} 用于消歧义
-        model: 覆盖默认 model；默认走 MODEL_CN_AUX（DeepSeek，中文任务）
+        model: 覆盖默认 model；默认走 MODEL_MAIN（跟主聊天一样，走中转 Opus 4.6）
 
     Returns:
         dict: {"signals": [...], "raw": str, "model": str, "error": Optional[str]}
@@ -155,20 +154,21 @@ def extract_signals(
     )
 
     try:
+        # ★ 注意：不传 temperature —— 中转 API 的 create_chat 不接受该参数
+        #   Observer 的判断本来就靠 prompt 的严格约束，不靠低 temperature
         raw_text, _usage = create_chat(
-            model=model or MODEL_CN_AUX,
+            model=model or MODEL_MAIN,
             messages=[{'role': 'user', 'content': user_prompt}],
             system=_OBSERVER_SYSTEM_PROMPT,
             max_tokens=SIGNAL_EXTRACTOR_MAX_TOKENS,
-            temperature=SIGNAL_EXTRACTOR_TEMPERATURE,
         )
     except Exception as e:
-        return {'signals': [], 'raw': '', 'model': model or MODEL_CN_AUX,
+        return {'signals': [], 'raw': '', 'model': model or MODEL_MAIN,
                 'error': f'llm_call_failed: {e}'}
 
     parsed = _extract_json(raw_text)
     if parsed is None or 'signals' not in parsed:
-        return {'signals': [], 'raw': raw_text, 'model': model or MODEL_CN_AUX,
+        return {'signals': [], 'raw': raw_text, 'model': model or MODEL_MAIN,
                 'error': 'json_parse_failed'}
 
     # 简单清洗：确保每个 signal 有 signal_type/actor/confidence 三个必填
@@ -187,4 +187,4 @@ def extract_signals(
         valid_signals.append(s)
 
     return {'signals': valid_signals, 'raw': raw_text,
-            'model': model or MODEL_CN_AUX, 'error': None}
+            'model': model or MODEL_MAIN, 'error': None}

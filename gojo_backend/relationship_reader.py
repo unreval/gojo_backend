@@ -107,11 +107,33 @@ def derive_label(state: Dict) -> Dict:
     p = state['passion']
     total_f = sum(float(v) for v in (state['friction'] or {}).values())
 
-    # 负面关系判定优先
+    # ★ 负面关系判定 —— 必须有实际摩擦，不能仅凭 W 低就判负面
+    #   否则空账本(W=0, F=0)会永远被判成"疏远/厌恶"，覆盖真实关系
+    #   条件：(1) F 明显存在  且  (2) 满足 W 归零 或 F 显著大于 W 之一
     is_negative = (
-        w <= NEGATIVE_RELATIONSHIP_W_ZERO
-        or (w > 0 and total_f >= w * NEGATIVE_RELATIONSHIP_F_TO_W_RATIO)
+        total_f >= 10                              # 硬门槛：真的有摩擦
+        and (
+            w <= NEGATIVE_RELATIONSHIP_W_ZERO      # W 已经归零
+            or (w > 0 and total_f >= w * NEGATIVE_RELATIONSHIP_F_TO_W_RATIO)  # F 远超 W
+        )
     )
+
+    # ★ 账本空档判定 —— 全新用户/刚接入 v4 的老用户，账本还没起来
+    #   不能强行给个标签污染生成层；返回"未积累"让 Generator 走 fallback
+    is_unassessed = (
+        total_f < 1 and w < 1 and i < 1 and trust < 1
+        and attach < 1 and c < 1 and p < 1
+    )
+    if is_unassessed:
+        return {
+            'primary': '关系账本尚未积累（新接入或新对话）',
+            'complex_note': None,
+            'expression_guidance': (
+                '★ 后台关系账本目前是空的，不代表你们真的是陌生人。'
+                '请按【短期对话记忆 + 你自己的 core 判断】自然回应，不要因为这个摘要而改变态度。'
+                '（等账本积累起来后，本段会自动变成有依据的关系摘要。）'
+            ),
+        }
 
     # 判 stranger / acquaintance / friend / love
     if is_negative:

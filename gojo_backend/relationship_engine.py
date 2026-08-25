@@ -464,9 +464,12 @@ def _get_stage(state: Dict) -> str:
     total_f = sum(float(v) for v in (state.get('friction') or {}).values())
     w = state.get('warmth', 0)
 
-    # 负面关系判定
-    if (w <= NEGATIVE_RELATIONSHIP_W_ZERO
-        or (w > 0 and total_f >= w * NEGATIVE_RELATIONSHIP_F_TO_W_RATIO)):
+    # ★ 负面关系判定 —— 必须有实际摩擦，不能仅凭 W 低就判负面
+    #   否则空账本会永远被判 negative，flirt/reciprocal 全被阻断
+    if total_f >= 10 and (
+        w <= NEGATIVE_RELATIONSHIP_W_ZERO
+        or (w > 0 and total_f >= w * NEGATIVE_RELATIONSHIP_F_TO_W_RATIO)
+    ):
         return 'negative'
 
     i = state.get('intimacy', 0)

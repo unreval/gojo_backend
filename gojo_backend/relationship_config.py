@@ -156,6 +156,6 @@ REPAIR_EFFECT = {
 # ══════════════════════════════════════════════════════════════
 # Signal Extractor（Observer LLM #1）
 # ══════════════════════════════════════════════════════════════
-# 用 MODEL_CN_AUX（DeepSeek）省钱，中文任务；如需换用 ai_client 里的常量
+# 默认走 MODEL_MAIN（中转 Opus 4.6），与主聊天同 provider
+# 中转 API 不接受 temperature 参数，靠 prompt 严格约束保证判定一致性
 SIGNAL_EXTRACTOR_MAX_TOKENS = 400
-SIGNAL_EXTRACTOR_TEMPERATURE = 0.2       # 尽量确定性
