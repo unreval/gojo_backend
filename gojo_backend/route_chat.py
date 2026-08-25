@@ -13,6 +13,15 @@
 
 ★ 记账升级：/chat/text 里,LLM 返回 pending_transaction 时,后端只透传给前端(不写库),
   由前端确认卡引导用户核对后再 POST /accounting/records 落库。其他 handler 一律不做记账检测。
+
+★ v4 感情判断接入（本次改动）：
+  - _fire_and_forget_relationship_update 改用 sys.stderr 直写 + flush，
+    避免 uvicorn/Docker 里子线程 print 被 stdout buffer 吞掉（无法诊断问题）。
+  - 传 character_core_snippet（core_prompt 前 300 字）+ recent_context（最近 6 轮对话）
+    给 Observer，让它判断短消息（"哈哈"、"嗯"）时有上下文可参考，判断质量提升一大档。
+  - 输出精简为一行 done 汇总，不再刷屏 state summary。
+  - 参数通过 threading args= 传入，避免闭包读被 handler return 后的变量。
+  - 修复原实现里 `except Exception:` 后 `print({e})` 但 e 未定义的 bug。
 """
 import threading
 import random
@@ -178,6 +187,62 @@ def _extract_pending_tx(result: dict, user_id: str, tag: str = 'chat'):
     except Exception as e:
         print(f'[{user_id}] [{tag}] pending_transaction 解析失败:{e}')
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ★ v4 感情判断异步触发器 —— 顶层函数，方便所有 endpoint 调用
+# ═══════════════════════════════════════════════════════════════════
+def _fire_relationship_update(user_id, character_id, user_text, full_jp,
+                              core_snippet, recent_ctx):
+    """子线程：调 process_turn 更新 v4 关系账本。
+    ★ 用 sys.stderr 直写 + flush，避免 uvicorn stdout buffering 吞掉子线程输出。
+    ★ 所有异常必须自己捕获——子线程报错默认无声。
+    """
+    import sys
+    import traceback
+
+    def _log(msg):
+        # stderr 是 line-buffered，Zeabur/Docker 一定能捕获到
+        sys.stderr.write(msg + '\n')
+        sys.stderr.flush()
+
+    try:
+        from relationship_engine import process_turn
+        _log(f'[rel_update] start {user_id}/{character_id}')
+        result = process_turn(
+            user_id=user_id,
+            character_id=character_id,
+            user_message=user_text,
+            character_reply=full_jp,
+            character_core_snippet=core_snippet,
+            recent_context=recent_ctx,
+        )
+        # 精简输出：只打关键数字 + action 列表 + error（不再刷 state summary 满屏）
+        sig_n = result.get('signals_extracted', 0)
+        app_n = result.get('signals_applied', 0)
+        err = result.get('observer_error')
+        actions = [a.get('result', {}).get('action', '?')
+                   for a in result.get('applied', [])
+                   if a.get('result')]
+        _log(f'[rel_update] done {user_id}/{character_id} '
+             f'signals={sig_n} applied={app_n} '
+             f'actions={actions} err={err}')
+    except Exception as e:
+        _log(f'[rel_update] EXCEPTION {user_id}/{character_id}: {type(e).__name__}: {e}')
+        _log(traceback.format_exc())
+
+
+def _start_relationship_update(user_id, character_id, user_text, full_jp,
+                               char, short_memories):
+    """快捷方法：从 handler 里一行调用起 v4 更新线程。
+    char + short_memories 由 handler 提供（handler 里已经拿到了）。"""
+    core_snippet = (char.get('core_prompt') or '')[:300]
+    recent_ctx = [{'role': r, 'content': c} for r, c in (short_memories or [])[-6:]]
+    threading.Thread(
+        target=_fire_relationship_update,
+        args=(user_id, character_id, user_text, full_jp, core_snippet, recent_ctx),
+        daemon=True,
+    ).start()
 
 
 @router.post('/chat/text')
@@ -350,29 +415,9 @@ async def chat_text(data: dict):
     except Exception:
         pass
 
-    # ★ 感情判断系统 v4：异步更新关系状态，不阻塞主聊天
-    #   process_turn 内部会连一次数据库 + 调一次 DeepSeek，全部放后台线程；
-    #   出错只打日志，绝不能让关系判断的问题影响正常聊天。
-    #   下面两行 print 是临时调试用的，等确认稳定跑通之后可以删掉。
-    def _fire_and_forget_relationship_update():
-        try:
-            from relationship_engine import process_turn
-            from relationship_reader import build_state_summary
-            result = process_turn(
-                user_id=user_id,
-                character_id=character_id,
-                user_message=user_text,
-                character_reply=full_jp,
-            )
-            print(f'[rel_update] ok: {result}')
-            print(f'[rel_update] state: {build_state_summary(user_id, character_id)}')
-        except Exception :
-            import traceback
-            print(f'[rel_update] failed: {e}')
-            traceback.print_exc()
-
-    threading.Thread(target=_fire_and_forget_relationship_update, daemon=True).start()
-    print(f'[rel_update] thread started for {user_id}/{character_id}')
+    # ★ v4 感情账本异步更新（传上下文 + stderr 可靠输出，见文件顶部说明）
+    _start_relationship_update(user_id, character_id, user_text, full_jp,
+                               char, short_memories)
 
     voice_id = char.get('voice_id')
     for m in msgs:
