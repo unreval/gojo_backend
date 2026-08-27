@@ -2,13 +2,14 @@
 // ★ 完整版多功能日程（基于原版重写，原有逻辑全部保留）：
 //   保留：每日打卡(结束日期自动停) / DDL 倒数梯度提醒 / 原生时间转盘 / 聊天取消提醒联动 / 前端去重
 //   新增：
-//     1. 列表 ⇄ 月历 双视图（月历有任务圆点，点日期看当天任务）
+//     1. 列表 ⇄ 月历 ⇄ 课表 三视图（月历有任务圆点+课程方点，点日期看当天任务）
 //     2. 今日进度卡（完成度进度条 + 最近 DDL 倒计时）
 //     3. 列表按时间智能分组：逾期 / 每日打卡 / 今天 / 明天 / 7天内 / 以后 / 无日期
 //     4. 任务卡 DDL 倒计时徽章（D-N，越近越红）
 //     5. 已完成区可折叠
 //     6. DDL 提醒梯度升级：≥14天 → 14/7/3/1/当天 五连提醒
 //     7. 备注本机持久化（按任务 id 存 AsyncStorage）
+//     8. ★ Phase 2 课程表：周网格视图 + 课程 CRUD + 请假/调课，跟月历联动（月历上课程用方点）
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -67,6 +68,57 @@ interface Task {
   repeat_type?: string;
   last_completed_date?: string | null;
 }
+
+// ★ Phase 2 课程表类型 ─────────────────
+interface CourseSession {
+  id?: number;
+  weekday: number;      // 1-7 (周一 ~ 周日)
+  start_time: string;   // "08:00"
+  end_time: string;     // "09:40"
+  weeks: string;        // "1-16" / "1,3,5" / "" (=每周)
+}
+interface Course {
+  id: number;
+  name: string;
+  teacher: string;
+  location: string;
+  color: string;
+  note: string;
+  semester_start: string | null;
+  semester_end: string | null;
+  sessions: CourseSession[];
+}
+interface CourseInstance {
+  instance_id: string;
+  course_id: number;
+  session_id: number | null;
+  name: string;
+  color: string;
+  teacher: string;
+  note: string;
+  date: string;          // YYYY-MM-DD
+  weekday: number;       // 1-7
+  start_time: string;
+  end_time: string;
+  location: string;
+  is_exception: boolean;
+  exception_type: string | null;
+  exception_id: number | null;
+}
+
+// ★ 课程表网格常量
+const DAY_START_HOUR = 8;
+const DAY_END_HOUR   = 22;
+const HOUR_HEIGHT    = 56;
+const TIME_COL_W     = 36;
+const GRID_H         = (DAY_END_HOUR - DAY_START_HOUR) * HOUR_HEIGHT;
+const DAY_COL_W      = Math.floor((width - TIME_COL_W - 8) / 7);
+const COURSE_COLORS  = [
+  '#3b82f6', '#60a5fa', '#8b5cf6', '#a78bfa',
+  '#ec4899', '#f472b6', '#f59e0b', '#fbbf24',
+  '#10b981', '#34d399', '#06b6d4', '#22d3ee',
+];
+const WEEKDAY_LABELS_MON = ['一', '二', '三', '四', '五', '六', '日'];
 
 const CATEGORY_LIST = ['个人', '工作', '心愿单', '纪念日'];
 const CATEGORY_COLORS: Record<string, string> = {
@@ -136,12 +188,43 @@ function ladderLabel(daysAway: number): string {
   return '1天前 + 当天';
 }
 
+// ★ 课程表 helper ─────────────────
+// 拿一个日期所在周的周一（周日算上一周的末尾，跟中国习惯一致）
+function mondayOf(d: Date): Date {
+  const n = new Date(d);
+  const day = n.getDay();               // 0=日 1=一 ... 6=六
+  const diff = day === 0 ? -6 : 1 - day;
+  n.setDate(n.getDate() + diff);
+  n.setHours(0, 0, 0, 0);
+  return n;
+}
+function addDays(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+// "08:30" → 8.5，用来算课程卡在网格里的 top / height
+function parseHM(t: string): number {
+  const [h, m] = (t || '00:00').split(':').map(x => parseInt(x, 10) || 0);
+  return h + m / 60;
+}
+// 学期第几周（semester_start 没给 → 返回 null）
+function weekNumberOf(target: Date, semStart: string | null): number | null {
+  if (!semStart) return null;
+  const s = new Date(semStart); s.setHours(0, 0, 0, 0);
+  const sMon = mondayOf(s);
+  const tMon = mondayOf(target);
+  const days = Math.round((tMon.getTime() - sMon.getTime()) / 86400000);
+  if (days < 0) return 0;
+  return Math.floor(days / 7) + 1;
+}
+
 export default function CalendarScreen() {
   const [tasks, setTasks]         = useState<Task[]>([]);
   const [loading, setLoading]     = useState(true);
   const [userId, setUserId]       = useState('');
   const [activeTab, setActiveTab] = useState('所有');
-  const [viewMode, setViewMode]   = useState<'list'|'month'>('list');   // ★ 双视图
+  const [viewMode, setViewMode]   = useState<'list'|'month'|'timetable'>('list');   // ★ 三视图
   const [showCompleted, setShowCompleted] = useState(false);            // ★ 已完成折叠
   const [selDate, setSelDate]     = useState<string>(formatDate(new Date())); // ★ 月历选中日
   const [viewYear, setViewYear]   = useState(new Date().getFullYear());
@@ -183,6 +266,36 @@ export default function CalendarScreen() {
   const [editNote, setEditNote]           = useState('');
   const [showEditCat, setShowEditCat]     = useState(false);
 
+  // ★ Phase 2 课程表 state ─────────────────
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [courseInstances, setCourseInstances] = useState<CourseInstance[]>([]);   // 课表 tab 里当前显示的那一周
+  const [monthCourseInstances, setMonthCourseInstances] = useState<CourseInstance[]>([]);  // 月历上要显示的（跨多周）
+  const [ttMonday, setTtMonday] = useState<Date>(mondayOf(new Date()));           // 课表当前显示的那个周一
+
+  // 课程编辑 Modal（新建 + 编辑共用）
+  const [showCourseEdit, setShowCourseEdit] = useState(false);
+  const [editingCourse, setEditingCourse] = useState<Course | null>(null);
+  const [cName, setCName] = useState('');
+  const [cTeacher, setCTeacher] = useState('');
+  const [cLocation, setCLocation] = useState('');
+  const [cColor, setCColor] = useState(COURSE_COLORS[0]);
+  const [cNote, setCNote] = useState('');
+  const [cSemStart, setCSemStart] = useState('');
+  const [cSemEnd, setCSemEnd] = useState('');
+  const [cSessions, setCSessions] = useState<CourseSession[]>([]);
+
+  // 课程卡片操作菜单（点某节课弹出）
+  const [showCourseAction, setShowCourseAction] = useState(false);
+  const [actionInstance, setActionInstance] = useState<CourseInstance | null>(null);
+
+  // 调课 Modal
+  const [showResched, setShowResched] = useState(false);
+  const [rNewDate, setRNewDate] = useState('');
+  const [rNewStart, setRNewStart] = useState('');
+  const [rNewEnd, setRNewEnd] = useState('');
+  const [rNewLocation, setRNewLocation] = useState('');
+  const [rNote, setRNote] = useState('');
+
   const todayStr = formatDate(new Date());
 
   // ★ 生理期
@@ -201,6 +314,50 @@ export default function CalendarScreen() {
       setPeriodStatus(st.data);
       setPeriodRecords(rc.data?.records || []);
     } catch { setPeriodStatus(null); }
+  };
+
+  // ★ Phase 2 课程表：拉全部课程（编辑时用 + 算学期第几周用）
+  const loadCourses = async (uid: string) => {
+    try {
+      const r = await axios.get(`${SERVER_URL}/courses`, { params: { user_id: uid }, timeout: 8000 });
+      setCourses(r.data?.courses || []);
+    } catch (e: any) { console.warn('loadCourses', e?.message); }
+  };
+  // ★ 拉某一周的课程实例（课表 tab 用）
+  const loadWeekInstances = async (uid: string, mon: Date) => {
+    try {
+      const r = await axios.get(`${SERVER_URL}/courses/week`, {
+        params: { user_id: uid, monday: formatDate(mon) },
+        timeout: 8000,
+      });
+      setCourseInstances(r.data?.instances || []);
+    } catch (e: any) { console.warn('loadWeekInstances', e?.message); }
+  };
+  // ★ 拉月历显示所需的多周课程实例（当前月前后各一个月）
+  const loadMonthInstances = async (uid: string, year: number, month: number) => {
+    try {
+      const results: CourseInstance[] = [];
+      const seen = new Set<string>();
+      // 覆盖 month 前后各 6 周（保守），足够画整月
+      const base = mondayOf(new Date(year, month, 1));
+      for (let offset = -1; offset <= 6; offset++) {
+        const mon = addDays(base, offset * 7);
+        try {
+          const r = await axios.get(`${SERVER_URL}/courses/week`, {
+            params: { user_id: uid, monday: formatDate(mon) },
+            timeout: 8000,
+          });
+          const arr: CourseInstance[] = r.data?.instances || [];
+          for (const ins of arr) {
+            if (!seen.has(ins.instance_id)) {
+              seen.add(ins.instance_id);
+              results.push(ins);
+            }
+          }
+        } catch {}
+      }
+      setMonthCourseInstances(results);
+    } catch {}
   };
 
   const recordPeriod = async (startDate: string, endDate?: string | null) => {
@@ -258,14 +415,22 @@ export default function CalendarScreen() {
       setUserId(uid);
       await loadTasks(uid);
       loadPeriod(uid);
+      loadCourses(uid);                        // ★ 课程表
+      loadWeekInstances(uid, ttMonday);        // ★ 课程表当前周
+      loadMonthInstances(uid, new Date().getFullYear(), new Date().getMonth());  // ★ 月历课程
       setLoading(false);
     })();
   }, []);
 
   useFocusEffect(
     useCallback(() => {
-      if (userId) loadTasks(userId);
-    }, [userId])
+      if (userId) {
+        loadTasks(userId);
+        loadCourses(userId);
+        loadWeekInstances(userId, ttMonday);
+        loadMonthInstances(userId, viewYear, viewMonth);
+      }
+    }, [userId, ttMonday, viewYear, viewMonth])
   );
 
   const loadTasks = async (uid: string) => {
@@ -547,6 +712,166 @@ export default function CalendarScreen() {
     } catch {}
   };
 
+  // ═══════════════════════════════════════════════════════════
+  //  ★ Phase 2 课程表：CRUD + 请假 + 调课
+  // ═══════════════════════════════════════════════════════════
+
+  const openNewCourse = () => {
+    setEditingCourse(null);
+    setCName('');
+    setCTeacher('');
+    setCLocation('');
+    setCColor(COURSE_COLORS[courses.length % COURSE_COLORS.length]);
+    setCNote('');
+    setCSemStart(formatDate(ttMonday));
+    setCSemEnd(formatDate(addDays(ttMonday, 18 * 7 - 1)));
+    setCSessions([{ weekday: 1, start_time: '08:00', end_time: '09:40', weeks: '' }]);
+    setShowCourseEdit(true);
+  };
+
+  const openEditCourse = (course: Course) => {
+    setEditingCourse(course);
+    setCName(course.name);
+    setCTeacher(course.teacher);
+    setCLocation(course.location);
+    setCColor(course.color || COURSE_COLORS[0]);
+    setCNote(course.note);
+    setCSemStart(course.semester_start || '');
+    setCSemEnd(course.semester_end || '');
+    setCSessions(
+      course.sessions.length > 0
+        ? course.sessions.map(s => ({ ...s }))
+        : [{ weekday: 1, start_time: '08:00', end_time: '09:40', weeks: '' }]
+    );
+    setShowCourseEdit(true);
+  };
+
+  const saveCourse = async () => {
+    const name = cName.trim();
+    if (!name) { Alert.alert('请填写课程名'); return; }
+    const validSessions = cSessions.filter(s => s.start_time && s.end_time);
+    if (validSessions.length === 0) { Alert.alert('至少要有一个上课时段'); return; }
+    setShowCourseEdit(false);
+    try {
+      const body: any = {
+        user_id: userId,
+        name,
+        teacher: cTeacher.trim(),
+        location: cLocation.trim(),
+        color: cColor,
+        note: cNote.trim(),
+        semester_start: cSemStart || null,
+        semester_end: cSemEnd || null,
+        sessions: validSessions,
+      };
+      if (editingCourse) {
+        await axios.put(`${SERVER_URL}/courses/${editingCourse.id}`, body);
+      } else {
+        await axios.post(`${SERVER_URL}/courses`, body);
+      }
+      await loadCourses(userId);
+      await loadWeekInstances(userId, ttMonday);
+      await loadMonthInstances(userId, viewYear, viewMonth);
+    } catch (e: any) {
+      Alert.alert('保存失败', e?.response?.data?.error ?? e?.message ?? '');
+    }
+  };
+
+  const deleteCourse = () => {
+    if (!editingCourse) return;
+    const c = editingCourse;
+    Alert.alert('删除课程', `确认删除「${c.name}」？这会连带删除全部上课记录和请假/调课记录。`, [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '删除', style: 'destructive', onPress: async () => {
+          setShowCourseEdit(false);
+          try {
+            await axios.delete(`${SERVER_URL}/courses/${c.id}`);
+            await loadCourses(userId);
+            await loadWeekInstances(userId, ttMonday);
+            await loadMonthInstances(userId, viewYear, viewMonth);
+          } catch { Alert.alert('删除失败'); }
+        }
+      },
+    ]);
+  };
+
+  const cancelCourseInstance = async (ins: CourseInstance) => {
+    setShowCourseAction(false);
+    try {
+      await axios.post(`${SERVER_URL}/course/exceptions`, {
+        course_id: ins.course_id,
+        session_id: ins.session_id,
+        exception_date: ins.date,
+        exception_type: 'cancel',
+      });
+      await loadWeekInstances(userId, ttMonday);
+      await loadMonthInstances(userId, viewYear, viewMonth);
+    } catch (e: any) {
+      Alert.alert('请假失败', e?.response?.data?.error ?? e?.message ?? '');
+    }
+  };
+
+  const restoreCourseInstance = async (ins: CourseInstance) => {
+    if (!ins.exception_id) return;
+    setShowCourseAction(false);
+    try {
+      await axios.delete(`${SERVER_URL}/course/exceptions/${ins.exception_id}`);
+      await loadWeekInstances(userId, ttMonday);
+      await loadMonthInstances(userId, viewYear, viewMonth);
+    } catch { Alert.alert('恢复失败'); }
+  };
+
+  const openResched = (ins: CourseInstance) => {
+    setShowCourseAction(false);
+    setRNewDate(ins.date);
+    setRNewStart(ins.start_time);
+    setRNewEnd(ins.end_time);
+    setRNewLocation(ins.location || '');
+    setRNote('');
+    setActionInstance(ins);
+    setShowResched(true);
+  };
+  const submitReschedule = async () => {
+    if (!actionInstance) return;
+    if (!rNewDate || !rNewStart || !rNewEnd) {
+      Alert.alert('请填写新日期和时间'); return;
+    }
+    setShowResched(false);
+    try {
+      await axios.post(`${SERVER_URL}/course/exceptions`, {
+        course_id: actionInstance.course_id,
+        session_id: actionInstance.session_id,
+        exception_date: actionInstance.date,
+        exception_type: 'reschedule',
+        new_date: rNewDate,
+        new_start_time: rNewStart,
+        new_end_time: rNewEnd,
+        new_location: rNewLocation.trim(),
+        note: rNote.trim(),
+      });
+      await loadWeekInstances(userId, ttMonday);
+      await loadMonthInstances(userId, viewYear, viewMonth);
+    } catch (e: any) {
+      Alert.alert('调课失败', e?.response?.data?.error ?? e?.message ?? '');
+    }
+  };
+
+  const onCourseCardPress = (ins: CourseInstance) => {
+    setActionInstance(ins);
+    setShowCourseAction(true);
+  };
+
+  // 课表当前那一周 → 学期第几周（用第一个有 semester_start 的课程算）
+  const ttWeekNum = (() => {
+    const c = courses.find(x => x.semester_start);
+    return c ? weekNumberOf(ttMonday, c.semester_start) : null;
+  })();
+  const ttWeekLabel = (() => {
+    const sun = addDays(ttMonday, 6);
+    return `${ttMonday.getMonth()+1}/${ttMonday.getDate()} ~ ${sun.getMonth()+1}/${sun.getDate()}`;
+  })();
+
   // ── 过滤 & 分组 ──
   const filtered  = activeTab === '所有' ? tasks : tasks.filter(t => t.category === activeTab);
   const pending   = filtered.filter(t => !isTaskCompleted(t) && !isDailyEnded(t));
@@ -589,6 +914,11 @@ export default function CalendarScreen() {
     });
   };
 
+  // ★ 月历上某天有哪些课（跟任务分开显示，方点 vs 圆点）
+  const coursesOnDate = (dateStr: string): CourseInstance[] => {
+    return monthCourseInstances.filter(c => c.date === dateStr);
+  };
+
   const addDaysAway = (!isDailyContext && tempDate) ? daysUntil(tempDate) : null;
 
   if (loading) return (
@@ -622,6 +952,11 @@ export default function CalendarScreen() {
               style={[s.viewToggleBtn, viewMode==='month' && s.viewToggleActive]}
               onPress={() => { setViewMode('month'); setSelDate(todayStr); setViewYear(new Date().getFullYear()); setViewMonth(new Date().getMonth()); }}>
               <Text style={[s.viewToggleText, viewMode==='month' && {color:'#fff'}]}>月历</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.viewToggleBtn, viewMode==='timetable' && s.viewToggleActive]}
+              onPress={() => { setViewMode('timetable'); setTtMonday(mondayOf(new Date())); }}>
+              <Text style={[s.viewToggleText, viewMode==='timetable' && {color:'#fff'}]}>课表</Text>
             </TouchableOpacity>
           </View>
           <ChibiSprite pose="peek" size={48} />
@@ -673,7 +1008,7 @@ export default function CalendarScreen() {
         })}
       </ScrollView>
 
-      {viewMode === 'list' ? (
+      {viewMode === 'list' && (
         /* ════ 列表视图 ════ */
         <ScrollView style={{flex:1}} contentContainerStyle={s.list}>
           {overdue.length > 0 && (
@@ -739,7 +1074,8 @@ export default function CalendarScreen() {
             </>
           )}
         </ScrollView>
-      ) : (
+      )}
+      {viewMode === 'month' && (
         /* ════ 月历视图 ════ */
         <ScrollView style={{flex:1}} contentContainerStyle={{paddingBottom:100}}>
           <View style={s.monthCard}>
@@ -767,9 +1103,11 @@ export default function CalendarScreen() {
               )}
               {getMonthDays(viewYear, viewMonth).map(({day, date}) => {
                 const dayTasks = tasksOnDate(date);
+                const dayCourses = coursesOnDate(date);         // ★ 课程点
                 const isSel = selDate === date;
                 const isTd  = date === todayStr;
                 const dots = dayTasks.slice(0, 3);
+                const courseDots = dayCourses.slice(0, 2);      // 课程最多显 2 个方点，任务圆点跟后面
                 return (
                   <TouchableOpacity key={date} style={s.calCellBig} onPress={() => setSelDate(date)}>
                     <View style={[
@@ -784,10 +1122,16 @@ export default function CalendarScreen() {
                       ]}>{day}</Text>
                     </View>
                     <View style={s.dotRow}>
+                      {/* ★ 课程 = 方点（跟任务圆点视觉区分） */}
+                      {courseDots.map((c, i) => (
+                        <View key={`c${i}`} style={[s.taskDot, s.courseSquare, {backgroundColor: c.color}]} />
+                      ))}
                       {dots.map((t, i) => (
                         <View key={i} style={[s.taskDot, {backgroundColor: CATEGORY_COLORS[t.category] || C.accent}]} />
                       ))}
-                      {dayTasks.length > 3 && <Text style={s.dotMore}>+</Text>}
+                      {(dayTasks.length + dayCourses.length) > (dots.length + courseDots.length) && (
+                        <Text style={s.dotMore}>+</Text>
+                      )}
                     </View>
                   </TouchableOpacity>
                 );
@@ -795,23 +1139,169 @@ export default function CalendarScreen() {
             </View>
           </View>
 
-          {/* 选中日的任务 */}
+          {/* 选中日的任务 + 课程 */}
           <View style={{paddingHorizontal:20, gap:6}}>
-            <Text style={s.sectionLabel}>
-              {selDate === todayStr ? '今天' : selDate.slice(5).replace('-','/')} 的安排 ({selDayTasks.length})
-            </Text>
-            {selDayTasks.length === 0 && (
-              <Text style={[s.emptyText, {marginTop:16}]}>这天没有安排</Text>
-            )}
-            {selDayTasks.map(task => (
-              <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete}
-                done={isTaskCompleted(task)} />
-            ))}
+            {(() => {
+              const selDayCourses = coursesOnDate(selDate).sort((a,b)=>a.start_time.localeCompare(b.start_time));
+              const totalCount = selDayTasks.length + selDayCourses.length;
+              return (
+                <>
+                  <Text style={s.sectionLabel}>
+                    {selDate === todayStr ? '今天' : selDate.slice(5).replace('-','/')} 的安排 ({totalCount})
+                  </Text>
+                  {totalCount === 0 && (
+                    <Text style={[s.emptyText, {marginTop:16}]}>这天没有安排</Text>
+                  )}
+                  {/* ★ 先列课程（一天里课通常有固定时间，排前面） */}
+                  {selDayCourses.map(ins => (
+                    <TouchableOpacity key={ins.instance_id} style={s.courseMiniRow}
+                      onPress={() => { setViewMode('timetable'); setTtMonday(mondayOf(new Date(ins.date))); }}
+                      activeOpacity={0.75}>
+                      <View style={[s.courseMiniBar, {backgroundColor: ins.color}]} />
+                      <View style={{flex:1}}>
+                        <Text style={s.courseMiniTitle}>
+                          📚 {ins.name}
+                          {ins.is_exception && <Text style={{color: C.textMute}}>（调课）</Text>}
+                        </Text>
+                        <Text style={s.courseMiniMeta}>
+                          {ins.start_time}~{ins.end_time}{ins.location ? ` · @${ins.location}` : ''}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                  {selDayTasks.map(task => (
+                    <TaskRow key={task.id} task={task} onPress={openEdit} onCheck={toggleComplete}
+                      done={isTaskCompleted(task)} />
+                  ))}
+                </>
+              );
+            })()}
           </View>
         </ScrollView>
       )}
+      {viewMode === 'timetable' && (
+        /* ════ ★ Phase 2 课表视图 ════ */
+        <View style={{flex:1}}>
+          {/* 周切换条 */}
+          <View style={s.ttWeekBar}>
+            <TouchableOpacity style={s.ttNavBtn} onPress={() => setTtMonday(addDays(ttMonday, -7))}>
+              <Text style={s.ttNavText}>‹</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setTtMonday(mondayOf(new Date()))} style={{flex:1, alignItems:'center'}}>
+              <Text style={s.ttWeekTitle}>
+                {ttWeekNum ? `第 ${ttWeekNum} 周 · ` : ''}{ttWeekLabel}
+              </Text>
+              <Text style={s.ttWeekSub}>点击回到本周</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={s.ttNavBtn} onPress={() => setTtMonday(addDays(ttMonday, 7))}>
+              <Text style={s.ttNavText}>›</Text>
+            </TouchableOpacity>
+          </View>
 
-      <TouchableOpacity style={s.fab} onPress={openAddSheet} activeOpacity={0.85}>
+          {/* 星期头行 */}
+          <View style={s.ttHeader}>
+            <View style={{width: TIME_COL_W}} />
+            {WEEKDAY_LABELS_MON.map((label, i) => {
+              const day = addDays(ttMonday, i);
+              const isTd = formatDate(day) === todayStr;
+              return (
+                <View key={i} style={[s.ttDayHead, {width: DAY_COL_W}]}>
+                  <Text style={[s.ttDayHeadWk, isTd && {color: C.accent2 || '#5BC4FF'}]}>{label}</Text>
+                  <Text style={[s.ttDayHeadDate, isTd && {color: C.accent2 || '#5BC4FF', fontWeight:'700'}]}>
+                    {day.getMonth()+1}/{day.getDate()}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+
+          {/* 网格主体 */}
+          <ScrollView style={{flex:1}} contentContainerStyle={{paddingBottom: 140}}>
+            <View style={{flexDirection:'row', height: GRID_H}}>
+              {/* 左侧时间轴 */}
+              <View style={{width: TIME_COL_W}}>
+                {Array.from({length: DAY_END_HOUR - DAY_START_HOUR}).map((_, i) => (
+                  <View key={i} style={{
+                    height: HOUR_HEIGHT,
+                    borderTopWidth: 1, borderColor: C.border + '44',
+                  }}>
+                    <Text style={s.ttHourLabel}>{DAY_START_HOUR + i}:00</Text>
+                  </View>
+                ))}
+              </View>
+
+              {/* 7 天列 + 绝对定位的课程卡 */}
+              <View style={{flex:1, flexDirection:'row', position:'relative'}}>
+                {WEEKDAY_LABELS_MON.map((_, i) => (
+                  <View key={i} style={{
+                    width: DAY_COL_W,
+                    borderLeftWidth: 1, borderColor: C.border + '44',
+                    height: GRID_H,
+                  }}>
+                    {Array.from({length: DAY_END_HOUR - DAY_START_HOUR}).map((_, h) => (
+                      <View key={h} style={{
+                        height: HOUR_HEIGHT,
+                        borderTopWidth: 1, borderColor: C.border + '22',
+                      }} />
+                    ))}
+                  </View>
+                ))}
+                {courseInstances.map(ins => {
+                  const startH = parseHM(ins.start_time);
+                  const endH   = parseHM(ins.end_time);
+                  const top    = (startH - DAY_START_HOUR) * HOUR_HEIGHT;
+                  const height = Math.max(28, (endH - startH) * HOUR_HEIGHT);
+                  const left   = (ins.weekday - 1) * DAY_COL_W;
+                  if (top < 0 || top >= GRID_H) return null;
+                  return (
+                    <TouchableOpacity key={ins.instance_id}
+                      activeOpacity={0.85}
+                      onPress={() => onCourseCardPress(ins)}
+                      style={[s.ttCard, {
+                        top, height, left, width: DAY_COL_W - 2,
+                        backgroundColor: ins.color + 'DD',
+                        borderLeftColor: ins.color,
+                      }]}
+                    >
+                      <Text style={s.ttCardTitle} numberOfLines={2}>{ins.name}</Text>
+                      {!!ins.location && (
+                        <Text style={s.ttCardMeta} numberOfLines={1}>@{ins.location}</Text>
+                      )}
+                      {ins.is_exception && <Text style={s.ttCardExc}>调</Text>}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* 全部课程列表（便于编辑） */}
+            <View style={{paddingHorizontal: 16, marginTop: 20}}>
+              <Text style={s.sectionLabel}>所有课程 ({courses.length})</Text>
+              {courses.length === 0 && (
+                <Text style={[s.emptyText, {marginTop: 12}]}>还没有课程{'\n'}点右下角 + 添加</Text>
+              )}
+              {courses.map(c => (
+                <TouchableOpacity key={c.id} style={s.ttCourseRow} onPress={() => openEditCourse(c)}>
+                  <View style={[s.ttCourseDot, {backgroundColor: c.color}]} />
+                  <View style={{flex:1}}>
+                    <Text style={s.ttCourseName}>{c.name}</Text>
+                    <Text style={s.ttCourseSub} numberOfLines={1}>
+                      {c.teacher || '未设老师'} · {c.sessions.length} 个时段
+                      {c.location ? ` · ${c.location}` : ''}
+                    </Text>
+                  </View>
+                  <Text style={s.taskArrow}>›</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </ScrollView>
+        </View>
+      )}
+
+      {/* FAB：课表模式建课程，其他模式建任务 */}
+      <TouchableOpacity style={s.fab}
+        onPress={viewMode === 'timetable' ? openNewCourse : openAddSheet}
+        activeOpacity={0.85}>
         <Text style={s.fabText}>＋</Text>
       </TouchableOpacity>
 
@@ -1198,6 +1688,206 @@ export default function CalendarScreen() {
             <Text style={s.editSaveText}>保存</Text>
           </TouchableOpacity>
         </View>
+      </Modal>
+
+      {/* ═══ ★ Phase 2 课程编辑 Modal（新建+编辑共用）═══ */}
+      <Modal visible={showCourseEdit} transparent animationType="slide">
+        <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios' ? 'padding' : 'height'}>
+          <Pressable style={{flex:1, backgroundColor:'#00000055'}} onPress={() => setShowCourseEdit(false)} />
+          <View style={s.courseEditSheet}>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{paddingBottom:16}}>
+              <Text style={s.courseEditTitle}>{editingCourse ? '编辑课程' : '新建课程'}</Text>
+
+              <Text style={s.ceFieldLabel}>课程名 *</Text>
+              <TextInput style={s.ceInput} value={cName} onChangeText={setCName}
+                placeholder="高等数学" placeholderTextColor={C.textMute} />
+
+              <Text style={s.ceFieldLabel}>老师</Text>
+              <TextInput style={s.ceInput} value={cTeacher} onChangeText={setCTeacher}
+                placeholder="选填" placeholderTextColor={C.textMute} />
+
+              <Text style={s.ceFieldLabel}>教室</Text>
+              <TextInput style={s.ceInput} value={cLocation} onChangeText={setCLocation}
+                placeholder="选填，例如 教一 201" placeholderTextColor={C.textMute} />
+
+              <Text style={s.ceFieldLabel}>颜色</Text>
+              <View style={s.ceColorRow}>
+                {COURSE_COLORS.map(col => (
+                  <TouchableOpacity key={col} onPress={() => setCColor(col)}
+                    style={[
+                      s.ceColorDot,
+                      { backgroundColor: col },
+                      cColor === col && { borderWidth: 3, borderColor: C.text },
+                    ]} />
+                ))}
+              </View>
+
+              <Text style={s.ceFieldLabel}>学期起止（算学期第几周用，不填就一直显示）</Text>
+              <View style={{flexDirection:'row', gap:8}}>
+                <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
+                  value={cSemStart} onChangeText={setCSemStart}
+                  placeholder="2026-09-01" placeholderTextColor={C.textMute}
+                  autoCapitalize="none" />
+                <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
+                  value={cSemEnd} onChangeText={setCSemEnd}
+                  placeholder="2027-01-15" placeholderTextColor={C.textMute}
+                  autoCapitalize="none" />
+              </View>
+
+              <Text style={s.ceFieldLabel}>上课时段 * ({cSessions.length})</Text>
+              {cSessions.map((sess, idx) => (
+                <View key={idx} style={s.ceSessionBox}>
+                  <View style={{flexDirection:'row', alignItems:'center', marginBottom: 8}}>
+                    <Text style={{color:C.textMute, fontSize:12}}>时段 {idx+1}</Text>
+                    <View style={{flex:1}} />
+                    {cSessions.length > 1 && (
+                      <TouchableOpacity onPress={() => setCSessions(prev => prev.filter((_,i) => i !== idx))}>
+                        <Text style={{color:'#f87171', fontSize:12}}>删除</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  <View style={{flexDirection:'row', flexWrap:'wrap', gap:6, marginBottom: 8}}>
+                    {[1,2,3,4,5,6,7].map(wd => (
+                      <TouchableOpacity key={wd}
+                        style={[s.ceWdChip, sess.weekday === wd && s.ceWdChipOn]}
+                        onPress={() => setCSessions(prev => prev.map((x,i) => i===idx ? {...x, weekday: wd} : x))}>
+                        <Text style={[s.ceWdChipText, sess.weekday === wd && {color:'#fff', fontWeight:'700'}]}>
+                          周{WEEKDAY_LABELS_MON[wd-1]}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <View style={{flexDirection:'row', gap:8}}>
+                    <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
+                      value={sess.start_time}
+                      onChangeText={v => setCSessions(prev => prev.map((x,i) => i===idx ? {...x, start_time:v} : x))}
+                      placeholder="08:00" placeholderTextColor={C.textMute} />
+                    <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
+                      value={sess.end_time}
+                      onChangeText={v => setCSessions(prev => prev.map((x,i) => i===idx ? {...x, end_time:v} : x))}
+                      placeholder="09:40" placeholderTextColor={C.textMute} />
+                  </View>
+                  <TextInput style={[s.ceInput, {marginTop:6}]}
+                    value={sess.weeks}
+                    onChangeText={v => setCSessions(prev => prev.map((x,i) => i===idx ? {...x, weeks:v} : x))}
+                    placeholder="周次：1-16 或 1,3,5,7-16。空=每周都有"
+                    placeholderTextColor={C.textMute} />
+                </View>
+              ))}
+              <TouchableOpacity style={s.ceAddSessionBtn} onPress={() => {
+                setCSessions(prev => [...prev, { weekday: 1, start_time: '08:00', end_time: '09:40', weeks: '' }]);
+              }}>
+                <Text style={s.ceAddSessionText}>+ 加一个时段</Text>
+              </TouchableOpacity>
+
+              <Text style={s.ceFieldLabel}>备注</Text>
+              <TextInput style={[s.ceInput, {minHeight:60}]}
+                value={cNote} onChangeText={setCNote} multiline
+                placeholder="选填" placeholderTextColor={C.textMute} />
+            </ScrollView>
+
+            <View style={s.ceFooter}>
+              {editingCourse && (
+                <TouchableOpacity style={s.ceDeleteBtn} onPress={deleteCourse}>
+                  <Text style={s.ceDeleteText}>删除</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity style={s.ceCancelBtn} onPress={() => setShowCourseEdit(false)}>
+                <Text style={s.ceCancelText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={s.ceSaveBtn} onPress={saveCourse}>
+                <Text style={s.ceSaveText}>保存</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ═══ ★ 课程卡操作菜单 ═══ */}
+      <Modal visible={showCourseAction} transparent animationType="fade">
+        <Pressable style={{flex:1, backgroundColor:'#00000066'}} onPress={() => setShowCourseAction(false)} />
+        <View style={s.caSheet}>
+          {actionInstance && (
+            <>
+              <View style={s.caHead}>
+                <View style={[s.caDot, {backgroundColor: actionInstance.color}]} />
+                <View style={{flex:1}}>
+                  <Text style={s.caTitle}>{actionInstance.name}</Text>
+                  <Text style={s.caSub}>
+                    {actionInstance.date.slice(5).replace('-','/')} · {actionInstance.start_time}~{actionInstance.end_time}
+                    {actionInstance.location ? ` · @${actionInstance.location}` : ''}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity style={s.caBtn} onPress={() => {
+                const c = courses.find(x => x.id === actionInstance.course_id);
+                if (c) { setShowCourseAction(false); openEditCourse(c); }
+              }}>
+                <Text style={s.caBtnText}>📝 编辑课程</Text>
+              </TouchableOpacity>
+              {actionInstance.is_exception && actionInstance.exception_id ? (
+                <TouchableOpacity style={s.caBtn} onPress={() => restoreCourseInstance(actionInstance)}>
+                  <Text style={s.caBtnText}>↩️ 撤销这次调课</Text>
+                </TouchableOpacity>
+              ) : (
+                <>
+                  <TouchableOpacity style={s.caBtn} onPress={() => cancelCourseInstance(actionInstance)}>
+                    <Text style={s.caBtnText}>🚫 请假 / 停课这一次</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.caBtn} onPress={() => openResched(actionInstance)}>
+                    <Text style={s.caBtnText}>🔀 调到别的时间</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+              <TouchableOpacity style={[s.caBtn, s.caBtnCancel]} onPress={() => setShowCourseAction(false)}>
+                <Text style={[s.caBtnText, {color: C.textMute}]}>取消</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+      </Modal>
+
+      {/* ═══ ★ 调课 Modal ═══ */}
+      <Modal visible={showResched} transparent animationType="slide">
+        <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios' ? 'padding' : 'height'}>
+          <Pressable style={{flex:1, backgroundColor:'#00000055'}} onPress={() => setShowResched(false)} />
+          <View style={s.courseEditSheet}>
+            <ScrollView>
+              <Text style={s.courseEditTitle}>调课</Text>
+              {actionInstance && (
+                <Text style={{color:C.textMute, fontSize:12, marginBottom:8}}>
+                  原时间：{actionInstance.date.slice(5).replace('-','/')} {actionInstance.start_time}~{actionInstance.end_time}
+                </Text>
+              )}
+              <Text style={s.ceFieldLabel}>新日期 *</Text>
+              <TextInput style={s.ceInput} value={rNewDate} onChangeText={setRNewDate}
+                placeholder="YYYY-MM-DD" placeholderTextColor={C.textMute} autoCapitalize="none" />
+              <Text style={s.ceFieldLabel}>新时间 *</Text>
+              <View style={{flexDirection:'row', gap:8}}>
+                <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
+                  value={rNewStart} onChangeText={setRNewStart}
+                  placeholder="08:00" placeholderTextColor={C.textMute} />
+                <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
+                  value={rNewEnd} onChangeText={setRNewEnd}
+                  placeholder="09:40" placeholderTextColor={C.textMute} />
+              </View>
+              <Text style={s.ceFieldLabel}>新教室</Text>
+              <TextInput style={s.ceInput} value={rNewLocation} onChangeText={setRNewLocation}
+                placeholder="不改就留空" placeholderTextColor={C.textMute} />
+              <Text style={s.ceFieldLabel}>备注</Text>
+              <TextInput style={[s.ceInput, {minHeight:60}]} value={rNote} onChangeText={setRNote}
+                multiline placeholder="选填" placeholderTextColor={C.textMute} />
+            </ScrollView>
+            <View style={s.ceFooter}>
+              <TouchableOpacity style={s.ceCancelBtn} onPress={() => setShowResched(false)}>
+                <Text style={s.ceCancelText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={s.ceSaveBtn} onPress={submitReschedule}>
+                <Text style={s.ceSaveText}>确认调课</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ═══ 🌸 生理期弹窗 ═══ */}
@@ -1647,4 +2337,145 @@ const s = StyleSheet.create({
     borderRadius:16, paddingVertical:16, alignItems:'center',
   },
   editSaveText: { color:'#fff', fontSize:17, fontWeight:'700' },
+
+  // ═══ ★ Phase 2 课程表 ═══
+  // 月历上的课程方点（跟 taskDot 共用大小,只是变方）
+  courseSquare: { borderRadius: 1 },
+  // 月历"这天有什么"里的课程小卡片
+  courseMiniRow: {
+    flexDirection:'row', alignItems:'center', gap:10,
+    backgroundColor:C.card, borderRadius:12,
+    borderWidth:1, borderColor:C.border,
+    paddingHorizontal:12, paddingVertical:10,
+  },
+  courseMiniBar: { width:3, height:32, borderRadius:2 },
+  courseMiniTitle: { color:C.text, fontSize:14, fontWeight:'600' },
+  courseMiniMeta: { color:C.textMute, fontSize:11, marginTop:2 },
+
+  // 课表周切换条
+  ttWeekBar: {
+    flexDirection:'row', alignItems:'center',
+    paddingHorizontal:12, paddingVertical:8,
+    backgroundColor:C.card,
+    borderTopWidth:1, borderBottomWidth:1, borderColor:C.border,
+  },
+  ttNavBtn: {
+    width:40, height:40, alignItems:'center', justifyContent:'center',
+    borderRadius:10, backgroundColor:C.bg,
+    borderWidth:1, borderColor:C.border,
+  },
+  ttNavText: { color:C.text, fontSize:20, lineHeight:22 },
+  ttWeekTitle: { color:C.text, fontSize:14, fontWeight:'700' },
+  ttWeekSub:   { color:C.textMute, fontSize:10, marginTop:2 },
+
+  // 课表星期头
+  ttHeader: {
+    flexDirection:'row', paddingVertical:8, paddingLeft:4,
+    backgroundColor:C.card,
+    borderBottomWidth:1, borderColor:C.border,
+  },
+  ttDayHead: { alignItems:'center' },
+  ttDayHeadWk: { color:C.text, fontSize:12, fontWeight:'700' },
+  ttDayHeadDate: { color:C.textMute, fontSize:11, marginTop:2 },
+
+  // 时间轴 label
+  ttHourLabel: {
+    color:C.textMute, fontSize:9,
+    textAlign:'right', paddingRight:4, marginTop:-6,
+  },
+
+  // 课程卡（绝对定位在网格上）
+  ttCard: {
+    position:'absolute',
+    borderRadius:6, borderLeftWidth:3,
+    padding:4, overflow:'hidden',
+  },
+  ttCardTitle: { color:'#fff', fontSize:11, fontWeight:'700', lineHeight:14 },
+  ttCardMeta:  { color:'#fff', fontSize:9, opacity:0.85, marginTop:2 },
+  ttCardExc: {
+    position:'absolute', top:2, right:2,
+    backgroundColor:'#00000055', color:'#fff',
+    fontSize:8, paddingHorizontal:3, paddingVertical:1, borderRadius:3,
+  },
+
+  // 课表底部的"所有课程"列表
+  ttCourseRow: {
+    flexDirection:'row', alignItems:'center', gap:10,
+    backgroundColor:C.card, borderRadius:12,
+    borderWidth:1, borderColor:C.border,
+    paddingHorizontal:12, paddingVertical:12, marginBottom:6,
+  },
+  ttCourseDot: { width:10, height:10, borderRadius:5 },
+  ttCourseName: { color:C.text, fontSize:14, fontWeight:'600' },
+  ttCourseSub:  { color:C.textMute, fontSize:11, marginTop:3 },
+
+  // 课程编辑 Sheet
+  courseEditSheet: {
+    position:'absolute', bottom:0, left:0, right:0,
+    maxHeight: '90%',
+    backgroundColor:C.card,
+    borderTopLeftRadius:20, borderTopRightRadius:20,
+    paddingHorizontal:16, paddingTop:20, paddingBottom: Platform.OS==='ios' ? 36 : 20,
+  },
+  courseEditTitle: { color:C.text, fontSize:18, fontWeight:'700', marginBottom:12 },
+  ceFieldLabel: { color:C.textMute, fontSize:12, marginTop:12, marginBottom:6 },
+  ceInput: {
+    backgroundColor:C.bg, color:C.text, fontSize:14,
+    paddingHorizontal:12, paddingVertical:10,
+    borderRadius:8, borderWidth:1, borderColor:C.border,
+    marginTop:4,
+  },
+  ceColorRow: { flexDirection:'row', flexWrap:'wrap', gap:8, marginTop:4 },
+  ceColorDot: { width:32, height:32, borderRadius:16 },
+  ceSessionBox: {
+    backgroundColor:C.bg, borderRadius:10,
+    borderWidth:1, borderColor:C.border,
+    padding:10, marginTop:8,
+  },
+  ceWdChip: {
+    paddingHorizontal:10, paddingVertical:5, borderRadius:6,
+    borderWidth:1, borderColor:C.border, backgroundColor:C.card,
+  },
+  ceWdChipOn: { backgroundColor:C.accent, borderColor:C.accent },
+  ceWdChipText: { color:C.textMute, fontSize:12 },
+  ceAddSessionBtn: {
+    marginTop:8, alignItems:'center', paddingVertical:10,
+    borderRadius:8, borderWidth:1, borderColor:C.border, borderStyle:'dashed',
+  },
+  ceAddSessionText: { color:C.accent2 || '#5BC4FF', fontSize:13 },
+  ceFooter: { flexDirection:'row', gap:8, marginTop:16 },
+  ceDeleteBtn: {
+    paddingHorizontal:14, paddingVertical:12,
+    borderRadius:10, backgroundColor:'#7f1d1d',
+  },
+  ceDeleteText: { color:'#fff', fontSize:14, fontWeight:'600' },
+  ceCancelBtn: {
+    flex:1, alignItems:'center', paddingVertical:12,
+    borderRadius:10, backgroundColor:C.bg,
+    borderWidth:1, borderColor:C.border,
+  },
+  ceCancelText: { color:C.textMute, fontSize:14 },
+  ceSaveBtn: {
+    flex:2, alignItems:'center', paddingVertical:12,
+    borderRadius:10, backgroundColor:C.accent2 || '#5BC4FF',
+  },
+  ceSaveText: { color:'#fff', fontSize:14, fontWeight:'700' },
+
+  // 课程卡操作菜单
+  caSheet: {
+    position:'absolute', bottom:0, left:0, right:0,
+    backgroundColor:C.card,
+    borderTopLeftRadius:20, borderTopRightRadius:20,
+    paddingHorizontal:16, paddingTop:16, paddingBottom: Platform.OS==='ios' ? 36 : 20,
+  },
+  caHead: {
+    flexDirection:'row', alignItems:'center', gap:10,
+    paddingBottom:12, borderBottomWidth:1, borderColor:C.border, marginBottom:6,
+  },
+  caDot: { width:12, height:12, borderRadius:6 },
+  caTitle: { color:C.text, fontSize:15, fontWeight:'700' },
+  caSub:   { color:C.textMute, fontSize:11, marginTop:3 },
+  caBtn:   { paddingVertical:14, paddingHorizontal:8 },
+  caBtnText: { color:C.text, fontSize:15 },
+  caBtnCancel: { borderTopWidth:1, borderColor:C.border, marginTop:4 },
 });

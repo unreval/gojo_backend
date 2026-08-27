@@ -47,7 +47,9 @@ from route_chatlog import router as chatlog_router              # ★ 聊天记�
 from route_schedule import router as schedule_router            # ★ 角色自己的日程
 from db_schedule import init_schedule_table
 from db_chatlog import init_chatlog_table
-from schedule_share import start_schedule_share                 # ★ 日程驱动的主动分享
+from schedule_share import start_schedule_share 
+from route_courses import router as courses_router
+from db_course import init_course_tables                # ★ 日程驱动的主动分享
 
 # ★ 新模块用 try/except 包住：缺文件不会搞崩整个后端
 try:
@@ -93,6 +95,7 @@ init_proactive_table()
 init_promise_table()   # ★ 承诺表（承诺驱动的主动消息）
 init_chatlog_table()   # ★ 聊天记录表（卸载重装/换手机都不丢）
 init_schedule_table()  # ★ 角色日程表（忙的时候只已读不回）
+init_course_tables()   # ★ 课程表（日程驱动的主动分享）
 init_push_table()
 if _HAS_GRUMBLE:
     try:
@@ -132,7 +135,8 @@ app.include_router(diary_router)
 app.include_router(proactive_router)
 app.include_router(accounting_router)
 app.include_router(stats_router)
-app.include_router(voice_stream_router)   # ★ B档流式语音
+app.include_router(voice_stream_router) # ★ B档流式语音
+app.include_router(courses_router)  
 app.include_router(chatlog_router)        # ★ 聊天记录同步
 app.include_router(schedule_router)       # ★ 角色日程
 if _HAS_GRUMBLE:
