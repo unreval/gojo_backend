@@ -1,25 +1,25 @@
-"""课程表 · 三张表初始化
+"""课程表 · 四张表初始化
 
     courses           —— 课程本身（名字/老师/教室/颜色/学期起止）
     course_sessions   —— 每周固定的第几节（周几 + 起止时间 + 周次）
-    course_exceptions —— 单次的调课 / 请假
+    course_exceptions —— 单次的调课 / 请假 / 临时加课（extra）
+    course_day_off    —— 某天全部放假（法定节假日、校运会、突发放假）
 
 设计取舍：
 1. 学期起止（semester_start / semester_end）挂在 courses 上而不是全局。
-   理由是同一个 App 里可能同时有正课 + 短期培训班，学期长度不一样，
-   放全局配置反而僵硬。
-2. weeks 字段用字符串 "1-16" / "1,3,5,7-16"（空串 = 学期内每周都有），
-   不做 JSON 也不做 int[]，前端后端拼字符串比较省事。
-3. course_exceptions 分两种：
-     - cancel      : 那天这节课不上（请假 / 停课 / 放假）
+   同一个 App 里可能同时有正课 + 短期培训班,学期长度不一样,放全局配置反而僵硬。
+2. weeks 字段用字符串 "1-16" / "1,3,5,7-16"（空串 = 学期内每周都有）,
+   不做 JSON 也不做 int[]，前后端传值直接是字符串。
+3. course_exceptions 三种 exception_type：
+     - cancel      : 那天这节课不上（请假 / 停课）
      - reschedule  : 那天这节课挪到 new_date + new_start_time
-   两种都可能带 new_location（临时换教室），reschedule 还可能改时长。
-4. session_id 允许为空。理由：如果 course 只有一个 session，不填也能推断出来；
-   如果 course 有多个 session（比如一门课周一 + 周三两次），必须填，
-   不然不知道请的是哪一节。前端会自动带上。
+     - extra       : 那天临时加一节课（补课 / 加课）
+                     此时 exception_date = new_date = 加课日期
+   三种都可能带 new_location（临时换教室）。
+4. course_day_off 用独立表而不是复用 course_exceptions,因为放假跟具体课程无关
+   —— 说"这天全部放假"不该被绑到某一门课上。删掉某门课也不该影响放假记录。
 
-三张表都在 gojo_server.py 启动时调用一次 init_course_tables()，
-和 db_group / db_bond / db_diary 保持一致的独立初始化风格。
+四张表都在 gojo_server.py 启动时调用一次 init_course_tables()。
 """
 from db import get_conn
 
@@ -42,7 +42,7 @@ def init_course_tables():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
     # ── 每周固定的节次 ──
-    # weekday: 1=周一 ... 7=周日（和 ISO 8601 一致，也是 postgres date_part('isodow') 的口径）
+    # weekday: 1=周一 ... 7=周日（和 ISO 8601 一致）
     cur.execute('''CREATE TABLE IF NOT EXISTS course_sessions (
         id SERIAL PRIMARY KEY,
         course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
@@ -53,7 +53,8 @@ def init_course_tables():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_course_sessions_course ON course_sessions(course_id)')
 
-    # ── 调课 / 请假 ──
+    # ── 调课 / 请假 / 临时加课 ──
+    # exception_type ∈ { 'cancel' | 'reschedule' | 'extra' }
     cur.execute('''CREATE TABLE IF NOT EXISTS course_exceptions (
         id SERIAL PRIMARY KEY,
         course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
@@ -69,7 +70,17 @@ def init_course_tables():
     cur.execute('CREATE INDEX IF NOT EXISTS idx_course_exc_course_date ON course_exceptions(course_id, exception_date)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_course_exc_new_date ON course_exceptions(new_date)')
 
+    # ── ★ 全部放假 · 独立表 ──
+    cur.execute('''CREATE TABLE IF NOT EXISTS course_day_off (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL DEFAULT 'default',
+        off_date DATE NOT NULL,
+        note TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (user_id, off_date))''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_course_day_off_user ON course_day_off(user_id, off_date)')
+
     conn.commit()
     cur.close()
     conn.close()
-    print('[init] 课程表已就绪：courses / course_sessions / course_exceptions')
+    print('[init] 课程表已就绪：courses / course_sessions / course_exceptions / course_day_off')

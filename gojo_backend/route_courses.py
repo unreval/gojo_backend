@@ -1,4 +1,4 @@
-"""课程表路由 · CRUD + 按周查询
+"""课程表路由 · CRUD + 按周查询 + 放假 + 调休
 
 风格和 route_tasks.py 保持一致：函数薄壳，业务写在 courses.py 里。
 """
@@ -9,6 +9,7 @@ from courses import (
     list_courses, get_course, create_course, update_course, delete_course,
     replace_sessions, add_session, delete_session,
     list_exceptions, create_exception, delete_exception,
+    list_day_offs, create_day_off, delete_day_off,
     get_week_view,
 )
 
@@ -21,7 +22,6 @@ router = APIRouter()
 
 @router.get('/courses')
 async def get_courses(user_id: str = 'default'):
-    """列出用户所有课程，每个课程带上它的 sessions。"""
     return JSONResponse({'courses': list_courses(user_id)})
 
 
@@ -35,12 +35,7 @@ async def get_course_detail(course_id: int):
 
 @router.post('/courses')
 async def post_course(data: dict):
-    """新建课程。body:
-    {
-      user_id, name(必填), teacher, location, color, note,
-      semester_start, semester_end,
-      sessions: [{ weekday, start_time, end_time, weeks }, ...]
-    }"""
+    """新建课程。body 见 courses.create_course 参数。"""
     user_id = data.get('user_id', 'default')
     name = (data.get('name') or '').strip()
     if not name:
@@ -61,7 +56,7 @@ async def post_course(data: dict):
 
 @router.put('/courses/{course_id}')
 async def put_course(course_id: int, data: dict):
-    """更新课程字段。sessions 传了就整批替换（可选）。"""
+    """更新课程字段。sessions 传了就整批替换。"""
     changed = update_course(course_id, data)
     if 'sessions' in data:
         replace_sessions(course_id, data.get('sessions') or [])
@@ -77,7 +72,7 @@ async def del_course(course_id: int):
     return JSONResponse({'ok': True})
 
 
-# ── 单独增删 session（一般走 PUT /courses/{id} 的整批替换就够，这里备用）──
+# ── 单独增删 session ──
 
 @router.post('/course/sessions')
 async def post_session(data: dict):
@@ -98,7 +93,7 @@ async def del_session(session_id: int):
 
 
 # ══════════════════════════════════════════════════════════════
-#  course_exceptions（调课 / 请假）
+#  course_exceptions（调课 / 请假 / 临时加课）
 # ══════════════════════════════════════════════════════════════
 
 @router.get('/course/exceptions')
@@ -111,15 +106,16 @@ async def get_exceptions(user_id: str = 'default',
 @router.post('/course/exceptions')
 async def post_exception(data: dict):
     """body:
-      { course_id, session_id?, exception_date(YYYY-MM-DD), exception_type('cancel'|'reschedule'),
+      { course_id, session_id?, exception_date(YYYY-MM-DD),
+        exception_type('cancel'|'reschedule'|'extra'),
         new_date?, new_start_time?, new_end_time?, new_location?, note? }
     """
     course_id = data.get('course_id')
     ex_date = data.get('exception_date')
     ex_type = data.get('exception_type')
-    if not course_id or not ex_date or ex_type not in ('cancel', 'reschedule'):
+    if not course_id or not ex_date or ex_type not in ('cancel', 'reschedule', 'extra'):
         return JSONResponse(
-            {'error': 'course_id / exception_date / exception_type(cancel|reschedule) required'},
+            {'error': 'course_id / exception_date / exception_type(cancel|reschedule|extra) required'},
             status_code=400
         )
     if ex_type == 'reschedule':
@@ -128,12 +124,19 @@ async def post_exception(data: dict):
                 {'error': 'reschedule requires new_date / new_start_time / new_end_time'},
                 status_code=400
             )
+    if ex_type == 'extra':
+        # 临时加课至少要有 new_start_time / new_end_time；new_date 默认等于 exception_date
+        if not data.get('new_start_time') or not data.get('new_end_time'):
+            return JSONResponse(
+                {'error': 'extra requires new_start_time / new_end_time'},
+                status_code=400
+            )
     new_id = create_exception(
         course_id=course_id,
         exception_date=ex_date,
         exception_type=ex_type,
         session_id=data.get('session_id'),
-        new_date=data.get('new_date'),
+        new_date=data.get('new_date') or (ex_date if ex_type == 'extra' else None),
         new_start_time=data.get('new_start_time'),
         new_end_time=data.get('new_end_time'),
         new_location=(data.get('new_location') or '').strip(),
@@ -149,12 +152,42 @@ async def del_exception(exception_id: int):
 
 
 # ══════════════════════════════════════════════════════════════
+#  course_day_off（这一天全部放假）
+# ══════════════════════════════════════════════════════════════
+
+@router.get('/course/day-off')
+async def get_day_offs(user_id: str = 'default',
+                        start: str | None = None,
+                        end: str | None = None):
+    return JSONResponse({'day_offs': list_day_offs(user_id, start, end)})
+
+
+@router.post('/course/day-off')
+async def post_day_off(data: dict):
+    """body: { user_id, off_date(YYYY-MM-DD), note? }
+    同一 user_id + off_date 幂等（第二次调用会更新 note）。"""
+    user_id = data.get('user_id', 'default')
+    off_date = data.get('off_date')
+    if not off_date:
+        return JSONResponse({'error': 'off_date required'}, status_code=400)
+    new_id = create_day_off(user_id, off_date, (data.get('note') or '').strip())
+    return JSONResponse({'ok': True, 'id': new_id})
+
+
+@router.delete('/course/day-off/{day_off_id}')
+async def del_day_off(day_off_id: int):
+    delete_day_off(day_off_id)
+    return JSONResponse({'ok': True})
+
+
+# ══════════════════════════════════════════════════════════════
 #  按周查询（前端铺格子的主入口）
 # ══════════════════════════════════════════════════════════════
 
 @router.get('/courses/week')
 async def get_courses_week(user_id: str = 'default', monday: str | None = None):
-    """给一个"周一"日期(YYYY-MM-DD)，返回那一周所有具体的课（已应用调课/请假）。
+    """给一个"周一"日期(YYYY-MM-DD)，返回那一周所有具体的课
+    （已应用调课 / 请假 / 放假 / 临时加课）。
     monday 不传就自动用今天所在周。"""
     if not monday:
         from datetime import date, timedelta

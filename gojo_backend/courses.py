@@ -1,8 +1,8 @@
 """课程表数据库操作 · CRUD + 按周查询
 
 按周查询是这里的核心：给一个 monday 日期，返回那一周所有具体的课
-（把 weeks 字段解析开、把 exceptions 应用上）。前端拿到就能直接铺格子，
-不用自己算学期第几周。
+（把 weeks 字段解析开、把 exceptions 应用上、把 day_off 过滤掉、把 extra 补上）。
+前端拿到就能直接铺格子，不用自己算学期第几周。
 """
 from datetime import date, datetime, timedelta
 from db import get_conn
@@ -212,11 +212,11 @@ def delete_session(session_id):
 
 
 # ══════════════════════════════════════════════════════════════
-#  course_exceptions · CRUD
+#  course_exceptions · CRUD（cancel / reschedule / extra）
 # ══════════════════════════════════════════════════════════════
 
 def list_exceptions(user_id, start_date=None, end_date=None):
-    """列出用户所有 exceptions（按日期范围过滤，两端都不给就全返）。"""
+    """列出用户所有 exceptions（按日期范围过滤）。"""
     conn = get_conn()
     cur = conn.cursor()
     sql = '''SELECT e.id, e.course_id, e.session_id, e.exception_date, e.exception_type,
@@ -281,11 +281,66 @@ def delete_exception(exception_id):
 
 
 # ══════════════════════════════════════════════════════════════
-#  按周查询 · 把 sessions + exceptions 组合成一周的实际课表
+#  course_day_off · CRUD（某天全部放假）
+# ══════════════════════════════════════════════════════════════
+
+def list_day_offs(user_id, start_date=None, end_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    sql = 'SELECT id, off_date, note FROM course_day_off WHERE user_id = %s'
+    args = [user_id]
+    if start_date:
+        sql += ' AND off_date >= %s'
+        args.append(start_date)
+    if end_date:
+        sql += ' AND off_date <= %s'
+        args.append(end_date)
+    sql += ' ORDER BY off_date DESC'
+    cur.execute(sql, args)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{
+        'id': r[0],
+        'off_date': str(r[1]) if r[1] else None,
+        'note': r[2] or '',
+    } for r in rows]
+
+
+def create_day_off(user_id, off_date, note=''):
+    """加一条放假记录；同一天重复调用会返回已存在的 id（幂等）。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''INSERT INTO course_day_off (user_id, off_date, note)
+           VALUES (%s, %s, %s)
+           ON CONFLICT (user_id, off_date) DO UPDATE
+             SET note = EXCLUDED.note
+           RETURNING id''',
+        (user_id, off_date, note)
+    )
+    new_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return new_id
+
+
+def delete_day_off(day_off_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM course_day_off WHERE id = %s', (day_off_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ══════════════════════════════════════════════════════════════
+#  按周查询 · 把 sessions + exceptions + day_off 组合成一周的实际课表
 # ══════════════════════════════════════════════════════════════
 
 def _parse_weeks(weeks_str):
-    """把 "1-16" / "1,3,5,7-16" / "" 解析成 set[int]，空串表示 None（意为不过滤）。"""
+    """把 "1-16" / "1,3,5,7-16" / "" 解析成 set[int]，空串返回 None(不过滤)。"""
     s = (weeks_str or '').strip()
     if not s:
         return None
@@ -313,37 +368,36 @@ def _parse_weeks(weeks_str):
 
 
 def _week_number(target_date, semester_start):
-    """target_date 是学期第几周（从 1 开始，学期开始那周算第 1 周）。
-    semester_start 没给 → 返回 None（表示不按周次过滤）。"""
+    """target_date 是学期第几周（从 1 开始）。semester_start 没给 → 返回 None。"""
     if not semester_start:
         return None
     if isinstance(semester_start, str):
         semester_start = datetime.strptime(semester_start, '%Y-%m-%d').date()
-    # 学期开始日所在的那一周（从周一算起）为第 1 周
     sem_monday = semester_start - timedelta(days=semester_start.weekday())
     tgt_monday = target_date - timedelta(days=target_date.weekday())
     delta_days = (tgt_monday - sem_monday).days
     if delta_days < 0:
-        return 0   # 学期开始前
+        return 0
     return delta_days // 7 + 1
 
 
 def get_week_view(user_id, monday_date):
-    """给一个"周一"日期，返回那一周所有具体课（已应用调课/请假）。
+    """给一个"周一"日期，返回那一周所有具体课（已应用调课/请假/放假/临时加课）。
 
-    返回结构（前端直接铺格子用）：
+    应用顺序：
+      1. 展开每门课的每个 session 到这周的具体日期
+      2. 学期范围 + weeks 过滤
+      3. 应用 course_exceptions：
+         · cancel     → 那节课不出现
+         · reschedule → 原时段不出现（会以补入的形式出现在新时间）
+         · extra      → 补一条临时加课
+      4. 应用 course_day_off：如果 off_date 在本周内,该日全部课不出现
+
+    返回结构（前端直接铺格子）：
     [{
-        instance_id: "session_12_2025-09-15",   # 前端做 key 用
-        course_id, session_id, name, color, teacher, note,
-        date: "2025-09-15",     # 具体这天
-        weekday: 1,             # 1-7
-        start_time: "08:00",
-        end_time: "09:40",
-        location: "教学楼A101",
-        is_exception: false,    # 是不是被调过课
-        exception_type: null,   # 'reschedule' 时是 'reschedule'
-        exception_id: null,
-        note: '',               # exception 的备注
+        instance_id, course_id, session_id, name, color, teacher, note,
+        date, weekday, start_time, end_time, location,
+        is_exception, exception_type, exception_id,
     }, ...]
     """
     if isinstance(monday_date, str):
@@ -354,20 +408,24 @@ def get_week_view(user_id, monday_date):
 
     courses = list_courses(user_id)
     exceptions = list_exceptions(user_id, str(monday_date), str(sunday_date))
+    day_offs = list_day_offs(user_id, str(monday_date), str(sunday_date))
+    day_off_set = {d['off_date'] for d in day_offs}
 
     # index: (course_id, session_id, exception_date) → exception 对象
+    # 用于 cancel / reschedule 覆盖原时段
     exc_by_source = {}
-    # index: 从别处调过来的（new_date 落在本周内）
-    exc_moved_in = []
+    # 补入本周的（reschedule 的 new_date / extra 的 new_date 落在本周内）
+    exc_supplement = []
     for e in exceptions:
         if e['exception_date']:
             src_day = datetime.strptime(e['exception_date'], '%Y-%m-%d').date()
-            if monday_date <= src_day <= sunday_date:
+            if monday_date <= src_day <= sunday_date and e['exception_type'] in ('cancel', 'reschedule'):
                 exc_by_source[(e['course_id'], e['session_id'], e['exception_date'])] = e
-        if e['exception_type'] == 'reschedule' and e['new_date']:
+        # reschedule / extra 都可能有 new_date
+        if e['exception_type'] in ('reschedule', 'extra') and e['new_date']:
             new_day = datetime.strptime(e['new_date'], '%Y-%m-%d').date()
             if monday_date <= new_day <= sunday_date:
-                exc_moved_in.append(e)
+                exc_supplement.append(e)
 
     result = []
     for c in courses:
@@ -377,6 +435,10 @@ def get_week_view(user_id, monday_date):
             weekday = int(s['weekday'])  # 1-7
             day = monday_date + timedelta(days=weekday - 1)
             date_str = str(day)
+
+            # ★ 放假过滤：这一天已被标记为放假,所有 session 都不出现
+            if date_str in day_off_set:
+                continue
 
             # 学期范围过滤
             if sem_start and str(day) < sem_start:
@@ -392,17 +454,12 @@ def get_week_view(user_id, monday_date):
                     continue
 
             # 查这节课这天有没有 exception（cancel / reschedule）
-            # 优先精确匹配 session_id，其次匹配 course_id + date（session_id 为空的老数据）
             exc = exc_by_source.get((c['id'], s['id'], date_str)) or \
                   exc_by_source.get((c['id'], None, date_str))
 
             if exc:
-                if exc['exception_type'] == 'cancel':
-                    # 请假/停课：这次不出现
-                    continue
-                if exc['exception_type'] == 'reschedule':
-                    # 原时段不出现（会以另一条 exc_moved_in 的形式在新日子出现）
-                    continue
+                # 请假 / 调课 → 原时段不出现
+                continue
 
             result.append({
                 'instance_id': f'session_{s["id"]}_{date_str}',
@@ -422,13 +479,16 @@ def get_week_view(user_id, monday_date):
                 'exception_id': None,
             })
 
-    # 补入被调过来的课
-    for e in exc_moved_in:
-        # 找到源 course
+    # 补入 reschedule 的新时段 + extra 临时加课
+    for e in exc_supplement:
+        new_day_str = e['new_date']
+        # 放假日不加课（哪怕是补课/调课过来的,也遵守放假规则）
+        if new_day_str in day_off_set:
+            continue
         source_course = next((c for c in courses if c['id'] == e['course_id']), None)
         if not source_course:
             continue
-        new_day = datetime.strptime(e['new_date'], '%Y-%m-%d').date()
+        new_day = datetime.strptime(new_day_str, '%Y-%m-%d').date()
         weekday = new_day.isoweekday()   # 1-7
         result.append({
             'instance_id': f'exc_{e["id"]}',
@@ -438,16 +498,15 @@ def get_week_view(user_id, monday_date):
             'color': source_course['color'],
             'teacher': source_course['teacher'],
             'note': e['note'] or source_course['note'],
-            'date': e['new_date'],
+            'date': new_day_str,
             'weekday': weekday,
             'start_time': e['new_start_time'] or '',
             'end_time': e['new_end_time'] or '',
             'location': e['new_location'] or source_course['location'],
             'is_exception': True,
-            'exception_type': 'reschedule',
+            'exception_type': e['exception_type'],   # 'reschedule' 或 'extra'
             'exception_id': e['id'],
         })
 
-    # 按日期 + 起始时间排序，前端不用再排
     result.sort(key=lambda x: (x['date'], x['start_time']))
     return result
