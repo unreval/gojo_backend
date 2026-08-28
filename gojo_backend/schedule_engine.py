@@ -143,6 +143,14 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 没用到的就不写。也可以不用任何一家(去其他虚构地点)。
 '''
 
+    # ★ 当季限定/热门信息
+    trending_block = ''
+    try:
+        import trending_engine
+        trending_block = trending_engine.get_trending_for_schedule(main_city)
+    except Exception:
+        pass
+
     # ★ system prompt 框定为创意写作任务
     system_prompt = '''你是一个创意写作助手。你的任务是为一个虚拟陪伴 App 生成虚构角色的每日行程表。
 这是 App 的一个功能模块:用户可以查看角色"今天在干什么"。
@@ -161,6 +169,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 {city_note}
 {'今天是周末,安排可以更随性。' if is_weekend else '今天是工作日。'}
 {places_block}
+{trending_block}
 
 【日程写法要求】
 1. 从起床到睡觉,排 8-12 个时间段。
@@ -195,14 +204,21 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 ]}}'''
 
     try:
-        from ai_client import create_chat
-        raw, _usage = create_chat(
-            model=MODEL_CN_AUX,
+        import anthropic
+        from config import ANTHROPIC_KEY, MODEL_MAIN
+        # ★ 直接用和主聊天 route_chat.py 一样的 Anthropic 客户端
+        #   不走 ai_client.create_chat(那个在 tdyun 上 opus 会 404)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+        # system 指令和 user 内容合并成一条 user message,避免 system 参数兼容问题
+        full_prompt = system_prompt + '\n\n' + prompt
+
+        resp = client.messages.create(
+            model=MODEL_MAIN,        # ★ 用 MODEL_MAIN(和主聊天一样的模型)
             max_tokens=3000,
-            system=system_prompt,
-            messages=[{'role': 'user', 'content': prompt}],
+            messages=[{'role': 'user', 'content': full_prompt}],
         )
-        raw = (raw or '').strip()
+        raw = resp.content[0].text.strip() if resp.content else ''
         if not raw:
             print(f'[schedule] {character_id} 生成返回空')
             return None
