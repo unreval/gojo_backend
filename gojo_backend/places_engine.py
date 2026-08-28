@@ -101,17 +101,33 @@ def search_places(city: str = 'tokyo', category: str = 'cafe', limit: int = 30) 
 );
 out center 100;'''
 
-    try:
-        resp = requests.post(
-            'https://overpass-api.de/api/interpreter',
-            data={'data': query},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f'[places] Overpass 请求失败: {e}')
-        return []
+    # 多个 Overpass 镜像,挨个试
+    OVERPASS_MIRRORS = [
+        'https://overpass.kumi.systems/api/interpreter',
+        'https://z.overpass-api.de/api/interpreter',
+        'https://overpass-api.de/api/interpreter',
+    ]
+
+    last_err = None
+    for mirror in OVERPASS_MIRRORS:
+        try:
+            resp = requests.post(
+                mirror,
+                data={'data': query},
+                timeout=20,
+                headers={'User-Agent': 'GojoAssistant/1.0'},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except Exception as e:
+            last_err = e
+            print(f'[places] {mirror} 失败: {e}')
+            continue
+    else:
+        # 所有镜像都失败,试 Nominatim 兜底
+        print(f'[places] 所有 Overpass 镜像失败,尝试 Nominatim...')
+        return _nominatim_fallback(city, category, cat_info, city_info, limit)
 
     results = []
     for el in data.get('elements', []):
@@ -161,7 +177,7 @@ def get_random_place(city: str = 'tokyo', category: str = None) -> dict | None:
 
 
 def get_schedule_places(city: str = 'tokyo', count: int = 3) -> list:
-    """给日程引擎用:搜几个不同类别的地点,供 LLM 挑选。"""
+    """给日程引擎用：搜几个不同类别的地点,供 LLM 挑选。"""
     categories = random.sample(
         ['cafe', 'restaurant', 'sweets', 'bakery', 'ramen', 'fashion', 'bookstore'],
         min(count + 2, 7)
@@ -174,3 +190,58 @@ def get_schedule_places(city: str = 'tokyo', count: int = 3) -> list:
         if len(places) >= count:
             break
     return places
+
+
+def _nominatim_fallback(city, category, cat_info, city_info, limit):
+    """Overpass 全挂时用 Nominatim 搜(免费,不同域名)。"""
+    try:
+        search_terms = {
+            'cafe': 'cafe coffee',
+            'restaurant': 'restaurant',
+            'sweets': 'sweets dessert patisserie',
+            'bakery': 'bakery bread',
+            'ramen': 'ramen noodle',
+            'fashion': 'fashion clothing boutique',
+            'bookstore': 'bookstore books',
+            'convenience': 'convenience store',
+        }
+        q = search_terms.get(category, category)
+        city_name = city_info.get('name_jp', 'Tokyo')
+
+        resp = requests.get(
+            'https://nominatim.openstreetmap.org/search',
+            params={
+                'q': f'{q} {city_name}',
+                'format': 'json',
+                'limit': min(limit, 30),
+                'addressdetails': 1,
+            },
+            timeout=15,
+            headers={'User-Agent': 'GojoAssistant/1.0'},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        results = []
+        for item in data:
+            name = item.get('display_name', '').split(',')[0]
+            if not name:
+                continue
+            results.append({
+                'name': name,
+                'lat': float(item.get('lat', 0)),
+                'lng': float(item.get('lon', 0)),
+                'address': item.get('display_name', '').split(',')[1] if ',' in item.get('display_name', '') else city_name,
+                'category': category,
+                'category_label': cat_info['label_cn'],
+                'city': city,
+                'osm_id': item.get('osm_id'),
+            })
+
+        if results:
+            print(f'[places] Nominatim 兜底成功: {city}/{category} 搜到 {len(results)} 个')
+        return random.sample(results, min(limit, len(results))) if results else []
+
+    except Exception as e:
+        print(f'[places] Nominatim 也失败了: {e}')
+        return []
