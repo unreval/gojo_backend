@@ -148,6 +148,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 这是 App 的一个功能模块:用户可以查看角色"今天在干什么"。
 你需要根据角色设定,生成一份符合角色性格和背景的日程。
 这是纯粹的创意写作/内容生成任务,不是角色扮演。
+★ 所有内容必须用中文写(title、location、note 全部中文),不要用日文。
 请直接输出 JSON 格式的日程数据,不需要任何解释或前言。'''
 
     prompt = f'''请为以下虚构角色生成 {target_date}（{weekday_cn}）的日程。
@@ -164,6 +165,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 【日程写法要求】
 1. 从起床到睡觉,排 8-12 个时间段。
 2. 符合角色身份和性格。
+3. ★★★ 所有内容(title / location / note)必须用【中文】写,不要用日文 ★★★
 
 3. title【极短】(5-15字),手机一行看完,细节放 note:
    ✅ "去Ivy Place吃brunch" ✅ "原宿买限量可颂"
