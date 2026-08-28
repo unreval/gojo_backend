@@ -3,25 +3,10 @@
 场景:他正在探店 / 买到限定甜品 / 翘班溜达 —— 这种时候真人会顺手发条消息。
 不是"到点汇报",是"刚好遇到值得说的事"。
 
-★ 三道闸门,缺一不可:
-  1. 【关系够深】陌生人凭什么给你汇报行程。关系浅时这个功能整个不启动。
-  2. 【活动值得分享】开会/写文件/通勤没什么好说的;探店/限定甜品/翘班才有。
-  3. 【频率克制】一天最多 2 条、间隔至少 3 小时、每次还要掷骰子。
-     真人不会每小时都给你发生活播报。
-
-★ 最终决定权在 LLM:它拿到当前活动和关系状态后可以选择 skip。
-  跟 proactive_scheduler 一样,宁可不发也不要发得尴尬。
-
-独立线程,不依赖 diary_scheduler,只需要在 gojo_server.py 加一行 start_schedule_share()。
-
-★ v-fix (2026-08):踩过的坑
-  1. SHARE_CHANCE=0.5 太激进:每 45min 有一半概率发,一天累积 4 条铁定刷屏。
-     调到 0.15 —— 沉默是默认,发是意外。
-  2. 没有进程内 last_tick 冷却:进程重启/多线程重入时会立刻再跑一遍,
-     翻倍写入。加 _MIN_TICK_GAP_SEC 兜一手。
-  3. 写库前没做内容级去重:同一个活动可能连续两次 tick 都判"值得分享",
-     生成的 jp 差不多,但 tick 里的 _sent_today 只挡数量,挡不了复读。
-     加 proactive_msg.has_similar_recent() 做最后一道网。
+★ v-fix2:主动消息上限可被对话调整
+  用户跟角色说"多发消息给我",角色同意后,
+  promise_detector 会调高那个角色的每日上限(存数据库)。
+  这里读 promise_detector.get_msg_limit() 拿个性化上限。
 """
 import threading
 import time
@@ -34,27 +19,20 @@ import proactive_msg
 
 TARGET_USER = 'user_mofpiyd7442ia7'
 
-# ── 节奏控制 ──
-# ★ 这些是【防刷屏的技术上限】,不是目标值。
-#   真正决定发不发的是角色自己 —— 关系浅他会一直 skip,
-#   关系深了才越来越愿意说。频率曲线由他的判断自然产生,不靠数值卡。
-TICK_SECONDS = 90 * 60      # 每 90 分钟看一眼(原来 45min 太密,配 0.5 概率一天必刷屏)
-SHARE_CHANCE = 0.15         # 掷骰子(原来 0.5 太激进 —— 真人生活里"想跟你说一句"没那么频繁)
-MAX_PER_DAY = 2             # 硬上限,防止极端情况刷屏(原来 4 条,实际测下来太多)
-MIN_GAP_HOURS = 3           # 两条之间至少隔 3 小时(原来 2 小时略短)
+# ── 节奏控制(默认值,可被对话调整) ──
+TICK_SECONDS = 90 * 60
+SHARE_CHANCE = 0.15
+MAX_PER_DAY = 2             # ★ 默认值,实际用 _get_limit() 读个性化上限
+MIN_GAP_HOURS = 3
 
-# ── 进程内防抖:两次 tick 至少间隔这么久,防止重启/线程抖动时立刻重跑 ──
 _MIN_TICK_GAP_SEC = 30 * 60
-_last_tick_at = {}          # character_id → 上次 tick 的时间戳(float)
+_last_tick_at = {}
 
-# ── 什么活动值得分享 ──
-# 有这些关键词才可能发 —— 开会、写文件、通勤没什么好说的。
 WORTH_SHARING = (
     '甜品', '甜点', '蛋糕', '和菓子', '大福', '限定', '探店', '店',
     '逛', '闲逛', '翘班', '偷懒', '溜', '发呆', '散步',
     '吃饭', '午餐', '晚餐', '便利店', '买',
 )
-# 明确不发的
 NEVER_SHARE = ('睡', '就寝', '寝', '通勤', '起床', '洗漱', '开会', '会议', '文件', '事务')
 
 _thread = None
@@ -65,14 +43,19 @@ def _now():
     return datetime.now(CN_TZ)
 
 
-def _has_any_history(character_id, user_id):
-    """最低理智检查:至少得聊过。
-
-    ★ 这里【故意】不设"认识几天""几条记忆"的门槛 ——
-      那是机械判断,和"他想不想跟你分享"是两回事。
-      真正的判断交给他自己(见 _generate_share 的 prompt),
-      关系浅他会一直 skip,关系深了自然越说越多。
+def _get_limit(character_id, user_id):
+    """读个性化的每日主动消息上限。
+    用户跟角色说"多发消息",角色同意后,promise_detector 会调高这个值。
+    读不到就用默认值 MAX_PER_DAY。
     """
+    try:
+        from promise_detector import get_msg_limit
+        return get_msg_limit(character_id, user_id, default=MAX_PER_DAY)
+    except Exception:
+        return MAX_PER_DAY
+
+
+def _has_any_history(character_id, user_id):
     try:
         from user_memory import get_bond_memories
         bonds = get_bond_memories(user_id, character_id, kind='between', limit=3)
@@ -82,9 +65,8 @@ def _has_any_history(character_id, user_id):
 
 
 def _worth_sharing(activity):
-    """这个活动值不值得主动说一句。"""
     if not activity or not activity.get('can_reply'):
-        return False        # 走不开的时候本来就不该发消息
+        return False
     title = activity.get('title', '')
     if any(k in title for k in NEVER_SHARE):
         return False
@@ -92,7 +74,6 @@ def _worth_sharing(activity):
 
 
 def _sent_today(character_id, user_id):
-    """今天已经主动分享过几条 + 最后一条是什么时候。"""
     from db import get_conn
     start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
     conn = get_conn()
@@ -111,7 +92,6 @@ def _sent_today(character_id, user_id):
 
 
 def _generate_share(character_id, user_id, activity):
-    """让角色就当前这件事说一句。返回 True 表示真的发了。"""
     from characters import get_character
     from user_memory import get_short_memory, get_bond_memories, save_short_memory
     from ai_client import create_chat
@@ -136,8 +116,6 @@ def _generate_share(character_id, user_id, activity):
     except Exception:
         bonds, bond_text = [], ''
 
-    # ★ 用和聊天时【同一套】关系判断规则 —— 不然这里判出来的亲疏
-    #   会和他在聊天里表现的不一致(之前日记就踩过这个坑)
     try:
         from shared_relation_prompt import build_relation_rules
         from user_memory import get_first_interaction_days, get_long_memory
@@ -214,8 +192,6 @@ def _generate_share(character_id, user_id, activity):
         if not jp:
             return False
 
-        # ★ 写库前最后一道去重网:3 小时内已经发过开头一样的主动消息就跳过。
-        #   这是防线,不是主控 —— MAX_PER_DAY 挡数量,这里挡内容重复。
         if proactive_msg.has_similar_recent(user_id, character_id, jp, within_minutes=180):
             print(f'[life_share] {character_id} 3h 内已发过相似开头,跳过复读。jp={jp[:30]}')
             return False
@@ -254,8 +230,6 @@ def _generate_share(character_id, user_id, activity):
 def _tick_character(character_id):
     now = _now()
 
-    # ★ 进程内防抖:同一角色两次 tick 至少间隔 _MIN_TICK_GAP_SEC
-    #   防止 scheduler 重启抖动 / 线程重入时立刻重跑,写出双份
     now_ts = time.time()
     last_ts = _last_tick_at.get(character_id)
     if last_ts and (now_ts - last_ts) < _MIN_TICK_GAP_SEC:
@@ -267,10 +241,13 @@ def _tick_character(character_id):
         return
 
     if not _has_any_history(character_id, TARGET_USER):
-        return          # 完全没聊过,连判断的必要都没有
+        return
+
+    # ★ 用个性化上限(可被对话调整),而不是硬编码的 MAX_PER_DAY
+    limit = _get_limit(character_id, TARGET_USER)
 
     sent, last = _sent_today(character_id, TARGET_USER)
-    if sent >= MAX_PER_DAY:
+    if sent >= limit:
         return
     if last:
         try:
@@ -283,13 +260,13 @@ def _tick_character(character_id):
     if random.random() > SHARE_CHANCE:
         return
 
-    print(f'[life_share] {character_id} 正在「{act["title"]}」,问问他想不想说')
+    print(f'[life_share] {character_id} 正在「{act["title"]}」,问问他想不想说 (limit={limit})')
     _generate_share(character_id, TARGET_USER, act)
 
 
 def _loop():
     global _stop
-    time.sleep(120)     # 启动后等其它初始化跑完
+    time.sleep(120)
     while not _stop:
         try:
             from characters import list_characters
@@ -311,4 +288,4 @@ def start_schedule_share():
     _thread = threading.Thread(target=_loop, daemon=True)
     _thread.start()
     print(f'[life_share] 日程主动分享已启动'
-          f'（发不发由角色自己按关系判断，技术上限一天 {MAX_PER_DAY} 条）')
+          f'（默认上限 {MAX_PER_DAY} 条,可通过对话调整）')

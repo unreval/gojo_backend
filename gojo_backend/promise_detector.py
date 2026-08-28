@@ -30,6 +30,9 @@ _PROMISE_PATTERNS = [
     # 定期类
     (r'每天.{0,6}(找你|提醒|叫你|问你|发)', 'daily'),
     (r'每(早|晚|天早上|天晚上).{0,6}(找你|提醒|叫)', 'daily'),
+    # ★ 频率调整类:角色同意多发消息
+    (r'(好|行|可以|没问题|答应).{0,6}(多发|多找|经常|随时|常联系)', 'freq_up'),
+    (r'(会|要)(多|经常|随时).{0,4}(发|找|联系|消息)', 'freq_up'),
 ]
 
 # 不是真的承诺:否定句/疑问句/条件句
@@ -127,6 +130,11 @@ def detect_and_save(character_id, user_id, user_text, reply_zh):
                                 trigger_at=trigger_at,
                                 context=context, origin=user_text)
 
+        elif matched_type == 'freq_up':
+            # ★ 频率调整:角色同意多发消息,调高每日上限
+            _adjust_frequency(character_id, user_id, 'up')
+            return None
+
         return None
 
     except Exception as e:
@@ -160,3 +168,67 @@ def _save_promise(character_id, user_id, trigger_kind,
     except Exception as e:
         print(f'[promise_detect] 保存失败: {e}')
         return None
+
+
+def _adjust_frequency(character_id, user_id, direction='up'):
+    """调整角色的主动消息每日上限。存在 proactive_promise 表里作为特殊记录。
+    schedule_share.py 启动时读取这个值覆盖默认的 MAX_PER_DAY。
+    """
+    try:
+        from db import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # 读当前上限(存在 config 键值对里)
+        config_key = f'msg_limit_{character_id}_{user_id}'
+        cur.execute("SELECT value FROM app_config WHERE key=%s", (config_key,))
+        row = cur.fetchone()
+
+        current = int(row[0]) if row else 4  # 默认 4
+
+        if direction == 'up':
+            new_val = min(current + 3, 15)  # 每次 +3,上限 15
+        else:
+            new_val = max(current - 2, 2)   # 每次 -2,下限 2
+
+        # upsert
+        if row:
+            cur.execute("UPDATE app_config SET value=%s WHERE key=%s", (str(new_val), config_key))
+        else:
+            cur.execute("INSERT INTO app_config (key, value) VALUES (%s, %s)", (config_key, str(new_val)))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        print(f'[promise_detect] 📈 {character_id} 主动消息上限: {current} → {new_val}')
+        return new_val
+    except Exception as e:
+        # app_config 表可能不存在,用 schedule_share 的内存变量兜底
+        print(f'[promise_detect] 调频率失败(用内存兜底): {e}')
+        try:
+            import schedule_share
+            if direction == 'up':
+                schedule_share.MAX_PER_DAY = min(schedule_share.MAX_PER_DAY + 3, 15)
+            else:
+                schedule_share.MAX_PER_DAY = max(schedule_share.MAX_PER_DAY - 2, 2)
+            print(f'[promise_detect] 📈 内存调整 MAX_PER_DAY → {schedule_share.MAX_PER_DAY}')
+        except Exception:
+            pass
+        return None
+
+
+def get_msg_limit(character_id, user_id, default=4):
+    """给 schedule_share.py 用:读取这个角色的每日主动消息上限。"""
+    try:
+        from db import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        config_key = f'msg_limit_{character_id}_{user_id}'
+        cur.execute("SELECT value FROM app_config WHERE key=%s", (config_key,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return int(row[0]) if row else default
+    except Exception:
+        return default
