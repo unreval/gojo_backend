@@ -405,6 +405,18 @@ async def chat_text(data: dict):
     except Exception:
         pass
 
+    # ★ 承诺检测:角色回复里如果有"答应/承诺/会主动找你"类的话,自动创建 proactive_promise
+    try:
+        import promise_detector
+        # full_jp 是日语回复,但 promise_detector 需要中文。从 result 里拿 zh
+        reply_zh_combined = ' '.join(m.get('zh', '') for m in msgs if m.get('zh'))
+        if reply_zh_combined:
+            threading.Thread(target=promise_detector.detect_and_save,
+                            args=(character_id, user_id, user_text, reply_zh_combined),
+                            daemon=True).start()
+    except Exception:
+        pass
+
     # ★ 便利贴吐槽:这一轮聊完,他心里可能会嘀咕一句(不发出来,只写便利贴)
     #   完全后台,失败也不影响主对话
     try:

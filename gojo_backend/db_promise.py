@@ -172,3 +172,25 @@ def deactivate(promise_id):
     conn.commit()
     cur.close()
     conn.close()
+
+# db_promise.py 补丁 — 在文件末尾加这个函数
+
+def get_active_promises(character_id, user_id):
+    """拿所有活跃的承诺(promise_detector 防重复用)。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''SELECT id, trigger_kind, trigger_at, trigger_time, context, origin_text
+           FROM proactive_promise
+           WHERE character_id=%s AND user_id=%s AND is_active=TRUE
+           ORDER BY created_at DESC LIMIT 20''',
+        (character_id, user_id)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{
+        'id': r[0], 'trigger_kind': r[1],
+        'trigger_at': r[2], 'trigger_time': r[3],
+        'context': r[4] or '', 'origin_text': r[5] or '',
+    } for r in rows]
