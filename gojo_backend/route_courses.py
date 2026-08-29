@@ -25,6 +25,23 @@ async def get_courses(user_id: str = 'default'):
     return JSONResponse({'courses': list_courses(user_id)})
 
 
+# ⚠️ 顺序很关键：/courses/week 必须放在 /courses/{course_id} 前面
+# 否则 FastAPI 会把 "week" 当成 course_id 试图解析成整数，报 int_parsing 错误
+@router.get('/courses/week')
+async def get_courses_week(user_id: str = 'default', monday: str | None = None):
+    """给一个"周一"日期(YYYY-MM-DD)，返回那一周所有具体的课
+    （已应用调课 / 请假 / 放假 / 临时加课）。
+    monday 不传就自动用今天所在周。"""
+    if not monday:
+        from datetime import date, timedelta
+        today = date.today()
+        monday = str(today - timedelta(days=today.weekday()))
+    return JSONResponse({
+        'monday': monday,
+        'instances': get_week_view(user_id, monday),
+    })
+
+
 @router.get('/courses/{course_id}')
 async def get_course_detail(course_id: int):
     c = get_course(course_id)
@@ -178,22 +195,3 @@ async def post_day_off(data: dict):
 async def del_day_off(day_off_id: int):
     delete_day_off(day_off_id)
     return JSONResponse({'ok': True})
-
-
-# ══════════════════════════════════════════════════════════════
-#  按周查询（前端铺格子的主入口）
-# ══════════════════════════════════════════════════════════════
-
-@router.get('/courses/week')
-async def get_courses_week(user_id: str = 'default', monday: str | None = None):
-    """给一个"周一"日期(YYYY-MM-DD)，返回那一周所有具体的课
-    （已应用调课 / 请假 / 放假 / 临时加课）。
-    monday 不传就自动用今天所在周。"""
-    if not monday:
-        from datetime import date, timedelta
-        today = date.today()
-        monday = str(today - timedelta(days=today.weekday()))
-    return JSONResponse({
-        'monday': monday,
-        'instances': get_week_view(user_id, monday),
-    })

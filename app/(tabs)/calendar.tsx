@@ -373,9 +373,15 @@ export default function CalendarScreen() {
   const [cLocation, setCLocation] = useState('');
   const [cColor, setCColor] = useState(COURSE_COLORS[0]);
   const [cNote, setCNote] = useState('');
-  const [cSemStart, setCSemStart] = useState('');
-  const [cSemEnd, setCSemEnd] = useState('');
+  // ★ 学期起止改成 Date 对象（用 DateTimePicker）
+  const [cSemStart, setCSemStart] = useState<Date | null>(null);
+  const [cSemEnd, setCSemEnd] = useState<Date | null>(null);
   const [cSessions, setCSessions] = useState<CourseSession[]>([]);
+  // 编辑课程时的 picker 显示状态
+  const [ceSemStartShow, setCeSemStartShow] = useState(false);
+  const [ceSemEndShow, setCeSemEndShow] = useState(false);
+  // 时段 picker：记录哪个时段的哪个字段在弹（例如 { idx: 0, which: 'start' }）
+  const [ceSessionPicker, setCeSessionPicker] = useState<null | { idx: number; which: 'start' | 'end' }>(null);
 
   // 课程操作菜单
   const [showCourseAction, setShowCourseAction] = useState(false);
@@ -876,8 +882,8 @@ export default function CalendarScreen() {
     setCLocation('');
     setCColor(COURSE_COLORS[courses.length % COURSE_COLORS.length]);
     setCNote('');
-    setCSemStart(formatDate(ttMonday));
-    setCSemEnd(formatDate(addDaysD(ttMonday, 18 * 7 - 1)));
+    setCSemStart(new Date(ttMonday));
+    setCSemEnd(addDaysD(ttMonday, 18 * 7 - 1));
     setCSessions([{ weekday: 1, start_time: '08:00', end_time: '09:40', weeks: '' }]);
     setShowCourseEdit(true);
   };
@@ -888,8 +894,8 @@ export default function CalendarScreen() {
     setCLocation(course.location);
     setCColor(course.color || COURSE_COLORS[0]);
     setCNote(course.note);
-    setCSemStart(course.semester_start || '');
-    setCSemEnd(course.semester_end || '');
+    setCSemStart(course.semester_start ? new Date(course.semester_start) : null);
+    setCSemEnd(course.semester_end ? new Date(course.semester_end) : null);
     setCSessions(
       course.sessions.length > 0
         ? course.sessions.map(s => ({ ...s }))
@@ -910,8 +916,8 @@ export default function CalendarScreen() {
         location: cLocation.trim(),
         color: cColor,
         note: cNote.trim(),
-        semester_start: cSemStart || null,
-        semester_end: cSemEnd || null,
+        semester_start: cSemStart ? formatDate(cSemStart) : null,
+        semester_end: cSemEnd ? formatDate(cSemEnd) : null,
         sessions: validSessions,
       };
       if (editingCourse) {
@@ -2212,15 +2218,49 @@ export default function CalendarScreen() {
 
               <Text style={s.ceFieldLabel}>学期起止（算学期第几周用，不填就一直显示）</Text>
               <View style={{flexDirection:'row', gap:8}}>
-                <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
-                  value={cSemStart} onChangeText={setCSemStart}
-                  placeholder="2026-09-01" placeholderTextColor={C.textMute}
-                  autoCapitalize="none" />
-                <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
-                  value={cSemEnd} onChangeText={setCSemEnd}
-                  placeholder="2027-01-15" placeholderTextColor={C.textMute}
-                  autoCapitalize="none" />
+                <TouchableOpacity style={[s.pickerRow, {flex:1, marginTop:0}]}
+                  onPress={() => setCeSemStartShow(true)}>
+                  <Text style={[s.pickerRowText, !cSemStart && {color:C.textMute}]}>
+                    {cSemStart ? formatDate(cSemStart) : '开始日期'}
+                  </Text>
+                  <Text style={s.pickerRowIcon}>📅</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.pickerRow, {flex:1, marginTop:0}]}
+                  onPress={() => setCeSemEndShow(true)}>
+                  <Text style={[s.pickerRowText, !cSemEnd && {color:C.textMute}]}>
+                    {cSemEnd ? formatDate(cSemEnd) : '结束日期'}
+                  </Text>
+                  <Text style={s.pickerRowIcon}>📅</Text>
+                </TouchableOpacity>
               </View>
+              {cSemStart && (
+                <TouchableOpacity onPress={() => { setCSemStart(null); setCSemEnd(null); }}
+                  style={{alignSelf:'flex-end', marginTop:4}}>
+                  <Text style={{color:C.textMute, fontSize:11}}>清除日期（一直显示）</Text>
+                </TouchableOpacity>
+              )}
+              {ceSemStartShow && (
+                <DateTimePicker
+                  value={cSemStart || new Date()} mode="date" display="default"
+                  onChange={(event: any, d?: Date) => {
+                    setCeSemStartShow(false);
+                    if (event?.type === 'set' && d) {
+                      setCSemStart(d);
+                      // 如果结束日期还没设,自动填一个 18 周后
+                      if (!cSemEnd) setCSemEnd(addDaysD(d, 18 * 7 - 1));
+                    }
+                  }}
+                />
+              )}
+              {ceSemEndShow && (
+                <DateTimePicker
+                  value={cSemEnd || new Date()} mode="date" display="default"
+                  onChange={(event: any, d?: Date) => {
+                    setCeSemEndShow(false);
+                    if (event?.type === 'set' && d) setCSemEnd(d);
+                  }}
+                />
+              )}
 
               <Text style={s.ceFieldLabel}>上课时段 * ({cSessions.length})</Text>
               {cSessions.map((sess, idx) => (
@@ -2246,14 +2286,14 @@ export default function CalendarScreen() {
                     ))}
                   </View>
                   <View style={{flexDirection:'row', gap:8}}>
-                    <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
-                      value={sess.start_time}
-                      onChangeText={v => setCSessions(prev => prev.map((x,i) => i===idx ? {...x, start_time:v} : x))}
-                      placeholder="08:00" placeholderTextColor={C.textMute} />
-                    <TextInput style={[s.ceInput, {flex:1, marginTop:0}]}
-                      value={sess.end_time}
-                      onChangeText={v => setCSessions(prev => prev.map((x,i) => i===idx ? {...x, end_time:v} : x))}
-                      placeholder="09:40" placeholderTextColor={C.textMute} />
+                    <TouchableOpacity style={[s.pickerRow, {flex:1, marginTop:0}]}
+                      onPress={() => setCeSessionPicker({ idx, which: 'start' })}>
+                      <Text style={s.pickerRowText}>开始 {sess.start_time}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[s.pickerRow, {flex:1, marginTop:0}]}
+                      onPress={() => setCeSessionPicker({ idx, which: 'end' })}>
+                      <Text style={s.pickerRowText}>结束 {sess.end_time}</Text>
+                    </TouchableOpacity>
                   </View>
                   <TextInput style={[s.ceInput, {marginTop:6}]}
                     value={sess.weeks}
@@ -2262,6 +2302,29 @@ export default function CalendarScreen() {
                     placeholderTextColor={C.textMute} />
                 </View>
               ))}
+              {ceSessionPicker && (
+                <DateTimePicker
+                  value={(() => {
+                    const s = cSessions[ceSessionPicker.idx];
+                    const cur = ceSessionPicker.which === 'start' ? s.start_time : s.end_time;
+                    const [h, m] = cur.split(':').map(Number);
+                    const d = new Date(); d.setHours(h, m, 0, 0); return d;
+                  })()}
+                  mode="time" is24Hour display="default"
+                  onChange={(event: any, d?: Date) => {
+                    const p = ceSessionPicker;
+                    setCeSessionPicker(null);
+                    if (event?.type === 'set' && d && p) {
+                      const hm = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+                      setCSessions(prev => prev.map((x, i) =>
+                        i === p.idx
+                          ? { ...x, [p.which === 'start' ? 'start_time' : 'end_time']: hm }
+                          : x
+                      ));
+                    }
+                  }}
+                />
+              )}
               <TouchableOpacity style={s.ceAddSessionBtn} onPress={() => {
                 setCSessions(prev => [...prev, { weekday: 1, start_time: '08:00', end_time: '09:40', weeks: '' }]);
               }}>
