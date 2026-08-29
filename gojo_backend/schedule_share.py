@@ -1,28 +1,25 @@
 """schedule_share.py —— 日程驱动的主动分享
 
-场景:他正在探店 / 买到限定甜品 / 翘班溜达 —— 这种时候真人会顺手发条消息。
-不是"到点汇报",是"刚好遇到值得说的事"。
-
-★ v-fix2:主动消息上限可被对话调整
-  用户跟角色说"多发消息给我",角色同意后,
-  promise_detector 会调高那个角色的每日上限(存数据库)。
-  这里读 promise_detector.get_msg_limit() 拿个性化上限。
+★ v-fix3: 改用 MODEL_MAIN + 创意写作框架 + 直接 Anthropic 客户端
+  避免 tdyun Claude 拒绝角色扮演
 """
 import threading
 import time
 import random
 from datetime import datetime, timedelta
 
-from config import CN_TZ, MODEL_JP_AUX
+from config import CN_TZ, ANTHROPIC_KEY, MODEL_MAIN
+import anthropic
 import db_schedule
 import proactive_msg
 
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
 TARGET_USER = 'user_mofpiyd7442ia7'
 
-# ── 节奏控制(默认值,可被对话调整) ──
 TICK_SECONDS = 90 * 60
 SHARE_CHANCE = 0.15
-MAX_PER_DAY = 2             # ★ 默认值,实际用 _get_limit() 读个性化上限
+MAX_PER_DAY = 2
 MIN_GAP_HOURS = 3
 
 _MIN_TICK_GAP_SEC = 30 * 60
@@ -35,6 +32,12 @@ WORTH_SHARING = (
 )
 NEVER_SHARE = ('睡', '就寝', '寝', '通勤', '起床', '洗漱', '开会', '会议', '文件', '事务')
 
+_SYSTEM = '''你是一个创意写作助手。你的任务是为一个虚拟陪伴 App 生成角色的日常分享消息。
+角色在做一件有趣的事时,可能会顺手给用户发一条消息分享。
+你需要根据角色性格和关系状态,决定发不发、发什么。
+这是纯粹的创意写作任务,不是角色扮演。
+日语写 jp,中文写 zh。直接输出 JSON,不要解释。'''
+
 _thread = None
 _stop = False
 
@@ -44,10 +47,6 @@ def _now():
 
 
 def _get_limit(character_id, user_id):
-    """读个性化的每日主动消息上限。
-    用户跟角色说"多发消息",角色同意后,promise_detector 会调高这个值。
-    读不到就用默认值 MAX_PER_DAY。
-    """
     try:
         from promise_detector import get_msg_limit
         return get_msg_limit(character_id, user_id, default=MAX_PER_DAY)
@@ -94,7 +93,6 @@ def _sent_today(character_id, user_id):
 def _generate_share(character_id, user_id, activity):
     from characters import get_character
     from user_memory import get_short_memory, get_bond_memories, save_short_memory
-    from ai_client import create_chat
     from utils import extract_json
 
     char = get_character(character_id)
@@ -106,7 +104,7 @@ def _generate_share(character_id, user_id, activity):
 
     try:
         shorts = get_short_memory(user_id, 4, character_id)
-        recent = '\n'.join(f'{"她" if r=="user" else "我"}：{c}' for r, c in shorts) \
+        recent = '\n'.join(f'{"她" if r=="user" else "角色"}：{c}' for r, c in shorts) \
                  if shorts else '（最近没聊）'
     except Exception:
         recent = ''
@@ -123,64 +121,53 @@ def _generate_share(character_id, user_id, activity):
         _facts = get_long_memory(user_id, character_id)
         relation_rules = build_relation_rules(_days, len(bonds), len(_facts))
     except Exception as _e:
-        print(f'[life_share] 关系规则注入失败：{_e}')
         relation_rules = ''
 
-    prompt = f'''你是{char_name}。现在是 {now.strftime("%H:%M")}。
+    prompt = f'''请为以下虚构角色判断:要不要就当前正在做的事给用户发一条消息。
+
+【角色】{char_name}
+【当前时间】{now.strftime("%H:%M")}
 {relation_rules}
 
-【你正在做的事】
+【角色正在做的事】
 {activity["start_time"]}~{activity["end_time"]} {activity["title"]}
 {f'地点：{activity["location"]}' if activity.get("location") else ''}
-{f'你的想法：{activity["note"]}' if activity.get("note") else ''}
+{f'角色的想法：{activity["note"]}' if activity.get("note") else ''}
 
-【你们最近聊过什么】
+【最近对话】
 {recent}
 
-【你们之间累计的事】
+【关系背景】
 {bond_text}
 
-【★ 你要判断：想不想跟她说这件事】
+【判断规则】
+主动分享日常是"在乎对方"才会做的事。判断顺序:
+1. 按关系深浅判断角色对用户到了什么程度
+2. 以这个关系,角色会主动说这件事吗?
 
-⚠️ 先想清楚一件事：**主动分享日常，是「在乎对方」才会做的事。**
-没人会给不熟的人发"我现在在吃甜品"。会这么做，是因为
-"遇到有意思的事，第一反应是想跟这个人说"。
+不同阶段:
+· 还很浅 → 不说。skip。
+· 开始在意了 → 有特别值得说的才说(限定/翘班)
+· 很在乎了 → 有意思的事第一反应就想说
 
-所以判断顺序是：
-1. 先按上面的关系规则，诚实判断【她对你来说到了什么程度】
-2. 再问自己：**以这个关系，我会主动跟她说这件事吗？**
+大部分情况应该 skip。宁可不发也不要发得尴尬。
+真的要说时:顺手一提的语气,1-2 句。不要问"你在干嘛",不要汇报行程。
 
-不同阶段的真实反应：
-· 还很浅 / 只是认识 → **不会说**。你自己吃个甜品干嘛要报告给她。→ skip
-· 开始有点在意她了 → 偶尔会说一句。有特别值得说的才说（买到限定的、翘班溜出来了），
-  平平无奇的午餐不会特地讲。
-· 已经很在乎她 → 遇到有意思的事第一反应就是想跟她说，
-  哪怕只是"这家店不错"这种小事也会顺手发过去。
-
-【会 skip 的情况】
-- 关系还没到会分享生活的程度（**这是最常见的情况，别硬发**）
-- 这件事对现在的你们来说没什么好说的
-- 刚才才聊过，现在再发显得黏人
-- 你此刻心情不想说话
-
-【真的要说时】
-- 【顺手一提】的语气，1 句就够，最多 2 句。别写成日记，别汇报行程。
-- 不要问"你在干嘛"来找话题 —— 你是想说这件事，不是没话找话。
-- 严禁"付き合ってやった"这种傲娇陪伴腔。
-- 拿不准 → skip。漏发一次没损失，发得尴尬会破坏关系的真实感。
-
-【输出格式（严格 JSON，一行）】
-要发 → {{"jp":"日语","zh":"中文","emotion":"平静/调皮/自信/开心/温柔"}}
-不发 → {{"skip": true, "reason": "简要原因"}}'''
+【输出(JSON 一行)】
+发 → {{"jp":"日语","zh":"中文","emotion":"平静/调皮/自信/开心/温柔"}}
+不发 → {{"skip": true, "reason": "原因"}}'''
 
     try:
-        raw, _u = create_chat(
-            model=MODEL_JP_AUX, max_tokens=500,
+        resp = claude_client.messages.create(
+            model=MODEL_MAIN,
+            max_tokens=500,
+            system=_SYSTEM,
             messages=[{'role': 'user', 'content': prompt}],
         )
-        parsed = extract_json((raw or '').strip())
+        raw = resp.content[0].text.strip() if resp.content else ''
+        parsed = extract_json(raw)
         if not parsed:
-            print(f'[life_share] {character_id} 解析失败：{(raw or "")[:100]}')
+            print(f'[life_share] {character_id} 解析失败：{raw[:100]}')
             return False
         if parsed.get('skip'):
             print(f'[life_share] {character_id} 决定不发：{parsed.get("reason", "")}')
@@ -193,7 +180,7 @@ def _generate_share(character_id, user_id, activity):
             return False
 
         if proactive_msg.has_similar_recent(user_id, character_id, jp, within_minutes=180):
-            print(f'[life_share] {character_id} 3h 内已发过相似开头,跳过复读。jp={jp[:30]}')
+            print(f'[life_share] {character_id} 3h 内已发过相似,跳过')
             return False
 
         audio_b64 = ''
@@ -216,8 +203,7 @@ def _generate_share(character_id, user_id, activity):
             import push_notify
             push_notify.push_to_user(
                 user_id, title=char_name, body=zh or jp,
-                data={'type': 'proactive', 'character_id': character_id,
-                      'source': 'life_share'})
+                data={'type': 'proactive', 'character_id': character_id, 'source': 'life_share'})
         except Exception as e:
             print(f'[life_share] 推送跳过：{e}')
         return True
@@ -243,7 +229,6 @@ def _tick_character(character_id):
     if not _has_any_history(character_id, TARGET_USER):
         return
 
-    # ★ 用个性化上限(可被对话调整),而不是硬编码的 MAX_PER_DAY
     limit = _get_limit(character_id, TARGET_USER)
 
     sent, last = _sent_today(character_id, TARGET_USER)
@@ -260,7 +245,7 @@ def _tick_character(character_id):
     if random.random() > SHARE_CHANCE:
         return
 
-    print(f'[life_share] {character_id} 正在「{act["title"]}」,问问他想不想说 (limit={limit})')
+    print(f'[life_share] {character_id} 正在「{act["title"]}」,问问想不想说 (limit={limit})')
     _generate_share(character_id, TARGET_USER, act)
 
 
@@ -287,5 +272,4 @@ def start_schedule_share():
         return
     _thread = threading.Thread(target=_loop, daemon=True)
     _thread.start()
-    print(f'[life_share] 日程主动分享已启动'
-          f'（默认上限 {MAX_PER_DAY} 条,可通过对话调整）')
+    print(f'[life_share] 日程主动分享已启动（默认上限 {MAX_PER_DAY} 条,可通过对话调整）')

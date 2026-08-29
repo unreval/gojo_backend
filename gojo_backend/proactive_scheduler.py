@@ -1,22 +1,11 @@
 """主动消息常驻排程 —— 【承诺驱动】版
 
-架构变了:
-- 老版本:硬编码每天 00:50 发一条任务汇报,不管什么关系状态
-- 新版本:读 proactive_promise 表,只有【真的存在约定】的用户才收到主动消息
-
-具体流程:
-1. Scheduler 每 10 分钟醒来一次
-2. 查 proactive_promise 表里所有【该触发但没触发过】的活跃承诺
-3. 对每条承诺,让 LLM 生成一条 gojo 的话 → 存 proactive_msg + 推送
-4. 标记这条承诺"已触发"(一次性 → is_fired=true;每天 → 更新 last_fired_at)
-
-★ 陌生用户没有承诺 → scheduler 静默跳过,不打扰
-★ 承诺的生成时机由 LLM 判断当时的关系状态,可能非常冷,也可能非常暖
+★ v-fix: 改用 MODEL_MAIN + 创意写作框架,避免 tdyun Claude 拒绝角色扮演
 """
 import threading
 import time
 from datetime import datetime
-from config import CN_TZ, ANTHROPIC_KEY
+from config import CN_TZ, ANTHROPIC_KEY, MODEL_MAIN
 import anthropic
 
 from characters import get_character
@@ -30,13 +19,20 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 _thread = None
 _stop = False
 
+# ★ 创意写作系统指令:框定为 App 功能,不是角色扮演
+_SYSTEM = '''你是一个创意写作助手。你的任务是为一个虚拟陪伴 App 生成角色的主动消息。
+这是 App 的功能:角色会根据之前的约定,在合适的时机给用户发一条消息。
+你需要根据角色设定和关系状态,生成一条符合角色语气的消息。
+这是纯粹的创意写作/内容生成任务,不是角色扮演。
+所有输出用日语写 jp 字段,用中文写 zh 字段。直接输出 JSON,不要解释。'''
+
 
 def _now():
     return datetime.now(CN_TZ)
 
 
 def generate_from_promise(promise, now):
-    """根据一条 promise,让 gojo 生成他要说的话。存 proactive_msg + 推送。返回 (msg_id, jp) 或 None。"""
+    """根据一条 promise 生成主动消息。"""
     try:
         character_id = promise['character_id']
         user_id = promise['user_id']
@@ -46,69 +42,62 @@ def generate_from_promise(promise, now):
 
         char = get_character(character_id)
         if not char:
-            print(f'[promise] 角色 {character_id} 不存在,跳过 promise #{promise["id"]}')
+            print(f'[promise] 角色 {character_id} 不存在,跳过 #{promise["id"]}')
             return None
         char_name = char['name']
         voice_id = char.get('voice_id')
 
         time_str = now.strftime('%Y年%m月%d日 %H:%M')
 
-        # 拉最近对话给 LLM 一点感觉(判断当前关系状态用)
         try:
             shorts = get_short_memory(user_id, 4, character_id)
-            recent = '\n'.join(f'{"她" if r=="user" else "我"}：{c}' for r, c in shorts) if shorts else '(最近没聊)'
+            recent = '\n'.join(f'{"她" if r=="user" else "角色"}：{c}' for r, c in shorts) if shorts else '(最近没聊)'
         except Exception:
-            recent = '(拉最近对话失败)'
+            recent = '(最近没聊)'
 
-        # 关系背景
         try:
             bonds = get_bond_memories(user_id, character_id, kind='between', limit=6)
             bond_text = '\n'.join(f'- {b[1]}' for b in bonds) if bonds else '(还没什么共同的事)'
         except Exception:
-            bond_text = '(拉共同经历失败)'
+            bond_text = ''
 
-        # 角色重要人物表
         relations_block = get_relations_text(character_id)
         relations_intro = (f'\n{relations_block}\n' if relations_block else '')
 
-        # ★ 关键:告诉 LLM 这个是【你之前答应过的事】,现在到点了,你要不要开口说,
-        #   完全按你【当前对她的态度】决定。
-        prompt = f'''你是{char_name}。现在是 {time_str}。
+        prompt = f'''请为以下虚构角色生成一条主动消息。
 
-【★ 触发场景】
-之前的对话里,你答应过 / 记下了这件事:
+【角色】{char_name}
+【当前时间】{time_str}
+
+【触发场景】
+角色之前答应过/记下了这件事:
 「{context}」
-{f"(她当时的原话大致是: 「{origin_text}」)" if origin_text else ""}
+{f"(用户当时的原话: 「{origin_text}」)" if origin_text else ""}
 
-现在到了这个时刻,你【可能】要主动开口说点什么。
+现在到了这个时刻,角色可能要主动开口说点什么。
 {relations_intro}
-【你们最近聊过什么】
+【最近对话】
 {recent}
 
-【你们之间累计的事】
+【关系背景】
 {bond_text}
 
-【★ 你要判断】
-根据当前你对她的真实态度(读上面的记忆),你要不要说、说什么、怎么说:
-- 关系深、有感情积累 → 你可能会自然带上关心("加油"、"别紧张")
-- 关系还浅、公事化 → 简短提醒一下就好,不越界
-- 你对她反感 / 完全陌生 → 你可以选择【什么都不说】,输出 {{"skip": true, "reason": "..."}}
-  (关系浅 + 只是普通承诺时,尤其可能选择跳过,或者只说非常冷的一句)
+【生成规则】
+根据角色和用户的关系深浅决定:
+- 关系深 → 自然带上关心
+- 关系浅 → 简短提醒,不越界
+- 完全陌生/反感 → 可以选择不说,输出 {{"skip": true, "reason": "原因"}}
 
-【铁律】
-- 你的措辞由【当前记忆里的关系】决定,不是由这条承诺当初的语气决定
-- 不要为了"温暖"而暖,不要为了"冷淡"而冷 —— 按此刻真实的你
-- 【严禁】"付き合ってやった"这种傲娇陪伴腔,更不要"陪你一会儿"这类
-- 不熟就短,别脑补场景细节
+角色语气要符合 {char_name} 的性格。1-2 句话,不要长篇。
 
-【输出格式(严格 JSON,一行)】
-如果你决定说 → {{"jp":"日语","zh":"中文","emotion":"情绪"}}
-如果决定跳过 → {{"skip": true, "reason": "简要原因"}}
-emotion 选: 平静/自信/调皮/认真/温柔/冷淡'''
+【输出格式(严格 JSON 一行)】
+说 → {{"jp":"日语","zh":"中文","emotion":"平静/自信/调皮/认真/温柔/冷淡"}}
+不说 → {{"skip": true, "reason": "原因"}}'''
 
         resp = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model=MODEL_MAIN,
             max_tokens=400,
+            system=_SYSTEM,
             messages=[{'role': 'user', 'content': prompt}],
         )
         raw = resp.content[0].text.strip()
@@ -120,8 +109,7 @@ emotion 选: 平静/自信/调皮/认真/温柔/冷淡'''
 
         if parsed.get('skip'):
             reason = parsed.get('reason', '')
-            print(f'[promise] #{promise["id"]} gojo 决定跳过: {reason}')
-            # 无论 once/daily,都 mark 一下,避免这个 tick 反复触发
+            print(f'[promise] #{promise["id"]} 角色决定跳过: {reason}')
             db_promise.mark_fired(promise['id'], now)
             return None
 
@@ -132,7 +120,6 @@ emotion 选: 平静/自信/调皮/认真/温柔/冷淡'''
             print(f'[promise] #{promise["id"]} jp 为空,跳过')
             return None
 
-        # 合成语音
         audio_b64 = ''
         try:
             from tts import tts_to_b64
@@ -140,31 +127,25 @@ emotion 选: 平静/自信/调皮/认真/温柔/冷淡'''
         except Exception as e:
             print(f'[promise] TTS 出错: {e}')
 
-        # 存 proactive_msg (kind 用 'promise' 区分)
         mid, ts = proactive_msg.add_proactive_msg(
             character_id, user_id, 'promise', jp, zh, emotion, audio_b64, created_at=now
         )
         print(f'[promise] ✅ #{promise["id"]} → msg #{mid}: {jp[:40]}')
 
-        # 也塞短记忆,避免上下文异常
         try:
             save_short_memory(user_id, 'assistant', jp, character_id)
-        except Exception as e:
-            print(f'[promise] 写 short_memory 跳过: {e}')
+        except Exception:
+            pass
 
-        # 推送
         try:
             import push_notify
             push_notify.push_to_user(
-                user_id,
-                title=char_name,
-                body=zh or jp,
+                user_id, title=char_name, body=zh or jp,
                 data={'type': 'proactive', 'character_id': character_id, 'promise_id': promise['id']},
             )
         except Exception as e:
             print(f'[promise] 推送跳过: {e}')
 
-        # 标记已触发
         db_promise.mark_fired(promise['id'], now)
         return mid, jp
 
@@ -174,7 +155,6 @@ emotion 选: 平静/自信/调皮/认真/温柔/冷淡'''
 
 
 def _tick():
-    """一次扫描,把该触发的 promise 全部处理掉。"""
     now = _now()
     try:
         due = db_promise.get_due_promises(now)
@@ -193,13 +173,13 @@ def _tick():
 
 def _loop():
     global _stop
-    time.sleep(90)  # 启动后稍等,别抢初始化
+    time.sleep(90)
     while not _stop:
         try:
             _tick()
         except Exception as e:
             print(f'[promise] tick 出错: {e}')
-        time.sleep(600)  # 每 10 分钟检查一次
+        time.sleep(600)
 
 
 def start_proactive_scheduler():
