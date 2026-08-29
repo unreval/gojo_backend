@@ -163,9 +163,26 @@ def _tick():
         return
     if not due:
         return
+
+    # ★ 去重:同一角色同时到期的相似承诺只处理第一条,其余直接 mark_fired
+    seen = {}  # character_id → [已处理的 context 前20字]
     print(f'[promise] tick: 有 {len(due)} 条到期')
     for p in due:
         try:
+            cid = p.get('character_id', '')
+            ctx = (p.get('context') or '')[:20]
+
+            if cid in seen:
+                # 检查有没有相似的已处理过
+                is_dup = any(ctx[:10] == s[:10] for s in seen[cid])
+                if is_dup:
+                    print(f'[promise] #{p["id"]} 与同角色已触发承诺相似,跳过并标记完成')
+                    db_promise.mark_fired(p['id'], now)
+                    continue
+                seen[cid].append(ctx)
+            else:
+                seen[cid] = [ctx]
+
             generate_from_promise(p, now)
         except Exception as e:
             print(f'[promise] 处理 #{p["id"]} 出错: {e}')

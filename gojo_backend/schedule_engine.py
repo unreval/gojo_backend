@@ -1,10 +1,10 @@
 """schedule_engine.py —— 让角色自己排一天的行程
 
-★ v4:接入真实店铺
-  · 生成前先用 places_engine 搜 5 个真实店铺(Overpass API,免费)
-  · 把店铺列表喂给 LLM,让它挑几家安排进日程
-  · 生成完成后,把日程里用到的真实店铺自动写入 char_visited_places(地图打点)
-  · 用 system prompt 框定为创意写作任务,避免 Claude 拒绝角色扮演
+★ v5:日程不只吃吃吃
+  · places_engine 现在搜景点/神社/公园/活动/温泉 等非餐饮地点
+  · prompt 鼓励角色安排多样化活动(打卡/散步/参拜/看展/泡汤/花火)
+  · 季节活动(花火大会/初詣/红叶)有真实坐标,去了就上地图
+  · 自动保存逻辑不变:日程里用到的真实地点名 → 写入 char_visited_places
 """
 from datetime import datetime
 from config import CN_TZ, MODEL_CN_AUX
@@ -42,41 +42,41 @@ def _busy_priority(title: str) -> int:
 
 
 def _seasonal_hints(month: int) -> str:
+    """★ v5:不只是甜品,加入活动/景点/体验"""
     hints = {
-        1: '正月初詣、福袋、冬季限定草莓甜品',
-        2: '情人节巧克力、草莓季、梅花',
-        3: '樱花季开始、春季限定抹茶',
-        4: '满开樱花、花见、春季新品',
-        5: '黄金周、新绿、抹茶新茶',
-        6: '梅雨季、紫阳花、夏季限定刨冰',
-        7: '夏祭、花火大会、刨冰',
-        8: '盂兰盆节、花火、夏季限定冰品、啤酒花园',
-        9: '秋季栗子甜品、月见、秋刀鱼',
-        10: '万圣节限定、红叶开始、栗子蒙布朗',
-        11: '红叶季、秋季限定、热饮回归',
-        12: '圣诞限定、年末、冬季草莓',
+        1: '正月初詣(明治神宫/浅草寺)、福袋抢购、冬季限定草莓甜品、箱根温泉',
+        2: '情人节巧克力、草莓季、梅花(汤岛天神)、滑雪',
+        3: '樱花季开始(目黑川/上野)、春季限定抹茶、毕业季',
+        4: '满开樱花、花见野餐、春季新品、高尾山登山',
+        5: '黄金周出行、新绿、抹茶新茶、�的场藤花',
+        6: '梅雨季、�的阳花(�的�的)、夏季限定刨冰、室内美术馆',
+        7: '夏祭(高圆寺阿波舞)、花火大会(隅田川)、刨冰、海水浴',
+        8: '盂兰盆节、花火(神宫外苑)、夏季限定冰品、啤酒花园、コミケ',
+        9: '秋季栗子甜品、月见、秋刀鱼、彼岸花',
+        10: '万圣节(涩谷)、红叶开始、栗子蒙布朗、秋季登山',
+        11: '红叶季(六义园/清水寺)、秋季限定、七五三、酉の市',
+        12: '圣诞灯饰(表参道/六本木)、年末、冬季草莓、除夜の鐘',
     }
     return hints.get(month, '')
 
 
 def _fetch_real_places(city='tokyo'):
-    """调 places_engine 搜真实店铺。失败返回空列表(不阻断日程生成)。"""
+    """★ v5:搜食物 + 景点 + 活动场地,不再只有吃的。"""
     try:
         import places_engine
-        places = places_engine.get_schedule_places(city, count=5)
+        places = places_engine.get_schedule_places(city, count=7)
         return places
     except Exception as e:
-        print(f'[schedule] 搜真实店铺失败(不影响日程生成): {e}')
+        print(f'[schedule] 搜真实地点失败(不影响日程生成): {e}')
         return []
 
 
 def _save_visited_places(character_id, user_id, items, real_places, target_date):
-    """日程生成后,把用到的真实店铺写入探店记录(地图打点用)。"""
+    """日程生成后,把用到的真实地点写入探店记录(地图打点用)。"""
     if not real_places:
         return
     try:
         import db_visited_places
-        # 把真实店名做个 set,检查日程 title/location 里有没有用到
         place_map = {p['name']: p for p in real_places}
         for item in items:
             text = (item.get('title', '') + ' ' + item.get('location', '')).strip()
@@ -87,10 +87,10 @@ def _save_visited_places(character_id, user_id, items, real_places, target_date)
                         character_id, user_id, place,
                         review=review, visit_date=target_date
                     )
-                    print(f'[schedule] 📍 {character_id} 探店: {name}')
-                    break  # 一个时段最多匹配一家店
+                    print(f'[schedule] 📍 {character_id} 打卡: {name} ({place.get("category", "?")})')
+                    break
     except Exception as e:
-        print(f'[schedule] 保存探店记录失败(不影响日程): {e}')
+        print(f'[schedule] 保存打卡记录失败(不影响日程): {e}')
 
 
 def generate_daily_schedule(character_id, user_id, target_date=None, force=False):
@@ -129,19 +129,28 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         main_city = other
         city_note = f'\n★ 今天角色{random.choice(["出差去了", "临时跑去了", "心血来潮去了"])}{city_names.get(other, other)},日程安排在那边。\n'
 
-    # ★ 搜真实店铺
+    # ★ 搜真实地点(食物 + 景点 + 活动)
     real_places = _fetch_real_places(main_city)
     places_block = ''
     if real_places:
-        lines = []
+        food_lines = []
+        activity_lines = []
         for p in real_places:
-            lines.append(f'  · {p["name"]}({p["category_label"]}) — {p["address"] or p["city"]}')
-        places_block = f'''
-【今天可以安排去的真实店铺(从中挑 1-3 家放进日程,不必全用)】
-{chr(10).join(lines)}
-用到的店请在 title 或 location 里写上【完整店名】(必须和上面一字不差),这样系统才能在地图上标记。
-没用到的就不写。也可以不用任何一家(去知名连锁或人气店)。
-★ 角色的品味要好!优先选知名/人气高/值得打卡的店。偶尔踩雷可以(10%概率),但大部分应该是genuinely好的。
+            cat = p.get('category', '')
+            line = f'  · {p["name"]}({p.get("category_label", cat)}) — {p.get("address") or p.get("city", "")}'
+            if cat in ('cafe', 'restaurant', 'sweets', 'bakery', 'ramen', 'fashion', 'bookstore'):
+                food_lines.append(line)
+            else:
+                activity_lines.append(line)
+
+        places_block = '\n【今天可以安排去的真实地点(从中挑几个放进日程,不必全用)】\n'
+        if food_lines:
+            places_block += '  餐饮/购物:\n' + '\n'.join(food_lines) + '\n'
+        if activity_lines:
+            places_block += '  景点/活动:\n' + '\n'.join(activity_lines) + '\n'
+        places_block += '''用到的地点请在 title 或 location 里写上【完整地点名】(必须和上面一字不差),这样系统才能在地图上标记。
+没用到的就不写。也可以不用任何一个(去你自己知道的地方)。
+★ 品味要好!优先选知名/值得打卡的地方。偶尔踩雷可以,但大部分应该是genuinely好的。
 '''
 
     # ★ 当季限定/热门信息
@@ -152,7 +161,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
     except Exception:
         pass
 
-    # ★ system prompt 框定为创意写作任务
+    # ★ system prompt
     system_prompt = '''你是一个创意写作助手。你的任务是为一个虚拟陪伴 App 生成虚构角色的每日行程表。
 这是 App 的一个功能模块:用户可以查看角色"今天在干什么"。
 你需要根据角色设定,生成一份符合角色性格和背景的日程。
@@ -177,26 +186,33 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 2. 符合角色身份和性格。
 3. ★★★ 所有内容(title / location / note)必须用【中文】写,不要用日文 ★★★
 
-3. title【极短】(5-15字),手机一行看完,细节放 note:
+4. title【极短】(5-15字),手机一行看完,细节放 note:
    ✅ "去Ivy Place吃brunch" ✅ "原宿买限量可颂"
    ✅ "溜去PARCO看快闪" ✅ "备课" ✅ "泡澡刷手机"
+   ✅ "明治神宫散步" ✅ "隅田川花火大会" ✅ "六义园看红叶"
    ❌ 超过15字 = 失败。描述性的长句写进 note 不要写进 title。
 
-4. location 要具体:
-   ✅ "Blue Bottle 表参道" "涩谷PARCO" ❌ "某店" "外面"
+5. location 要具体:
+   ✅ "Blue Bottle 表参道" "涩谷PARCO" "明治神宫" "隅田川河畔" ❌ "某店" "外面"
 
-5. note 是角色口吻的碎碎念,有趣/有画面:
-   ✅ "排了40分钟结果踩雷了,下次不来" "拍照确实出片"
+6. note 是角色口吻的碎碎念,有趣/有画面:
+   ✅ "排了40分钟结果踩雷了,下次不来" "拍照确实出片" "人太多了差点被挤死"
    ❌ "心情不错" ← 太空
 
-6. 不全是好评!有时踩雷就吐槽。
+7. ★★ 不只是吃!角色是活人不是吃货!一天日程里应该有:
+   · 至少 1 个非餐饮活动(逛景点/参拜/看展/泡汤/散步/打卡/看花火/逛公园)
+   · 可以有 2-3 个餐饮(不是每段都在吃)
+   · 剩下的是工作/任务/训练/休息 等日常
+   ★ 比例参考:吃 ≤ 3 段,景点/活动 1-2 段,工作/日常 4-6 段
 
-7. can_reply 标注(能不能回手机消息):
+8. 不全是好评!有时踩雷就吐槽。
+
+9. can_reply 标注(能不能回手机消息):
    false = 走不开:上课、出任务、战斗、洗澡
-   true = 能摸鱼:吃饭、逛街、探店、休息
+   true = 能摸鱼:吃饭、逛街、探店、景点、休息
    can_reply=false 一天最多 4 段,总共不超 4 小时。
 
-8. 每天要不一样。
+10. 每天要不一样。
 
 【输出:严格 JSON 一行,不要解释】
 {{"schedule":[
@@ -207,15 +223,12 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
     try:
         import anthropic
         from config import ANTHROPIC_KEY, MODEL_MAIN
-        # ★ 直接用和主聊天 route_chat.py 一样的 Anthropic 客户端
-        #   不走 ai_client.create_chat(那个在 tdyun 上 opus 会 404)
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-        # system 指令和 user 内容合并成一条 user message,避免 system 参数兼容问题
         full_prompt = system_prompt + '\n\n' + prompt
 
         resp = client.messages.create(
-            model=MODEL_MAIN,        # ★ 用 MODEL_MAIN(和主聊天一样的模型)
+            model=MODEL_MAIN,
             max_tokens=3000,
             messages=[{'role': 'user', 'content': full_prompt}],
         )
@@ -237,12 +250,14 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 
         db_schedule.save_schedule(character_id, user_id, target_date, items)
 
-        # ★ 自动保存探店记录(地图打点)
+        # ★ 自动保存打卡记录(地图打点)
         _save_visited_places(character_id, user_id, items, real_places, target_date)
 
         busy = [i for i in items if not i['can_reply']]
+        food_cnt = sum(1 for i in items if any(k in i.get('title','') for k in ('吃','喝','咖啡','面','甜','brunch','午餐','晚餐','早餐')))
+        act_cnt = sum(1 for i in items if any(k in i.get('title','') for k in ('逛','看','散步','打卡','参拜','花火','展','公园','温泉','泡')))
         print(f'[schedule] ✅ {char_name} {target_date} 共 {len(items)} 段,'
-              f'其中走不开 {len(busy)} 段')
+              f'走不开 {len(busy)} 段, 吃≈{food_cnt} 活动≈{act_cnt}')
         return items
 
     except Exception as e:
