@@ -90,6 +90,12 @@ def process_turn(
     except Exception:
         pass
 
+    # 5. ★ 检查 retreat_boundary 是否该被关系深化推翻
+    try:
+        check_retreat_boundary_superseded(user_id, character_id)
+    except Exception:
+        pass
+
     return {
         'signals_extracted': len(signals),
         'signals_applied': len(applied),
@@ -170,6 +176,21 @@ def _route_signal(user_id: str, character_id: str, sig: Dict,
     if stype == 'character_stance_declared' and actor == 'character':
         content = attrs.get('content', '')
         stance_type = attrs.get('stance_type', 'other')
+
+        # ★ 去重：如果最近已有同 type + 内容高度相似的 active stance，不重复存
+        if content and _is_duplicate_stance(user_id, character_id, stance_type, content):
+            return {'action': 'stance_dedup_skipped', 'type': stance_type}
+
+        # ★ retreat_boundary 特殊处理：标记为可被关系深化推翻
+        if stance_type == 'retreat_boundary':
+            stance_id = declare_stance(
+                user_id, character_id,
+                stance_type='retreat_boundary',
+                content=content,
+                source_event_ref=f'turn/{_now_iso()}',
+            )
+            return {'action': 'retreat_boundary_noted', 'stance_id': stance_id}
+
         stance_id = declare_stance(
             user_id, character_id,
             stance_type=stance_type,
@@ -585,3 +606,69 @@ def _log_interaction_stats(user_id, character_id, signals, session_id):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ══════════════════════════════════════════════════════════════
+# Stance 去重
+# ══════════════════════════════════════════════════════════════
+def _is_duplicate_stance(user_id, character_id, stance_type, content) -> bool:
+    """检查是否已有同 type + 内容前 20 字相同的 active stance。"""
+    from relationship_state import list_active_stances
+    existing = list_active_stances(user_id, character_id)
+    key = content[:20].strip()
+    for s in existing:
+        if s['type'] == stance_type and s['content'][:20].strip() == key:
+            return True
+    return False
+
+
+# ══════════════════════════════════════════════════════════════
+# Retreat Boundary 自动推翻检查
+# ══════════════════════════════════════════════════════════════
+def check_retreat_boundary_superseded(user_id, character_id):
+    """当关系深化到一定程度时，自动把 retreat_boundary 类型的 stance 标记为 superseded。
+
+    触发条件（全部满足）：
+    - 存在 active 的 retreat_boundary stance
+    - Attachment ≥ 65（依恋到了"离不开"的程度）
+    - Passion ≥ 25（有了不可忽略的心动）
+    - 存在比 retreat_boundary 更晚的 care_admission（说明角色在退缩之后又主动靠近了）
+
+    ★ 这是铁律 5 的补丁：retreat_boundary 不是"正面承诺"，是"靠近后的自我保护退缩"——
+      它可以被关系的自然深化推翻，不需要负面事件。
+    """
+    from relationship_state import list_active_stances, revoke_stance, load_state
+
+    stances = list_active_stances(user_id, character_id)
+    retreat_stances = [s for s in stances if s['type'] == 'retreat_boundary']
+    if not retreat_stances:
+        return
+
+    state = load_state(user_id, character_id)
+    attach = state.get('attachment', 0)
+    passion = state.get('passion', 0)
+
+    if attach < 65 or passion < 25:
+        return  # 关系还没深到能推翻退缩
+
+    # 检查是否有比 retreat 更晚的 care_admission（说明角色退缩之后又靠近了）
+    care_after_retreat = False
+    for s in stances:
+        if s['type'] == 'care_admission':
+            for r in retreat_stances:
+                if s.get('declared_at') and r.get('declared_at'):
+                    if s['declared_at'] > r['declared_at']:
+                        care_after_retreat = True
+                        break
+        if care_after_retreat:
+            break
+
+    if not care_after_retreat:
+        return  # 退缩之后没有再次靠近，不推翻
+
+    # 推翻所有 retreat_boundary
+    for r in retreat_stances:
+        revoke_stance(
+            user_id, character_id, r['id'],
+            reason='关系深化推翻：Attachment/Passion 达到阈值，且角色在退缩之后有再次主动靠近的证据'
+        )

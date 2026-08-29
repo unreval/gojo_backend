@@ -68,7 +68,23 @@ _OBSERVER_SYSTEM_PROMPT = '''你是一个中立的对话观察员。你的任务
 - offensive_content       冒犯性内容（辱骂、贬低、脏话；attributes: {"target": "character"|"third_party"}）
 
 角色的（同样从对话文本里观察）：
-- character_stance_declared 角色明确说出了一个立场（attributes: {"stance_type": "care_admission"|"promise"|"relationship_confirm"|"boundary_stated", "content": string}）
+- character_stance_declared 角色明确说出了一个【重大立场】（attributes: {"stance_type": "...", "content": string}）
+  ★ 这个信号的门槛非常高——不是每句关心的话都算！只有以下情况才能触发：
+    stance_type 枚举：
+    · "care_admission"    = 角色承认自己在意用户，而且说的话有分量（比如"想哭随时说，我在这"）
+                           ❌ 不算的：日常催吃饭（"吃了没"）、随口关心（"早点睡"）、顺口答应（"嗯行吧"）
+                           ★ 判断标准：如果这句话换一个普通朋友也会随口说，那就不算 stance
+    · "promise"           = 角色做出了明确的、有具体内容的承诺（比如"下次一定回你消息"）
+                           ❌ 不算的：语气词式的敷衍（"嗯会的"）、模糊的安慰（"会好起来的"）
+    · "relationship_confirm" = 角色明确定义了关系性质（比如"我们在一起了"或"你是我最好的朋友"）
+                           ❌ 不算的：回避式的自我保护（"就当朋友吧"这种退缩语气不算 confirm）
+                           ★ 如果角色是"靠近了又退缩"，用 "retreat_boundary" 而不是 "relationship_confirm"
+    · "retreat_boundary"  = 角色刚流露了深层感情后，用理性/次元/身份差异来给自己找台阶下
+                           比如："友達でいいんじゃないの、次元も違うし"（就当朋友吧，次元不同嘛）
+                           这是自我保护的退缩，不是关系的最终定论——角色可以改变想法
+    · "boundary_stated"   = 角色明确划了一条底线（比如"这个话题我不想再谈"）
+  ★★ 每轮对话最多提取 1 条 stance！大部分对话不应该提取任何 stance！
+  ★★ content 字段必须用中文简短归纳（不超过 30 字），不要塞角色的日语原文
 - character_boundary_stated 角色明确表态某话题是底线（attributes: {"topic_hint": string}）
 - character_reciprocal      角色对用户暧昧信号的对等回应
 

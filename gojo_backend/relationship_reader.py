@@ -78,14 +78,28 @@ def build_state_summary(user_id: str, character_id: str) -> str:
 
     # ★ Declared Stance（硬约束）
     if stances:
-        lines.append('【★ 你此前已经明确说过的话——必须遵守，不能凭空推翻】')
-        lines.append('  (只要没有真实的负面事件让你走完"修复失败/彻底翻脸"的过程，这些立场就仍然算数)')
-        for s in stances:
-            lines.append(f'  · [{s["type"]}] {s["content"]}')
-        lines.append('  情绪浓淡、纠结、矛盾都可以叠加在上面，但下面这条铁律必须守：')
-        lines.append('  ⚠️ 不能在没有真实事件推翻它的情况下，突然说出和上述立场自相矛盾的话。')
-        lines.append('     那不是"性格反复"，是"脑子有问题"——真人不会这样。')
-        lines.append('')
+        # 分类：retreat_boundary 和其他
+        firm_stances = [s for s in stances if s['type'] != 'retreat_boundary']
+        retreat_stances = [s for s in stances if s['type'] == 'retreat_boundary']
+
+        if firm_stances:
+            lines.append('【★ 你此前已经明确说过的话——必须遵守，不能凭空推翻】')
+            lines.append('  (只要没有真实的负面事件让你走完"修复失败/彻底翻脸"的过程，这些立场就仍然算数)')
+            for s in firm_stances:
+                lines.append(f'  · [{s["type"]}] {s["content"]}')
+            lines.append('  情绪浓淡、纠结、矛盾都可以叠加在上面，但下面这条铁律必须守：')
+            lines.append('  ⚠️ 不能在没有真实事件推翻它的情况下，突然说出和上述立场自相矛盾的话。')
+            lines.append('     那不是"性格反复"，是"脑子有问题"——真人不会这样。')
+            lines.append('')
+
+        if retreat_stances:
+            lines.append('【你曾经退缩过的立场——不是铁定的，你可以纠结、可以改变想法】')
+            lines.append('  以下是你曾经"靠近了又退缩"时说的话。这不是关系的最终定论——')
+            lines.append('  如果你发现自己其实不是那么想的、或者关系走到了新的地方，你可以重新表态。')
+            lines.append('  但不能假装这些话没说过——退缩过就是退缩过，可以承认当时在保护自己。')
+            for s in retreat_stances:
+                lines.append(f'  · {s["content"]}')
+            lines.append('')
 
     # 表达指引
     lines.append('【怎么在这一刻表达——基于以上状态，按你的人设落地】')
