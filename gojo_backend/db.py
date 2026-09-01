@@ -104,6 +104,11 @@ def init_db():
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_accounting_records_account
                    ON accounting_records (account_id)''')
 
+    # ── 通用键值配置（主动消息每日上限 msg_limit_{character}_{user} 等）──
+    cur.execute('''CREATE TABLE IF NOT EXISTS app_config (
+        key TEXT PRIMARY KEY,
+        value TEXT)''')
+
     # ── 老表自动加列(向后兼容)──
     cur.execute("ALTER TABLE short_memory ADD COLUMN IF NOT EXISTS character_id TEXT DEFAULT 'gojo'")
     cur.execute("ALTER TABLE long_memory ADD COLUMN IF NOT EXISTS character_id TEXT DEFAULT 'gojo'")

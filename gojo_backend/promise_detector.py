@@ -170,16 +170,23 @@ def _save_promise(character_id, user_id, trigger_kind,
         return None
 
 
+def _ensure_app_config(cur):
+    """查询前确保表存在。init_db() 也会建，这里再兜一层，避免旧进程没跑过初始化。"""
+    cur.execute('''CREATE TABLE IF NOT EXISTS app_config (
+        key TEXT PRIMARY KEY,
+        value TEXT)''')
+
+
 def _adjust_frequency(character_id, user_id, direction='up'):
-    """调整角色的主动消息每日上限。存在 proactive_promise 表里作为特殊记录。
-    schedule_share.py 启动时读取这个值覆盖默认的 MAX_PER_DAY。
+    """调整角色的主动消息每日上限，写入 app_config。
+    schedule_share.py 读取这个值覆盖默认的 MAX_PER_DAY。
     """
     try:
         from db import get_conn
         conn = get_conn()
         cur = conn.cursor()
+        _ensure_app_config(cur)
 
-        # 读当前上限(存在 config 键值对里)
         config_key = f'msg_limit_{character_id}_{user_id}'
         cur.execute("SELECT value FROM app_config WHERE key=%s", (config_key,))
         row = cur.fetchone()
@@ -191,11 +198,11 @@ def _adjust_frequency(character_id, user_id, direction='up'):
         else:
             new_val = max(current - 2, 2)   # 每次 -2,下限 2
 
-        # upsert
-        if row:
-            cur.execute("UPDATE app_config SET value=%s WHERE key=%s", (str(new_val), config_key))
-        else:
-            cur.execute("INSERT INTO app_config (key, value) VALUES (%s, %s)", (config_key, str(new_val)))
+        cur.execute(
+            '''INSERT INTO app_config (key, value) VALUES (%s, %s)
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value''',
+            (config_key, str(new_val)),
+        )
 
         conn.commit()
         cur.close()
@@ -204,7 +211,6 @@ def _adjust_frequency(character_id, user_id, direction='up'):
         print(f'[promise_detect] 📈 {character_id} 主动消息上限: {current} → {new_val}')
         return new_val
     except Exception as e:
-        # app_config 表可能不存在,用 schedule_share 的内存变量兜底
         print(f'[promise_detect] 调频率失败(用内存兜底): {e}')
         try:
             import schedule_share
@@ -224,9 +230,11 @@ def get_msg_limit(character_id, user_id, default=4):
         from db import get_conn
         conn = get_conn()
         cur = conn.cursor()
+        _ensure_app_config(cur)
         config_key = f'msg_limit_{character_id}_{user_id}'
         cur.execute("SELECT value FROM app_config WHERE key=%s", (config_key,))
         row = cur.fetchone()
+        conn.commit()
         cur.close()
         conn.close()
         return int(row[0]) if row else default
