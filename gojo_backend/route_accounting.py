@@ -15,6 +15,7 @@ from accounting import (
 from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock
 from utils import extract_json
+from ai_client import extract_text
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -210,7 +211,7 @@ async def get_insights(user_id: str = 'default',
                 system=system_prompt,
                 messages=[{'role': 'user', 'content': user_prompt}],
             )
-            raw = response.content[0].text.strip()
+            raw = extract_text(response).strip()
             try:
                 parsed = extract_json(raw)
             except Exception:

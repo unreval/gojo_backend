@@ -94,6 +94,7 @@ def _generate_share(character_id, user_id, activity):
     from characters import get_character
     from user_memory import get_short_memory, get_bond_memories, save_short_memory
     from utils import extract_json
+    from ai_client import extract_text
 
     char = get_character(character_id)
     if not char:
@@ -164,7 +165,7 @@ def _generate_share(character_id, user_id, activity):
             system=_SYSTEM,
             messages=[{'role': 'user', 'content': prompt}],
         )
-        raw = resp.content[0].text.strip() if resp.content else ''
+        raw = extract_text(resp).strip()
         parsed = extract_json(raw)
         if not parsed:
             print(f'[life_share] {character_id} 解析失败：{raw[:100]}')

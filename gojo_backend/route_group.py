@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID
 from db import get_conn
 from utils import extract_json, sanitize_jp
+from ai_client import extract_text
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
@@ -248,7 +249,7 @@ def _schedule_speakers(members, history, user_text, mentioned_id=None):
             max_tokens=120,
             messages=[{'role': 'user', 'content': sched_prompt}]
         )
-        raw = resp.content[0].text.strip()
+        raw = extract_text(resp).strip()
         parsed = _parse_reply(raw)
         ids = []
         if parsed and isinstance(parsed.get('speakers'), list):
@@ -324,7 +325,7 @@ def _schedule_interaction(candidates, history, all_members):
             max_tokens=80,
             messages=[{'role': 'user', 'content': sched_prompt}]
         )
-        raw = resp.content[0].text.strip()
+        raw = extract_text(resp).strip()
         parsed = _parse_reply(raw)
         if parsed and isinstance(parsed.get('speakers'), list):
             valid = {m['id'] for m in candidates}
@@ -485,7 +486,7 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
                 messages=messages
             )
             log_cache_usage(f'group:{member["id"]}', resp)
-            raw = resp.content[0].text.strip()
+            raw = extract_text(resp).strip()
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 all_msgs = parsed['messages']

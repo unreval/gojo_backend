@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID
 from utils import extract_json, sanitize_jp
+from ai_client import extract_text
 from tts import tts_to_b64
 from characters import get_character
 
@@ -123,7 +124,7 @@ async def story_generate(data: dict):
                 system=system_prompt,
                 messages=messages,
             )
-            raw = response.content[0].text.strip()
+            raw = extract_text(response).strip()
             print(f'[story] attempt {attempt+1}: {raw[:120]}...')
             parsed = extract_json(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 6:

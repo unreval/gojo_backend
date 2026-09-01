@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
 from db import get_conn
 from utils import extract_json, sanitize_jp, merge_only_extreme_short
+from ai_client import extract_text
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
@@ -160,7 +161,7 @@ async def chat_image(data: dict):
                 messages=messages,
             )
             log_cache_usage(f'image:{character_id}', response)
-            raw = response.content[0].text.strip()
+            raw = extract_text(response).strip()
             print(f'[{user_id}][{character_id}] image attempt {attempt+1}: {raw[:120]}...')
             parsed = extract_json(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:

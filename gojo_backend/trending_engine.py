@@ -11,6 +11,7 @@ import time
 import threading
 from datetime import datetime
 from config import ANTHROPIC_KEY, CN_TZ
+from ai_client import extract_text
 
 _cache: dict = {}
 _CACHE_TTL = 7 * 24 * 3600
@@ -54,11 +55,7 @@ def _search_trending(city='tokyo'):
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{'role': 'user', 'content': prompt}],
         )
-        text_parts = []
-        for block in resp.content:
-            if hasattr(block, 'text'):
-                text_parts.append(block.text)
-        raw = '\n'.join(text_parts).strip()
+        raw = extract_text(resp, sep='\n').strip()
         if not raw:
             return []
         from utils import extract_json
@@ -106,7 +103,7 @@ def _search_without_tool(city, city_cn, year, month):
             max_tokens=2000,
             messages=[{'role': 'user', 'content': prompt}],
         )
-        raw = resp.content[0].text.strip() if resp.content else ''
+        raw = extract_text(resp).strip()
         from utils import extract_json
         parsed = extract_json(raw)
         if parsed and isinstance(parsed.get('trending'), list):

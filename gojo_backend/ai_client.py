@@ -32,6 +32,32 @@ def _get_anthropic():
     return _anthropic_client
 
 
+def extract_text(response, sep=''):
+    """从 Anthropic Messages 响应中只拼接 type=text 的块。
+
+    Extended Thinking 开启后 content 可能是:
+        [ThinkingBlock(...), TextBlock(text="..."), ToolUseBlock(...), ...]
+    ThinkingBlock 没有 .text，直接访问会 AttributeError。
+    所有 Claude 响应解析都应走这里，不要再用 response.content[0].text。
+    """
+    if response is None:
+        return ''
+    content = getattr(response, 'content', None)
+    if not content:
+        return ''
+    parts = []
+    for block in content:
+        if isinstance(block, dict):
+            if block.get('type') == 'text' and block.get('text'):
+                parts.append(block['text'])
+            continue
+        if getattr(block, 'type', None) == 'text':
+            text = getattr(block, 'text', None)
+            if text:
+                parts.append(text)
+    return sep.join(parts)
+
+
 def create_chat(model, messages, system=None, max_tokens=1000, temperature=None):
     """统一接口,自动按 model 前缀分发到 Anthropic 或 DeepSeek。
 
@@ -68,7 +94,7 @@ def _call_anthropic(model, messages, system, max_tokens, temperature):
     if temperature is not None:
         kwargs['temperature'] = temperature
     resp = client.messages.create(**kwargs)
-    text = resp.content[0].text if resp.content else ''
+    text = extract_text(resp)
     return text, {
         'input_tokens': getattr(resp.usage, 'input_tokens', 0),
         'output_tokens': getattr(resp.usage, 'output_tokens', 0),

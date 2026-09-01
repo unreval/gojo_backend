@@ -9,6 +9,7 @@ from config import CN_TZ, ANTHROPIC_KEY, MODEL_MAIN
 import anthropic
 
 from characters import get_character
+from ai_client import extract_text
 from user_memory import get_bond_memories, save_short_memory, get_short_memory
 from character_relations import get_relations_text
 import proactive_msg
@@ -105,7 +106,7 @@ def generate_from_promise(promise, now):
             system=_SYSTEM,
             messages=[{'role': 'user', 'content': prompt}],
         )
-        raw = resp.content[0].text.strip()
+        raw = extract_text(resp).strip()
         from utils import extract_json
         parsed = extract_json(raw)
         if not parsed:

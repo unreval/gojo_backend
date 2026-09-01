@@ -135,6 +135,7 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
     """
     import anthropic
     from config import ANTHROPIC_KEY
+    from ai_client import extract_text
     from characters import get_character
     from user_memory import get_short_memory, get_bond_memories, save_short_memory, save_bond_memory
     from character_relations import get_relations_text
@@ -221,7 +222,7 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
             max_tokens=400,
             messages=[{'role': 'user', 'content': prompt}],
         )
-        raw = resp.content[0].text.strip()
+        raw = extract_text(resp).strip()
         from utils import extract_json
         parsed = extract_json(raw)
         if not parsed:

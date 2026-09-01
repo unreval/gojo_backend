@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
 from db import get_conn
 from utils import extract_json, sanitize_jp, merge_only_extreme_short
+from ai_client import extract_text
 from tts import tts_to_b64, transcribe_audio_b64
 from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
@@ -62,7 +63,7 @@ def _create_json(model, max_tokens, system_blocks, messages):
         system=system_blocks,
         messages=messages,
     )
-    raw = response.content[0].text.strip()
+    raw = extract_text(response).strip()
     return raw, response
 
 
@@ -156,7 +157,7 @@ def _quick_translate(jp: str) -> str:
             messages=[{'role': 'user', 'content':
                 f'把下面这句日语忠实翻译成中文，只输出译文本身，不要解释、不要引号：\n{jp}'}],
         )
-        return resp.content[0].text.strip().strip('「」"\'。 ').strip()
+        return extract_text(resp).strip().strip('「」"\'。 ').strip()
     except Exception:
         return ''
 

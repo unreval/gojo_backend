@@ -223,6 +223,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
     try:
         import anthropic
         from config import ANTHROPIC_KEY, MODEL_MAIN
+        from ai_client import extract_text
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
         full_prompt = system_prompt + '\n\n' + prompt
@@ -232,7 +233,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
             max_tokens=3000,
             messages=[{'role': 'user', 'content': full_prompt}],
         )
-        raw = resp.content[0].text.strip() if resp.content else ''
+        raw = extract_text(resp).strip()
         if not raw:
             print(f'[schedule] {character_id} 生成返回空')
             return None

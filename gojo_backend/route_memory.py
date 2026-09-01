@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID
+from ai_client import extract_text
 from db import get_conn
 from user_memory import (
     get_short_memory, get_long_memory, get_chat_days,
@@ -172,7 +173,7 @@ async def reclassify_memories(data: dict):
 只输出分类名，例如：喜好'''
                 }]
             )
-            cat = response.content[0].text.strip()
+            cat = extract_text(response).strip()
             if cat not in valid_cats:
                 cat = '其他'
             conn = get_conn()
