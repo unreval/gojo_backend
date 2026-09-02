@@ -234,7 +234,6 @@ async def story_generate(data: dict):
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
                 max_tokens=10000,    # ★ 长故事 + 可能夹 thinking，给够输出额度
-                temperature=1.0,     # ★ 拉满变化，配合随机主题进一步防重复
                 system=system_prompt,
                 messages=messages,
             )
