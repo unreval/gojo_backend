@@ -6,6 +6,7 @@
 这样长故事不会因为"一次性合成十几段语音太久"而超时。
 不写入聊天历史 / 长期记忆 / 聊天天数 —— 与聊天、记忆系统完全隔离。
 """
+import json
 import re
 import random
 import anthropic
@@ -23,6 +24,8 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 STORY_MAX_JP = 80        # ★ 单段日语超过这个长度，就按句子再切（调短了，语音更稳，不易跑偏）
 SEGMENT_PAUSE_MS = 1500  # ★ 每段之间停顿多少毫秒（想更慢就调大，比如 2200；更快就调小）
+MIN_STORY_MSGS = 16      # ★ 少于此段数视为没讲完，继续重试（不要再 6 段就收下）
+TARGET_STORY_MSGS = 20   # 提示里要求的目标段数
 
 # ★ 随机主题池：每次没指定主题就随机抽一个，避免老讲同一个故事
 STORY_THEMES = [
@@ -74,6 +77,65 @@ def _split_jp_sentences(text: str, max_chars: int = STORY_MAX_JP):
     return chunks or [text]
 
 
+_MSG_OBJ_RE = re.compile(
+    r'\{\s*"(?:jp|zh)"\s*:\s*"(?:\\.|[^"\\])*"\s*,\s*"(?:jp|zh)"\s*:\s*"(?:\\.|[^"\\])*"\s*\}'
+)
+
+
+def _valid_story_msgs(msgs):
+    """留下 jp/zh 都非空的气泡。"""
+    if not isinstance(msgs, list):
+        return []
+    out = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        jp = (m.get('jp') or '').strip()
+        zh = (m.get('zh') or '').strip()
+        if jp and zh:
+            out.append({'jp': jp, 'zh': zh})
+    return out
+
+
+def _parse_story_json(raw: str):
+    """解析睡前故事 JSON。extract_json 失败时从花括号抠，再失败就救援已完整的气泡。"""
+    if not raw:
+        return None
+
+    parsed = extract_json(raw)
+    if parsed and isinstance(parsed.get('messages'), list):
+        msgs = _valid_story_msgs(parsed['messages'])
+        if msgs:
+            parsed['messages'] = msgs
+            return parsed
+
+    try:
+        i, j = raw.find('{'), raw.rfind('}')
+        if i != -1 and j > i:
+            parsed = json.loads(raw[i:j + 1])
+            if parsed and isinstance(parsed.get('messages'), list):
+                msgs = _valid_story_msgs(parsed['messages'])
+                if msgs:
+                    parsed['messages'] = msgs
+                    return parsed
+    except Exception:
+        pass
+
+    recovered = []
+    for s in _MSG_OBJ_RE.findall(raw):
+        try:
+            obj = json.loads(s)
+            jp = (obj.get('jp') or '').strip()
+            zh = (obj.get('zh') or '').strip()
+            if jp and zh:
+                recovered.append({'jp': jp, 'zh': zh})
+        except Exception:
+            continue
+    if recovered:
+        return {'emotion': '温柔', 'messages': recovered}
+    return None
+
+
 # ─────────────────── 第一步：只生成文字（秒回）───────────────────
 
 @router.post('/story/generate')
@@ -90,62 +152,80 @@ async def story_generate(data: dict):
     if not theme:
         theme = random.choice(STORY_THEMES)
 
+    char_name = char.get('name') or '五条悟'
+
     # 只用角色核心人格，不接聊天/记忆那套脚手架 —— 保证隔离
     system_prompt = char.get('core_prompt', '') + f'''
 
 【★ 睡前故事模式】
-现在是睡前，对方想听你（五条悟）讲一个故事哄她入睡。
+现在是睡前，对方想听你（{char_name}）讲一个故事哄她入睡。
 【这次要讲的故事】{theme}
 
 要求：
 1. 语气温柔、舒缓、慵懒，适合入睡，不要激烈或紧张的情节。
 2. 故事完整且有内容：温柔的开头、有起伏的发展、平静温暖的结尾。讲得丰富一点、长一点。
-3. 分成 16-24 个气泡，每个气泡只讲一两句，像轻声细语慢慢道来。
+3. 必须分成 20-24 个气泡（绝对不能少于 {MIN_STORY_MSGS} 个）。每个气泡只讲一两句，像轻声细语慢慢道来。少于 {MIN_STORY_MSGS} 个等于故事没讲完。
 4. 每个气泡的【日语】控制在 30-70 字以内（短一点，语音合成更稳，不会跑调）。
 5. jp 必须是纯日语，zh 是对应中文翻译，不要把中文混进 jp。
 6. 别每次都用"最强咒术师"那种开头，这次就好好讲上面指定的故事。
+7. 只输出 JSON，不要解释、不要 markdown。
 
-严格按这个 JSON 返回：
+严格按这个 JSON 返回（messages 数组里要有 20-24 个对象）：
 {{"emotion":"温柔","messages":[{{"jp":"第一句日语","zh":"第一句中文"}},{{"jp":"第二句日语","zh":"第二句中文"}}]}}'''
 
-    user_line = '给我讲一个睡前故事吧。'
+    user_line = f'给我讲一个完整的长睡前故事。必须输出 {TARGET_STORY_MSGS} 到 24 个气泡的 JSON，不要提前结束。'
     if data.get('theme'):
-        user_line = f'给我讲一个睡前故事吧，我想听：{theme}'
+        user_line = f'给我讲一个完整的长睡前故事，主题：{theme}。必须输出 {TARGET_STORY_MSGS} 到 24 个气泡的 JSON，不要提前结束。'
 
     messages = [{'role': 'user', 'content': user_line}]
 
     result = None
+    best = None
     for attempt in range(5):
         try:
             response = claude_client.messages.create(
                 model='claude-sonnet-4-6',
-                max_tokens=6000,     # ★ 更长更丰富的故事
+                max_tokens=10000,    # ★ 长故事 + 可能夹 thinking，给够输出额度
                 temperature=1.0,     # ★ 拉满变化，配合随机主题进一步防重复
                 system=system_prompt,
                 messages=messages,
             )
             raw = extract_text(response).strip()
-            print(f'[story] attempt {attempt+1}: {raw[:120]}...')
-            parsed = extract_json(raw)
-            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 6:
-                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
-                    result = parsed
-                    break
+            n_out = getattr(getattr(response, 'usage', None), 'output_tokens', '?')
+            print(f'[story] attempt {attempt+1}: stop={getattr(response, "stop_reason", "?")} '
+                  f'out_tokens={n_out} raw={raw[:120]}...')
+            parsed = _parse_story_json(raw)
+            if not parsed:
+                print(f'[story] attempt {attempt+1}: JSON 解析失败, raw_len={len(raw)}')
+                continue
+            n = len(parsed['messages'])
+            print(f'[story] attempt {attempt+1}: parsed {n} bubbles')
+            if best is None or n > len(best['messages']):
+                best = parsed
+            if n >= MIN_STORY_MSGS:
+                result = parsed
+                break
+            print(f'[story] attempt {attempt+1}: 只有 {n} 段(<{MIN_STORY_MSGS})，继续重试')
         except Exception as e:
             print(f'[story] attempt {attempt+1} error: {e}')
 
     if not result:
-        result = {
-            'emotion': '温柔',
-            'messages': [
-                {'jp': 'まあ、特別に話を聞かせてあげる。', 'zh': '嘛，特别讲个故事给你听吧。'},
-                {'jp': 'ゆっくり目を閉じて、聞いてて。', 'zh': '慢慢闭上眼睛，听着就好。'},
-                {'jp': '昔々、静かな夜の街にね。', 'zh': '很久很久以前，在一座安静的夜晚的城市里。'},
-                {'jp': '小さな灯りが一つ、ともっていた。', 'zh': '亮着一盏小小的灯。'},
-                {'jp': 'その灯りは、誰かの帰りをずっと待ってた。', 'zh': '那盏灯，一直在等着谁回家。'},
-                {'jp': 'もう眠っていいよ。おやすみ。', 'zh': '可以睡了哦，晚安。'},
-            ],
-        }
+        # 重试都没到 16 段：优先用最长的那次，避免掉进 6 段硬编码兜底
+        if best and len(best['messages']) >= 10:
+            result = best
+            print(f'[story] 未满 {MIN_STORY_MSGS} 段，采用最长一次 {len(best["messages"])} 段')
+        else:
+            result = {
+                'emotion': '温柔',
+                'messages': [
+                    {'jp': 'まあ、特別に話を聞かせてあげる。', 'zh': '嘛，特别讲个故事给你听吧。'},
+                    {'jp': 'ゆっくり目を閉じて、聞いてて。', 'zh': '慢慢闭上眼睛，听着就好。'},
+                    {'jp': '昔々、静かな夜の街にね。', 'zh': '很久很久以前，在一座安静的夜晚的城市里。'},
+                    {'jp': '小さな灯りが一つ、ともっていた。', 'zh': '亮着一盏小小的灯。'},
+                    {'jp': 'その灯りは、誰かの帰りをずっと待ってた。', 'zh': '那盏灯，一直在等着谁回家。'},
+                    {'jp': 'もう眠っていいよ。おやすみ。', 'zh': '可以睡了哦，晚安。'},
+                ],
+            }
 
     emotion = result.get('emotion', '温柔')
     if emotion not in EMOTIONS:

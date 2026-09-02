@@ -108,7 +108,7 @@ export default function BedtimeStoryScreen() {
       const res = await axios.post(
         `${SERVER_URL}/story/generate`,
         { character_id: CHARACTER_ID },
-        { timeout: 60000 },
+        { timeout: 120000 },
       );
       const segs: Segment[] = Array.isArray(res.data?.segments) ? res.data.segments : [];
       emotionRef.current = res.data?.emotion || '平静';
