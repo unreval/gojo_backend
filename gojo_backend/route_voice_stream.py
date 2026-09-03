@@ -20,7 +20,6 @@
 import asyncio
 import json
 import re
-import threading
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -28,7 +27,8 @@ from fastapi.responses import StreamingResponse
 from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
 from tts import tts_to_b64
 from prompt import build_system_blocks
-from user_memory import save_short_memory, get_short_memory, extract_and_save_memory
+from user_memory import save_short_memory, get_short_memory
+from memory_jobs import enqueue_private_extraction
 from characters import get_character
 
 router = APIRouter()
@@ -196,11 +196,7 @@ async def chat_voice_stream(data: dict):
                     save_short_memory(user_id, 'assistant', full_jp, character_id)
                 except Exception as e:
                     print(f'[voice_stream] short_memory 保存失败:{e}')
-                threading.Thread(
-                    target=extract_and_save_memory,
-                    args=(user_id, user_text, full_jp, character_id),
-                    daemon=True,
-                ).start()
+                enqueue_private_extraction(user_id, user_text, full_jp, character_id)
                 print(f'[voice_stream] ✅ {character_id} 流式回复完成,共 {seq} 段')
             else:
                 print(f'[voice_stream] ⚠️ {character_id} 流式回复没抓到任何 JP+ZH 对,可能 LLM 格式漂了')

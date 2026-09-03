@@ -17,7 +17,6 @@
 
 调度与回复都要求模型返回【单行 JSON】——因为 utils.extract_json 会把换行抹掉，多行 JSON 会被破坏。
 """
-import threading
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -29,7 +28,8 @@ from ai_client import extract_text
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
-from user_memory import extract_and_save_group_memory, update_chat_days   # ★ 群聊专用记忆提取 + 陪伴天数
+from user_memory import update_chat_days
+from memory_jobs import enqueue_group_extraction
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -783,12 +783,10 @@ async def group_chat(data: dict):
         round_transcript = f'群主：{user_text}\n' + '\n'.join(
             f"{r['sender_name']}：{r['zh']}" for r in replies
         )
-        threading.Thread(
-            target=extract_and_save_group_memory,
-            args=(owner_id, user_text, round_transcript,
-                  [{'id': m['id'], 'name': m['name']} for m in members]),
-            daemon=True
-        ).start()
+        enqueue_group_extraction(
+            owner_id, user_text, round_transcript,
+            [{'id': m['id'], 'name': m['name']} for m in members],
+        )
 
     print(f'[group][{gid}] 本轮共 {len(replies)} 条回复')
     return JSONResponse({'group_id': gid, 'replies': replies})

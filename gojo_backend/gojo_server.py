@@ -97,6 +97,9 @@ init_chatlog_table()   # ★ 聊天记录表（卸载重装/换手机都不丢�
 init_schedule_table()  # ★ 角色日程表（忙的时候只已读不回）
 init_course_tables()   # ★ 课程表（日程驱动的主动分享）
 init_push_table()
+from memory_jobs import init_memory_jobs_table, start_memory_worker
+init_memory_jobs_table()
+start_memory_worker()
 if _HAS_GRUMBLE:
     try:
         init_grumble_table()

@@ -92,10 +92,19 @@ def save_short_memory(user_id, role, content, character_id=DEFAULT_CHARACTER_ID)
     conn.close()
 
 
+def _short_limit(n):
+    """调用方传入的 n 生效，但不会超过 SHORT_MEMORY_MAX。"""
+    try:
+        return min(max(int(n), 1), SHORT_MEMORY_MAX)
+    except (TypeError, ValueError):
+        return SHORT_MEMORY_MAX
+
+
 def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
     """★ v3.1：给历史消息加时间标记，防止把昨晚的话当成刚刚发生。
     规则：2小时内的消息不加标记（保持自然）；更早的加【今天HH:MM】【昨天HH:MM】【M月D日 HH:MM】。
     标记只在读取时拼接，不改数据库内容。"""
+    limit = _short_limit(n)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -104,7 +113,7 @@ def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
              AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
            ORDER BY timestamp DESC
            LIMIT %s''',
-        (user_id, character_id, SHORT_MEMORY_HOURS, SHORT_MEMORY_MAX)
+        (user_id, character_id, SHORT_MEMORY_HOURS, limit)
     )
     rows = cur.fetchall()
     cur.close()
@@ -179,6 +188,22 @@ def _bg_embed(table, row_id, content):
         pass
 
 
+def _invalidate_rag(table=None):
+    try:
+        import memory_search
+        if memory_search.is_vector_ready():
+            memory_search.invalidate_cache(table)
+    except Exception:
+        pass
+
+
+def notify_memory_changed(table, row_id=None, content=None, deleted=False):
+    """编辑/删除记忆后同步 RAG 缓存；更新内容时后台重算 embedding。"""
+    _invalidate_rag(table)
+    if not deleted and row_id and content:
+        _bg_embed(table, row_id, content)
+
+
 def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARACTER_ID):
     conn = get_conn()
     cur = conn.cursor()
@@ -242,6 +267,7 @@ def delete_long_memory(memory_id):
     conn.commit()
     cur.close()
     conn.close()
+    notify_memory_changed('long_memory', deleted=True)
 
 
 # ────────── 第 2/3 层：羁绊记忆（我们之间的事 / 她告诉我的事）──────────
@@ -434,6 +460,18 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
             (user_id, character_id, kind, new_content)
         )
         new_id = cur.fetchone()[0]
+
+        # ★ 合并后重新挂 linked_fact_id，否则二级召回断链
+        try:
+            from smart_recall import link_bond_to_fact
+            fact_id = link_bond_to_fact(user_id, character_id, new_content)
+            if fact_id:
+                cur.execute('UPDATE bond_memory SET linked_fact_id = %s WHERE id = %s',
+                            (fact_id, new_id))
+                print(f'[{user_id}] 🔗 合并后 bond #{new_id} 关联到 fact #{fact_id}')
+        except Exception:
+            pass
+
         conn.commit()
 
         for _i, old in targets:
@@ -443,14 +481,7 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
         cur.close()
         conn.close()
 
-    _bg_embed('bond_memory', new_id, new_content)
-    # ★ 合并删掉了旧条目,通知检索层清缓存,免得捞到已经不存在的记忆
-    try:
-        import memory_search
-        if memory_search.is_vector_ready():
-            memory_search.invalidate_cache('bond_memory')
-    except Exception:
-        pass
+    notify_memory_changed('bond_memory', row_id=new_id, content=new_content)
     return True, deleted
 
 
@@ -485,6 +516,7 @@ def delete_bond_memory(memory_id):
     conn.commit()
     cur.close()
     conn.close()
+    notify_memory_changed('bond_memory', deleted=True)
 
 
 # ────────── 认识时长（按角色最早共同痕迹算，不是全局app天数）──────────
@@ -571,27 +603,27 @@ def get_companion_days(user_id):
 
 # ────────── 记忆自动纠错 ──────────
 
-def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
-    """用户纠正之前说错的信息时，扫描长期记忆删掉错的那条。"""
+def plan_memory_corrections(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
+    """只判断哪些旧记忆该删，不写库。返回 [(id, content), ...]。"""
     correction_keywords = [
         '不是', '我说错', '说错了', '其实', '不对', '搞错', '记错',
         '哪有', '才不', '说反了', '重新说', '纠正',
     ]
     if not any(kw in user_text for kw in correction_keywords):
-        return False
+        return []
 
     memories = _get_memories_with_id(user_id, character_id)
     if not memories:
-        return False
+        return []
 
     memory_list = '\n'.join(f'[ID:{mid}] {content}' for mid, content in memories)
+    by_id = {int(mid): content for mid, content in memories}
 
     try:
         now = datetime.now(CN_TZ)
         today_str = now.strftime('%Y-%m-%d')
         weekday_cn = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][now.weekday()]
 
-        # ★ 纠错扫描:纯中文结构化任务,走 MODEL_CN_AUX
         from ai_client import create_chat
         from config import MODEL_CN_AUX
         correction_prompt = f'''你是记忆纠错助手。用户正在纠正自己之前说过的错误信息，你要找出哪些旧记忆需要删除。
@@ -626,38 +658,61 @@ def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
         print(f'[{user_id}] 纠错扫描 ({MODEL_CN_AUX}): {raw[:120]}')
 
         parsed = extract_json(raw)
-        if not parsed:
-            return False
+        if not parsed or parsed.get('action') != 'delete' or not parsed.get('ids'):
+            return []
 
-        if parsed.get('action') == 'delete' and parsed.get('ids'):
-            conn = get_conn()
-            cur = conn.cursor()
-            deleted = 0
-            for mem_id in parsed['ids']:
-                try:
-                    mid_int = int(mem_id)
-                except (ValueError, TypeError):
-                    continue
-                cur.execute(
-                    '''DELETE FROM long_memory
-                       WHERE id = %s AND user_id = %s AND character_id IN (%s, %s)''',
-                    (mid_int, user_id, character_id, SHARED_CHARACTER_ID)
-                )
-                if cur.rowcount:
-                    deleted += cur.rowcount
-                    print(f'[{user_id}] ✂️ 纠错删除记忆 #{mid_int}')
-            conn.commit()
-            cur.close()
-            conn.close()
-            if deleted:
-                print(f'[{user_id}] 纠错完成：删除了 {deleted} 条旧记忆')
-                return True
-
-        return False
+        planned = []
+        for mem_id in parsed['ids']:
+            try:
+                mid_int = int(mem_id)
+            except (ValueError, TypeError):
+                continue
+            if mid_int in by_id:
+                planned.append((mid_int, by_id[mid_int]))
+        return planned
 
     except Exception as e:
         print(f'[{user_id}] 纠错扫描失败：{e}')
-        return False
+        return []
+
+
+def apply_memory_corrections(user_id, ids, character_id=DEFAULT_CHARACTER_ID):
+    """提取成功后再删旧记忆。"""
+    if not ids:
+        return 0
+    conn = get_conn()
+    cur = conn.cursor()
+    deleted = 0
+    try:
+        for mem_id in ids:
+            try:
+                mid_int = int(mem_id)
+            except (ValueError, TypeError):
+                continue
+            cur.execute(
+                '''DELETE FROM long_memory
+                   WHERE id = %s AND user_id = %s AND character_id IN (%s, %s)''',
+                (mid_int, user_id, character_id, SHARED_CHARACTER_ID)
+            )
+            if cur.rowcount:
+                deleted += cur.rowcount
+                print(f'[{user_id}] ✂️ 纠错删除记忆 #{mid_int}')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+    if deleted:
+        notify_memory_changed('long_memory', deleted=True)
+        print(f'[{user_id}] 纠错完成：删除了 {deleted} 条旧记忆')
+    return deleted
+
+
+def correct_memories(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
+    """兼容旧调用：只计划、不删除。真正删除请走 extract 成功后的 apply。"""
+    return bool(plan_memory_corrections(user_id, user_text, character_id))
 
 
 # ────────── 提取结果的通用校验小工具 ──────────
@@ -747,10 +802,15 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
     C told      —— 她告诉这个角色的、关于角色本人或其世界的信息（含剧透）→ bond_memory(told)
     """
     try:
-        corrected = correct_memories(user_id, user_text, character_id)
+        pending_corrections = plan_memory_corrections(user_id, user_text, character_id)
         correction_hint = ''
-        if corrected:
-            correction_hint = '\n【提示】用户刚纠正了之前说错的信息，旧记忆已删除，请提取她这次给出的正确事实。'
+        if pending_corrections:
+            listed = '\n'.join(f'- [ID:{mid}] {content}' for mid, content in pending_corrections)
+            correction_hint = (
+                '\n【提示】用户刚纠正了之前说错的信息。下面这些旧记忆将在本轮提取成功后删除，'
+                '请提取她这次给出的正确事实（不要再复述旧的错误信息）：\n'
+                f'{listed}'
+            )
 
         char_names = _all_character_names()
         from characters import get_character
@@ -1000,8 +1060,14 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                 print(f'[{user_id}] 重试也失败:{_re}')
 
         if not parsed:
-            print(f'[{user_id}] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢: {raw[:200]}')
-            return
+            print(f'[{user_id}] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢（纠错删除已取消，旧记忆保留）: {raw[:200]}')
+            return False
+
+        # 提取 JSON 成功后再删旧记忆，避免先删后存失败导致两边都空
+        if pending_corrections:
+            apply_memory_corrections(
+                user_id, [mid for mid, _ in pending_corrections], character_id
+            )
 
         # A. 用户事实 → shared 桶
         uf = parsed.get('user_fact')
@@ -1054,8 +1120,11 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         except Exception:
             pass
 
+        return True
+
     except Exception as e:
         print(f'记忆提取失败：{e}')
+        return False
 
 
 # ────────── ★ 群聊统一提取（用户事实 + 定向告知）──────────
@@ -1068,10 +1137,15 @@ def extract_and_save_group_memory(user_id, user_text, round_transcript, members)
     members: [{'id','name'}, ...] 群里全部角色。
     """
     try:
-        corrected = correct_memories(user_id, user_text, SHARED_CHARACTER_ID)
+        pending_corrections = plan_memory_corrections(user_id, user_text, SHARED_CHARACTER_ID)
         correction_hint = ''
-        if corrected:
-            correction_hint = '\n【提示】用户刚纠正了之前说错的信息，旧记忆已删除，请提取她这次给出的正确事实。'
+        if pending_corrections:
+            listed = '\n'.join(f'- [ID:{mid}] {content}' for mid, content in pending_corrections)
+            correction_hint = (
+                '\n【提示】用户刚纠正了之前说错的信息。下面这些旧记忆将在本轮提取成功后删除，'
+                '请提取她这次给出的正确事实（不要再复述旧的错误信息）：\n'
+                f'{listed}'
+            )
 
         character_names = [m['name'] for m in members]
         name_to_id = {m['name']: m['id'] for m in members}
@@ -1141,7 +1215,13 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
 
         parsed = extract_json(raw)
         if not parsed:
-            return
+            print(f'[{user_id}][group] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢（纠错删除已取消）: {raw[:200]}')
+            return False
+
+        if pending_corrections:
+            apply_memory_corrections(
+                user_id, [mid for mid, _ in pending_corrections], SHARED_CHARACTER_ID
+            )
 
         # A. 用户事实 → shared
         uf = parsed.get('user_fact')
@@ -1176,5 +1256,8 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
                     if save_bond_memory(user_id, target_id, 'between', content):
                         print(f'[{user_id}][group] ✅ 互动记忆（{target_id}）：{content}')
 
+        return True
+
     except Exception as e:
         print(f'群聊记忆提取失败：{e}')
+        return False

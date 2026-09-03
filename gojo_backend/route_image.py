@@ -7,7 +7,6 @@
 ★ 记账升级：LLM 返回 pending_transaction 时,后端只透传给前端(不写库),
   由前端确认卡引导用户核对后再 POST /accounting/records 落库。
 """
-import threading
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -20,8 +19,9 @@ from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
     save_short_memory, get_short_memory,
-    update_chat_days, extract_and_save_memory
+    update_chat_days,
 )
+from memory_jobs import enqueue_private_extraction
 from characters import get_character
 from tasks import (
     find_duplicate_task,
@@ -193,9 +193,7 @@ async def chat_image(data: dict):
 
     # 如果用户附了文字，尝试提取用户事实
     if user_text:
-        threading.Thread(target=extract_and_save_memory,
-                         args=(user_id, user_text, full_jp, character_id),
-                         daemon=True).start()
+        enqueue_private_extraction(user_id, user_text, full_jp, character_id)
 
     voice_id = char.get('voice_id')
     for m in msgs:

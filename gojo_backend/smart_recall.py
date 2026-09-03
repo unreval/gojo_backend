@@ -182,10 +182,9 @@ def two_level_recall(user_id, character_id, user_message,
         )
         all_facts = cur.fetchall()
 
+        # long_memory 为空时仍继续召回 bond / told，三者独立存储
         if not all_facts:
-            cur.close()
-            conn.close()
-            return {'facts': [], 'loose_bonds': [], 'tolds': []}
+            all_facts = []
 
         # ── 向量缓存（如果 RAG 开着的话）──
         fact_embeddings = {}

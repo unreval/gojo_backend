@@ -9,7 +9,7 @@ from db import get_conn
 from user_memory import (
     get_short_memory, get_long_memory, get_chat_days,
     extract_and_save_memory, SHARED_CHARACTER_ID,
-    get_bond_memories, delete_bond_memory,
+    get_bond_memories, delete_bond_memory, notify_memory_changed,
 )
 
 router = APIRouter()
@@ -77,6 +77,7 @@ async def update_long_memory(memory_id: int, data: dict):
     conn.commit()
     cur.close()
     conn.close()
+    notify_memory_changed('long_memory', row_id=memory_id, content=content)
     return JSONResponse({'ok': True, 'id': memory_id})
 
 
@@ -88,6 +89,7 @@ async def delete_long_memory(memory_id: int):
     conn.commit()
     cur.close()
     conn.close()
+    notify_memory_changed('long_memory', deleted=True)
     return JSONResponse({'ok': True, 'id': memory_id})
 
 
@@ -220,6 +222,7 @@ async def edit_bond_memory(memory_id: int, data: dict):
     conn.close()
     if not updated:
         return JSONResponse({'error': 'not found'}, status_code=404)
+    notify_memory_changed('bond_memory', row_id=memory_id, content=content)
     return JSONResponse({'ok': True, 'id': memory_id})
 
 
