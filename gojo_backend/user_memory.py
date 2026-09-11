@@ -523,14 +523,16 @@ def delete_bond_memory(memory_id):
 
 def get_first_interaction_days(user_id, character_id):
     """返回和【这个角色】最早的共同痕迹距今多少天；完全没有痕迹返回 None。
-    依据：该角色的羁绊记忆 + 该角色专属长期记忆 + 该角色的短期记忆，取最早时间。"""
+    依据：持久时间账本 + 羁绊记忆 + 角色专属长期记忆 + 短期记忆，取最早时间。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('''SELECT LEAST(
+        COALESCE((SELECT MIN(first_interaction_at) FROM temporal_awareness WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp),
         COALESCE((SELECT MIN(timestamp) FROM bond_memory  WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp),
         COALESCE((SELECT MIN(timestamp) FROM long_memory  WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp),
         COALESCE((SELECT MIN(timestamp) FROM short_memory WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp)
-    )''', (user_id, character_id, user_id, character_id, user_id, character_id))
+    )''', (user_id, character_id, user_id, character_id,
+            user_id, character_id, user_id, character_id))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -795,7 +797,9 @@ def _norm_category(cat: str) -> str:
 
 # ────────── ★ 统一三桶提取（私聊）──────────
 
-def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEFAULT_CHARACTER_ID):
+def extract_and_save_memory(user_id, user_text, assistant_text,
+                            character_id=DEFAULT_CHARACTER_ID,
+                            temporal_context=None):
     """一次 Haiku 调用同时提取三类记忆：
     A user_fact —— 她透露的关于她自己的新事实 → long_memory(shared)
     B bond      —— 她和这个角色之间发生的事/约定/共同经历 → bond_memory(between)
@@ -832,6 +836,14 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
         relations_block = get_relations_text(character_id)
         relations_intro = (f'\n{relations_block}\n' if relations_block else '')
 
+        # ★ 本轮开始前的真实时间跨度 —— 由 route_chat 入队时保存，避免 worker 延迟造成错位
+        temporal_intro = ''
+        try:
+            from temporal_awareness import build_memory_context
+            temporal_intro = build_memory_context(temporal_context)
+        except Exception:
+            temporal_intro = ''
+
         # ★ 记忆提取:纯中文结构化任务,走 MODEL_CN_AUX(默认 deepseek-chat 便宜好用)
         from ai_client import create_chat
         from config import MODEL_CN_AUX
@@ -842,6 +854,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text, character_id=DEF
 - "{char_name}" = 角色（她的聊天对象）
 {relations_intro}
 【今天日期】{today_str}（{weekday_cn}）{correction_hint}
+{temporal_intro}
 
 【已记录的她的事实】
 {existing_text}

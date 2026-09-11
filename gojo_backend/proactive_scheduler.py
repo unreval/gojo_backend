@@ -12,6 +12,9 @@ from characters import get_character
 from ai_client import extract_text
 from user_memory import get_bond_memories, save_short_memory, get_short_memory
 from character_relations import get_relations_text
+from temporal_awareness import (
+    build_prompt_context, get_temporal_snapshot, record_assistant_message,
+)
 import proactive_msg
 import db_promise
 
@@ -49,6 +52,9 @@ def generate_from_promise(promise, now):
         voice_id = char.get('voice_id')
 
         time_str = now.strftime('%Y年%m月%d日 %H:%M')
+        temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+        temporal_text = build_prompt_context(
+            user_id, character_id, snapshot=temporal_snapshot)
 
         try:
             shorts = get_short_memory(user_id, 4, character_id)
@@ -69,6 +75,7 @@ def generate_from_promise(promise, now):
 
 【角色】{char_name}
 【当前时间】{time_str}
+{temporal_text}
 
 【触发场景】
 角色之前答应过/记下了这件事:
@@ -140,6 +147,10 @@ def generate_from_promise(promise, now):
 
         try:
             save_short_memory(user_id, 'assistant', jp, character_id)
+            record_assistant_message(
+                user_id, character_id, source=f'promise:{kind}',
+                prior_snapshot=temporal_snapshot,
+            )
         except Exception:
             pass
 

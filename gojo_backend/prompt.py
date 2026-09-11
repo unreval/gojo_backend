@@ -340,7 +340,8 @@ context 里写清楚为什么触发,让【触发那一刻的你】知道要说�
 
 ★ 记账、提醒、取消、承诺可以并存，该有的字段都给。绝不能因为加了 pending_transaction 就漏 reminder。'''
 
-def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message='', extra_suffix=''):
+def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
+                        user_message='', extra_suffix='', temporal_snapshot=None):
     # ── 1. 角色定义 ──
     char = get_character(character_id)
     if not char:
@@ -453,6 +454,15 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
                                       user_id=user_id, character_id=character_id)
 
 
+    # ── ★ 3.65 持久时间意识：上次真实互动距今多久 ──
+    temporal_text = ''
+    try:
+        from temporal_awareness import build_prompt_context
+        temporal_text = build_prompt_context(
+            user_id, character_id, snapshot=temporal_snapshot)
+    except Exception as _e:
+        print(f'[prompt] 时间意识注入跳过：{_e}')
+
 
     # ── ★ 3.7 生理周期贴心情报（只在临近/经期时注入）──
     try:
@@ -533,7 +543,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
 
     semi_static = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 
-    dynamic_tail = f"""{stage_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
+    dynamic_tail = f"""{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}
 
@@ -550,7 +560,8 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
     return static_head, semi_static, dynamic_tail
 
 
-def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID, user_message='', extra_suffix=''):
+def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID,
+                        user_message='', extra_suffix='', temporal_snapshot=None):
     """★ 返回 Anthropic system 数组（带缓存断点）。
 
     结构：
@@ -561,7 +572,7 @@ def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
     调用方式：client.messages.create(system=build_system_blocks(...), ...)
     """
     static_head, semi_static, dynamic_tail = _build_prompt_parts(
-        user_id, character_id, user_message, extra_suffix
+        user_id, character_id, user_message, extra_suffix, temporal_snapshot
     )
     return [
         {'type': 'text', 'text': static_head, 'cache_control': {'type': 'ephemeral'}},
@@ -570,9 +581,11 @@ def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID, user_message
     ]
 
 
-def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID, user_message='', extra_suffix=''):
+def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID,
+                        user_message='', extra_suffix='', temporal_snapshot=None):
     """兼容旧调用：把三段拼成一个字符串（不走缓存）。"""
-    a, b, c = _build_prompt_parts(user_id, character_id, user_message, extra_suffix)
+    a, b, c = _build_prompt_parts(
+        user_id, character_id, user_message, extra_suffix, temporal_snapshot)
     return f'{a}\n{b}\n{c}'
 
 

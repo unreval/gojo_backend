@@ -105,12 +105,21 @@ def _build_user_prompt(
     user_message: str, character_reply: Optional[str],
     character_core_snippet: Optional[str] = None,
     recent_context: Optional[List[Dict]] = None,
+    temporal_context: Optional[Dict] = None,
 ) -> str:
     parts = []
     if character_core_snippet:
         parts.append(
             f'【角色语言习惯参考】（只用于理解语气，不用于判断关系）\n{character_core_snippet}\n'
         )
+    if temporal_context:
+        try:
+            from temporal_awareness import build_relationship_context
+            temporal_text = build_relationship_context(temporal_context)
+            if temporal_text:
+                parts.append(temporal_text)
+        except Exception:
+            pass
     if recent_context:
         parts.append('【最近对话上下文】（帮你消歧义，不用于推断）')
         for msg in recent_context[-6:]:
@@ -150,6 +159,7 @@ def extract_signals(
     character_reply: Optional[str] = None,
     character_core_snippet: Optional[str] = None,
     recent_context: Optional[List[Dict]] = None,
+    temporal_context: Optional[Dict] = None,
     model: Optional[str] = None,
 ) -> Dict:
     """从一轮对话里提取 signal 列表。
@@ -166,7 +176,7 @@ def extract_signals(
     """
     user_prompt = _build_user_prompt(
         user_message, character_reply,
-        character_core_snippet, recent_context,
+        character_core_snippet, recent_context, temporal_context,
     )
 
     try:

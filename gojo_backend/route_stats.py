@@ -151,7 +151,7 @@ async def reset_memory(data: dict):
     deleted = {}
 
     # 三张核心记忆表都按 user_id 清
-    tables = ['short_memory', 'long_memory', 'bond_memory']
+    tables = ['short_memory', 'long_memory', 'bond_memory', 'temporal_awareness']
     for tbl in tables:
         try:
             if character_id:

@@ -44,8 +44,19 @@ def init_memory_jobs_table():
     print('[memory_jobs] 表已就绪')
 
 
-def enqueue_private_extraction(user_id, user_text, assistant_text, character_id):
-    return _enqueue('private', user_id, character_id, user_text, assistant_text, None)
+def enqueue_private_extraction(user_id, user_text, assistant_text, character_id,
+                               temporal_context=None):
+    extra = None
+    if temporal_context:
+        try:
+            from temporal_awareness import serialize_snapshot
+            extra = json.dumps(
+                {'temporal_context': serialize_snapshot(temporal_context)},
+                ensure_ascii=False,
+            )
+        except Exception:
+            extra = None
+    return _enqueue('private', user_id, character_id, user_text, assistant_text, extra)
 
 
 def enqueue_group_extraction(user_id, user_text, round_transcript, members):
@@ -150,12 +161,14 @@ def _run_job(row):
                 extra.get('members') or [],
             )
         else:
+            extra = json.loads(extra_json or '{}') if extra_json else {}
             from user_memory import extract_and_save_memory
             ok = extract_and_save_memory(
                 user_id,
                 user_text or '',
                 assistant_text or '',
                 character_id,
+                temporal_context=extra.get('temporal_context'),
             )
         if ok:
             _set_status(job_id, 'done')

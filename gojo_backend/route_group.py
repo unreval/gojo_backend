@@ -30,6 +30,7 @@ from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
 from user_memory import update_chat_days
 from memory_jobs import enqueue_group_extraction
+from temporal_awareness import record_assistant_message, record_turn
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -713,6 +714,7 @@ async def group_chat(data: dict):
                 'emotion': reply['emotion'],
                 'audio_b64': audio,
             })
+        record_turn(owner_id, cid, source='group_chat')
 
     # 4) 角色互动:用专门的"互动调度器"判断要不要有人接茬
     #    - MAX_TURNS_PER_ROUND 是硬上限(防止极端情况下无限互怼)
@@ -770,6 +772,7 @@ async def group_chat(data: dict):
                     'emotion': reply['emotion'],
                     'audio_b64': audio,
                 })
+            record_assistant_message(owner_id, cid, source='group_interaction')
             turns_used += 1
 
         if turns_used >= MAX_TURNS_PER_ROUND:
@@ -878,6 +881,7 @@ async def group_chat_continue(data: dict):
             'emotion': reply['emotion'],
             'audio_b64': audio,
         })
+    record_assistant_message(owner_id, cid, source='group_continue')
 
     print(f'[group][{gid}] continue: {member["name"]} replied {len(result_replies)} bubbles (turns={turns_used+1})')
     return JSONResponse({

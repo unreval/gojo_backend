@@ -41,6 +41,10 @@ from user_memory import (
     update_chat_days, SHORT_MEMORY_MAX,
 )
 from memory_jobs import enqueue_private_extraction
+from temporal_awareness import (
+    get_temporal_snapshot, record_assistant_message,
+    record_turn, record_user_message,
+)
 from characters import get_character
 from tasks import (
     find_duplicate_task,
@@ -195,7 +199,7 @@ def _extract_pending_tx(result: dict, user_id: str, tag: str = 'chat'):
 # ★ v4 感情判断异步触发器 —— 顶层函数，方便所有 endpoint 调用
 # ═══════════════════════════════════════════════════════════════════
 def _fire_relationship_update(user_id, character_id, user_text, full_jp,
-                              core_snippet, recent_ctx):
+                              core_snippet, recent_ctx, temporal_snapshot):
     """子线程：调 process_turn 更新 v4 关系账本。
     ★ 用 sys.stderr 直写 + flush，避免 uvicorn stdout buffering 吞掉子线程输出。
     ★ 所有异常必须自己捕获——子线程报错默认无声。
@@ -218,6 +222,7 @@ def _fire_relationship_update(user_id, character_id, user_text, full_jp,
             character_reply=full_jp,
             character_core_snippet=core_snippet,
             recent_context=recent_ctx,
+            temporal_context=temporal_snapshot,
         )
         # 精简输出：只打关键数字 + action 列表 + error（不再刷 state summary 满屏）
         sig_n = result.get('signals_extracted', 0)
@@ -235,14 +240,15 @@ def _fire_relationship_update(user_id, character_id, user_text, full_jp,
 
 
 def _start_relationship_update(user_id, character_id, user_text, full_jp,
-                               char, short_memories):
+                               char, short_memories, temporal_snapshot=None):
     """快捷方法：从 handler 里一行调用起 v4 更新线程。
     char + short_memories 由 handler 提供（handler 里已经拿到了）。"""
     core_snippet = (char.get('core_prompt') or '')[:300]
     recent_ctx = [{'role': r, 'content': c} for r, c in (short_memories or [])[-6:]]
     threading.Thread(
         target=_fire_relationship_update,
-        args=(user_id, character_id, user_text, full_jp, core_snippet, recent_ctx),
+        args=(user_id, character_id, user_text, full_jp, core_snippet, recent_ctx,
+              temporal_snapshot),
         daemon=True,
     ).start()
 
@@ -260,6 +266,8 @@ async def chat_text(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+
     # ★ 角色日程:他现在可能真的走不开(上课/出任务/洗澡)。
     #   走不开就【只已读不回】,并排一条 promise 等忙完再回 ——
     #   这比秒回一句"我在忙"更像真人。
@@ -272,6 +280,10 @@ async def chat_text(data: dict):
         if act and not act['can_reply']:
             # 先把这句话存进短期记忆,不然他忙完回来不知道你说了啥
             save_short_memory(user_id, 'user', user_text, character_id)
+            record_user_message(
+                user_id, character_id, source='chat_text_busy',
+                prior_snapshot=temporal_snapshot,
+            )
 
             free_at = db_schedule.get_next_free_time(character_id, user_id, _now_dt) or act['end_time']
             try:
@@ -347,7 +359,8 @@ async def chat_text(data: dict):
     if short_memories:
         recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
 
-    system_blocks = build_system_blocks(user_id, character_id, recall_query)
+    system_blocks = build_system_blocks(
+        user_id, character_id, recall_query, temporal_snapshot=temporal_snapshot)
 
     result = None
     last_raw = ''   # ★ 记住最后一次模型原始回复，用于"纯日语救援"
@@ -395,7 +408,14 @@ async def chat_text(data: dict):
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
-    enqueue_private_extraction(user_id, user_text, full_jp, character_id)
+    record_turn(
+        user_id, character_id, source='chat_text',
+        prior_snapshot=temporal_snapshot,
+    )
+    enqueue_private_extraction(
+        user_id, user_text, full_jp, character_id,
+        temporal_context=temporal_snapshot,
+    )
     # ★ 事件驱动日记：聊到大事时，他会因为"这事值得记"而写一篇（后台，不阻塞回复）
     try:
         import diary_engine
@@ -429,7 +449,7 @@ async def chat_text(data: dict):
 
     # ★ v4 感情账本异步更新（传上下文 + stderr 可靠输出，见文件顶部说明）
     _start_relationship_update(user_id, character_id, user_text, full_jp,
-                               char, short_memories)
+                               char, short_memories, temporal_snapshot)
 
     voice_id = char.get('voice_id')
     for m in msgs:
@@ -584,6 +604,7 @@ async def chat_story(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     total_days = update_chat_days(user_id)
     short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
 
@@ -594,7 +615,10 @@ async def chat_story(data: dict):
     if short_memories:
         recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
 
-    system_blocks = build_system_blocks(user_id, character_id, recall_query, extra_suffix=STORY_SCENE)
+    system_blocks = build_system_blocks(
+        user_id, character_id, recall_query, extra_suffix=STORY_SCENE,
+        temporal_snapshot=temporal_snapshot,
+    )
 
     result = None
     for attempt in range(5):
@@ -632,7 +656,14 @@ async def chat_story(data: dict):
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
-    enqueue_private_extraction(user_id, user_text, full_jp, character_id)
+    record_turn(
+        user_id, character_id, source='chat_story',
+        prior_snapshot=temporal_snapshot,
+    )
+    enqueue_private_extraction(
+        user_id, user_text, full_jp, character_id,
+        temporal_context=temporal_snapshot,
+    )
 
     voice_id = char.get('voice_id')
     for m in msgs:
@@ -665,6 +696,7 @@ async def chat_proactive(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     if mode == 'remind':
         trigger = f'【系统触发：到提醒时间了】现在该主动提醒对方去做这件事："{task_title}"。语气慵懒又带点关心，1条气泡。'
     else:
@@ -674,7 +706,8 @@ async def chat_proactive(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': trigger})
 
-    system_blocks = build_system_blocks(user_id, character_id, task_title)
+    system_blocks = build_system_blocks(
+        user_id, character_id, task_title, temporal_snapshot=temporal_snapshot)
 
     result = None
     for attempt in range(3):
@@ -706,6 +739,10 @@ async def chat_proactive(data: dict):
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
+    record_assistant_message(
+        user_id, character_id, source=f'chat_proactive:{mode}',
+        prior_snapshot=temporal_snapshot,
+    )
 
     voice_id = char.get('voice_id')
     for m in msgs:
@@ -740,11 +777,15 @@ async def chat_voice_text(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 
-    system_blocks = build_system_blocks(user_id, character_id, user_text, extra_suffix=VOICE_CALL_SCENE)
+    system_blocks = build_system_blocks(
+        user_id, character_id, user_text, extra_suffix=VOICE_CALL_SCENE,
+        temporal_snapshot=temporal_snapshot,
+    )
 
     result = None
     for attempt in range(3):
@@ -774,7 +815,14 @@ async def chat_voice_text(data: dict):
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
-    enqueue_private_extraction(user_id, user_text, full_jp, character_id)
+    record_turn(
+        user_id, character_id, source='chat_voice_text',
+        prior_snapshot=temporal_snapshot,
+    )
+    enqueue_private_extraction(
+        user_id, user_text, full_jp, character_id,
+        temporal_context=temporal_snapshot,
+    )
 
     voice_id = char.get('voice_id')
     for m in msgs:
@@ -812,11 +860,15 @@ async def chat_voice_story(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     short_memories = get_short_memory(user_id, 4, character_id)
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 
-    system_blocks = build_system_blocks(user_id, character_id, user_text, extra_suffix=VOICE_STORY_SCENE)
+    system_blocks = build_system_blocks(
+        user_id, character_id, user_text, extra_suffix=VOICE_STORY_SCENE,
+        temporal_snapshot=temporal_snapshot,
+    )
 
     result = None
     for attempt in range(5):
@@ -853,7 +905,14 @@ async def chat_voice_story(data: dict):
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
-    enqueue_private_extraction(user_id, user_text, full_jp, character_id)
+    record_turn(
+        user_id, character_id, source='chat_voice_story',
+        prior_snapshot=temporal_snapshot,
+    )
+    enqueue_private_extraction(
+        user_id, user_text, full_jp, character_id,
+        temporal_context=temporal_snapshot,
+    )
 
     voice_id = char.get('voice_id')
     for m in msgs:
@@ -882,6 +941,7 @@ async def chat_voice_proactive(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     if mode == 'greeting':
         trigger = ('【系统:电话刚接通。'
                    '按你此刻对她的【真实态度】开口——不是"客服接通"式打招呼,不是默认关心。'
@@ -929,7 +989,10 @@ async def chat_voice_proactive(data: dict):
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': trigger})
 
-    system_blocks = build_system_blocks(user_id, character_id, '', extra_suffix=scene)
+    system_blocks = build_system_blocks(
+        user_id, character_id, '', extra_suffix=scene,
+        temporal_snapshot=temporal_snapshot,
+    )
 
     result = None
     for attempt in range(3):
@@ -965,6 +1028,10 @@ async def chat_voice_proactive(data: dict):
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
+    record_assistant_message(
+        user_id, character_id, source=f'chat_voice_proactive:{mode}',
+        prior_snapshot=temporal_snapshot,
+    )
 
     voice_id = char.get('voice_id')
     for m in msgs:

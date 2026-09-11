@@ -30,6 +30,7 @@ from prompt import build_system_blocks
 from user_memory import save_short_memory, get_short_memory
 from memory_jobs import enqueue_private_extraction
 from characters import get_character
+from temporal_awareness import get_temporal_snapshot, record_turn
 
 router = APIRouter()
 
@@ -98,12 +99,14 @@ async def chat_voice_stream(data: dict):
         return _err(f'character {character_id} not found')
 
     voice_id = char.get('voice_id')
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     short_memories = get_short_memory(user_id, 6, character_id)
     messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': user_text})
 
     system_blocks = build_system_blocks(
-        user_id, character_id, user_text, extra_suffix=VOICE_STREAM_SCENE
+        user_id, character_id, user_text, extra_suffix=VOICE_STREAM_SCENE,
+        temporal_snapshot=temporal_snapshot,
     )
 
     async def event_stream():
@@ -194,9 +197,16 @@ async def chat_voice_stream(data: dict):
                 try:
                     save_short_memory(user_id, 'user', user_text, character_id)
                     save_short_memory(user_id, 'assistant', full_jp, character_id)
+                    record_turn(
+                        user_id, character_id, source='chat_voice_stream',
+                        prior_snapshot=temporal_snapshot,
+                    )
                 except Exception as e:
                     print(f'[voice_stream] short_memory 保存失败:{e}')
-                enqueue_private_extraction(user_id, user_text, full_jp, character_id)
+                enqueue_private_extraction(
+                    user_id, user_text, full_jp, character_id,
+                    temporal_context=temporal_snapshot,
+                )
                 print(f'[voice_stream] ✅ {character_id} 流式回复完成,共 {seq} 段')
             else:
                 print(f'[voice_stream] ⚠️ {character_id} 流式回复没抓到任何 JP+ZH 对,可能 LLM 格式漂了')

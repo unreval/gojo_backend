@@ -44,6 +44,7 @@ def build_state_summary(user_id: str, character_id: str) -> str:
     tone = compute_tone(user_id, character_id)
     reciprocity = compute_reciprocity(user_id, character_id)
     pursue_withdraw = compute_pursue_withdraw(user_id, character_id)
+    temporal_note = _temporal_note(user_id, character_id)
 
     lines = []
     lines.append('【★ 当前关系状态摘要——由后台账本读出，不由你现场判断】')
@@ -74,6 +75,8 @@ def build_state_summary(user_id: str, character_id: str) -> str:
     lines.append(f'- 互惠度：{reciprocity["desc"]}')
     if pursue_withdraw and pursue_withdraw.get('pattern'):
         lines.append(f'- 追逃模式：{pursue_withdraw["desc"]}（★ 不要把节奏差误读成关系变冷）')
+    if temporal_note:
+        lines.append(f'- 时间节奏：{temporal_note}')
     lines.append('')
 
     # ★ Declared Stance（硬约束）
@@ -323,6 +326,32 @@ def _top_friction_categories(friction: Dict, n: int = 3) -> List[str]:
         return []
     items = sorted(friction.items(), key=lambda x: -float(x[1]))
     return [k for k, v in items[:n] if float(v) > 1.0]
+
+
+def _temporal_note(user_id, character_id) -> Optional[str]:
+    try:
+        from temporal_awareness import get_temporal_snapshot
+        snap = get_temporal_snapshot(user_id, character_id)
+    except Exception:
+        return None
+    if not snap or not snap.get('has_history'):
+        return None
+    elapsed = snap.get('elapsed_seconds_since_last_interaction')
+    label = snap.get('elapsed_label') or '未知'
+    bucket = snap.get('gap_bucket')
+    if elapsed is None:
+        return None
+    if bucket in ('continuous', 'short_gap'):
+        return f'最近仍是连续聊天节奏，上次互动约 {label} 前'
+    if bucket == 'same_day_gap':
+        return f'同一天隔了约 {label}，旧话题不是刚刚发生'
+    if bucket == 'overnight':
+        return f'中间隔了约 {label}，可能已跨过半天或一晚'
+    if bucket == 'few_days':
+        return f'她隔了约 {label} 又回来；注意到断档，但不要直接判成变冷'
+    if bucket in ('long_gap', 'very_long_gap'):
+        return f'已有明显断档（约 {label}）；可作为久别/等待语境，不能单独当感情结论'
+    return f'上次互动约 {label} 前'
 
 
 # ══════════════════════════════════════════════════════════════

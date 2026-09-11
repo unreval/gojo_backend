@@ -22,6 +22,7 @@ from user_memory import (
     update_chat_days,
 )
 from memory_jobs import enqueue_private_extraction
+from temporal_awareness import get_temporal_snapshot, record_turn
 from characters import get_character
 from tasks import (
     find_duplicate_task,
@@ -98,6 +99,7 @@ async def chat_image(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     total_days = update_chat_days(user_id)
     short_memories = get_short_memory(user_id, 6, character_id)
 
@@ -148,7 +150,10 @@ async def chat_image(data: dict):
 
     # 用 caption 做背景记忆检索（聊到甜食的照片→召回喜久福那条）
     recall_query = user_text if user_text else ''
-    system_blocks = build_system_blocks(user_id, character_id, recall_query)
+    system_blocks = build_system_blocks(
+        user_id, character_id, recall_query,
+        temporal_snapshot=temporal_snapshot,
+    )
 
     # ── 调用 Claude Vision ──
     result = None
@@ -190,10 +195,18 @@ async def chat_image(data: dict):
 
     save_short_memory(user_id, 'user', display_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
+    record_turn(
+        user_id, character_id,
+        source='chat_video' if is_video else 'chat_image',
+        prior_snapshot=temporal_snapshot,
+    )
 
     # 如果用户附了文字，尝试提取用户事实
     if user_text:
-        enqueue_private_extraction(user_id, user_text, full_jp, character_id)
+        enqueue_private_extraction(
+            user_id, user_text, full_jp, character_id,
+            temporal_context=temporal_snapshot,
+        )
 
     voice_id = char.get('voice_id')
     for m in msgs:

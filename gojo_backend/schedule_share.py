@@ -12,6 +12,9 @@ from config import CN_TZ, ANTHROPIC_KEY, MODEL_MAIN
 import anthropic
 import db_schedule
 import proactive_msg
+from temporal_awareness import (
+    build_prompt_context, get_temporal_snapshot, record_assistant_message,
+)
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
@@ -102,6 +105,9 @@ def _generate_share(character_id, user_id, activity):
     char_name = char['name']
     voice_id = char.get('voice_id')
     now = _now()
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    temporal_text = build_prompt_context(
+        user_id, character_id, snapshot=temporal_snapshot)
 
     try:
         shorts = get_short_memory(user_id, 4, character_id)
@@ -120,7 +126,10 @@ def _generate_share(character_id, user_id, activity):
         from user_memory import get_first_interaction_days, get_long_memory
         _days = get_first_interaction_days(user_id, character_id)
         _facts = get_long_memory(user_id, character_id)
-        relation_rules = build_relation_rules(_days, len(bonds), len(_facts))
+        relation_rules = build_relation_rules(
+            _days, len(bonds), len(_facts),
+            user_id=user_id, character_id=character_id,
+        )
     except Exception as _e:
         relation_rules = ''
 
@@ -128,6 +137,7 @@ def _generate_share(character_id, user_id, activity):
 
 【角色】{char_name}
 【当前时间】{now.strftime("%H:%M")}
+{temporal_text}
 {relation_rules}
 
 【角色正在做的事】
@@ -197,6 +207,10 @@ def _generate_share(character_id, user_id, activity):
 
         try:
             save_short_memory(user_id, 'assistant', jp, character_id)
+            record_assistant_message(
+                user_id, character_id, source='life_share',
+                prior_snapshot=temporal_snapshot,
+            )
         except Exception:
             pass
 

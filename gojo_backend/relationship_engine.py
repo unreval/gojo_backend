@@ -10,6 +10,7 @@
 ★ 铁律 4：low confidence 只入 hypothesis，不改核心状态
 ★ 铁律 5：character_stance_declared → 写入 declared_stance
 """
+import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -51,6 +52,7 @@ def process_turn(
     character_reply: Optional[str] = None,
     character_core_snippet: Optional[str] = None,
     recent_context: Optional[List[Dict]] = None,
+    temporal_context: Optional[Dict] = None,
     session_id: Optional[str] = None,
     signal_model: Optional[str] = None,
 ) -> Dict:
@@ -68,12 +70,14 @@ def process_turn(
         character_reply=character_reply,
         character_core_snippet=character_core_snippet,
         recent_context=recent_context,
+        temporal_context=temporal_context,
         model=signal_model,
     )
     signals = extraction.get('signals', [])
 
     # 2. 记录交互统计（Tone / Reciprocity 用）
     _log_interaction_stats(user_id, character_id, signals, session_id)
+    _log_temporal_observation(user_id, character_id, temporal_context)
 
     # 3. 路由每个 signal 到具体处理
     applied = []
@@ -602,6 +606,46 @@ def _log_interaction_stats(user_id, character_id, signals, session_id):
     conn.commit()
     cur.close()
     conn.close()
+
+
+def _log_temporal_observation(user_id, character_id, temporal_context):
+    """把有意义的时间断档写进 provenance，但不改任何关系数值。"""
+    if not temporal_context or not temporal_context.get('has_history'):
+        return
+    try:
+        elapsed = temporal_context.get('elapsed_seconds_since_last_interaction')
+        if elapsed is None or int(elapsed) < 600:
+            return
+        note = (
+            f"距离上一轮互动约 {temporal_context.get('elapsed_label', '未知')}; "
+            f"上次互动 {temporal_context.get('last_interaction_cn', '未知')}"
+        )
+        evidence = [{
+            'elapsed_seconds': int(elapsed),
+            'elapsed_label': temporal_context.get('elapsed_label'),
+            'gap_bucket': temporal_context.get('gap_bucket'),
+            'last_interaction_at': temporal_context.get('last_interaction_cn'),
+            'last_user_message_at': temporal_context.get('last_user_message_cn'),
+            'last_assistant_message_at': temporal_context.get('last_assistant_message_cn'),
+            'rule': 'context_only_not_linear_emotion_delta',
+        }]
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('''INSERT INTO rel_provenance_log
+                       (user_id, character_id, state_field,
+                        value_before, value_after, delta,
+                        signal_type, confidence, rule,
+                        evidence_refs, note)
+                       VALUES (%s, %s, %s, NULL, NULL, NULL,
+                               %s, %s, %s, %s, %s)''',
+                    (user_id, character_id, 'temporal.gap_observed',
+                     'temporal_gap', 'high', 'temporal_context_only',
+                     json.dumps(evidence, ensure_ascii=False), note))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f'[rel_update] temporal observation skipped: {e}')
 
 
 def _now_iso() -> str:
