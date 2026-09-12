@@ -11,11 +11,13 @@ fake_db.get_conn = lambda: (_ for _ in ()).throw(
 sys.modules.setdefault('db', fake_db)
 
 from temporal_awareness import (  # noqa: E402
+    build_calendar_grounding,
     build_memory_context,
     build_prompt_context,
     build_relationship_context,
     classify_gap,
     format_elapsed,
+    find_reply_calendar_conflict,
     serialize_snapshot,
 )
 
@@ -79,6 +81,65 @@ class TemporalAwarenessTextTests(unittest.TestCase):
         text = build_prompt_context('u1', 'gojo', snapshot=snap)
         self.assertIn('第一次记录', text)
         self.assertIn('不要凭空断言你们"刚认识"', text)
+
+    def test_evening_treats_today_noon_as_past_and_next_noon_as_tomorrow(self):
+        now_utc = datetime(2026, 9, 12, 10, 13, tzinfo=timezone.utc)
+        text = build_calendar_grounding(now_utc, '我要这样忍到明天中午吗？')
+
+        self.assertIn('当前：2026-09-12 18:13', text)
+        self.assertIn('今天中午：2026-09-12 12:00，已过去6小时13分钟', text)
+        self.assertIn('下一次中午：2026-09-13 12:00，还有17小时47分钟', text)
+        self.assertIn('“明天中午” = 2026-09-13 12:00', text)
+        self.assertIn('绝不是今天中午', text)
+        self.assertIn('严禁说“今天中午还有几小时”', text)
+
+    def test_morning_keeps_today_noon_in_the_future(self):
+        now_utc = datetime(2026, 9, 12, 1, 0, tzinfo=timezone.utc)
+        text = build_calendar_grounding(now_utc, '忍到中午')
+
+        self.assertIn('当前：2026-09-12 09:00', text)
+        self.assertIn('今天中午：2026-09-12 12:00，还有3小时', text)
+        self.assertIn('下一次中午：2026-09-12 12:00，还有3小时', text)
+        self.assertIn('今天 12:00 尚未过去', text)
+
+    def test_evening_rejects_noon_as_an_unlabelled_future_deadline(self):
+        now_utc = datetime(2026, 9, 12, 10, 13, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            find_reply_calendar_conflict(
+                '', 'じゃあ昼まで我慢すれば。あと何時間かだろ。', now_utc),
+            'past_noon_used_as_future_deadline',
+        )
+        self.assertIsNone(
+            find_reply_calendar_conflict(
+                '', 'じゃあ明日の昼まで我慢すれば。', now_utc)
+        )
+
+    def test_reply_cannot_rewrite_tomorrow_noon_as_today(self):
+        now_utc = datetime(2026, 9, 12, 10, 13, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            find_reply_calendar_conflict(
+                '我要这样忍到明天中午吗？',
+                '今日の昼だろ。今まだ夕方だぞ。',
+                now_utc,
+            ),
+            'tomorrow_noon_rewritten_as_today',
+        )
+        self.assertIsNone(
+            find_reply_calendar_conflict(
+                '我要这样忍到明天中午吗？',
+                '今日の昼じゃなくて、明日の昼だ。',
+                now_utc,
+            )
+        )
+
+    def test_morning_allows_today_noon_as_a_future_deadline(self):
+        now_utc = datetime(2026, 9, 12, 1, 0, tzinfo=timezone.utc)
+        self.assertIsNone(
+            find_reply_calendar_conflict(
+                '', 'じゃあ昼まで我慢すれば。', now_utc)
+        )
 
     def test_snapshot_serialization_keeps_background_jobs_json_safe(self):
         snap = self._snapshot(3600)

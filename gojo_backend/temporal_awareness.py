@@ -6,7 +6,7 @@
 它不做"过了 X 天所以感情 +/-N"这种线性情绪/关系改动，只把真实经过时间
 交给 prompt、记忆提取和关系 observer/reader 当上下文使用。
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from config import CN_TZ
@@ -110,6 +110,145 @@ def serialize_snapshot(snapshot: Optional[Dict]) -> Optional[Dict]:
         else:
             out[key] = value
     return out
+
+
+def build_calendar_grounding(now_utc: Optional[datetime] = None,
+                             user_text: str = '') -> str:
+    """Build deterministic local-calendar facts for the generation prompt."""
+    current = _coerce_dt(now_utc) if now_utc is not None else datetime.now(timezone.utc)
+    if current is None:
+        current = datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    now_cn = current.astimezone(CN_TZ).replace(second=0, microsecond=0)
+
+    today_morning = _local_anchor(now_cn, 8)
+    today_noon = _local_anchor(now_cn, 12)
+    today_evening = _local_anchor(now_cn, 18)
+    tonight = _local_anchor(now_cn, 21)
+    tomorrow_noon = today_noon + timedelta(days=1)
+    next_noon = today_noon if now_cn <= today_noon else tomorrow_noon
+
+    if now_cn <= today_noon:
+        noon_rule = (
+            f'今天 12:00 尚未过去；面向未来的“到中午/昼まで”指今天 '
+            f'{today_noon.strftime("%Y-%m-%d 12:00")}。'
+        )
+    else:
+        noon_rule = (
+            f'今天 12:00 已经过去；面向未来的“到中午/昼まで”只能指下一次中午，'
+            f'即明天 {tomorrow_noon.strftime("%Y-%m-%d 12:00")}。'
+            '严禁说“今天中午还有几小时”。'
+        )
+
+    explicit_rule = ''
+    normalized_text = str(user_text or '')
+    tomorrow_noon_tokens = ('明天中午', '明日の昼', '明日のお昼', '明日昼')
+    today_noon_tokens = ('今天中午', '今日の昼', '今日のお昼', '今日昼')
+    if any(token in normalized_text for token in tomorrow_noon_tokens):
+        explicit_rule = (
+            f'\n- 本轮用户所说的“明天中午” = '
+            f'{tomorrow_noon.strftime("%Y-%m-%d 12:00")}，'
+            f'{_describe_delta(tomorrow_noon, now_cn)}；绝不是今天中午。'
+        )
+    elif any(token in normalized_text for token in today_noon_tokens):
+        explicit_rule = (
+            f'\n- 本轮用户所说的“今天中午” = '
+            f'{today_noon.strftime("%Y-%m-%d 12:00")}，'
+            f'{_describe_delta(today_noon, now_cn)}。'
+        )
+
+    return f'''【确定性日历锚点——后端已计算，不得凭感觉改写】
+- 当前：{now_cn.strftime("%Y-%m-%d %H:%M")}（北京时间）
+{_anchor_line('今天早上', today_morning, now_cn)}
+{_anchor_line('今天中午', today_noon, now_cn)}
+{_anchor_line('今天傍晚', today_evening, now_cn)}
+{_anchor_line('今晚', tonight, now_cn)}
+{_anchor_line('下一次中午', next_noon, now_cn)}{explicit_rule}
+
+硬约束：
+1. {noon_rule}
+2. “今天/明天/昨天”必须先换成完整日期，再判断目标时刻在当前时刻之前还是之后。
+3. 说“还有多久”只能用于未来；目标已过去必须说“已经过去”。
+4. 只有“九点”而没有早上/晚上时，不得擅自把 09:00 和 21:00 互换；上下文不足就自然确认。'''
+
+
+def find_reply_calendar_conflict(user_text: str, assistant_text: str,
+                                 now_utc: Optional[datetime] = None) -> Optional[str]:
+    """Return a stable code for an obvious named-time contradiction."""
+    current = _coerce_dt(now_utc) if now_utc is not None else datetime.now(timezone.utc)
+    if current is None:
+        current = datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    now_cn = current.astimezone(CN_TZ).replace(second=0, microsecond=0)
+    today_noon = _local_anchor(now_cn, 12)
+
+    user = str(user_text or '')
+    reply = str(assistant_text or '')
+    tomorrow_noon_tokens = ('明天中午', '明日の昼', '明日のお昼', '明日昼')
+    today_noon_tokens = ('今天中午', '今日の昼', '今日のお昼', '今日昼')
+    today_noon_corrections = (
+        '不是今天中午', '并非今天中午', '今天中午已经', '今天中午早就',
+        '今日の昼じゃない', '今日の昼ではなく', '今日の昼じゃなく',
+        '今日の昼はもう', '今日の昼ならもう',
+    )
+
+    if any(token in user for token in tomorrow_noon_tokens):
+        says_today_noon = any(token in reply for token in today_noon_tokens)
+        corrects_today_noon = any(token in reply for token in today_noon_corrections)
+        if says_today_noon and not corrects_today_noon:
+            return 'tomorrow_noon_rewritten_as_today'
+
+    if now_cn > today_noon:
+        future_noon_terms = ('昼まで', '中午再', '到中午', '等到中午', '忍到中午')
+        future_cues = (
+            '我慢すれば', '我慢でき', '我慢して', '待て', 'あと',
+            '再忍', '等到', '还有',
+        )
+        says_future_noon = (
+            any(token in reply for token in future_noon_terms)
+            and any(token in reply for token in future_cues)
+        )
+        names_tomorrow = any(token in reply for token in tomorrow_noon_tokens)
+        if says_future_noon and not names_tomorrow:
+            return 'past_noon_used_as_future_deadline'
+
+    return None
+
+
+def _local_anchor(now_cn: datetime, hour: int, minute: int = 0) -> datetime:
+    return now_cn.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _anchor_line(label: str, target: datetime, now_cn: datetime) -> str:
+    return (
+        f'- {label}：{target.strftime("%Y-%m-%d %H:%M")}，'
+        f'{_describe_delta(target, now_cn)}'
+    )
+
+
+def _describe_delta(target: datetime, now_cn: datetime) -> str:
+    delta_seconds = int((target - now_cn).total_seconds())
+    if abs(delta_seconds) < 60:
+        return '就是现在'
+    if delta_seconds > 0:
+        return f'还有{_format_clock_delta(delta_seconds)}'
+    return f'已过去{_format_clock_delta(-delta_seconds)}'
+
+
+def _format_clock_delta(seconds: int) -> str:
+    total_minutes = max(1, int(round(seconds / 60)))
+    days, remaining_minutes = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(remaining_minutes, 60)
+    parts = []
+    if days:
+        parts.append(f'{days}天')
+    if hours:
+        parts.append(f'{hours}小时')
+    if minutes:
+        parts.append(f'{minutes}分钟')
+    return ''.join(parts) or '不到1分钟'
 
 
 def record_turn(user_id: str, character_id: str, source: str = 'chat',

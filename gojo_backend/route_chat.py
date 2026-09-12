@@ -42,7 +42,7 @@ from user_memory import (
 )
 from memory_jobs import enqueue_private_extraction
 from temporal_awareness import (
-    get_temporal_snapshot, record_assistant_message,
+    find_reply_calendar_conflict, get_temporal_snapshot, record_assistant_message,
     record_turn, record_user_message,
 )
 from characters import get_character
@@ -380,6 +380,29 @@ async def chat_text(data: dict):
             parsed = _parse_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(_valid_msg(m) for m in parsed['messages']):
+                    reply_text = ' '.join(
+                        f'{m.get("jp", "")} {m.get("zh", "")}'
+                        for m in parsed['messages']
+                    )
+                    calendar_conflict = find_reply_calendar_conflict(
+                        user_text,
+                        reply_text,
+                        now_utc=temporal_snapshot.get('now_utc'),
+                    )
+                    if calendar_conflict:
+                        last_raw = ''
+                        last_visible = ''
+                        system_blocks = system_blocks + [{
+                            'type': 'text',
+                            'text': (
+                                '上一候选回复违反了后端确定的日历事实，错误代码：'
+                                f'{calendar_conflict}。必须按“确定性日历锚点”重新生成；'
+                                '已经过去的今天中午不能当作未来，明天中午也不能改成今天中午。'
+                            ),
+                        }]
+                        print(f'[{user_id}][{character_id}] 时间矛盾，拒绝候选并重试：'
+                              f'{calendar_conflict}')
+                        continue
                     result = parsed
                     break
         except Exception as e:

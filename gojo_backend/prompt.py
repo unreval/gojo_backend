@@ -18,10 +18,21 @@ from shared_relation_prompt import build_relation_rules
 import memory_search
 
 
-def get_time_context():
-    now = datetime.now(CN_TZ)
+def get_time_context(user_message='', now=None):
+    now = now or datetime.now(CN_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=CN_TZ)
+    else:
+        now = now.astimezone(CN_TZ)
     hour = now.hour
     weekday_jp = ['月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日', '日曜日'][now.weekday()]
+
+    try:
+        from temporal_awareness import build_calendar_grounding
+        calendar_grounding = build_calendar_grounding(now, user_message)
+    except Exception as e:
+        print(f'[prompt] 确定性日历锚点注入跳过：{e}')
+        calendar_grounding = ''
 
     if 5 <= hour < 11:
         period, greeting_hint = '早晨/上午（朝・午前）', '如果是问候，应该是「おはよう」'
@@ -52,13 +63,15 @@ def get_time_context():
 {greeting_hint}{night_note}
 绝对不要根据自己的想象发早安/晚安，必须根据真实时段。
 
+{calendar_grounding}
+
 【★ 时间算数铁律——非常重要】
 当对方提到"还剩多久""快到了没""几点开始"这类涉及【时间差】的话题时,
 你【必须先真正做一次减法】,不能凭感觉说"快了""还早"这种。
 
 具体做法:
 1. 当前时刻是 {now.strftime("%H:%M")}(以此为准,别脑补)
-2. 目标时刻是对方说的那个时间(比如 9:00 就是 21:00)
+2. 目标时刻必须包含日期和 24 小时时钟：“晚上九点”是 21:00，“早上九点”是 09:00；只说“九点”且上下文不足时先确认
 3. 差 = 目标 - 当前 = N 分钟(自己算清楚)
 4. 回复里的时间描述,必须和这个差值一致——
    · 差 8 分钟就说"还有八分钟",不说"还剩三分钟"
@@ -529,7 +542,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     canon_lock = load_canon_lock(character_id)
 
     # ── 时间 + 输出规范 ──
-    time_ctx = get_time_context()
+    time_ctx = get_time_context(user_message)
     emotion_list = ', '.join(EMOTIONS)
 
     # ════════════════════════════════════════════════════════
