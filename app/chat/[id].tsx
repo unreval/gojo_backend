@@ -1286,6 +1286,7 @@ export default function ChatRoom() {
       } else {
         const res = await axios.post(`${SERVER_URL}/chat/text`, {
           text, user_id: FIXED_USER_ID, character_id: chatId,
+          source_event_id: userMsg.id,
         });
         await processResponseExtras(res.data);
         // ★ 已读的语义:【他真的看到并回复了】才算已读。

@@ -13,6 +13,7 @@
 import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
+import uuid
 
 from db import get_conn
 
@@ -55,6 +56,7 @@ def process_turn(
     temporal_context: Optional[Dict] = None,
     session_id: Optional[str] = None,
     signal_model: Optional[str] = None,
+    source_event_id: Optional[str] = None,
 ) -> Dict:
     """处理一轮对话，更新关系状态。异步调用（不要挂在主聊天请求路径上）。
 
@@ -100,10 +102,29 @@ def process_turn(
     except Exception:
         pass
 
+    # 6. Cognitive Loop deterministic ingress reuses the v4 signal objects.
+    # It records facts and scheduling state only; it never writes rel_state.
+    cognitive_ingress = None
+    cognitive_ingress_error = None
+    try:
+        from cognitive_events import ingest_v4_signals
+        cognitive_ingress = ingest_v4_signals(
+            user_id=user_id,
+            character_id=character_id,
+            source_event_id=(
+                source_event_id or f'relationship-turn:{uuid.uuid4()}'
+            ),
+            signals=signals,
+        )
+    except Exception as exc:
+        cognitive_ingress_error = str(exc)
+
     return {
         'signals_extracted': len(signals),
         'signals_applied': len(applied),
         'observer_error': extraction.get('error'),
+        'cognitive_ingress': cognitive_ingress,
+        'cognitive_ingress_error': cognitive_ingress_error,
         'applied': applied,
     }
 

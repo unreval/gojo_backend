@@ -1,0 +1,1 @@
+"""GojoAssistant test package."""

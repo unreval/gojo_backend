@@ -199,7 +199,8 @@ def _extract_pending_tx(result: dict, user_id: str, tag: str = 'chat'):
 # ★ v4 感情判断异步触发器 —— 顶层函数，方便所有 endpoint 调用
 # ═══════════════════════════════════════════════════════════════════
 def _fire_relationship_update(user_id, character_id, user_text, full_jp,
-                              core_snippet, recent_ctx, temporal_snapshot):
+                              core_snippet, recent_ctx, temporal_snapshot,
+                              source_event_id=None):
     """子线程：调 process_turn 更新 v4 关系账本。
     ★ 用 sys.stderr 直写 + flush，避免 uvicorn stdout buffering 吞掉子线程输出。
     ★ 所有异常必须自己捕获——子线程报错默认无声。
@@ -223,6 +224,7 @@ def _fire_relationship_update(user_id, character_id, user_text, full_jp,
             character_core_snippet=core_snippet,
             recent_context=recent_ctx,
             temporal_context=temporal_snapshot,
+            source_event_id=source_event_id,
         )
         # 精简输出：只打关键数字 + action 列表 + error（不再刷 state summary 满屏）
         sig_n = result.get('signals_extracted', 0)
@@ -240,15 +242,18 @@ def _fire_relationship_update(user_id, character_id, user_text, full_jp,
 
 
 def _start_relationship_update(user_id, character_id, user_text, full_jp,
-                               char, short_memories, temporal_snapshot=None):
+                               char, short_memories, temporal_snapshot=None,
+                               source_event_id=None):
     """快捷方法：从 handler 里一行调用起 v4 更新线程。
     char + short_memories 由 handler 提供（handler 里已经拿到了）。"""
     core_snippet = (char.get('core_prompt') or '')[:300]
     recent_ctx = [{'role': r, 'content': c} for r, c in (short_memories or [])[-6:]]
     threading.Thread(
         target=_fire_relationship_update,
-        args=(user_id, character_id, user_text, full_jp, core_snippet, recent_ctx,
-              temporal_snapshot),
+        args=(
+            user_id, character_id, user_text, full_jp,
+            core_snippet, recent_ctx, temporal_snapshot, source_event_id,
+        ),
         daemon=True,
     ).start()
 
@@ -258,6 +263,7 @@ async def chat_text(data: dict):
     user_text    = data.get('text', '')
     user_id      = data.get('user_id', 'default')
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
+    source_event_id = str(data.get('source_event_id') or '').strip() or None
 
     if not user_text:
         return JSONResponse({'error': 'no input'}, status_code=400)
@@ -449,7 +455,8 @@ async def chat_text(data: dict):
 
     # ★ v4 感情账本异步更新（传上下文 + stderr 可靠输出，见文件顶部说明）
     _start_relationship_update(user_id, character_id, user_text, full_jp,
-                               char, short_memories, temporal_snapshot)
+                               char, short_memories, temporal_snapshot,
+                               source_event_id)
 
     voice_id = char.get('voice_id')
     for m in msgs:
