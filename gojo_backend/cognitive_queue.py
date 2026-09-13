@@ -53,6 +53,12 @@ def _json_value(value, default):
     return value
 
 
+def _json_datetime(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f'Object of type {type(value).__name__} is not JSON serializable')
+
+
 def _get_connection(conn):
     if conn is not None:
         return conn, False
@@ -457,7 +463,9 @@ def commit_cycle_success(
                 now=current_time,
             )
         context_json = (
-            json.dumps(reasoning_context, ensure_ascii=False)
+            json.dumps(
+                reasoning_context, ensure_ascii=False, default=_json_datetime,
+            )
             if reasoning_context is not None
             else None
         )

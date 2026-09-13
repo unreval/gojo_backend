@@ -223,7 +223,10 @@ class SlowLoopTransactionTests(unittest.TestCase):
         connection = TransactionConnection(cursor)
         result = cognitive_queue.commit_cycle_success(
             7,
-            reasoning_context={'events': [{'event_id': 27}]},
+            reasoning_context={
+                'events': [{'event_id': 27, 'occurred_at': NOW}],
+                'temporal': {'queued_at': NOW},
+            },
             structured_output=valid_output(),
             worker_model='test-model',
             worker_usage={'input_tokens': 10, 'output_tokens': 20},
@@ -242,6 +245,11 @@ class SlowLoopTransactionTests(unittest.TestCase):
         self.assertIn("SET status = 'consumed'", sql)
         self.assertIn('cycle_summary', sql)
         self.assertIn('evidence_refs', sql)
+        cycle_update = next(
+            params for statement, params in cursor.executed
+            if statement.startswith('UPDATE cognitive_cycles SET status')
+        )
+        self.assertIn('2026-09-13T08:00:00+00:00', cycle_update[1])
 
     def test_invalid_output_rolls_back_before_consuming_triggers(self):
         cursor = StructuredCommitCursor()
@@ -328,6 +336,15 @@ class SlowLoopSchemaTests(unittest.TestCase):
             self.assertIn(field, ddl)
         self.assertIn('CREATE TABLE IF NOT EXISTS cognitive_beliefs', ddl)
         self.assertIn('cognitive_worker_migrations', ddl)
+
+    def test_datetime_serialization_failures_are_requeued_once(self):
+        source = inspect.getsource(cognitive_db.init_cognitive_tables)
+        self.assertIn('slow_worker_v1_datetime_serialization_recovery', source)
+        self.assertIn(
+            'slow_loop_typeerror:Object_of_type_datetime_is_not_JSON_serializable',
+            source,
+        )
+        self.assertIn("status IN ('pending', 'dead_letter')", source)
 
 
 class SlowLoopInspectionTests(unittest.TestCase):

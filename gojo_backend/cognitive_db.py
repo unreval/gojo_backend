@@ -248,6 +248,28 @@ def init_cognitive_tables(conn=None):
                      AND consumed_cycle_id IS NULL''',
             )
             recovered_pre_worker = cur.rowcount
+        cur.execute(
+            '''INSERT INTO cognitive_worker_migrations (migration_key)
+               VALUES ('slow_worker_v1_datetime_serialization_recovery')
+               ON CONFLICT (migration_key) DO NOTHING
+               RETURNING migration_key''',
+        )
+        if cur.fetchone():
+            cur.execute(
+                '''UPDATE cognitive_event_triggers
+                   SET status = 'pending', attempt_count = 0,
+                       last_error_code = NULL,
+                       claimed_by_cycle_id = NULL, claimed_at = NULL,
+                       claim_expires_at = NULL,
+                       consumed_cycle_id = NULL, consumed_at = NULL,
+                       slow_cycle_suppressed_reason = NULL,
+                       suppressed_at = NULL
+                   WHERE status IN ('pending', 'dead_letter')
+                     AND last_error_code =
+                         'slow_loop_typeerror:Object_of_type_datetime_is_not_JSON_serializable'
+                     AND consumed_cycle_id IS NULL''',
+            )
+            recovered_pre_worker += cur.rowcount
         conn.commit()
     except Exception:
         conn.rollback()
