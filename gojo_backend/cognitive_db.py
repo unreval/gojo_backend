@@ -70,7 +70,7 @@ COGNITIVE_DDL = (
         user_id TEXT NOT NULL,
         character_id TEXT NOT NULL,
         trigger_class TEXT NOT NULL CHECK (trigger_class IN (
-            'prediction_error', 'question_reactivation',
+            'prediction_error', 'prediction_confirmation', 'question_reactivation',
             'high_weight_evidence', 'scheduled_reflection'
         )),
         occurrence_key TEXT NOT NULL DEFAULT 'default',
@@ -109,6 +109,36 @@ COGNITIVE_DDL = (
                 AND consumed_at IS NULL)
         )
     )''',
+    '''DO $$
+       DECLARE trigger_class_constraint RECORD;
+       BEGIN
+           IF NOT EXISTS (
+               SELECT 1 FROM pg_constraint
+               WHERE conrelid = 'cognitive_event_triggers'::regclass
+                 AND conname = 'ck_cognitive_trigger_class_v2'
+           ) THEN
+               FOR trigger_class_constraint IN
+                   SELECT conname FROM pg_constraint
+                   WHERE conrelid = 'cognitive_event_triggers'::regclass
+                     AND contype = 'c'
+                     AND pg_get_constraintdef(oid) LIKE '%trigger_class%'
+               LOOP
+                   EXECUTE format(
+                       'ALTER TABLE cognitive_event_triggers '
+                       'DROP CONSTRAINT %I',
+                       trigger_class_constraint.conname
+                   );
+               END LOOP;
+               ALTER TABLE cognitive_event_triggers
+                   ADD CONSTRAINT ck_cognitive_trigger_class_v2 CHECK (
+                       trigger_class IN (
+                           'prediction_error', 'prediction_confirmation',
+                           'question_reactivation', 'high_weight_evidence',
+                           'scheduled_reflection'
+                       )
+                   );
+           END IF;
+       END $$''',
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_triggers_pending_pair
        ON cognitive_event_triggers
        (user_id, character_id, status, priority DESC, created_at)''',
@@ -270,6 +300,22 @@ def init_cognitive_tables(conn=None):
                      AND consumed_cycle_id IS NULL''',
             )
             recovered_pre_worker += cur.rowcount
+        cur.execute(
+            '''INSERT INTO cognitive_worker_migrations (migration_key)
+               VALUES ('semantic_prediction_v2_supersede_count_resolvers')
+               ON CONFLICT (migration_key) DO NOTHING
+               RETURNING migration_key''',
+        )
+        if cur.fetchone():
+            cur.execute(
+                '''UPDATE cognitive_predictions
+                   SET status = 'expired', settled_at = CURRENT_TIMESTAMP,
+                       last_error_code =
+                           'superseded_nonsemantic_prediction_v2'
+                   WHERE status = 'pending'
+                     AND resolver_name <> 'current_event_signal_outcome'
+                     AND metadata ->> 'created_by' = 'cognitive_slow_loop' ''',
+            )
         conn.commit()
     except Exception:
         conn.rollback()

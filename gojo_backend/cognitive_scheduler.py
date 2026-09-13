@@ -2,10 +2,13 @@
 from datetime import datetime, timedelta, timezone
 
 from cognitive_config import (
+    COGNITIVE_REFLECTION_ACTIVE_DAYS,
     COGNITIVE_REFLECTION_INTERVAL_SECONDS,
+    COGNITIVE_REFLECTION_SCAN_BATCH,
     COGNITIVE_REFLECTION_SUPPRESSION_SECONDS,
 )
 from cognitive_events import record_source_event
+from cognitive_predictions import settle_pending_predictions
 from cognitive_triggers import create_trigger_occurrence
 
 
@@ -61,6 +64,14 @@ def enqueue_scheduled_reflection(
             database.commit()
             return {'status': 'duplicate', 'event_id': None, 'trigger_id': None}
 
+        settled_predictions = settle_pending_predictions(
+            database,
+            user_id=user_id,
+            character_id=character_id,
+            event_id=event_id,
+            occurred_at=event_time,
+        )
+
         cur = database.cursor()
         try:
             suppression_floor = event_time - timedelta(
@@ -106,10 +117,71 @@ def enqueue_scheduled_reflection(
             )
             status = 'pending'
         database.commit()
-        return {'status': status, 'event_id': event_id, 'trigger_id': trigger_id}
+        return {
+            'status': status,
+            'event_id': event_id,
+            'trigger_id': trigger_id,
+            'settled_predictions': settled_predictions,
+        }
     except Exception:
         database.rollback()
         raise
+    finally:
+        if owns_connection:
+            database.close()
+
+
+def enqueue_due_reflections(*, scheduled_for=None, conn=None):
+    """Discover recently active pairs and enqueue their current time bucket."""
+    database = conn
+    owns_connection = database is None
+    if database is None:
+        from db import get_conn
+        database = get_conn()
+    event_time = _as_utc(scheduled_for)
+    activity_floor = event_time - timedelta(
+        days=COGNITIVE_REFLECTION_ACTIVE_DAYS,
+    )
+    try:
+        cur = database.cursor()
+        try:
+            cur.execute(
+                '''SELECT user_id, character_id,
+                          MAX(occurred_at) AS last_event_at
+                   FROM cognitive_events
+                   WHERE source_event_type <> 'scheduled_reflection'
+                     AND occurred_at >= %s AND occurred_at <= %s
+                   GROUP BY user_id, character_id
+                   ORDER BY last_event_at DESC
+                   LIMIT %s''',
+                (activity_floor, event_time, COGNITIVE_REFLECTION_SCAN_BATCH),
+            )
+            pairs = [(row[0], row[1]) for row in cur.fetchall()]
+        finally:
+            cur.close()
+
+        results = []
+        for user_id, character_id in pairs:
+            try:
+                result = enqueue_scheduled_reflection(
+                    user_id,
+                    character_id,
+                    scheduled_for=event_time,
+                    conn=database,
+                )
+            except Exception as exc:
+                result = {'status': 'failed', 'error': str(exc)[:180]}
+                print(
+                    '[cognitive_scheduler] reflection enqueue failed for '
+                    f'{user_id}/{character_id}: {exc}',
+                    flush=True,
+                )
+            results.append({
+                'user_id': user_id,
+                'character_id': character_id,
+                'result': result,
+            })
+        return results
     finally:
         if owns_connection:
             database.close()

@@ -216,6 +216,7 @@ class CognitiveSchemaTests(unittest.TestCase):
         self.assertIn('ck_cognitive_cycle_output_version', ddl)
         self.assertIn('ck_cognitive_trigger_claim_fields', ddl)
         self.assertIn('ck_cognitive_trigger_consumed_fields', ddl)
+        self.assertIn("'prediction_confirmation'", ddl)
 
     def test_claim_and_consumption_fields_are_separate(self):
         ddl = '\n'.join(cognitive_db.ddl_statements())
@@ -323,11 +324,11 @@ class TriggerIngressTests(unittest.TestCase):
 class PredictionTests(unittest.TestCase):
     def _prediction(self, **overrides):
         prediction = {
-            'resolver_name': 'messages_since_prediction_created',
+            'resolver_name': 'current_event_signal_outcome',
             'fulfillment_operator': '>=',
-            'fulfillment_value': 3,
-            'violation_operator': '<',
-            'violation_value': 1,
+            'fulfillment_value': 1,
+            'violation_operator': '<=',
+            'violation_value': -1,
             'expires_at': NOW + timedelta(days=1),
         }
         prediction.update(overrides)
@@ -346,20 +347,20 @@ class PredictionTests(unittest.TestCase):
 
     def test_prediction_fulfilled(self):
         result = cognitive_predictions.evaluate_prediction(
-            self._prediction(), {'messages_since_prediction_created': 3}, now=NOW,
+            self._prediction(), {'current_event_signal_outcome': 1}, now=NOW,
         )
         self.assertEqual(result['status'], 'fulfilled')
 
     def test_prediction_violated(self):
         result = cognitive_predictions.evaluate_prediction(
-            self._prediction(), {'messages_since_prediction_created': 0}, now=NOW,
+            self._prediction(), {'current_event_signal_outcome': -1}, now=NOW,
         )
         self.assertEqual(result['status'], 'violated')
 
     def test_prediction_expired_without_interpretation(self):
         result = cognitive_predictions.evaluate_prediction(
             self._prediction(expires_at=NOW - timedelta(seconds=1)),
-            {'messages_since_prediction_created': 99},
+            {'current_event_signal_outcome': 1},
             now=NOW,
         )
         self.assertEqual(result, {'status': 'expired', 'observed_value': None})
@@ -369,19 +370,31 @@ class PredictionTests(unittest.TestCase):
             'id': 8,
             'user_id': 'u',
             'character_id': 'gojo',
-            'resolver_name': 'messages_since_prediction_created',
+            'resolver_name': 'current_event_signal_outcome',
             'fulfillment_operator': '>=',
-            'fulfillment_value': 3,
-            'violation_operator': '<',
-            'violation_value': 1,
+            'fulfillment_value': 1,
+            'violation_operator': '<=',
+            'violation_value': -1,
             'expires_at': NOW + timedelta(days=1),
             'created_at': NOW - timedelta(hours=1),
+            'metadata': {
+                'description': 'test',
+                'fulfillment_signals': [{
+                    'signal_type': 'character_reciprocal',
+                    'actor': 'character',
+                }],
+                'violation_signals': [{
+                    'signal_type': 'character_stance_declared',
+                    'actor': 'character',
+                    'attributes': {'stance_type': 'retreat_boundary'},
+                }],
+            },
         }
         cursor = PredictionCursor(prediction)
         connection = TransactionConnection(cursor)
         with patch.dict(
             cognitive_predictions._RESOLVERS,
-            {'messages_since_prediction_created': lambda *args: 0},
+            {'current_event_signal_outcome': lambda *args: -1},
             clear=True,
         ), patch.object(cognitive_predictions, 'create_trigger_occurrence') as create:
             settled = cognitive_predictions.settle_pending_predictions(
@@ -390,6 +403,97 @@ class PredictionTests(unittest.TestCase):
             )
         self.assertEqual(settled[0]['status'], 'violated')
         self.assertEqual(create.call_args.kwargs['trigger_class'], 'prediction_error')
+
+    def test_fulfilled_settlement_creates_confirmation_trigger(self):
+        prediction = {
+            'id': 9,
+            'user_id': 'u',
+            'character_id': 'gojo',
+            'resolver_name': 'current_event_signal_outcome',
+            'fulfillment_operator': '>=',
+            'fulfillment_value': 1,
+            'violation_operator': '<=',
+            'violation_value': -1,
+            'expires_at': NOW + timedelta(days=1),
+            'created_at': NOW - timedelta(hours=1),
+            'metadata': {
+                'description': 'test',
+                'fulfillment_signals': [{
+                    'signal_type': 'genuine_care', 'actor': 'user',
+                }],
+                'violation_signals': [{
+                    'signal_type': 'explicit_rejection', 'actor': 'user',
+                }],
+            },
+        }
+        connection = TransactionConnection(PredictionCursor(prediction))
+        with patch.dict(
+            cognitive_predictions._RESOLVERS,
+            {'current_event_signal_outcome': lambda *args: 1},
+            clear=True,
+        ), patch.object(cognitive_predictions, 'create_trigger_occurrence') as create:
+            settled = cognitive_predictions.settle_pending_predictions(
+                connection,
+                user_id='u', character_id='gojo', event_id=23, occurred_at=NOW,
+            )
+        self.assertEqual(settled[0]['status'], 'fulfilled')
+        self.assertEqual(
+            create.call_args.kwargs['trigger_class'],
+            'prediction_confirmation',
+        )
+
+    def test_signal_selector_matches_attributes_and_violation_wins(self):
+        metadata = {
+            'description': '角色会继续保持边界。',
+            'fulfillment_signals': [{
+                'signal_type': 'character_stance_declared',
+                'actor': 'character',
+                'attributes': {'stance_type': 'boundary_stated'},
+            }],
+            'violation_signals': [{
+                'signal_type': 'character_reciprocal',
+                'actor': 'character',
+            }],
+        }
+        normalized = cognitive_predictions.normalize_signal_prediction_metadata(
+            metadata,
+        )
+        signals = [{
+            'signal_type': 'character_reciprocal',
+            'actor': 'character',
+            'confidence': 'high',
+            'attributes': {},
+        }]
+        self.assertTrue(cognitive_predictions._selector_matches(
+            signals[0], normalized['violation_signals'][0],
+        ))
+
+    def test_semantic_prediction_requires_positive_and_negative_selectors(self):
+        with self.assertRaisesRegex(ValueError, 'violation_signals'):
+            cognitive_predictions.validate_signal_prediction_contract(
+                'current_event_signal_outcome', '>=', 1, '<=', -1,
+                {
+                    'description': 'missing negative evidence',
+                    'fulfillment_signals': [{
+                        'signal_type': 'genuine_care', 'actor': 'user',
+                    }],
+                    'violation_signals': [],
+                },
+            )
+
+    def test_semantic_prediction_rejects_actor_signal_mismatch(self):
+        with self.assertRaisesRegex(ValueError, 'actor_signal_mismatch'):
+            cognitive_predictions.normalize_signal_prediction_metadata({
+                'description': 'invalid actor',
+                'fulfillment_signals': [{
+                    'signal_type': 'explicit_rejection',
+                    'actor': 'character',
+                }],
+                'violation_signals': [{
+                    'signal_type': 'character_reciprocal',
+                    'actor': 'character',
+                }],
+            })
 
     def test_no_eval_exec_or_dynamic_import_is_used(self):
         source = inspect.getsource(cognitive_predictions)
@@ -525,6 +629,8 @@ class QueueLifecycleTests(unittest.TestCase):
             "'settled_predictions'", "'reactivated_questions'", "'temporal'",
         ):
             self.assertIn(field, source)
+        self.assertIn("'hypothesis_key'", source)
+        self.assertIn("'metadata'", source)
         for phrase in ('应该冷淡', '应该生气', '收短回复', '可以暧昧'):
             self.assertNotIn(phrase, source)
 
@@ -538,6 +644,7 @@ class SchedulerTests(unittest.TestCase):
         cursor = SchedulerCursor(recent_success=None)
         connection = TransactionConnection(cursor)
         with patch.object(cognitive_scheduler, 'record_source_event', return_value=41), \
+             patch.object(cognitive_scheduler, 'settle_pending_predictions', return_value=[]), \
              patch.object(cognitive_scheduler, 'create_trigger_occurrence', return_value=51) as create:
             result = cognitive_scheduler.enqueue_scheduled_reflection(
                 'u', 'gojo', scheduled_for=NOW, conn=connection,
@@ -554,6 +661,7 @@ class SchedulerTests(unittest.TestCase):
         cursor = SchedulerCursor(recent_success=(9,))
         connection = TransactionConnection(cursor)
         with patch.object(cognitive_scheduler, 'record_source_event', return_value=41), \
+             patch.object(cognitive_scheduler, 'settle_pending_predictions', return_value=[]), \
              patch.object(cognitive_scheduler, 'create_trigger_occurrence', return_value=51) as create:
             result = cognitive_scheduler.enqueue_scheduled_reflection(
                 'u', 'gojo', scheduled_for=NOW, conn=connection,

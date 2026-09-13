@@ -35,10 +35,25 @@ def build_relation_rules(first_days, bond_count: int, fact_count: int,
         try:
             from relationship_reader import build_state_summary
             v4_summary = build_state_summary(user_id, character_id)
+            cognitive_summary = ''
+            try:
+                from cognitive_reader import build_cognitive_prompt_context
+                cognitive_summary = build_cognitive_prompt_context(
+                    user_id, character_id,
+                )
+            except Exception as cognitive_error:
+                print(
+                    '[shared_relation_prompt] 认知复盘读取失败，继续使用关系账本: '
+                    f'{cognitive_error}'
+                )
 
             # 拼装：接触信息（保留原有）+ v4 摘要 + 永远该守的表达约束
             meet_line = _build_meet_line(first_days, bond_count, fact_count)
-            return meet_line + '\n\n' + v4_summary + '\n\n' + _EXPRESSION_ONLY_RULES
+            parts = [meet_line, v4_summary]
+            if cognitive_summary:
+                parts.append(cognitive_summary)
+            parts.append(_EXPRESSION_ONLY_RULES)
+            return '\n\n'.join(parts)
         except Exception as e:
             # v4 挂了不能让主聊天崩，打印 warning 后 fallback 到旧规则
             print(f'[shared_relation_prompt] v4 摘要生成失败 fallback 到 legacy: {e}')

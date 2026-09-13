@@ -59,6 +59,24 @@ def _json_datetime(value):
     raise TypeError(f'Object of type {type(value).__name__} is not JSON serializable')
 
 
+def _context_evidence_ids(context):
+    result = set()
+
+    def visit(value):
+        if isinstance(value, dict):
+            event_id = value.get('event_id')
+            if isinstance(event_id, int) and not isinstance(event_id, bool):
+                result.add(int(event_id))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(context or {})
+    return result
+
+
 def _get_connection(conn):
     if conn is not None:
         return conn, False
@@ -446,7 +464,22 @@ def commit_cycle_success(
                    WHERE link.cycle_id = %s''',
                 (cycle_id,),
             )
-            allowed_event_ids = [row[0] for row in cur.fetchall()]
+            allowed_event_ids = {int(row[0]) for row in cur.fetchall()}
+            historical_candidates = (
+                _context_evidence_ids(reasoning_context) - allowed_event_ids
+            )
+            if historical_candidates:
+                cur.execute(
+                    '''SELECT id FROM cognitive_events
+                       WHERE user_id = %s AND character_id = %s
+                         AND id = ANY(%s)''',
+                    (
+                        user_id,
+                        character_id,
+                        sorted(historical_candidates),
+                    ),
+                )
+                allowed_event_ids.update(int(row[0]) for row in cur.fetchall())
             from cognitive_output import (
                 persist_slow_loop_output,
                 validate_slow_loop_output,
@@ -691,11 +724,17 @@ def build_reasoning_context(cycle_id, *, conn=None):
         settled_predictions = []
         if event_ids:
             cur.execute(
-                '''SELECT id, prediction_key, status, resolver_name,
-                          observed_value, settled_by_event_id, settled_at
-                   FROM cognitive_predictions
-                   WHERE settled_by_event_id = ANY(%s)
-                   ORDER BY settled_at, id''',
+                '''SELECT prediction.id, prediction.prediction_key,
+                          prediction.status, prediction.resolver_name,
+                          prediction.observed_value,
+                          prediction.settled_by_event_id,
+                          prediction.settled_at, prediction.metadata,
+                          hypothesis.hypothesis_key
+                   FROM cognitive_predictions AS prediction
+                   LEFT JOIN cognitive_hypotheses AS hypothesis
+                     ON hypothesis.id = prediction.hypothesis_id
+                   WHERE prediction.settled_by_event_id = ANY(%s)
+                   ORDER BY prediction.settled_at, prediction.id''',
                 (event_ids,),
             )
             settled_predictions = [
@@ -707,6 +746,8 @@ def build_reasoning_context(cycle_id, *, conn=None):
                     'observed_value': row[4],
                     'settled_by_event_id': row[5],
                     'settled_at': row[6],
+                    'metadata': _json_value(row[7], {}),
+                    'hypothesis_key': row[8],
                 }
                 for row in cur.fetchall()
             ]

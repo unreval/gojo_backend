@@ -5,6 +5,7 @@ import threading
 from datetime import datetime, timezone
 
 from cognitive_config import (
+    COGNITIVE_REFLECTION_SCAN_SECONDS,
     COGNITIVE_WORKER_ENABLED,
     COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS,
     COGNITIVE_WORKER_MAX_TOKENS,
@@ -25,10 +26,12 @@ from cognitive_queue import (
     commit_cycle_success,
     fail_cycle,
 )
+from cognitive_scheduler import enqueue_due_reflections
 
 
 _THREAD = None
 _STOP = threading.Event()
+_LAST_REFLECTION_SCAN_AT = None
 
 
 _SYSTEM_PROMPT = '''You are the Slow Loop consolidation worker for a fictional
@@ -68,29 +71,50 @@ Schema:
   }],
   "new_predictions": [{
     "prediction_key": "stable.lowercase.key",
-    "resolver_name": "messages_since_prediction_created",
+    "resolver_name": "current_event_signal_outcome",
     "fulfillment_operator": ">=",
-    "fulfillment_value": 3,
-    "violation_operator": null,
-    "violation_value": null,
+    "fulfillment_value": 1,
+    "violation_operator": "<=",
+    "violation_value": -1,
     "expires_in_seconds": 86400,
     "hypothesis_key": null,
-    "metadata": {"description": "falsifiable expectation"},
+    "metadata": {
+      "description": "falsifiable expectation",
+      "fulfillment_signals": [{
+        "signal_type": "character_reciprocal",
+        "actor": "character"
+      }],
+      "violation_signals": [{
+        "signal_type": "character_stance_declared",
+        "actor": "character",
+        "attributes": {"stance_type": "retreat_boundary"}
+      }]
+    },
     "evidence_refs": [123]
   }],
   "evidence_refs": [{"event_id": 123, "reason": "why it supports output"}]
 }
 
-Every referenced event_id must exist in the supplied cycle. Every update and
-prediction must cite at least one event declared in top-level evidence_refs.
-Use empty arrays when evidence does not justify an update. Never invent IDs.
+Every referenced event_id must exist in the supplied context. Historical IDs
+may be reused only when they already appear in a prior belief, hypothesis, or
+prediction evidence_refs. Every update and prediction must cite at least one
+event declared in top-level evidence_refs. A scheduled_reflection event is a
+clock tick, not factual evidence by itself. Use empty update arrays when the
+evidence does not justify a change. Never invent IDs.
 
-Allowed numeric prediction resolvers:
-- interaction_gap_seconds: gap from the previous non-scheduled event
-- messages_since_prediction_created: later relationship signal event count
-- evidence_count_since_prediction_created: later extracted signal count
-Only numeric operators <, <=, >, >= are allowed. Predictions must be falsifiable;
-omit them when these resolvers cannot represent the expectation.'''
+The only prediction resolver is current_event_signal_outcome. It checks the
+next extracted relationship signals against declarative selectors. Use exactly
+fulfillment >= 1 and violation <= -1. Each selector must contain signal_type
+and actor; confidence and a subset of attributes are optional. Both selector
+lists must be non-empty. Predict an observable future signal, not a hidden
+feeling, message count, elapsed time, relationship score, or final romantic
+outcome. Omit predictions that cannot be represented this way.
+
+When settled_predictions are present, use their linked hypothesis_key,
+description, selectors, status, and the settling event as a feedback signal.
+A fulfillment may support a hypothesis and a violation may weaken or reject
+it, but one observation is not automatically conclusive. Preserve uncertainty
+and cite the actual event, not the prediction record, as evidence.'''
 
 
 def _utc_now():
@@ -102,10 +126,21 @@ def _serialize_context(context):
 
 
 def _event_ids(context):
-    return {
-        int(item['event_id']) for item in context.get('events', [])
-        if isinstance(item, dict) and item.get('event_id') is not None
-    }
+    result = set()
+
+    def visit(value):
+        if isinstance(value, dict):
+            event_id = value.get('event_id')
+            if isinstance(event_id, int) and not isinstance(event_id, bool):
+                result.add(int(event_id))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(context)
+    return result
 
 
 def _worker_error_code(exc):
@@ -158,6 +193,21 @@ def maintain_pending_cycles(now=None):
     return results
 
 
+def maintain_scheduled_reflections(now=None):
+    """Periodically create idempotent reflection events for active pairs."""
+    global _LAST_REFLECTION_SCAN_AT
+    current_time = now or _utc_now()
+    if (
+        _LAST_REFLECTION_SCAN_AT is not None
+        and (current_time - _LAST_REFLECTION_SCAN_AT).total_seconds()
+        < COGNITIVE_REFLECTION_SCAN_SECONDS
+    ):
+        return []
+    results = enqueue_due_reflections(scheduled_for=current_time)
+    _LAST_REFLECTION_SCAN_AT = current_time
+    return results
+
+
 def generate_cycle_output(context, *, create_chat_fn=None):
     """Call the model outside any database lock and validate its output."""
     if create_chat_fn is None:
@@ -204,6 +254,7 @@ def generate_cycle_output(context, *, create_chat_fn=None):
 
 def run_worker_once(*, create_chat_fn=None, now=None):
     """Maintain the queue and process at most one cycle."""
+    maintain_scheduled_reflections(now=now)
     maintain_pending_cycles(now=now)
     claimed = claim_next_cycle(now=now)
     if not claimed:

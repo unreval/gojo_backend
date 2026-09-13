@@ -46,14 +46,25 @@ def valid_output():
         }],
         'new_predictions': [{
             'prediction_key': 'care_signal.repeats.v1',
-            'resolver_name': 'evidence_count_since_prediction_created',
+            'resolver_name': 'current_event_signal_outcome',
             'fulfillment_operator': '>=',
-            'fulfillment_value': 3,
-            'violation_operator': None,
-            'violation_value': None,
+            'fulfillment_value': 1,
+            'violation_operator': '<=',
+            'violation_value': -1,
             'expires_in_seconds': 86400,
             'hypothesis_key': 'character.care_without_commitment',
-            'metadata': {'description': '等待更多可观察证据'},
+            'metadata': {
+                'description': '等待角色后续是否仍明确保持边界。',
+                'fulfillment_signals': [{
+                    'signal_type': 'character_stance_declared',
+                    'actor': 'character',
+                    'attributes': {'stance_type': 'boundary_stated'},
+                }],
+                'violation_signals': [{
+                    'signal_type': 'character_reciprocal',
+                    'actor': 'character',
+                }],
+            },
             'evidence_refs': [27],
         }],
         'evidence_refs': [{
@@ -149,8 +160,8 @@ class SnapshotCursor:
         elif 'FROM cognitive_predictions' in compact:
             self.many = [(
                 'care_signal.repeats.v1', 'pending',
-                'evidence_count_since_prediction_created', '>=', 3.0,
-                None, None, None, NOW, None, 7, '{}',
+                'current_event_signal_outcome', '>=', 1.0,
+                '<=', -1.0, None, NOW, None, 7, '{}',
             )]
         else:
             self.many = []
@@ -180,7 +191,7 @@ class SlowLoopValidationTests(unittest.TestCase):
         )
         self.assertEqual(result['cycle_summary']['confidence'], 'high')
         self.assertEqual(result['belief_updates'][0]['evidence_refs'], [27])
-        self.assertEqual(result['new_predictions'][0]['fulfillment_value'], 3.0)
+        self.assertEqual(result['new_predictions'][0]['fulfillment_value'], 1.0)
 
     def test_json_fence_is_tolerated_but_reasoning_is_not_saved(self):
         raw = 'preface\n```json\n' + json.dumps(valid_output()) + '\n```'
@@ -281,7 +292,8 @@ class SlowLoopWorkerTests(unittest.TestCase):
         self.assertEqual(usage['input_tokens'], 1)
 
     def test_worker_claims_builds_calls_and_commits(self):
-        with patch.object(cognitive_worker, 'maintain_pending_cycles'), \
+        with patch.object(cognitive_worker, 'maintain_scheduled_reflections'), \
+             patch.object(cognitive_worker, 'maintain_pending_cycles'), \
              patch.object(cognitive_worker, 'claim_next_cycle', return_value={
                  'status': 'running', 'cycle_id': 7,
              }), \
@@ -299,7 +311,8 @@ class SlowLoopWorkerTests(unittest.TestCase):
         self.assertEqual(commit.call_args.kwargs['structured_output'], valid_output())
 
     def test_worker_failure_releases_cycle(self):
-        with patch.object(cognitive_worker, 'maintain_pending_cycles'), \
+        with patch.object(cognitive_worker, 'maintain_scheduled_reflections'), \
+             patch.object(cognitive_worker, 'maintain_pending_cycles'), \
              patch.object(cognitive_worker, 'claim_next_cycle', return_value={
                  'status': 'running', 'cycle_id': 7,
              }), \
@@ -345,6 +358,12 @@ class SlowLoopSchemaTests(unittest.TestCase):
             source,
         )
         self.assertIn("status IN ('pending', 'dead_letter')", source)
+
+    def test_old_count_predictions_are_superseded_once(self):
+        source = inspect.getsource(cognitive_db.init_cognitive_tables)
+        self.assertIn('semantic_prediction_v2_supersede_count_resolvers', source)
+        self.assertIn('superseded_nonsemantic_prediction_v2', source)
+        self.assertIn("resolver_name <> 'current_event_signal_outcome'", source)
 
 
 class SlowLoopInspectionTests(unittest.TestCase):

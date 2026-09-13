@@ -46,6 +46,15 @@ COGNITIVE_REFLECTION_SUPPRESSION_SECONDS = _int_env(
 COGNITIVE_REFLECTION_INTERVAL_SECONDS = _int_env(
     'COGNITIVE_REFLECTION_INTERVAL_SECONDS', 24 * 60 * 60, 1,
 )
+COGNITIVE_REFLECTION_SCAN_SECONDS = _int_env(
+    'COGNITIVE_REFLECTION_SCAN_SECONDS', 5 * 60, 30,
+)
+COGNITIVE_REFLECTION_ACTIVE_DAYS = _int_env(
+    'COGNITIVE_REFLECTION_ACTIVE_DAYS', 30, 1,
+)
+COGNITIVE_REFLECTION_SCAN_BATCH = _int_env(
+    'COGNITIVE_REFLECTION_SCAN_BATCH', 200, 1,
+)
 COGNITIVE_ESTIMATED_TOKENS_PER_SLOW_CYCLE = _int_env(
     'COGNITIVE_ESTIMATED_TOKENS_PER_SLOW_CYCLE', 1200, 1,
 )
@@ -79,15 +88,14 @@ COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT = _int_env(
 
 TRIGGER_PRIORITIES = {
     'prediction_error': 400,
+    'prediction_confirmation': 350,
     'question_reactivation': 300,
     'high_weight_evidence': 200,
     'scheduled_reflection': 100,
 }
 
 PREDICTION_RESOLVER_WHITELIST = frozenset({
-    'interaction_gap_seconds',
-    'messages_since_prediction_created',
-    'evidence_count_since_prediction_created',
+    'current_event_signal_outcome',
 })
 
 PREDICTION_NUMERIC_OPERATORS = frozenset({'<', '<=', '>', '>='})

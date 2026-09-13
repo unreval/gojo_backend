@@ -7,6 +7,7 @@ from cognitive_config import (
     PREDICTION_NUMERIC_OPERATORS,
     PREDICTION_RESOLVER_WHITELIST,
 )
+from cognitive_predictions import validate_signal_prediction_contract
 
 
 ROOT_FIELDS = frozenset({
@@ -314,6 +315,19 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
             raise SlowLoopOutputError(f'new_prediction_{index}_metadata_invalid')
         if len(json.dumps(metadata, ensure_ascii=False)) > 4000:
             raise SlowLoopOutputError(f'new_prediction_{index}_metadata_too_large')
+        try:
+            metadata = validate_signal_prediction_contract(
+                resolver,
+                fulfillment_operator,
+                fulfillment_value,
+                violation_operator,
+                violation_value,
+                metadata,
+            )
+        except (TypeError, ValueError) as exc:
+            raise SlowLoopOutputError(
+                f'new_prediction_{index}_{exc}',
+            ) from exc
         new_predictions.append({
             'prediction_key': key,
             'resolver_name': resolver,
