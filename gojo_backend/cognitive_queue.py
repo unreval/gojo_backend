@@ -7,6 +7,9 @@ from cognitive_config import (
     COGNITIVE_CLAIM_LEASE_SECONDS,
     COGNITIVE_COOLDOWN_SECONDS,
     COGNITIVE_DAILY_CYCLE_LIMIT,
+    COGNITIVE_MAX_BELIEFS_IN_CONTEXT,
+    COGNITIVE_MAX_HYPOTHESES_IN_CONTEXT,
+    COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT,
     COGNITIVE_MAX_QUESTIONS_PER_CYCLE,
     COGNITIVE_MAX_RETRY,
     COGNITIVE_MAX_TRIGGERS_PER_CYCLE,
@@ -318,7 +321,77 @@ def mark_cycle_running(cycle_id, *, conn=None, now=None):
             database.close()
 
 
-def commit_cycle_success(cycle_id, *, reasoning_context=None, conn=None, now=None):
+def claim_next_cycle(*, conn=None, now=None):
+    """Claim one queued cycle across worker replicas and refresh its lease."""
+    database, owns_connection = _get_connection(conn)
+    current_time = _utc_now(now)
+    lease_expires = current_time + timedelta(
+        seconds=COGNITIVE_CLAIM_LEASE_SECONDS,
+    )
+    cur = database.cursor()
+    try:
+        cur.execute(
+            '''SELECT id, user_id, character_id
+               FROM cognitive_cycles
+               WHERE status = 'queued'
+               ORDER BY queued_at, id
+               FOR UPDATE SKIP LOCKED
+               LIMIT 1''',
+        )
+        row = cur.fetchone()
+        if not row:
+            database.commit()
+            return None
+        cycle_id, user_id, character_id = row
+        cur.execute(
+            '''UPDATE cognitive_event_triggers
+               SET claimed_at = %s, claim_expires_at = %s
+               WHERE claimed_by_cycle_id = %s AND status = 'claimed' ''',
+            (current_time, lease_expires, cycle_id),
+        )
+        if cur.rowcount <= 0:
+            cur.execute(
+                '''UPDATE cognitive_cycles
+                   SET status = 'failed', failure_code = 'missing_claimed_triggers',
+                       output_state_version = NULL, completed_at = %s
+                   WHERE id = %s''',
+                (current_time, cycle_id),
+            )
+            database.commit()
+            return {'status': 'invalid', 'cycle_id': cycle_id}
+        cur.execute(
+            '''UPDATE cognitive_cycles
+               SET status = 'running', started_at = %s, failure_code = NULL
+               WHERE id = %s AND status = 'queued' ''',
+            (current_time, cycle_id),
+        )
+        database.commit()
+        return {
+            'status': 'running',
+            'cycle_id': cycle_id,
+            'user_id': user_id,
+            'character_id': character_id,
+            'claim_expires_at': lease_expires,
+        }
+    except Exception:
+        database.rollback()
+        raise
+    finally:
+        cur.close()
+        if owns_connection:
+            database.close()
+
+
+def commit_cycle_success(
+    cycle_id,
+    *,
+    reasoning_context=None,
+    structured_output=None,
+    worker_model=None,
+    worker_usage=None,
+    conn=None,
+    now=None,
+):
     database, owns_connection = _get_connection(conn)
     current_time = _utc_now(now)
     cur = database.cursor()
@@ -357,18 +430,71 @@ def commit_cycle_success(cycle_id, *, reasoning_context=None, conn=None, now=Non
         if trigger_count == 0 or valid_claim_count != trigger_count:
             raise ValueError('cycle claim is missing or expired')
         output_version = successful_output_version(input_version)
+        normalized_output = None
+        if structured_output is not None:
+            cur.execute(
+                '''SELECT DISTINCT trigger.event_id
+                   FROM cognitive_cycle_trigger_events AS link
+                   JOIN cognitive_event_triggers AS trigger
+                     ON trigger.id = link.trigger_event_id
+                   WHERE link.cycle_id = %s''',
+                (cycle_id,),
+            )
+            allowed_event_ids = [row[0] for row in cur.fetchall()]
+            from cognitive_output import (
+                persist_slow_loop_output,
+                validate_slow_loop_output,
+            )
+            normalized_output = validate_slow_loop_output(
+                structured_output, allowed_event_ids=allowed_event_ids,
+            )
+            persist_slow_loop_output(
+                cur,
+                cycle_id=cycle_id,
+                user_id=user_id,
+                character_id=character_id,
+                output=normalized_output,
+                now=current_time,
+            )
         context_json = (
             json.dumps(reasoning_context, ensure_ascii=False)
             if reasoning_context is not None
             else None
         )
+        output_json = {
+            key: (
+                json.dumps(normalized_output[key], ensure_ascii=False)
+                if normalized_output is not None else None
+            )
+            for key in (
+                'cycle_summary', 'belief_updates', 'hypothesis_updates',
+                'new_predictions', 'evidence_refs',
+            )
+        }
+        usage_json = (
+            json.dumps(worker_usage, ensure_ascii=False)
+            if worker_usage is not None else None
+        )
         cur.execute(
             '''UPDATE cognitive_cycles
                SET status = 'succeeded', output_state_version = %s,
                    reasoning_context = COALESCE(%s::jsonb, reasoning_context),
+                   cycle_summary = COALESCE(%s::jsonb, cycle_summary),
+                   belief_updates = COALESCE(%s::jsonb, belief_updates),
+                   hypothesis_updates = COALESCE(%s::jsonb, hypothesis_updates),
+                   new_predictions = COALESCE(%s::jsonb, new_predictions),
+                   evidence_refs = COALESCE(%s::jsonb, evidence_refs),
+                   worker_model = COALESCE(%s, worker_model),
+                   worker_usage = COALESCE(%s::jsonb, worker_usage),
                    failure_code = NULL, completed_at = %s
                WHERE id = %s''',
-            (output_version, context_json, current_time, cycle_id),
+            (
+                output_version, context_json,
+                output_json['cycle_summary'], output_json['belief_updates'],
+                output_json['hypothesis_updates'], output_json['new_predictions'],
+                output_json['evidence_refs'], worker_model, usage_json,
+                current_time, cycle_id,
+            ),
         )
         cur.execute(
             '''UPDATE cognitive_event_triggers AS trigger
@@ -404,7 +530,11 @@ def commit_cycle_success(cycle_id, *, reasoning_context=None, conn=None, now=Non
                 (current_time, user_id, character_id),
             )
         database.commit()
-        return {'status': 'succeeded', 'output_state_version': output_version}
+        return {
+            'status': 'succeeded',
+            'output_state_version': output_version,
+            'output': normalized_output,
+        }
     except Exception:
         database.rollback()
         raise
@@ -481,7 +611,7 @@ def fail_cycle(cycle_id, error_code, *, conn=None, now=None):
 
 
 def build_reasoning_context(cycle_id, *, conn=None):
-    """Build factual context for a future Slow Loop without invoking a model."""
+    """Build factual context for the Slow Loop without invoking a model."""
     database, owns_connection = _get_connection(conn)
     cur = database.cursor()
     try:
@@ -591,6 +721,75 @@ def build_reasoning_context(cycle_id, *, conn=None):
                 for item in reactivated_questions:
                     item.update(question_facts.get(item['question_id'], {}))
 
+        cur.execute(
+            '''SELECT belief_key, statement, confidence, status,
+                      evidence_refs, updated_at
+               FROM cognitive_beliefs
+               WHERE user_id = %s AND character_id = %s
+                 AND status = 'active'
+               ORDER BY updated_at DESC, id DESC
+               LIMIT %s''',
+            (user_id, character_id, COGNITIVE_MAX_BELIEFS_IN_CONTEXT),
+        )
+        current_beliefs = [
+            {
+                'belief_key': row[0],
+                'statement': row[1],
+                'confidence': row[2],
+                'status': row[3],
+                'evidence_refs': _json_value(row[4], []),
+                'updated_at': row[5],
+            }
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(
+            '''SELECT hypothesis_key, statement, status, evidence, updated_at
+               FROM cognitive_hypotheses
+               WHERE user_id = %s AND character_id = %s
+                 AND status <> 'archived'
+               ORDER BY updated_at DESC, id DESC
+               LIMIT %s''',
+            (user_id, character_id, COGNITIVE_MAX_HYPOTHESES_IN_CONTEXT),
+        )
+        current_hypotheses = [
+            {
+                'hypothesis_key': row[0],
+                'statement': row[1],
+                'status': row[2],
+                'evidence': _json_value(row[3], []),
+                'updated_at': row[4],
+            }
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(
+            '''SELECT prediction_key, resolver_name, fulfillment_operator,
+                      fulfillment_value, violation_operator, violation_value,
+                      expires_at, observed_value, metadata, created_at
+               FROM cognitive_predictions
+               WHERE user_id = %s AND character_id = %s
+                 AND status = 'pending'
+               ORDER BY created_at DESC, id DESC
+               LIMIT %s''',
+            (user_id, character_id, COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT),
+        )
+        pending_predictions = [
+            {
+                'prediction_key': row[0],
+                'resolver_name': row[1],
+                'fulfillment_operator': row[2],
+                'fulfillment_value': row[3],
+                'violation_operator': row[4],
+                'violation_value': row[5],
+                'expires_at': row[6],
+                'observed_value': row[7],
+                'metadata': _json_value(row[8], {}),
+                'created_at': row[9],
+            }
+            for row in cur.fetchall()
+        ]
+
         event_times = [item['occurred_at'] for item in events_by_id.values()]
         return {
             'cycle_id': cycle_id,
@@ -599,6 +798,9 @@ def build_reasoning_context(cycle_id, *, conn=None):
             'triggers': triggers,
             'settled_predictions': settled_predictions,
             'reactivated_questions': reactivated_questions,
+            'current_beliefs': current_beliefs,
+            'current_hypotheses': current_hypotheses,
+            'pending_predictions': pending_predictions,
             'temporal': {
                 'queued_at': queued_at,
                 'first_event_at': min(event_times) if event_times else None,

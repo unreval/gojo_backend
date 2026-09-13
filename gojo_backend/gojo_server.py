@@ -22,6 +22,7 @@ import memory_search
 import group_bubbler
 import diary_scheduler
 import proactive_scheduler
+import cognitive_worker
 
 
 # 路由模块
@@ -124,6 +125,7 @@ seed_gojo_character()
 group_bubbler.start_bubbler()
 diary_scheduler.start_diary_scheduler()
 proactive_scheduler.start_proactive_scheduler()
+cognitive_worker.start_cognitive_worker()
 start_schedule_share()   # ★ 他在探店/翘班时,可能顺手发条消息（发不发由他按关系判断）
 
 # ── 注册路由 ──
@@ -165,6 +167,7 @@ async def health():
         'game': _HAS_GAME,
         'grumble': _HAS_GRUMBLE,
         'explore': _HAS_EXPLORE,
+        'cognitive_worker': cognitive_worker.is_cognitive_worker_running(),
     }
 
 

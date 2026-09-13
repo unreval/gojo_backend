@@ -1,8 +1,9 @@
-# Cognitive Loop v1.1: Deterministic Half
+# Cognitive Loop v1.1
 
-This phase implements only verifiable event maintenance and Slow Loop scheduling
-state. It does not implement a Slow Loop model worker and it does not decide
-how a character should interpret, feel about, or respond to facts.
+The Cognitive Loop combines verifiable deterministic maintenance with a
+background Slow Loop consolidation worker. The worker creates auditable beliefs,
+hypotheses, and falsifiable predictions. It does not decide the character's next
+reply or directly change relationship state.
 
 ## Data Flow
 
@@ -16,7 +17,13 @@ source event
     -> cognitive_event_triggers
     -> per-user/character aggregation and claim
     -> cognitive_cycles
-    -> future Slow Loop (not implemented)
+    -> Slow Loop model consolidation
+       - cycle_summary
+       - belief_updates
+       - hypothesis_updates
+       - new_predictions
+       - evidence_refs
+    -> atomic validation, persistence, and trigger consumption
 ```
 
 Scheduled reflection writes an idempotent source event and a normal trigger
@@ -28,8 +35,8 @@ create a cycle. All trigger classes meet at the same queue transaction.
 - **CLV1-INV-001:** Cognitive Loop never writes `rel_state`, any relationship
   model, or relationship dimensions such as warmth, trust, attachment,
   passion, or friction.
-- **CLV1-INV-002:** The deterministic Fast Loop makes no LLM calls. A future
-  Slow Loop is outside this implementation.
+- **CLV1-INV-002:** The deterministic Fast Loop makes no LLM calls. Only
+  `cognitive_worker.py` may invoke the model for Slow Loop consolidation.
 - **CLV1-INV-003:** Cognitive output cannot recursively create another
   cognitive source event.
 - **CLV1-INV-004:** Cognitive ingress reuses the relationship v4 signal schema
@@ -75,6 +82,19 @@ create a cycle. All trigger classes meet at the same queue transaction.
 - **CLV1-INV-020:** `consumed_cycle_id` and `consumed_at` are written only in
   the successful cycle commit transaction. Failure and lease expiry leave both
   fields `NULL` and either retry or dead-letter the trigger.
+- **CLV1-INV-021:** The model call runs after the cycle claim transaction has
+  committed. No database or advisory lock is held during network I/O.
+- **CLV1-INV-022:** The worker receives only structured cycle events, trigger
+  facts, current beliefs, hypotheses, and pending predictions. It does not load
+  or send complete chat logs.
+- **CLV1-INV-023:** Model output must contain exactly `cycle_summary`,
+  `belief_updates`, `hypothesis_updates`, `new_predictions`, and
+  `evidence_refs`. Hidden reasoning or surrounding prose is not persisted.
+- **CLV1-INV-024:** Every update must cite an event attached to the claimed
+  cycle. Invented, undeclared, or out-of-cycle evidence IDs reject the whole
+  output.
+- **CLV1-INV-025:** Durable cognitive writes, the cycle output version, and
+  trigger consumption commit in one transaction or all roll back together.
 
 ## Lifecycle
 
@@ -84,11 +104,59 @@ constraint and Slow Loop limits, selects pending triggers with `FOR UPDATE SKIP
 LOCKED`, creates a queued cycle, claims all selected occurrences, and records
 their primary/secondary joins.
 
-On success, the cycle and all claimed trigger occurrences are committed in one
+The Slow Loop worker is enabled by default. Each pass recovers expired leases,
+aggregates pending trigger pairs, claims one queued cycle with `FOR UPDATE SKIP
+LOCKED`, commits the claim, builds factual context, and calls the configured
+model outside the transaction. Model output is parsed and strictly validated;
+one correction attempt is allowed by default.
+
+On success, structured cycle output, durable beliefs, hypotheses, predictions,
+the output version, and all claimed trigger occurrences are committed in one
 transaction. On failure or lease expiry, the output version remains `NULL`;
 triggers return to `pending` until `COGNITIVE_MAX_RETRY`, then become
 `dead_letter`. Cooldown leaves triggers pending for later aggregation. Daily
-limit suppression is terminal for those occurrences.
+limit suppression is terminal for those occurrences. A one-time startup
+migration requeues pre-worker dead letters caused only by expired claims.
+
+## Structured Output
+
+`cognitive_cycles` stores the complete validated result in five JSONB columns:
+
+- `cycle_summary`: factual synthesis, salient change, uncertainty, and a
+  low/medium/high confidence label.
+- `belief_updates`: durable keyed beliefs with numeric confidence, status, and
+  evidence references. Current values are upserted into `cognitive_beliefs`.
+- `hypothesis_updates`: keyed, testable interpretations with lifecycle status
+  and evidence history. Current values are upserted into
+  `cognitive_hypotheses`.
+- `new_predictions`: keyed predictions restricted to the deterministic resolver
+  and operator whitelist. They are inserted into `cognitive_predictions`.
+- `evidence_refs`: event IDs from this cycle plus a concise explanation of why
+  each event supports the output.
+
+Predictions are never free-form executable instructions. Unknown fields,
+resolvers, operators, status values, oversized content, invalid TTLs, duplicate
+keys, and ungrounded references reject the output before any conclusion is
+written.
+
+## Operation
+
+The server starts the worker automatically after cognitive tables are ready.
+Set `COGNITIVE_WORKER_ENABLED=false` only to disable it. Useful settings are:
+
+- `COGNITIVE_WORKER_MODEL` (defaults to `MODEL_MAIN`)
+- `COGNITIVE_WORKER_MAX_TOKENS` (default `1800`)
+- `COGNITIVE_WORKER_MODEL_ATTEMPTS` (default `2`)
+- `COGNITIVE_WORKER_POLL_SECONDS` (default `5`)
+- `COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS` (default `20`)
+
+The health response includes `cognitive_worker: true|false`. To inspect saved
+conclusions without exposing the full reasoning context, run this inside the
+backend service directory:
+
+```bash
+python3 cognitive_inspect.py --user-id USER_ID --character-id gojo --limit 5
+```
 
 ## Prediction Rules
 

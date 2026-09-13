@@ -27,6 +27,13 @@ COGNITIVE_DDL = (
         input_state_version BIGINT NOT NULL DEFAULT 0,
         output_state_version BIGINT,
         reasoning_context JSONB,
+        cycle_summary JSONB,
+        belief_updates JSONB NOT NULL DEFAULT '[]'::jsonb,
+        hypothesis_updates JSONB NOT NULL DEFAULT '[]'::jsonb,
+        new_predictions JSONB NOT NULL DEFAULT '[]'::jsonb,
+        evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+        worker_model TEXT,
+        worker_usage JSONB,
         failure_code TEXT,
         queued_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         started_at TIMESTAMPTZ,
@@ -43,6 +50,20 @@ COGNITIVE_DDL = (
        WHERE status IN ('queued', 'running')''',
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_cycles_pair_completed
        ON cognitive_cycles (user_id, character_id, completed_at DESC)''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS cycle_summary JSONB''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS belief_updates JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS hypothesis_updates JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS new_predictions JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS worker_model TEXT''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS worker_usage JSONB''',
     '''CREATE TABLE IF NOT EXISTS cognitive_event_triggers (
         id BIGSERIAL PRIMARY KEY,
         event_id BIGINT NOT NULL REFERENCES cognitive_events(id) ON DELETE CASCADE,
@@ -123,6 +144,26 @@ COGNITIVE_DDL = (
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_questions_dormant
        ON cognitive_questions (user_id, character_id, status)
        WHERE status = 'dormant' ''',
+    '''CREATE TABLE IF NOT EXISTS cognitive_beliefs (
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        character_id TEXT NOT NULL,
+        belief_key TEXT NOT NULL,
+        statement TEXT NOT NULL,
+        confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5
+            CHECK (confidence >= 0 AND confidence <= 1),
+        status TEXT NOT NULL DEFAULT 'active'
+            CHECK (status IN ('active', 'retracted')),
+        evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
+        updated_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (user_id, character_id, belief_key)
+    )''',
+    '''CREATE INDEX IF NOT EXISTS idx_cognitive_beliefs_active
+       ON cognitive_beliefs (user_id, character_id, updated_at DESC)
+       WHERE status = 'active' ''',
     '''CREATE TABLE IF NOT EXISTS cognitive_hypotheses (
         id BIGSERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -166,6 +207,10 @@ COGNITIVE_DDL = (
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_predictions_pending
        ON cognitive_predictions (user_id, character_id, status, created_at)
        WHERE status = 'pending' ''',
+    '''CREATE TABLE IF NOT EXISTS cognitive_worker_migrations (
+        migration_key TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )''',
 )
 
 
@@ -180,9 +225,29 @@ def init_cognitive_tables(conn=None):
         from db import get_conn
         conn = get_conn()
     cur = conn.cursor()
+    recovered_pre_worker = 0
     try:
         for statement in COGNITIVE_DDL:
             cur.execute(statement)
+        cur.execute(
+            '''INSERT INTO cognitive_worker_migrations (migration_key)
+               VALUES ('slow_worker_v1_dead_letter_recovery')
+               ON CONFLICT (migration_key) DO NOTHING
+               RETURNING migration_key''',
+        )
+        if cur.fetchone():
+            cur.execute(
+                '''UPDATE cognitive_event_triggers
+                   SET status = 'pending', attempt_count = 0,
+                       last_error_code = NULL,
+                       claimed_by_cycle_id = NULL, claimed_at = NULL,
+                       claim_expires_at = NULL,
+                       consumed_cycle_id = NULL, consumed_at = NULL
+                   WHERE status = 'dead_letter'
+                     AND last_error_code = 'claim_lease_expired'
+                     AND consumed_cycle_id IS NULL''',
+            )
+            recovered_pre_worker = cur.rowcount
         conn.commit()
     except Exception:
         conn.rollback()
@@ -191,4 +256,5 @@ def init_cognitive_tables(conn=None):
         cur.close()
         if owns_connection:
             conn.close()
-    print('[init] Cognitive Loop v1.1 deterministic tables ready')
+    print('[init] Cognitive Loop storage ready '
+          f'(recovered pre-worker dead letters: {recovered_pre_worker})')

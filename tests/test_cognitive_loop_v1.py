@@ -608,7 +608,7 @@ class ReplayAndBoundaryTests(unittest.TestCase):
         }
         self.assertEqual(len(combinations), 100)
 
-    def test_cognitive_modules_do_not_write_relationship_state_or_call_models(self):
+    def test_deterministic_modules_do_not_write_relationship_state_or_call_models(self):
         forbidden_writes = ('UPDATE rel_state', 'INSERT INTO rel_state')
         forbidden_models = ('create_chat(', 'anthropic.', 'openai.')
         for filename in os.listdir(BACKEND):
@@ -617,7 +617,19 @@ class ReplayAndBoundaryTests(unittest.TestCase):
             with open(os.path.join(BACKEND, filename), encoding='utf-8') as handle:
                 source = handle.read()
             for forbidden in forbidden_writes + forbidden_models:
+                if filename == 'cognitive_worker.py' and forbidden in forbidden_models:
+                    continue
                 self.assertNotIn(forbidden, source, filename)
+
+    def test_only_slow_worker_may_call_a_model(self):
+        model_callers = []
+        for filename in os.listdir(BACKEND):
+            if not filename.startswith('cognitive_') or not filename.endswith('.py'):
+                continue
+            with open(os.path.join(BACKEND, filename), encoding='utf-8') as handle:
+                if 'from ai_client import create_chat' in handle.read():
+                    model_callers.append(filename)
+        self.assertEqual(model_callers, ['cognitive_worker.py'])
 
     def test_wrong_deterministic_response_guidance_is_absent(self):
         self.assertFalse(os.path.exists(

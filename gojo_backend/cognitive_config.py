@@ -1,4 +1,4 @@
-"""Central configuration for Cognitive Loop v1.1 deterministic maintenance."""
+"""Central configuration for Cognitive Loop v1.1."""
 import os
 
 
@@ -15,6 +15,13 @@ def _float_env(name, default, minimum=0.0, maximum=1.0):
     except (TypeError, ValueError):
         return default
     return min(maximum, max(minimum, value))
+
+
+def _bool_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() not in {'0', 'false', 'no', 'off'}
 
 
 COGNITIVE_COOLDOWN_SECONDS = _int_env('COGNITIVE_COOLDOWN_SECONDS', 30 * 60)
@@ -41,6 +48,33 @@ COGNITIVE_REFLECTION_INTERVAL_SECONDS = _int_env(
 )
 COGNITIVE_ESTIMATED_TOKENS_PER_SLOW_CYCLE = _int_env(
     'COGNITIVE_ESTIMATED_TOKENS_PER_SLOW_CYCLE', 1200, 1,
+)
+COGNITIVE_WORKER_ENABLED = _bool_env('COGNITIVE_WORKER_ENABLED', True)
+COGNITIVE_WORKER_MODEL = (
+    os.environ.get('COGNITIVE_WORKER_MODEL')
+    or os.environ.get('MODEL_MAIN')
+    or 'claude-opus-4-6'
+)
+COGNITIVE_WORKER_MAX_TOKENS = _int_env(
+    'COGNITIVE_WORKER_MAX_TOKENS', 1800, 256,
+)
+COGNITIVE_WORKER_MODEL_ATTEMPTS = _int_env(
+    'COGNITIVE_WORKER_MODEL_ATTEMPTS', 2, 1,
+)
+COGNITIVE_WORKER_POLL_SECONDS = _int_env(
+    'COGNITIVE_WORKER_POLL_SECONDS', 5, 1,
+)
+COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS = _int_env(
+    'COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS', 20, 1,
+)
+COGNITIVE_MAX_BELIEFS_IN_CONTEXT = _int_env(
+    'COGNITIVE_MAX_BELIEFS_IN_CONTEXT', 50, 1,
+)
+COGNITIVE_MAX_HYPOTHESES_IN_CONTEXT = _int_env(
+    'COGNITIVE_MAX_HYPOTHESES_IN_CONTEXT', 30, 1,
+)
+COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT = _int_env(
+    'COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT', 20, 1,
 )
 
 TRIGGER_PRIORITIES = {
