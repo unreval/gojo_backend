@@ -406,3 +406,51 @@ def list_active_stances(user_id, character_id) -> List[Dict]:
     conn.close()
     return [{'id': r[0], 'type': r[1], 'content': r[2], 'declared_at': r[3]}
             for r in rows]
+
+
+def save_offline_character_state(user_id: str, character_id: str, state: Dict):
+    """upsert 最新一条内部状态。JSON 本身保留，供下一回合连续性使用。"""
+    if not user_id or not character_id or not isinstance(state, dict):
+        return
+    payload = {k: v for k, v in state.items() if v is not None}
+    if not payload:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''INSERT INTO rel_offline_character_state
+               (user_id, character_id, payload, updated_at)
+           VALUES (%s, %s, %s::jsonb, CURRENT_TIMESTAMP)
+           ON CONFLICT (user_id, character_id) DO UPDATE
+           SET payload = EXCLUDED.payload,
+               updated_at = CURRENT_TIMESTAMP''',
+        (user_id, character_id, json.dumps(payload, ensure_ascii=False)),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def load_offline_character_state(user_id: str, character_id: str) -> Dict:
+    """读取上一回合内部状态。没有则返回空 dict。"""
+    if not user_id or not character_id:
+        return {}
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''SELECT payload FROM rel_offline_character_state
+           WHERE user_id = %s AND character_id = %s''',
+        (user_id, character_id),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row or not row[0]:
+        return {}
+    payload = row[0]
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return {}
+    return payload if isinstance(payload, dict) else {}

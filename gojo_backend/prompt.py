@@ -183,6 +183,7 @@ emotion字段从以下选一个：{emotion_list}
 【输出格式——必须严格遵守】
 返回合法单行JSON：
 {{"emotion":"情绪","messages":[{{"jp":"日语","zh":"中文翻译"}}]}}
+不要输出 <<<OFFLINE_CHARACTER_STATES>>> 或任何内部状态 JSON。那些不是当前协议，用户永远不该看到。
 
 【提醒功能——添加新提醒】
 如果对方请求提醒/叫他/在某时间做某事，必须额外添加 reminder 字段：

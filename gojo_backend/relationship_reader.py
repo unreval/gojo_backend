@@ -104,6 +104,27 @@ def build_state_summary(user_id: str, character_id: str) -> str:
                 lines.append(f'  · {s["content"]}')
             lines.append('')
 
+    try:
+        from relationship_state import load_offline_character_state
+        offline = load_offline_character_state(user_id, character_id)
+    except Exception:
+        offline = None
+    if offline:
+        lines.append('【★ 你上一回合留给自己的内部笔记——用户看不到这段】')
+        for key, label_cn in (
+            ('inner', '内心'),
+            ('intent', '意图'),
+            ('status', '状态'),
+            ('moodshift', '情绪偏移'),
+            ('anchor', '上一句锚点'),
+        ):
+            val = offline.get(key)
+            if val not in (None, ''):
+                lines.append(f'- {label_cn}：{val}')
+        lines.append('接这一回合时参考上面，用你的人设自然表达。')
+        lines.append('这些笔记只给你自己看。禁止输出 <<<OFFLINE_CHARACTER_STATES>>>，禁止把内部 JSON 写进 jp/zh。')
+        lines.append('')
+
     # 表达指引
     lines.append('【怎么在这一刻表达——基于以上状态，按你的人设落地】')
     lines.append(label.get('expression_guidance', ''))

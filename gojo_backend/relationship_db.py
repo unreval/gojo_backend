@@ -127,12 +127,20 @@ def init_relationship_tables():
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_rel_interaction_user_char
                    ON rel_interaction_stats (user_id, character_id, timestamp DESC)''')
 
+    cur.execute('''CREATE TABLE IF NOT EXISTS rel_offline_character_state (
+        user_id TEXT NOT NULL,
+        character_id TEXT NOT NULL,
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, character_id))''')
+
     conn.commit()
     cur.close()
     conn.close()
     print('[init] 感情判断系统 v4 数据表已就绪：'
           'rel_state / rel_provenance_log / rel_declared_stance / '
-          'rel_boundary_hits / rel_repair_log / rel_interaction_stats')
+          'rel_boundary_hits / rel_repair_log / rel_interaction_stats / '
+          'rel_offline_character_state')
 
 
 def ensure_state_row(user_id: str, character_id: str, banter_baseline: str = 'reserved'):

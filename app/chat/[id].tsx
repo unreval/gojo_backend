@@ -180,6 +180,20 @@ function formatToday(): string {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
+const OFFLINE_STATE_RE = /<<<\s*OFFLINE_CHARACTER_STATES\s*>>>[\s\S]*$/i;
+function sanitizeUserReply(text?: string | null): string {
+  if (!text) return '';
+  return text.replace(OFFLINE_STATE_RE, '').trim();
+}
+function sanitizeStoredMessage(msg: Message): Message {
+  if (msg.role === 'user') return msg;
+  return {
+    ...msg,
+    text: sanitizeUserReply(msg.text),
+    subtitle: msg.subtitle ? sanitizeUserReply(msg.subtitle) : msg.subtitle,
+  };
+}
+
 export default function ChatRoom() {
   const { id: rawId } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -351,8 +365,7 @@ export default function ChatRoom() {
             // 服务器没有(第一次用)或拉取失败 → 用本地缓存
             const saved = await AsyncStorage.getItem(STORAGE_KEY);
             if (saved) {
-              const localMsgs = JSON.parse(saved);
-              // ★ 本地缓存有可能存了 readAt(旧路径),但为了统一,还是走一遍 sidecar 合并
+              const localMsgs = JSON.parse(saved).map(sanitizeStoredMessage);
               const withRead = await applyReadStatusFromStorage(localMsgs);
               setMessages(withRead);
               // ★ 本地有、服务器没有 → 补传上去(老用户首次升级的迁移)
@@ -1676,10 +1689,14 @@ export default function ChatRoom() {
                     )}
                     {msg.text && msg.text !== '📷 [图片]' && (
                       <Text style={[s.bubbleText, msg.role === 'user' && s.bubbleTextUser]}>
-                        {msg.text}
+                        {msg.role === 'user' ? msg.text : sanitizeUserReply(msg.text)}
                       </Text>
                     )}
-                    {msg.subtitle && <Text style={s.subtitle}>{msg.subtitle}</Text>}
+                    {msg.subtitle && (
+                      <Text style={s.subtitle}>
+                        {msg.role === 'user' ? msg.subtitle : sanitizeUserReply(msg.subtitle)}
+                      </Text>
+                    )}
                     {msg.role === 'gojo' && hasAudio && (
                       <Text style={s.replayHint}>
                         {resynthing === msg.id

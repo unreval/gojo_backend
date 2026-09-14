@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
 from db import get_conn
-from utils import extract_json, sanitize_jp, merge_only_extreme_short
+from utils import ingest_model_output, finalize_user_messages
 from ai_client import extract_text
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
@@ -168,9 +168,18 @@ async def chat_image(data: dict):
             log_cache_usage(f'image:{character_id}', response)
             raw = extract_text(response).strip()
             print(f'[{user_id}][{character_id}] image attempt {attempt+1}: {raw[:120]}...')
-            parsed = extract_json(raw)
+            _visible, parsed, state = ingest_model_output(raw)
+            if state:
+                try:
+                    from relationship_state import save_offline_character_state
+                    save_offline_character_state(user_id, character_id, state)
+                    print(f'[{user_id}][{character_id}] 已保存 OFFLINE_CHARACTER_STATES '
+                          f'keys={list(state.keys())}')
+                except Exception as e:
+                    print(f'[{user_id}][{character_id}] 保存 OFFLINE_CHARACTER_STATES 失败: {e}')
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(m.get('jp', '').strip() and m.get('zh', '').strip() for m in parsed['messages']):
+                if all(str(m.get('jp', '')).strip() and str(m.get('zh', '')).strip()
+                       for m in parsed['messages']):
                     result = parsed
                     break
         except Exception as e:
@@ -186,10 +195,7 @@ async def chat_image(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    msgs = result.get('messages', [])
-    for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = merge_only_extreme_short(msgs)
+    msgs = finalize_user_messages(result.get('messages', []))
 
     full_jp = ' '.join(m['jp'] for m in msgs)
 

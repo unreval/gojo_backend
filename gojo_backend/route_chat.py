@@ -32,7 +32,10 @@ from fastapi.responses import JSONResponse
 
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
 from db import get_conn
-from utils import extract_json, sanitize_jp, merge_only_extreme_short
+from utils import (
+    ingest_model_output, sanitize_user_reply, contains_offline_marker,
+    finalize_user_messages,
+)
 from ai_client import extract_text
 from tts import tts_to_b64, transcribe_audio_b64
 from prompt import build_system_blocks, log_cache_usage
@@ -77,7 +80,9 @@ def _msg_has_json_debris(m: dict) -> bool:
     True = 消息脏了,不该用。用于所有 LLM 消息数组验证。"""
     jp = str(m.get('jp', ''))
     zh = str(m.get('zh', ''))
-    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"'):
+    if contains_offline_marker(jp) or contains_offline_marker(zh):
+        return True
+    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"'):
         if kw in jp or kw in zh:
             return True
     return False
@@ -91,24 +96,28 @@ def _valid_msg(m: dict) -> bool:
 
 
 def _parse_reply(raw: str):
-    """把模型回复解析成 JSON。
-    先用 extract_json；失败就宽松地从第一个 { 抠到最后一个 } 再解析——
-    这样即使模型在 JSON 前面写了多余的日语/解说，也能把真正的 JSON 抠出来，
-    不会再因为"散文前缀"而整段解析失败、掉进兜底。"""
-    try:
-        parsed = extract_json(raw)
-    except Exception:
-        parsed = None
-    if parsed:
-        return parsed
-    try:
-        i = raw.find('{')
-        j = raw.rfind('}')
-        if i != -1 and j > i:
-            return json.loads(raw[i:j + 1])
-    except Exception:
-        pass
-    return None
+    """把模型回复解析成 JSON。内部状态块会先被剥离。"""
+    _, parsed, _ = ingest_model_output(raw)
+    return parsed
+
+
+def _ingest(raw: str, user_id: str, character_id: str):
+    """所有模型原文的统一入口：拆内部状态 → 保存 → 返回 (parsed, visible)。"""
+    visible, parsed, state = ingest_model_output(raw)
+    if state:
+        try:
+            from relationship_state import save_offline_character_state
+            save_offline_character_state(user_id, character_id, state)
+            print(f'[{user_id}][{character_id}] 已保存 OFFLINE_CHARACTER_STATES '
+                  f'keys={list(state.keys())}')
+        except Exception as e:
+            print(f'[{user_id}][{character_id}] 保存 OFFLINE_CHARACTER_STATES 失败: {e}')
+    return parsed, visible
+
+
+def _finalize_msgs(msgs):
+    """发给前端的最后一道清洗。attempt / rescue / fallback 都走这里。"""
+    return finalize_user_messages(msgs)
 
 
 def _salvage_japanese(raw: str):
@@ -118,17 +127,16 @@ def _salvage_japanese(raw: str):
     import re
     if not raw:
         return None
-    text = raw.strip().strip('`').strip()
+    text = sanitize_user_reply(raw).strip().strip('`').strip()
+    if contains_offline_marker(text):
+        print('[salvage] 仍含 OFFLINE_CHARACTER_STATES,放弃救援')
+        return None
 
-    # ★ 强化:如果原文里出现【多个】JSON 字段名残骸,说明这是【JSON 结构坏了】,
-    #   不能当"纯日语"救,否则会把 `调皮","messages":"jp":"...` 直接塞给用户看
-    #   (那种脏数据比默认兜底更糟)
     json_field_hits = 0
-    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"'):
+    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"'):
         if kw in text:
             json_field_hits += 1
     if json_field_hits >= 2:
-        # 2 个及以上字段名残骸 = 明显是坏 JSON 泄露,不救
         print(f'[salvage] 检测到 JSON 结构泄露({json_field_hits} 个字段名),放弃救援')
         return None
 
@@ -137,14 +145,13 @@ def _salvage_japanese(raw: str):
     text = text.strip('"\'，, 。').strip()
     if not text:
         return None
-    # 必须含有假名/日文汉字，才认为是"他真说了话"，否则宁可走兜底
     if not re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', text):
         return None
-    # ★ 再一次防御:救援后的文本里如果还包含 `"jp":`、`"zh":`、`"emotion"` 这些残骸,也算失败
-    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"'):
+    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"'):
         if kw in text:
             print(f'[salvage] 救援后仍含 JSON 残骸 {kw},放弃')
             return None
+    text = sanitize_user_reply(text)
     # 截断过长的（避免把一堆乱码全塞进去）
     jp = text[:200].strip()
     zh = _quick_translate(jp)
@@ -369,15 +376,17 @@ async def chat_text(data: dict):
         user_id, character_id, recall_query, temporal_snapshot=temporal_snapshot)
 
     result = None
-    last_raw = ''   # ★ 记住最后一次模型原始回复，用于"纯日语救援"
+    last_visible = ''
     for attempt in range(3):
         try:
             raw, response = _create_json(MODEL_MAIN, 1500, system_blocks, messages)
             log_cache_usage(f'chat:{character_id}', response)
             print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
-            if raw:
-                last_raw = raw
-            parsed = _parse_reply(raw)
+            parsed, visible = _ingest(raw, user_id, character_id)
+            if visible:
+                last_visible = visible
+            elif raw:
+                last_visible = sanitize_user_reply(raw)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(_valid_msg(m) for m in parsed['messages']):
                     reply_text = ' '.join(
@@ -408,10 +417,8 @@ async def chat_text(data: dict):
         except Exception as e:
             print(f'attempt {attempt+1} error: {e}')
 
-    # ★ 纯日语救援：模型说了日语但没包成 JSON（解析全失败）时，
-    #   与其甩一句"没听清"，不如把他真正说的话用上——比兜底自然得多。
-    if not result and last_raw:
-        salvaged = _salvage_japanese(last_raw)
+    if not result and last_visible:
+        salvaged = _salvage_japanese(last_visible)
         if salvaged:
             result = {'emotion': '平静', 'messages': [salvaged]}
             print(f'[{user_id}][{character_id}] 纯日语救援：{salvaged["jp"][:40]}')
@@ -429,10 +436,7 @@ async def chat_text(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    msgs = result.get('messages', [])
-    for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = merge_only_extreme_short(msgs)
+    msgs = _finalize_msgs(result.get('messages', []))
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
@@ -656,7 +660,7 @@ async def chat_story(data: dict):
             raw, response = _create_json(MODEL_MAIN, 4000, system_blocks, messages)
             log_cache_usage(f'story:{character_id}', response)
             print(f'[story] attempt {attempt+1}: {raw[:120]}...')
-            parsed = _parse_reply(raw)
+            parsed, _ = _ingest(raw, user_id, character_id)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(_valid_msg(m) for m in parsed['messages']):
                     result = parsed
@@ -678,10 +682,7 @@ async def chat_story(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    msgs = result.get('messages', [])
-    for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = merge_only_extreme_short(msgs)
+    msgs = _finalize_msgs(result.get('messages', []))
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
@@ -744,7 +745,7 @@ async def chat_proactive(data: dict):
         try:
             raw, response = _create_json(MODEL_MAIN, 400, system_blocks, messages)
             log_cache_usage(f'proactive:{character_id}', response)
-            parsed = _parse_reply(raw)
+            parsed, _ = _ingest(raw, user_id, character_id)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(_valid_msg(m) for m in parsed['messages']):
                     result = parsed
@@ -762,10 +763,7 @@ async def chat_proactive(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    msgs = result.get('messages', [])
-    for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = merge_only_extreme_short(msgs)
+    msgs = _finalize_msgs(result.get('messages', []))
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
@@ -822,7 +820,7 @@ async def chat_voice_text(data: dict):
         try:
             raw, response = _create_json(MODEL_JP_AUX, 500, system_blocks, messages)
             log_cache_usage(f'voice:{character_id}', response)
-            parsed = _parse_reply(raw)
+            parsed, _ = _ingest(raw, user_id, character_id)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(_valid_msg(m) for m in parsed['messages']):
                     result = parsed
@@ -837,10 +835,7 @@ async def chat_voice_text(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    msgs = result.get('messages', [])
-    for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = merge_only_extreme_short(msgs)
+    msgs = _finalize_msgs(result.get('messages', []))
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
@@ -905,7 +900,7 @@ async def chat_voice_story(data: dict):
         try:
             raw, response = _create_json(MODEL_MAIN, 3000, system_blocks, messages)
             log_cache_usage(f'voice_story:{character_id}', response)
-            parsed = _parse_reply(raw)
+            parsed, _ = _ingest(raw, user_id, character_id)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 3:
                 if all(_valid_msg(m) for m in parsed['messages']):
                     result = parsed
@@ -927,10 +922,7 @@ async def chat_voice_story(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    msgs = result.get('messages', [])
-    for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp', ''))
-    msgs = merge_only_extreme_short(msgs)
+    msgs = _finalize_msgs(result.get('messages', []))
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)
@@ -1029,7 +1021,7 @@ async def chat_voice_proactive(data: dict):
         try:
             raw, response = _create_json(MODEL_JP_AUX, 300, system_blocks, messages)
             log_cache_usage(f'voice_proactive:{character_id}', response)
-            parsed = _parse_reply(raw)
+            parsed, _ = _ingest(raw, user_id, character_id)
             if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
                 if all(_valid_msg(m) for m in parsed['messages']):
                     result = parsed
@@ -1051,9 +1043,7 @@ async def chat_voice_proactive(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    msgs = result.get('messages', [])
-    for m in msgs:
-        m['jp'] = sanitize_jp(m.get('jp', ''))
+    msgs = _finalize_msgs(result.get('messages', []))
     msgs = msgs[:2] if mode == 'greeting' else msgs[:1]
 
     full_jp = ' '.join(m['jp'] for m in msgs)
