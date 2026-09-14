@@ -28,6 +28,7 @@
 提取只用一次 Haiku 调用，同时产出 1/2/3 三类，成本和原来一样。
 """
 import anthropic
+import json
 from datetime import datetime, timedelta, timezone
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
@@ -204,11 +205,17 @@ def notify_memory_changed(table, row_id=None, content=None, deleted=False):
         _bg_embed(table, row_id, content)
 
 
-def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARACTER_ID):
+def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARACTER_ID,
+                     lifecycle_kind='long_fact', recall_weight=1.0,
+                     source_event_refs=None, expires_at=None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        'SELECT content FROM long_memory WHERE user_id = %s AND character_id = %s',
+        '''SELECT content FROM long_memory
+           WHERE user_id = %s
+             AND character_id = %s
+             AND COALESCE(recall_status, 'active') = 'active'
+             AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
         (user_id, character_id)
     )
     existing = cur.fetchall()
@@ -217,9 +224,19 @@ def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARA
             cur.close(); conn.close()
             print(f'[{user_id}] 记忆重复，跳过：{content}（已有：{e}）')
             return False
+    refs_json = json.dumps(source_event_refs or [], ensure_ascii=False)
     cur.execute(
-        'INSERT INTO long_memory (user_id, character_id, content, category) VALUES (%s, %s, %s, %s) RETURNING id',
-        (user_id, character_id, content, category)
+        '''INSERT INTO long_memory (
+               user_id, character_id, content, category,
+               lifecycle_kind, recall_status, recall_weight,
+               source_event_refs, expires_at
+           )
+           VALUES (%s, %s, %s, %s, %s, 'active', %s, %s::jsonb, %s)
+           RETURNING id''',
+        (
+            user_id, character_id, content, category,
+            lifecycle_kind, recall_weight, refs_json, expires_at,
+        )
     )
     new_id = cur.fetchone()[0]
     conn.commit()
@@ -236,6 +253,8 @@ def get_long_memory(user_id, character_id=DEFAULT_CHARACTER_ID):
     cur.execute(
         '''SELECT content, timestamp, category FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
+             AND COALESCE(recall_status, 'active') = 'active'
+             AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
            ORDER BY timestamp DESC LIMIT 40''',
         (user_id, character_id, SHARED_CHARACTER_ID)
     )
@@ -251,6 +270,8 @@ def _get_memories_with_id(user_id, character_id=DEFAULT_CHARACTER_ID):
     cur.execute(
         '''SELECT id, content FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
+             AND COALESCE(recall_status, 'active') = 'active'
+             AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
            ORDER BY timestamp DESC LIMIT 40''',
         (user_id, character_id, SHARED_CHARACTER_ID)
     )
@@ -799,13 +820,22 @@ def _norm_category(cat: str) -> str:
 
 def extract_and_save_memory(user_id, user_text, assistant_text,
                             character_id=DEFAULT_CHARACTER_ID,
-                            temporal_context=None):
+                            temporal_context=None, source_event_id=None):
     """一次 Haiku 调用同时提取三类记忆：
     A user_fact —— 她透露的关于她自己的新事实 → long_memory(shared)
     B bond      —— 她和这个角色之间发生的事/约定/共同经历 → bond_memory(between)
     C told      —— 她告诉这个角色的、关于角色本人或其世界的信息（含剧透）→ bond_memory(told)
     """
     try:
+        try:
+            from memory_lifecycle import reactivate_lifecycle_memories
+            reactivated = reactivate_lifecycle_memories(
+                user_id, character_id, user_text)
+            if reactivated:
+                print(f'[{user_id}] 🔁 重新激活 {reactivated} 条生命周期记忆')
+        except Exception as _e:
+            print(f'[{user_id}] 生命周期记忆激活跳过:{_e}')
+
         pending_corrections = plan_memory_corrections(user_id, user_text, character_id)
         correction_hint = ''
         if pending_corrections:
@@ -938,8 +968,10 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
        → 【同一件事】→ null
 
    【状态类记忆的特殊规则】
-   「她今天在改程序」这种带时间的状态,第二天又聊到时【要记新的】,
-   不要因为"上次记过改程序"就跳过 —— 状态会变,记录的是不同时刻的她。
+   "她去洗澡/吃饭/睡觉/上课/在路上/正在复习"这类普通当前状态,
+   不要当成永久 user_fact。它们只用于短期上下文或便利贴/生命周期候选。
+   "今天没睡好/头疼/很累"这类一次性状态,也先作为候选,不要扩写成长期特征。
+   只有反复、长期、强烈或有后果的状态,才可能整理成一条概括性的长期记忆。
 7.5 所有记忆都必须是【简短的一句话】（30 字以内），只记事实和事件本身。
     禁止引用原文对话、禁止附翻译、禁止补充解说和背景铺垫——那是聊天记录该干的事，不是记忆。
 8. 某类没有就填 null。日常闲聊确实多数是 null,这很正常——
@@ -1089,9 +1121,31 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
             category = (uf.get('category') or '其他').strip()
             category = _norm_category(category)
             if _valid_user_fact(user_id, content, char_names, category):
-                # ★ 单聊里说的只有这个角色知道（谁在场谁知道）；群聊说的才进 shared
-                if save_long_memory(user_id, content, category, character_id):
-                    print(f'[{user_id}] ✅ 用户事实 [{category}]（{character_id} 专属）：{content}')
+                try:
+                    from memory_lifecycle import apply_user_fact_lifecycle
+                    lifecycle = apply_user_fact_lifecycle(
+                        user_id, character_id, user_text, content, category,
+                        source_event_id=source_event_id,
+                        temporal_context=temporal_context,
+                    )
+                except Exception as _e:
+                    print(f'[{user_id}] ⚠️ 记忆生命周期处理失败,按旧逻辑保留:{_e}')
+                    lifecycle = {
+                        'should_save_long_memory': True,
+                        'long_memory_kwargs': {},
+                        'classification': {'reason': 'lifecycle_error_fallback'},
+                    }
+
+                if lifecycle.get('should_save_long_memory'):
+                    kwargs = lifecycle.get('long_memory_kwargs') or {}
+                    # ★ 单聊里说的只有这个角色知道（谁在场谁知道）；群聊说的才进 shared
+                    if save_long_memory(user_id, content, category, character_id, **kwargs):
+                        print(f'[{user_id}] ✅ 用户事实 [{category}]（{character_id} 专属）：{content}')
+                else:
+                    cls = lifecycle.get('classification') or {}
+                    if lifecycle.get('consolidated'):
+                        print(f'[{user_id}] ✅ 状态候选已巩固：{lifecycle["consolidated"]["content"]}')
+                    print(f'[{user_id}] 🧠 生命周期记忆 [{cls.get("memory_kind")}/{cls.get("reason")}]: {content}')
 
         # ★ B0. 记忆合并:先处理,把碎片收成一条(放在新增之前,避免刚存的又被合掉)
         bm = parsed.get('bond_merge')
@@ -1150,6 +1204,15 @@ def extract_and_save_group_memory(user_id, user_text, round_transcript, members)
     members: [{'id','name'}, ...] 群里全部角色。
     """
     try:
+        try:
+            from memory_lifecycle import reactivate_lifecycle_memories
+            reactivated = reactivate_lifecycle_memories(
+                user_id, SHARED_CHARACTER_ID, user_text)
+            if reactivated:
+                print(f'[{user_id}][group] 🔁 重新激活 {reactivated} 条生命周期记忆')
+        except Exception as _e:
+            print(f'[{user_id}][group] 生命周期记忆激活跳过:{_e}')
+
         pending_corrections = plan_memory_corrections(user_id, user_text, SHARED_CHARACTER_ID)
         correction_hint = ''
         if pending_corrections:
@@ -1243,8 +1306,25 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
             category = (uf.get('category') or '其他').strip()
             category = _norm_category(category)
             if _valid_user_fact(user_id, content, char_names_all):
-                if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID):
-                    print(f'[{user_id}][group] ✅ 用户事实 [{category}]：{content}')
+                try:
+                    from memory_lifecycle import apply_user_fact_lifecycle
+                    lifecycle = apply_user_fact_lifecycle(
+                        user_id, SHARED_CHARACTER_ID, user_text, content, category)
+                except Exception as _e:
+                    print(f'[{user_id}][group] ⚠️ 记忆生命周期处理失败,按旧逻辑保留:{_e}')
+                    lifecycle = {
+                        'should_save_long_memory': True,
+                        'long_memory_kwargs': {},
+                    }
+                if lifecycle.get('should_save_long_memory'):
+                    kwargs = lifecycle.get('long_memory_kwargs') or {}
+                    if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID, **kwargs):
+                        print(f'[{user_id}][group] ✅ 用户事实 [{category}]：{content}')
+                else:
+                    cls = lifecycle.get('classification') or {}
+                    if lifecycle.get('consolidated'):
+                        print(f'[{user_id}][group] ✅ 状态候选已巩固：{lifecycle["consolidated"]["content"]}')
+                    print(f'[{user_id}][group] 🧠 生命周期记忆 [{cls.get("memory_kind")}/{cls.get("reason")}]: {content}')
 
         # C. 定向告知 → 目标角色的 told 桶
         td = parsed.get('told')

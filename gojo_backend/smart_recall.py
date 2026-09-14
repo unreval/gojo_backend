@@ -174,9 +174,13 @@ def two_level_recall(user_id, character_id, user_message,
             '''SELECT id, content, timestamp, category,
                       COALESCE(mention_count, 1) as mention_count,
                       last_mentioned,
-                      COALESCE(pinned, FALSE) as pinned
+                      COALESCE(pinned, FALSE) as pinned,
+                      COALESCE(lifecycle_kind, 'legacy') as lifecycle_kind,
+                      COALESCE(recall_weight, 1.0) as recall_weight
                FROM long_memory
                WHERE user_id = %s AND character_id IN (%s, %s)
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC''',
             (user_id, character_id, shared_id)
         )
@@ -203,7 +207,7 @@ def two_level_recall(user_id, character_id, user_message,
         now_utc = datetime.utcnow()
 
         for row in all_facts:
-            fid, content, ts, category, mention_count, last_mentioned, is_pinned = row
+            fid, content, ts, category, mention_count, last_mentioned, is_pinned, lifecycle_kind, recall_weight = row
             category = category or '其他'
 
             # 状态类过期检查
@@ -217,6 +221,8 @@ def two_level_recall(user_id, character_id, user_message,
                 'category': category, 'pinned': bool(is_pinned),
                 'mention_count': mention_count,
                 'last_mentioned': last_mentioned,
+                'lifecycle_kind': lifecycle_kind,
+                'recall_weight': recall_weight,
             }
 
             if is_pinned:
@@ -232,7 +238,7 @@ def two_level_recall(user_id, character_id, user_message,
                 entry['timestamp'], entry['mention_count'],
                 entry['last_mentioned'], user_message,
                 query_embedding, mem_emb
-            )
+            ) * float(entry.get('recall_weight') or 1.0)
 
         # 按分数排序，取 top_k
         pool.sort(key=lambda x: x['score'], reverse=True)
@@ -317,13 +323,30 @@ def two_level_recall(user_id, character_id, user_message,
         cur.close()
         conn.close()
 
+        try:
+            from memory_lifecycle import recall_lifecycle_memories, recall_sticky_notes
+            lifecycle_memories = recall_lifecycle_memories(
+                user_id, character_id, user_message, limit=6)
+            sticky_notes = recall_sticky_notes(
+                user_id, character_id, user_message, limit=3)
+        except Exception as _recall_e:
+            print(f'[recall] 生命周期/便利贴召回跳过：{_recall_e}')
+            lifecycle_memories = []
+            sticky_notes = []
+
         elapsed = (_time.time() - t0) * 1000
-        total_injected = len(selected_facts) + sum(len(f['bonds']) for f in selected_facts) + len(loose_bonds) + len(tolds)
+        total_injected = (
+            len(selected_facts) + sum(len(f['bonds']) for f in selected_facts)
+            + len(loose_bonds) + len(tolds)
+            + len(lifecycle_memories) + len(sticky_notes)
+        )
         print(f'[recall] 两级召回完成：{len(selected_facts)} 条事实'
               f'（{len(pinned)} pinned + {len(selected_facts) - len(pinned)} scored）'
               f' + {sum(len(f["bonds"]) for f in selected_facts)} 条关联bond'
               f' + {len(loose_bonds)} 条独立bond'
               f' + {len(tolds)} 条told'
+              f' + {len(lifecycle_memories)} 条生命周期'
+              f' + {len(sticky_notes)} 条便利贴'
               f' = 共 {total_injected} 条'
               f'，耗时 {elapsed:.0f}ms')
 
@@ -331,6 +354,8 @@ def two_level_recall(user_id, character_id, user_message,
             'facts': selected_facts,
             'loose_bonds': loose_bonds,
             'tolds': tolds,
+            'lifecycle_memories': lifecycle_memories,
+            'sticky_notes': sticky_notes,
         }
 
     except Exception as e:
@@ -355,7 +380,9 @@ def reinforce_mentioned_facts(user_id, character_id, user_message, shared_id='sh
         cur = conn.cursor()
         cur.execute(
             '''SELECT id, content FROM long_memory
-               WHERE user_id = %s AND character_id IN (%s, %s)''',
+               WHERE user_id = %s AND character_id IN (%s, %s)
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
             (user_id, character_id, shared_id)
         )
         rows = cur.fetchall()
@@ -398,7 +425,9 @@ def link_bond_to_fact(user_id, character_id, bond_content, shared_id='shared'):
         cur = conn.cursor()
         cur.execute(
             '''SELECT id, content FROM long_memory
-               WHERE user_id = %s AND character_id IN (%s, %s)''',
+               WHERE user_id = %s AND character_id IN (%s, %s)
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
             (user_id, character_id, shared_id)
         )
         facts = cur.fetchall()
@@ -444,6 +473,8 @@ def format_recall_for_prompt(recall_result):
     facts = recall_result.get('facts', [])
     loose_bonds = recall_result.get('loose_bonds', [])
     tolds = recall_result.get('tolds', [])
+    lifecycle_memories = recall_result.get('lifecycle_memories', [])
+    sticky_notes = recall_result.get('sticky_notes', [])
 
     # ── 用户事实（带关联 bond 缩进显示）──
     memory_text = ''
@@ -473,6 +504,48 @@ def format_recall_for_prompt(recall_result):
 4. 标着"（当时的状态）"的条目只代表记录当天的情况——不代表此刻仍然成立。她说过已经好了/过去了，就是过去了。
 5. 【关心的分寸】同一件事的叮嘱（吃药/早睡/多喝水这类）点到为止。
 6. 带 · 缩进的是和这条事实相关的具体经历细节，帮你回忆起语境。'''
+
+    if lifecycle_memories:
+        lifecycle_lines = []
+        kind_labels = {
+            'ephemeral': '短期状态',
+            'candidate': '候选记忆',
+            'episodic': '情节候选',
+            'consolidated': '已巩固摘要',
+        }
+        for item in lifecycle_memories:
+            ts = item.get('updated_at') or item.get('created_at')
+            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
+            kind = kind_labels.get(item.get('memory_kind'), item.get('memory_kind') or '生命周期')
+            lifecycle_lines.append(f'- [{date_str}] [{kind}] {item["content"]}')
+        block = f'''
+
+【当前可想起的短期/候选记忆——有生命周期，不等于永久事实】
+{chr(10).join(lifecycle_lines)}
+
+使用规则：
+1. 这些内容只是当前仍有召回资格的状态、候选或情节线索。
+2. 短期状态只按当时/近期状态理解，不要说成她一直如此。
+3. 候选记忆没有巩固前，不要把它扩写成稳定人格或长期事实。
+4. 已巩固摘要可以自然当作近期趋势，但不要逐条复读旧碎片。'''
+        memory_text = f'{memory_text}{block}' if memory_text else block
+
+    if sticky_notes:
+        sticky_lines = []
+        for note in sticky_notes:
+            exp = note.get('expires_at')
+            exp_text = exp.strftime('%Y-%m-%d %H:%M') if exp else '未设期限'
+            sticky_lines.append(f'- [到期 {exp_text}] {note["content"]}')
+        block = f'''
+
+【便利贴备忘——短期、可完成/可过期，不是长期记忆】
+{chr(10).join(sticky_lines)}
+
+使用规则：
+1. 便利贴用于临近事项、未完成目标和短期提醒。
+2. 到期或完成后不要继续当作普通回忆主动提起。
+3. 它不绕过证据管线，也不能直接改变关系判断。'''
+        memory_text = f'{memory_text}{block}' if memory_text else block
 
     # ── 独立羁绊（没有关联事实的）──
     bond_text = ''

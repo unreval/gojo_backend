@@ -17,6 +17,7 @@ from db_bond import init_bond_table
 from relationship_db import init_relationship_tables
 from temporal_awareness import init_temporal_awareness_table
 from cognitive_db import init_cognitive_tables
+from memory_lifecycle import init_memory_lifecycle_tables
 from migrate_two_level_recall import migrate_two_level   # ★ 两级召回迁移
 import memory_search
 import group_bubbler
@@ -95,6 +96,7 @@ init_relationship_tables()
 init_temporal_awareness_table()
 init_cognitive_tables()
 migrate_two_level()   # ★ 两级召回：给 long_memory / bond_memory 加评分列
+init_memory_lifecycle_tables()
 init_period_table()
 init_diary_tables()
 init_proactive_table()

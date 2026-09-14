@@ -169,6 +169,7 @@ def _run_job(row):
                 assistant_text or '',
                 character_id,
                 temporal_context=extra.get('temporal_context'),
+                source_event_id=job_id,
             )
         if ok:
             _set_status(job_id, 'done')
