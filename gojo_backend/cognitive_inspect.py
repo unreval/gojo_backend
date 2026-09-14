@@ -28,7 +28,8 @@ def fetch_cognitive_snapshot(
             '''SELECT id, status, primary_trigger_class,
                       input_state_version, output_state_version,
                       cycle_summary, belief_updates, hypothesis_updates,
-                      new_predictions, evidence_refs, worker_model,
+                      new_predictions, evidence_refs,
+                      sticky_note_updates, diary_entries, worker_model,
                       failure_code, queued_at, started_at, completed_at
                FROM cognitive_cycles
                WHERE user_id = %s AND character_id = %s
@@ -49,11 +50,13 @@ def fetch_cognitive_snapshot(
                 'hypothesis_updates': _json_value(row[7], []),
                 'new_predictions': _json_value(row[8], []),
                 'evidence_refs': _json_value(row[9], []),
-                'worker_model': row[10],
-                'failure_code': row[11],
-                'queued_at': row[12],
-                'started_at': row[13],
-                'completed_at': row[14],
+                'sticky_note_updates': _json_value(row[10], []),
+                'diary_entries': _json_value(row[11], []),
+                'worker_model': row[12],
+                'failure_code': row[13],
+                'queued_at': row[14],
+                'started_at': row[15],
+                'completed_at': row[16],
             })
 
         cur.execute(
@@ -124,6 +127,45 @@ def fetch_cognitive_snapshot(
             }
             for row in cur.fetchall()
         ]
+        cur.execute(
+            '''SELECT note_key, content, status, source_event_refs,
+                      expires_at, completed_at, updated_at
+               FROM cognitive_sticky_notes
+               WHERE user_id = %s AND character_id = %s
+               ORDER BY updated_at DESC, id DESC''',
+            (user_id, character_id),
+        )
+        sticky_notes = [
+            {
+                'note_key': row[0],
+                'content': row[1],
+                'status': row[2],
+                'source_event_refs': _json_value(row[3], []),
+                'expires_at': row[4],
+                'completed_at': row[5],
+                'updated_at': row[6],
+            }
+            for row in cur.fetchall()
+        ]
+        cur.execute(
+            '''SELECT diary_key, content, reflection_kind,
+                      source_event_refs, occurred_at, created_at
+               FROM cognitive_diary_entries
+               WHERE user_id = %s AND character_id = %s
+               ORDER BY occurred_at DESC, id DESC''',
+            (user_id, character_id),
+        )
+        diary_entries = [
+            {
+                'diary_key': row[0],
+                'content': row[1],
+                'reflection_kind': row[2],
+                'source_event_refs': _json_value(row[3], []),
+                'occurred_at': row[4],
+                'created_at': row[5],
+            }
+            for row in cur.fetchall()
+        ]
         return {
             'user_id': user_id,
             'character_id': character_id,
@@ -131,6 +173,8 @@ def fetch_cognitive_snapshot(
             'beliefs': beliefs,
             'hypotheses': hypotheses,
             'predictions': predictions,
+            'sticky_notes': sticky_notes,
+            'diary_entries': diary_entries,
         }
     finally:
         cur.close()

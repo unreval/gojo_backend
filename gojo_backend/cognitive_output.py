@@ -4,6 +4,8 @@ import re
 from datetime import timedelta
 
 from cognitive_config import (
+    COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS,
+    COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS,
     PREDICTION_NUMERIC_OPERATORS,
     PREDICTION_RESOLVER_WHITELIST,
 )
@@ -17,11 +19,17 @@ ROOT_FIELDS = frozenset({
     'new_predictions',
     'evidence_refs',
 })
+OPTIONAL_ROOT_FIELDS = frozenset({
+    'sticky_note_updates',
+    'diary_entries',
+})
 SUMMARY_FIELDS = frozenset({
     'summary', 'salient_change', 'uncertainty', 'confidence',
 })
 BELIEF_STATUSES = frozenset({'active', 'retracted'})
 HYPOTHESIS_STATUSES = frozenset({'open', 'supported', 'rejected', 'archived'})
+STICKY_NOTE_STATUSES = frozenset({'active', 'completed', 'expired', 'archived'})
+DIARY_REFLECTION_KINDS = frozenset({'event', 'periodic', 'repair', 'uncertainty'})
 CONFIDENCE_LABELS = frozenset({'low', 'medium', 'high'})
 KEY_RE = re.compile(r'^[a-z0-9][a-z0-9._:-]{0,127}$')
 MAX_OUTPUT_ITEMS = 20
@@ -124,7 +132,7 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
     """Return a normalized output or reject any ungrounded/model-invented field."""
     root = _object(value, 'root')
     missing = ROOT_FIELDS - set(root)
-    extra = set(root) - ROOT_FIELDS
+    extra = set(root) - ROOT_FIELDS - OPTIONAL_ROOT_FIELDS
     if missing:
         raise SlowLoopOutputError(
             'missing_root_fields:' + ','.join(sorted(missing)),
@@ -348,12 +356,97 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
             ),
         })
 
+    sticky_note_updates = []
+    sticky_keys = set()
+    for index, item in enumerate(
+        _array(root.get('sticky_note_updates', []),
+               'sticky_note_updates', MAX_OUTPUT_ITEMS)
+    ):
+        update = _object(item, f'sticky_note_update_{index}')
+        required = {'note_key', 'content', 'status', 'evidence_refs'}
+        optional = {'expires_in_seconds'}
+        if not required.issubset(update) or set(update) - required - optional:
+            raise SlowLoopOutputError(
+                f'sticky_note_update_{index}_fields_invalid',
+            )
+        key = _key(update['note_key'], f'sticky_note_update_{index}_key')
+        if key in sticky_keys:
+            raise SlowLoopOutputError(
+                f'sticky_note_update_{index}_duplicate_key',
+            )
+        sticky_keys.add(key)
+        status = _text(update['status'], f'sticky_note_update_{index}_status', 16)
+        if status not in STICKY_NOTE_STATUSES:
+            raise SlowLoopOutputError(
+                f'sticky_note_update_{index}_status_invalid',
+            )
+        ttl = update.get('expires_in_seconds')
+        if ttl is None and status == 'active':
+            ttl = COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS
+        if ttl is not None:
+            if isinstance(ttl, bool) or not isinstance(ttl, int):
+                raise SlowLoopOutputError(
+                    f'sticky_note_update_{index}_ttl_invalid',
+                )
+            if ttl < 300 or ttl > COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS:
+                raise SlowLoopOutputError(
+                    f'sticky_note_update_{index}_ttl_out_of_range',
+                )
+        sticky_note_updates.append({
+            'note_key': key,
+            'content': _text(
+                update['content'],
+                f'sticky_note_update_{index}_content',
+                500,
+            ),
+            'status': status,
+            'expires_in_seconds': ttl,
+            'evidence_refs': _update_refs(
+                update['evidence_refs'],
+                f'sticky_note_update_{index}_evidence_refs',
+                allowed_ids, declared_ids,
+            ),
+        })
+
+    diary_entries = []
+    diary_keys = set()
+    for index, item in enumerate(
+        _array(root.get('diary_entries', []), 'diary_entries', MAX_OUTPUT_ITEMS)
+    ):
+        entry = _object(item, f'diary_entry_{index}')
+        required = {'diary_key', 'content', 'reflection_kind', 'evidence_refs'}
+        if set(entry) != required:
+            raise SlowLoopOutputError(f'diary_entry_{index}_fields_invalid')
+        key = _key(entry['diary_key'], f'diary_entry_{index}_key')
+        if key in diary_keys:
+            raise SlowLoopOutputError(f'diary_entry_{index}_duplicate_key')
+        diary_keys.add(key)
+        reflection_kind = _text(
+            entry['reflection_kind'], f'diary_entry_{index}_kind', 24,
+        )
+        if reflection_kind not in DIARY_REFLECTION_KINDS:
+            raise SlowLoopOutputError(f'diary_entry_{index}_kind_invalid')
+        diary_entries.append({
+            'diary_key': key,
+            'content': _text(
+                entry['content'], f'diary_entry_{index}_content', 1200,
+            ),
+            'reflection_kind': reflection_kind,
+            'evidence_refs': _update_refs(
+                entry['evidence_refs'],
+                f'diary_entry_{index}_evidence_refs',
+                allowed_ids, declared_ids,
+            ),
+        })
+
     return {
         'cycle_summary': normalized_summary,
         'belief_updates': belief_updates,
         'hypothesis_updates': hypothesis_updates,
         'new_predictions': new_predictions,
         'evidence_refs': evidence_refs,
+        'sticky_note_updates': sticky_note_updates,
+        'diary_entries': diary_entries,
     }
 
 
@@ -466,5 +559,53 @@ def persist_slow_loop_output(
                 prediction['violation_operator'], prediction['violation_value'],
                 now + timedelta(seconds=prediction['expires_in_seconds']),
                 cycle_id, json.dumps(metadata, ensure_ascii=False),
+            ),
+        )
+
+    for note in output.get('sticky_note_updates', []):
+        source_refs = full_refs(note['evidence_refs'])
+        expires_at = (
+            now + timedelta(seconds=note['expires_in_seconds'])
+            if note.get('expires_in_seconds') and note['status'] == 'active'
+            else None
+        )
+        completed_at = now if note['status'] == 'completed' else None
+        cur.execute(
+            '''INSERT INTO cognitive_sticky_notes (
+                   user_id, character_id, note_key, content, status, source,
+                   source_event_refs, created_by_cycle_id,
+                   updated_by_cycle_id, expires_at, completed_at, updated_at
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+               ON CONFLICT (user_id, character_id, note_key) DO UPDATE
+               SET content = EXCLUDED.content,
+                   status = EXCLUDED.status,
+                   source = EXCLUDED.source,
+                   source_event_refs = EXCLUDED.source_event_refs,
+                   updated_by_cycle_id = EXCLUDED.updated_by_cycle_id,
+                   expires_at = EXCLUDED.expires_at,
+                   completed_at = COALESCE(
+                       EXCLUDED.completed_at,
+                       cognitive_sticky_notes.completed_at),
+                   updated_at = EXCLUDED.updated_at''',
+            (
+                user_id, character_id, note['note_key'], note['content'],
+                note['status'], 'cognitive_slow_loop',
+                json.dumps(source_refs, ensure_ascii=False),
+                cycle_id, cycle_id, expires_at, completed_at, now,
+            ),
+        )
+
+    for entry in output.get('diary_entries', []):
+        source_refs = full_refs(entry['evidence_refs'])
+        cur.execute(
+            '''INSERT INTO cognitive_diary_entries (
+                   user_id, character_id, diary_key, content, reflection_kind,
+                   source, source_event_refs, created_by_cycle_id, occurred_at
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+               ON CONFLICT (user_id, character_id, diary_key) DO NOTHING''',
+            (
+                user_id, character_id, entry['diary_key'], entry['content'],
+                entry['reflection_kind'], 'cognitive_slow_loop',
+                json.dumps(source_refs, ensure_ascii=False), cycle_id, now,
             ),
         )

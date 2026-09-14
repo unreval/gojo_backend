@@ -45,6 +45,7 @@ from db_promise import init_promise_table
 from push_notify import init_push_table
 from route_accounting import router as accounting_router
 from route_stats import router as stats_router
+from route_cognitive import router as cognitive_router
 from route_voice_stream import router as voice_stream_router   # ★ B档：流式语音通话
 from route_chatlog import router as chatlog_router              # ★ 聊天记录云端同步
 from route_schedule import router as schedule_router            # ★ 角色自己的日程
@@ -144,6 +145,7 @@ app.include_router(diary_router)
 app.include_router(proactive_router)
 app.include_router(accounting_router)
 app.include_router(stats_router)
+app.include_router(cognitive_router)
 app.include_router(voice_stream_router) # ★ B档流式语音
 app.include_router(courses_router)  
 app.include_router(chatlog_router)        # ★ 聊天记录同步

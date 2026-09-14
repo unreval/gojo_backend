@@ -47,6 +47,16 @@ class ReaderCursor:
                 'character.care_without_commitment',
                 '角色的关心目前可能仍停留在友情。', 'open', NOW,
             )]
+        elif compact.startswith('SELECT id, note_key'):
+            self.many = [(
+                5, 'reply.pending.topic', '记得下次接她没说完的签证话题。',
+                'active', NOW, NOW,
+            )]
+        elif compact.startswith('SELECT id, diary_key'):
+            self.many = [(
+                6, 'reflection.topic', '我把这件事先记下来，但不能当成结论。',
+                'event', '[]', NOW,
+            )]
 
     def fetchone(self):
         return self.one
@@ -107,6 +117,10 @@ class CognitiveReaderTests(unittest.TestCase):
         self.assertIn('不是关系定论', context)
         self.assertIn('待验证理解（不能当成事实）', context)
         self.assertIn('后续是否出现对等回应仍未知', context)
+        self.assertIn('便利贴备忘', context)
+        self.assertIn('不是长期记忆或关系证据', context)
+        self.assertIn('近期反思日记', context)
+        self.assertIn('不可拿来做自我证明', context)
         self.assertNotIn('reasoning_context', context)
         self.assertNotIn('new_predictions', context)
 

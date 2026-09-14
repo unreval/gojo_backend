@@ -145,6 +145,7 @@ class SnapshotCursor:
                 json.dumps(valid_output()['hypothesis_updates'], ensure_ascii=False),
                 json.dumps(valid_output()['new_predictions'], ensure_ascii=False),
                 json.dumps(valid_output()['evidence_refs'], ensure_ascii=False),
+                '[]', '[]',
                 'test-model', None, NOW, NOW, NOW,
             )]
         elif 'FROM cognitive_beliefs' in compact:
@@ -226,6 +227,29 @@ class SlowLoopValidationTests(unittest.TestCase):
             cognitive_output.validate_slow_loop_output(
                 output, allowed_event_ids={27},
             )
+
+    def test_optional_sticky_notes_and_diary_require_grounding(self):
+        output = valid_output()
+        output['sticky_note_updates'] = [{
+            'note_key': 'reply.pending.topic',
+            'content': '下次回复前记得接她刚才没讲完的签证话题。',
+            'status': 'active',
+            'expires_in_seconds': 3600,
+            'evidence_refs': [27],
+        }]
+        output['diary_entries'] = [{
+            'diary_key': 'reflection.20260913.topic',
+            'content': '今天这轮让我意识到，她并不是随口提起那件事。',
+            'reflection_kind': 'event',
+            'evidence_refs': [27],
+        }]
+
+        result = cognitive_output.validate_slow_loop_output(
+            output, allowed_event_ids={27},
+        )
+
+        self.assertEqual(result['sticky_note_updates'][0]['status'], 'active')
+        self.assertEqual(result['diary_entries'][0]['reflection_kind'], 'event')
 
 
 class SlowLoopTransactionTests(unittest.TestCase):

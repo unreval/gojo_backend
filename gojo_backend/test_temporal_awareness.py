@@ -57,6 +57,37 @@ class TemporalAwarenessTextTests(unittest.TestCase):
         self.assertIn('真实经过时间', text)
         self.assertIn('严禁把时间间隔直接换算成情绪或关系分数', text)
 
+    def test_early_morning_to_evening_gap_bans_just_now_language(self):
+        now = datetime(2026, 9, 14, 12, 55, tzinfo=timezone.utc)
+        previous = datetime(2026, 9, 13, 19, 30, tzinfo=timezone.utc)
+        snap = {
+            'has_history': True,
+            'user_id': 'u1',
+            'character_id': 'gojo',
+            'now_utc': now,
+            'last_interaction_at': previous,
+            'last_user_message_at': previous,
+            'last_assistant_message_at': previous,
+            'first_interaction_at': previous,
+            'elapsed_seconds_since_last_interaction': 17 * 3600 + 25 * 60,
+            'elapsed_label': format_elapsed(17 * 3600 + 25 * 60),
+            'gap_bucket': classify_gap(17 * 3600 + 25 * 60),
+            'longest_gap_seconds': 17 * 3600 + 25 * 60,
+            'interaction_count': 2,
+            'last_initiator': 'assistant',
+            'last_source': 'chat_text',
+        }
+        text = build_prompt_context('u1', 'gojo', snapshot=snap)
+
+        self.assertIn('TEMPORAL SNAPSHOT', text)
+        self.assertIn('2026-09-14T20:55:00+08:00', text)
+        self.assertIn('2026-09-14T03:30:00+08:00', text)
+        self.assertIn('17小时25分钟', text)
+        self.assertIn('same_calendar_day', text)
+        self.assertIn('early_morning(凌晨) -> evening(晚上)', text)
+        self.assertIn('same_day_long_gap', text)
+        self.assertIn('刚才 / さっき / just now / a moment ago', text)
+
     def test_memory_and_relationship_boundaries(self):
         snap = self._snapshot(26 * 3600)
         memory_text = build_memory_context(snap)

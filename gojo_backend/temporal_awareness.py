@@ -57,6 +57,7 @@ def get_temporal_snapshot(user_id: str, character_id: str,
             'character_id': character_id,
             'now_utc': now,
             'now_cn': _format_cn(now),
+            **_derived_temporal_fields(now, None),
             'elapsed_seconds_since_last_interaction': None,
             'elapsed_label': '首次记录',
             'gap_bucket': 'first_contact',
@@ -76,6 +77,7 @@ def get_temporal_snapshot(user_id: str, character_id: str,
         'character_id': character_id,
         'now_utc': now,
         'now_cn': _format_cn(now),
+        **_derived_temporal_fields(now, last_interaction),
         'first_interaction_at': first,
         'first_interaction_cn': _format_cn(first) if first else None,
         'last_interaction_at': last_interaction,
@@ -110,6 +112,116 @@ def serialize_snapshot(snapshot: Optional[Dict]) -> Optional[Dict]:
         else:
             out[key] = value
     return out
+
+
+def _derived_temporal_fields(now_utc: Optional[datetime],
+                             previous_event: Optional[datetime]) -> Dict:
+    """Facts the generator should not have to infer from raw timestamps."""
+    now_local = _as_local(now_utc)
+    previous_local = _as_local(previous_event) if previous_event else None
+    current_phase = clock_phase(now_local)
+    fields = {
+        'current_timestamp': _iso_local(now_local),
+        'current_timestamp_utc': _iso_utc(now_utc or now_local),
+        'current_clock_phase': current_phase,
+        'previous_relevant_event_kind': None,
+        'previous_relevant_event_timestamp': None,
+        'previous_relevant_event_timestamp_utc': None,
+        'previous_relevant_event_cn': None,
+        'previous_clock_phase': None,
+        'clock_phase_transition': None,
+        'calendar_relation': 'first_contact',
+        'same_calendar_day': None,
+        'cross_calendar_day': None,
+        'semantic_gap_category': 'first_contact',
+        'temporal_language_constraints': (
+            '首次时间记录；不要凭空说刚才、好久不见或隔了多久。'
+        ),
+    }
+    if not previous_local:
+        return fields
+
+    elapsed = _seconds_between(previous_event, now_utc)
+    previous_phase = clock_phase(previous_local)
+    same_day = previous_local.date() == now_local.date()
+    fields.update({
+        'previous_relevant_event_kind': 'last_interaction',
+        'previous_relevant_event_timestamp': _iso_local(previous_local),
+        'previous_relevant_event_timestamp_utc': _iso_utc(previous_event),
+        'previous_relevant_event_cn': _format_cn(previous_event),
+        'previous_clock_phase': previous_phase,
+        'clock_phase_transition': f'{previous_phase} -> {current_phase}',
+        'calendar_relation': (
+            'same_calendar_day' if same_day else 'cross_calendar_day'
+        ),
+        'same_calendar_day': same_day,
+        'cross_calendar_day': not same_day,
+        'semantic_gap_category': semantic_gap_category(elapsed, same_day),
+        'temporal_language_constraints': temporal_language_constraints(
+            elapsed, same_day, previous_phase, current_phase,
+        ),
+    })
+    return fields
+
+
+def clock_phase(local_dt: Optional[datetime]) -> Optional[str]:
+    if not local_dt:
+        return None
+    hour = local_dt.hour
+    if hour < 5:
+        return 'early_morning(凌晨)'
+    if hour < 9:
+        return 'morning(早上)'
+    if hour < 12:
+        return 'late_morning(上午)'
+    if hour < 14:
+        return 'noon(中午)'
+    if hour < 18:
+        return 'afternoon(下午)'
+    if hour < 22:
+        return 'evening(晚上)'
+    return 'late_night(深夜)'
+
+
+def semantic_gap_category(seconds, same_calendar_day=None) -> str:
+    bucket = classify_gap(seconds)
+    if bucket in ('first_contact', 'unknown', 'continuous', 'short_gap'):
+        return bucket
+    if same_calendar_day is True:
+        if int(seconds or 0) >= 12 * 3600:
+            return 'same_day_long_gap'
+        return 'same_day_gap'
+    if same_calendar_day is False and bucket == 'overnight':
+        return 'cross_day_overnight'
+    return bucket
+
+
+def temporal_language_constraints(seconds, same_calendar_day=None,
+                                  previous_phase=None,
+                                  current_phase=None) -> str:
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return '时间差未知；不确定时不要使用刚才/さっき/just now。'
+    if seconds < 10 * 60:
+        return '连续对话；可以自然承接，但仍以 current_timestamp 为准。'
+    if seconds < 2 * 3600:
+        return '短间隔；可以接上旧话题，但不要夸张成隔了很久。'
+
+    banned = '刚才 / さっき / just now / a moment ago'
+    preferred = '上次、 earlier、刚才那会儿以外的具体时间表达'
+    if same_calendar_day:
+        preferred = '今天早些时候、今天凌晨/上午/下午、几个小时前'
+    elif seconds < 36 * 3600:
+        preferred = '昨天/今天、昨晚/今早、上次聊到时'
+    phase_hint = ''
+    if previous_phase and current_phase:
+        phase_hint = f'；时段已经从 {previous_phase} 变成 {current_phase}'
+    return (
+        f'长间隔（约 {format_elapsed(seconds)}）{phase_hint}。'
+        f'禁止把 previous_relevant_event 说成 {banned}；'
+        f'应改用 {preferred}，或直接说约 {format_elapsed(seconds)} 前。'
+    )
 
 
 def build_calendar_grounding(now_utc: Optional[datetime] = None,
@@ -356,7 +468,16 @@ def build_prompt_context(user_id: str, character_id: str,
     """给主生成 prompt 的持久时间上下文。"""
     snap = _normalize_snapshot(snapshot) or get_temporal_snapshot(user_id, character_id)
     if not snap.get('has_history'):
-        return '''
+        return f'''
+
+【TEMPORAL SNAPSHOT——生成前必须优先遵守】
+- current_timestamp: {snap.get('current_timestamp') or snap.get('now_cn')}
+- previous_relevant_event: none
+- elapsed: first_contact
+- calendar_relation: first_contact
+- clock_phase_transition: none
+- gap_category: first_contact
+- temporal_language_constraints: {snap.get('temporal_language_constraints') or '首次时间记录；不要凭空说刚才、好久不见或隔了多久。'}
 
 【真实经过时间——持久时间账本】
 这是后端第一次记录到你和她在这个角色维度的互动。若上方长期记忆里已有旧事，以那些旧事为准；不要凭空断言你们"刚认识"或"很久没见"。
@@ -380,6 +501,18 @@ def build_prompt_context(user_id: str, character_id: str,
 
     return f'''
 
+【TEMPORAL SNAPSHOT——生成前必须优先遵守】
+- current_timestamp: {snap.get('current_timestamp') or snap.get('now_cn')}
+- previous_relevant_event:
+  · kind: {snap.get('previous_relevant_event_kind') or 'last_interaction'}
+  · timestamp: {snap.get('previous_relevant_event_timestamp') or last_cn}
+  · human_label: {last_cn}
+- elapsed: {elapsed}（{snap.get('elapsed_seconds_since_last_interaction')} seconds）
+- calendar_relation: {snap.get('calendar_relation') or 'unknown'}; same_calendar_day={snap.get('same_calendar_day')}; cross_calendar_day={snap.get('cross_calendar_day')}
+- clock_phase_transition: {snap.get('clock_phase_transition') or 'unknown'}
+- gap_category: {snap.get('semantic_gap_category') or snap.get('gap_bucket')}
+- temporal_language_constraints: {snap.get('temporal_language_constraints')}
+
 【真实经过时间——持久时间账本】
 - 现在：{snap.get('now_cn')}
 - 上次有记录的互动：{last_cn}（约 {elapsed} 前，最后由{initiator}开口）{user_line}{assistant_line}
@@ -388,7 +521,7 @@ def build_prompt_context(user_id: str, character_id: str,
 用法：
 1. 这是真实经过时间，不是某条历史消息里的字面时间。你可以知道"刚刚还在聊"、"隔了几个小时"、"隔夜/隔了几天又回来"。
 2. {guidance}
-3. 时间间隔只提供语境：它可以影响你是否自然翻篇、是否提到"刚才/昨天/上次/好久没见"，也可以帮助理解等待、失约、重逢。
+3. 时间间隔只提供语境：它可以影响你是否自然翻篇、是否提到"刚才/昨天/上次/好久没见"，也可以帮助理解等待、失约、重逢。若 temporal_language_constraints 禁用了"刚才/さっき/just now"，最终回复里绝不能出现同义表达。
 4. 严禁把时间间隔直接换算成情绪或关系分数：不许因为过了 X 天就自动更爱/更冷/更生气。情绪看这一轮内容，关系看账本和真实事件。'''
 
 
@@ -409,7 +542,8 @@ def build_memory_context(snapshot: Optional[Dict]) -> str:
 
 【本轮真实时间线】
 本轮发生时间：{snap.get('now_cn') or '未知'}。
-距离上一轮有记录互动：约 {snap.get('elapsed_label') or '未知'}（上次互动：{snap.get('last_interaction_cn') or '未知'}）。
+距离上一轮有记录互动：约 {snap.get('elapsed_label') or '未知'}（上次互动：{snap.get('last_interaction_cn') or '未知'}；timestamp={snap.get('previous_relevant_event_timestamp') or '未知'}）。
+日历关系：{snap.get('calendar_relation') or '未知'}；时段变化：{snap.get('clock_phase_transition') or '未知'}；gap_category={snap.get('semantic_gap_category') or snap.get('gap_bucket') or '未知'}。
 她上次主动说话：{snap.get('last_user_message_cn') or '暂无记录'}。
 你上次发给她：{snap.get('last_assistant_message_cn') or '暂无记录'}。
 
@@ -435,7 +569,8 @@ def build_relationship_context(snapshot: Optional[Dict]) -> str:
 
 【客观时间线】
 本轮时间：{snap.get('now_cn') or '未知'}。
-距离上一轮有记录互动：约 {snap.get('elapsed_label') or '未知'}（上次：{snap.get('last_interaction_cn') or '未知'}）。
+距离上一轮有记录互动：约 {snap.get('elapsed_label') or '未知'}（上次：{snap.get('last_interaction_cn') or '未知'}；timestamp={snap.get('previous_relevant_event_timestamp') or '未知'}）。
+日历关系：{snap.get('calendar_relation') or '未知'}；时段变化：{snap.get('clock_phase_transition') or '未知'}；gap_category={snap.get('semantic_gap_category') or snap.get('gap_bucket') or '未知'}。
 她上次主动说话：{snap.get('last_user_message_cn') or '暂无记录'}；你上次发给她：{snap.get('last_assistant_message_cn') or '暂无记录'}。
 
 使用边界：时间跨度可以帮助判断等待、守约/失约、久别后回来、连续陪伴等事件；但时间本身不是感情结论，不直接改变 warmth/trust/attachment/passion。'''
@@ -456,7 +591,7 @@ def format_elapsed(seconds) -> str:
     if seconds < 86400:
         hours = seconds // 3600
         minutes = (seconds % 3600) // 60
-        if hours < 6 and minutes >= 10:
+        if minutes >= 10:
             return f'{hours}小时{minutes}分钟'
         return f'{hours}小时'
     if seconds < 7 * 86400:
@@ -661,6 +796,12 @@ def _normalize_snapshot(snapshot: Optional[Dict]) -> Optional[Dict]:
         snap['gap_bucket'] = classify_gap(elapsed)
     if snap.get('longest_gap_seconds') is not None and not snap.get('longest_gap_label'):
         snap['longest_gap_label'] = format_elapsed(snap.get('longest_gap_seconds'))
+    derived = _derived_temporal_fields(
+        snap.get('now_utc'), snap.get('last_interaction_at'),
+    )
+    for key, value in derived.items():
+        if snap.get(key) is None:
+            snap[key] = value
     return snap
 
 
@@ -707,6 +848,36 @@ def _seconds_between(start: Optional[datetime], end: Optional[datetime]) -> int:
     start = _as_utc_naive(start)
     end = _as_utc_naive(end)
     return max(0, int((end - start).total_seconds()))
+
+
+def _as_local(dt: Optional[datetime]) -> datetime:
+    value = _coerce_dt(dt)
+    if value is None:
+        value = datetime.utcnow()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(CN_TZ).replace(second=0, microsecond=0)
+
+
+def _as_aware_utc(dt: Optional[datetime]) -> datetime:
+    value = _coerce_dt(dt)
+    if value is None:
+        value = datetime.utcnow()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).replace(second=0, microsecond=0)
+
+
+def _iso_local(dt: Optional[datetime]) -> Optional[str]:
+    if not dt:
+        return None
+    return _as_local(dt).isoformat()
+
+
+def _iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    if not dt:
+        return None
+    return _as_aware_utc(dt).isoformat()
 
 
 def _as_utc_naive(dt: Optional[datetime]) -> datetime:

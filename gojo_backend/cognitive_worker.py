@@ -43,9 +43,10 @@ response, prescribe an emotion, modify relationship scores, or claim access to
 hidden mental states. Distinguish direct evidence from hypotheses. A user saying
 something about the character does not prove the character reciprocates it.
 
-Return one JSON object and no markdown. It must contain exactly these root keys:
+Return one JSON object and no markdown. It must contain these root keys:
 cycle_summary, belief_updates, hypothesis_updates, new_predictions,
 evidence_refs.
+It may also contain optional root keys sticky_note_updates and diary_entries.
 
 Schema:
 {
@@ -95,10 +96,38 @@ Schema:
   "evidence_refs": [{"event_id": 123, "reason": "why it supports output"}]
 }
 
+Optional sticky_note_updates schema:
+[{
+  "note_key": "stable.lowercase.key",
+  "content": "short visible note for the character to remember soon",
+  "status": "active|completed|expired|archived",
+  "expires_in_seconds": 259200,
+  "evidence_refs": [123]
+}]
+
+Sticky notes are lightweight short-term, visible/callable reminders. They are
+not long-term memory, relationship state, or proof of affection. Use them for
+near-future reminders, unresolved conversational threads, and small role-local
+to-dos. Mark a note completed/expired only when current evidence supports that
+lifecycle change. Every note must cite source events.
+
+Optional diary_entries schema:
+[{
+  "diary_key": "stable.lowercase.key",
+  "content": "first-person Chinese reflection grounded only in cited events",
+  "reflection_kind": "event|periodic|repair|uncertainty",
+  "evidence_refs": [123]
+}]
+
+Diary entries are cognitive output and later memory input only. They must not
+modify relationship_model, rel_state, or relationship scores. They are not
+evidence for themselves; do not use prior diary wording to prove a new belief.
+Write only when cited events justify a reflective record.
+
 Every referenced event_id must exist in the supplied context. Historical IDs
 may be reused only when they already appear in a prior belief, hypothesis, or
-prediction evidence_refs. Every update and prediction must cite at least one
-event declared in top-level evidence_refs. A scheduled_reflection event is a
+prediction evidence_refs. Every update, prediction, sticky note, and diary
+entry must cite at least one event declared in top-level evidence_refs. A scheduled_reflection event is a
 clock tick, not factual evidence by itself. Use empty update arrays when the
 evidence does not justify a change. Never invent IDs.
 

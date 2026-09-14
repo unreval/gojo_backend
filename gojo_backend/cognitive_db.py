@@ -64,6 +64,10 @@ COGNITIVE_DDL = (
        ADD COLUMN IF NOT EXISTS worker_model TEXT''',
     '''ALTER TABLE cognitive_cycles
        ADD COLUMN IF NOT EXISTS worker_usage JSONB''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS sticky_note_updates JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS diary_entries JSONB NOT NULL DEFAULT '[]'::jsonb''',
     '''CREATE TABLE IF NOT EXISTS cognitive_event_triggers (
         id BIGSERIAL PRIMARY KEY,
         event_id BIGINT NOT NULL REFERENCES cognitive_events(id) ON DELETE CASCADE,
@@ -237,6 +241,44 @@ COGNITIVE_DDL = (
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_predictions_pending
        ON cognitive_predictions (user_id, character_id, status, created_at)
        WHERE status = 'pending' ''',
+    '''CREATE TABLE IF NOT EXISTS cognitive_sticky_notes (
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        character_id TEXT NOT NULL,
+        note_key TEXT NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active'
+            CHECK (status IN ('active', 'completed', 'expired', 'archived')),
+        source TEXT NOT NULL DEFAULT 'cognitive_slow_loop',
+        source_event_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
+        updated_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
+        expires_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (user_id, character_id, note_key)
+    )''',
+    '''CREATE INDEX IF NOT EXISTS idx_cognitive_sticky_active
+       ON cognitive_sticky_notes (user_id, character_id, expires_at, updated_at DESC)
+       WHERE status = 'active' ''',
+    '''CREATE TABLE IF NOT EXISTS cognitive_diary_entries (
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        character_id TEXT NOT NULL,
+        diary_key TEXT NOT NULL,
+        content TEXT NOT NULL,
+        reflection_kind TEXT NOT NULL DEFAULT 'event'
+            CHECK (reflection_kind IN ('event', 'periodic', 'repair', 'uncertainty')),
+        source TEXT NOT NULL DEFAULT 'cognitive_slow_loop',
+        source_event_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
+        occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (user_id, character_id, diary_key)
+    )''',
+    '''CREATE INDEX IF NOT EXISTS idx_cognitive_diary_recent
+       ON cognitive_diary_entries (user_id, character_id, occurred_at DESC)''',
     '''CREATE TABLE IF NOT EXISTS cognitive_worker_migrations (
         migration_key TEXT PRIMARY KEY,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP

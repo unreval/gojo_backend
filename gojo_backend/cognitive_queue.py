@@ -11,6 +11,7 @@ from cognitive_config import (
     COGNITIVE_MAX_HYPOTHESES_IN_CONTEXT,
     COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT,
     COGNITIVE_MAX_QUESTIONS_PER_CYCLE,
+    COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
     COGNITIVE_MAX_RETRY,
     COGNITIVE_MAX_TRIGGERS_PER_CYCLE,
 )
@@ -510,6 +511,7 @@ def commit_cycle_success(
             for key in (
                 'cycle_summary', 'belief_updates', 'hypothesis_updates',
                 'new_predictions', 'evidence_refs',
+                'sticky_note_updates', 'diary_entries',
             )
         }
         usage_json = (
@@ -525,6 +527,8 @@ def commit_cycle_success(
                    hypothesis_updates = COALESCE(%s::jsonb, hypothesis_updates),
                    new_predictions = COALESCE(%s::jsonb, new_predictions),
                    evidence_refs = COALESCE(%s::jsonb, evidence_refs),
+                   sticky_note_updates = COALESCE(%s::jsonb, sticky_note_updates),
+                   diary_entries = COALESCE(%s::jsonb, diary_entries),
                    worker_model = COALESCE(%s, worker_model),
                    worker_usage = COALESCE(%s::jsonb, worker_usage),
                    failure_code = NULL, completed_at = %s
@@ -533,7 +537,9 @@ def commit_cycle_success(
                 output_version, context_json,
                 output_json['cycle_summary'], output_json['belief_updates'],
                 output_json['hypothesis_updates'], output_json['new_predictions'],
-                output_json['evidence_refs'], worker_model, usage_json,
+                output_json['evidence_refs'],
+                output_json['sticky_note_updates'], output_json['diary_entries'],
+                worker_model, usage_json,
                 current_time, cycle_id,
             ),
         )
@@ -839,6 +845,33 @@ def build_reasoning_context(cycle_id, *, conn=None):
             for row in cur.fetchall()
         ]
 
+        cur.execute(
+            '''SELECT note_key, content, status, source_event_refs,
+                      expires_at, updated_at
+               FROM cognitive_sticky_notes
+               WHERE user_id = %s AND character_id = %s
+                 AND status = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+               ORDER BY updated_at DESC, id DESC
+               LIMIT %s''',
+            (
+                user_id, character_id,
+                COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
+            ),
+        )
+        current_sticky_notes = [
+            {
+                'note_key': row[0],
+                'content': row[1],
+                'status': row[2],
+                'source_event_refs': _json_value(row[3], []),
+                'expires_at': row[4],
+                'updated_at': row[5],
+                'lifecycle': 'short_term_visible_note_not_relationship_evidence',
+            }
+            for row in cur.fetchall()
+        ]
+
         event_times = [item['occurred_at'] for item in events_by_id.values()]
         return {
             'cycle_id': cycle_id,
@@ -850,6 +883,7 @@ def build_reasoning_context(cycle_id, *, conn=None):
             'current_beliefs': current_beliefs,
             'current_hypotheses': current_hypotheses,
             'pending_predictions': pending_predictions,
+            'current_sticky_notes': current_sticky_notes,
             'temporal': {
                 'queued_at': queued_at,
                 'first_event_at': min(event_times) if event_times else None,
