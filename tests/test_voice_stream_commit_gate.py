@@ -233,6 +233,48 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.assertEqual(saved_current[0]['source_event_id'], 'voice-now')
         self.save_short.assert_not_called()
 
+    def test_retry_same_source_event_id_appears_once_in_stream_messages(self):
+        user_text = 'retry this voice turn'
+        source_event_id = 'voice-retry-1'
+        first_events = self.events(
+            'JP: ...\nZH: ...\n',
+            text=user_text,
+            source_event_id=source_event_id,
+        )
+        self.assertIn('generation_failed', self.types(first_events))
+        self.assertEqual(len(self.short_rows), 1)
+        self.assertEqual(self.short_rows[0]['role'], 'user')
+        self.assertEqual(self.short_rows[0]['source_event_id'], source_event_id)
+        self.save_short.assert_not_called()
+        self.jobs.assert_not_called()
+        self.record_turn.assert_not_called()
+        self.tts.assert_not_called()
+
+        second_events = self.events(
+            'JP: OK\nZH: OK\n',
+            text=user_text,
+            source_event_id=source_event_id,
+        )
+        self.assertEqual(len(self.stream_calls), 2)
+        second_messages = self.stream_calls[1]['messages']
+        self.assertEqual(
+            [m for m in second_messages
+             if m['role'] == 'user' and m['content'] == user_text],
+            [{'role': 'user', 'content': user_text}],
+        )
+        saved_current = [
+            row for row in self.short_rows
+            if row['role'] == 'user' and row['source_event_id'] == source_event_id
+        ]
+        self.assertEqual(len(saved_current), 1)
+        self.assertEqual(self.save_user_once.call_count, 2)
+        self.assertNotIn('generation_failed', self.types(second_events))
+        self.assertIn('audio', self.types(second_events))
+        self.save_short.assert_called_once()
+        self.jobs.assert_called_once()
+        self.record_turn.assert_called_once()
+        self.tts.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()

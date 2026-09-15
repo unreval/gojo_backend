@@ -104,15 +104,13 @@ async def chat_voice_stream(data: dict):
 
     voice_id = char.get('voice_id')
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
-    short_memories = get_short_memory(user_id, 6, character_id)
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
-    messages.append({'role': 'user', 'content': user_text})
 
-    # 真实用户发言：组好 LLM 上下文后再幂等保存，避免本轮 user_text 被读进 history 再 append 一次。
-    # 仍在 stream 开始前写入，generation_failed 也不会丢。
+    # Commit before reading: history includes this event once, even on retries.
     save_user_short_memory_once(
         user_id, user_text, character_id, source_event_id=source_event_id,
     )
+    short_memories = get_short_memory(user_id, 6, character_id)
+    messages = [{'role': r, 'content': c} for r, c in short_memories]
 
     system_blocks = build_system_blocks(
         user_id, character_id, user_text, extra_suffix=VOICE_STREAM_SCENE,
