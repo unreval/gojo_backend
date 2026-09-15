@@ -7,7 +7,7 @@
   - 每次调用后 log_cache_usage 打印缓存命中，部署后看日志即可确认省了多少
 
 ★ v-fix：预填 JSON（修"空循环"）
-  - 模型有时不输出 JSON、直接吐纯日语 → 解析失败 → 重试5次全废 → 落兜底"没听清"。
+  - 模型有时不输出 JSON、直接吐纯日语 → 解析失败 → 重试耗尽后返回 generation_failed，绝不伪造角色台词。
   - 解法：在 messages 末尾预填一条 {'role':'assistant','content':'{'}，强制模型必须从 { 接着写 JSON，
     拿到回复后把开头的 { 补回去再解析。所有产生 JSON 的端点都套用（见 _create_json）。
 
@@ -24,8 +24,8 @@
   - 修复原实现里 `except Exception:` 后 `print({e})` 但 e 未定义的 bug。
 """
 import threading
-import random
 import json
+import re
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -75,11 +75,34 @@ def _create_json(model, max_tokens, system_blocks, messages):
     return raw, response
 
 
+# 真正的可见正文：字母 / 数字 / 假名 / 汉字。纯空白、纯标点（...、……、!!!）不能过。
+_VISIBLE_CONTENT_RE = re.compile(
+    r'[A-Za-z0-9'
+    r'\u3040-\u30ff'   # 平假名 + 片假名
+    r'\u3400-\u9fff'   # CJK
+    r'\uff10-\uff19'   # 全角数字
+    r'\uff21-\uff3a'   # 全角 A-Z
+    r'\uff41-\uff5a'   # 全角 a-z
+    r'\uff66-\uff9d'   # 半角片假名
+    r']'
+)
+
+
+def _has_visible_text(text) -> bool:
+    """至少存在真正的文字/数字/kana/汉字。None、空串、纯空白、纯标点一律 False。"""
+    if text is None:
+        return False
+    s = str(text).strip()
+    if not s:
+        return False
+    return bool(_VISIBLE_CONTENT_RE.search(s))
+
+
 def _msg_has_json_debris(m: dict) -> bool:
     """检测消息 dict 里的 jp/zh 是否含 JSON 结构残骸(如 `","messages":"jp":"`)。
     True = 消息脏了,不该用。用于所有 LLM 消息数组验证。"""
-    jp = str(m.get('jp', ''))
-    zh = str(m.get('zh', ''))
+    jp = str(m.get('jp', '') or '')
+    zh = str(m.get('zh', '') or '')
     if contains_offline_marker(jp) or contains_offline_marker(zh):
         return True
     for kw in ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"'):
@@ -89,10 +112,30 @@ def _msg_has_json_debris(m: dict) -> bool:
 
 
 def _valid_msg(m: dict) -> bool:
-    """统一验证:jp/zh 都非空 + 没 JSON 残骸。"""
-    if not str(m.get('jp', '')).strip() or not str(m.get('zh', '')).strip():
+    """统一验证：jp/zh 都有真正可见正文 + 没 JSON 残骸。
+    「ん？」「え？」可通过；「...」「……」以及 {"jp":"..."} 残骸不能通过。"""
+    if not isinstance(m, dict):
         return False
-    return not _msg_has_json_debris(m)
+    if _msg_has_json_debris(m):
+        return False
+    jp = sanitize_user_reply(str(m.get('jp', '') or ''))
+    zh = sanitize_user_reply(str(m.get('zh', '') or ''))
+    return _has_visible_text(jp) and _has_visible_text(zh)
+
+
+def _commit_ready(msgs) -> bool:
+    """最终 commit gate：finalize 之后仍须非空且每条正文有效。"""
+    return bool(msgs) and all(_valid_msg(m) for m in msgs)
+
+
+def _generation_failed_response(user_id: str, character_id: str, total_days):
+    print(f'[{user_id}][{character_id}] generation_failed after 3 attempts; commit skipped')
+    return JSONResponse({
+        'error': 'generation_failed',
+        'generation_failed': True,
+        'messages': [],
+        'total_days': total_days,
+    }, status_code=502)
 
 
 def _parse_reply(raw: str):
@@ -116,7 +159,7 @@ def _ingest(raw: str, user_id: str, character_id: str):
 
 
 def _finalize_msgs(msgs):
-    """发给前端的最后一道清洗。attempt / rescue / fallback 都走这里。"""
+    """发给前端的最后一道清洗。attempt / rescue 都走这里；fallback 已删除，不能绕过 commit gate。"""
     return finalize_user_messages(msgs)
 
 
@@ -154,6 +197,8 @@ def _salvage_japanese(raw: str):
     text = sanitize_user_reply(text)
     # 截断过长的（避免把一堆乱码全塞进去）
     jp = text[:200].strip()
+    if not _has_visible_text(jp):
+        return None
     zh = _quick_translate(jp)
     return {'jp': jp, 'zh': zh}
 
@@ -377,12 +422,14 @@ async def chat_text(data: dict):
 
     result = None
     last_visible = ''
+    committed_state = None
     for attempt in range(3):
         try:
             raw, response = _create_json(MODEL_MAIN, 1500, system_blocks, messages)
             log_cache_usage(f'chat:{character_id}', response)
             print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
-            parsed, visible = _ingest(raw, user_id, character_id)
+            # 失败轮次不写入内部状态：只在最终 commit 通过后再保存。
+            visible, parsed, state = ingest_model_output(raw)
             if visible:
                 last_visible = visible
             elif raw:
@@ -413,30 +460,36 @@ async def chat_text(data: dict):
                               f'{calendar_conflict}')
                         continue
                     result = parsed
+                    committed_state = state
                     break
         except Exception as e:
             print(f'attempt {attempt+1} error: {e}')
 
     if not result and last_visible:
         salvaged = _salvage_japanese(last_visible)
-        if salvaged:
+        if salvaged and _valid_msg(salvaged):
             result = {'emotion': '平静', 'messages': [salvaged]}
             print(f'[{user_id}][{character_id}] 纯日语救援：{salvaged["jp"][:40]}')
 
     if not result:
-        fallback_pool = [
-            {'jp': 'ん？ちょっと聞き取れなかった。もう一回言って。', 'zh': '嗯？没太听清，再说一遍。'},
-            {'jp': 'さあ、なんだろうね。', 'zh': '谁知道呢。'},
-            {'jp': 'へえ、それで？', 'zh': '哦？然后呢？'},
-            {'jp': 'ふっ、急にどうしたの。', 'zh': '哼，怎么突然这样。'},
-        ]
-        result = {'emotion': '调皮', 'messages': [random.choice(fallback_pool)]}
+        return _generation_failed_response(user_id, character_id, total_days)
 
     emotion = result.get('emotion', '平静')
     if emotion not in EMOTIONS:
         emotion = '平静'
 
     msgs = _finalize_msgs(result.get('messages', []))
+    if not _commit_ready(msgs):
+        return _generation_failed_response(user_id, character_id, total_days)
+
+    if committed_state:
+        try:
+            from relationship_state import save_offline_character_state
+            save_offline_character_state(user_id, character_id, committed_state)
+            print(f'[{user_id}][{character_id}] 已保存 OFFLINE_CHARACTER_STATES '
+                  f'keys={list(committed_state.keys())}')
+        except Exception as e:
+            print(f'[{user_id}][{character_id}] 保存 OFFLINE_CHARACTER_STATES 失败: {e}')
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'user', user_text, character_id)

@@ -58,15 +58,6 @@ const MAX_AUDIO_ENTRIES = 30;
 const PROACTIVE_KEY  = 'gojo_proactive_state';
 const MSG_DELAY_MS   = 800;
 
-// ★ 用来替代 Alert.alert('回复异常', ...) 这种出戏弹窗 ——
-//   后端返回空 / 网络挂了都当他自己走神,塞条角色气泡糊过去
-const FALLBACK_LINES: { jp: string; zh: string }[] = [
-  { jp: 'ん…ちょっと今手が離せない。あとでな。', zh: '嗯…现在有点脱不开身，等等再说。' },
-  { jp: 'あー、ごめん。何だっけ？',              zh: '啊，抱歉，你刚说什么来着？' },
-  { jp: 'ちょっと聞き逃した。もう一回言ってくれる？', zh: '刚才没听清，能再说一遍吗？' },
-  { jp: 'んー、電波悪いっぽい。もう一回。',      zh: '嗯…信号好像不太好，再来一次。' },
-];
-
 // 每个会话独立的存储 key（按 id 隔离）
 const msgStorageKey = (id: string) => `chat_msgs_${id}`;
 
@@ -90,6 +81,16 @@ function toServerMsg(m: any) {
     extra: m.imageUri ? JSON.stringify({ imageUri: m.imageUri }) : '',
     has_audio: !!m.audioB64 || !!m.hasAudio,
   };
+}
+
+/** 基础设施失败气泡 / 本地 UI 提示绝不能进聊天记录。 */
+function isEphemeralUiMessage(m: any): boolean {
+  return !!(m?.localOnly || m?.generationFailure);
+}
+
+function isGenerationFailedPayload(data: any): boolean {
+  if (!data || typeof data !== 'object') return false;
+  return data.generation_failed === true || data.error === 'generation_failed';
 }
 
 /** 服务器格式 → 本地 Message */
@@ -117,12 +118,13 @@ function fromServerMsg(m: any): any {
 
 /** 追加到服务器。失败不阻断 UI —— 本地还有,下次进聊天页会补传。 */
 async function syncToServer(userId: string, chatId: string, msgs: any[]) {
-  if (!msgs || msgs.length === 0) return;
+  const persistable = (msgs || []).filter(m => !isEphemeralUiMessage(m));
+  if (persistable.length === 0) return;
   try {
     await axios.post(`${SERVER_URL}/chatlog/append`, {
       user_id: userId,
       chat_id: chatId,
-      messages: msgs.map(toServerMsg),
+      messages: persistable.map(toServerMsg),
     }, { timeout: 8000 });
   } catch (e: any) {
     console.warn('[chatlog] 同步失败(本地已保留):', e?.message);
@@ -215,6 +217,19 @@ export default function ChatRoom() {
   const syncedIdsRef = useRef<Set<string>>(new Set());
   const [inputText, setInputText] = useState('');
   const [loading, setLoading]     = useState(false);
+  const [generationFailed, setGenerationFailed] = useState(false);
+  const lastFailedSendRef = useRef<null | {
+    kind: 'text';
+    text: string;
+    sourceEventId: string;
+  } | {
+    kind: 'image';
+    base64: string;
+    mediaType: string;
+    localUri: string;
+    caption: string;
+    video?: { frames: { data: string; media_type: string }[] };
+  }>(null);
   const inputTextRef = useRef('');   // ★ IME 双写:发送时从 ref 读最新值,防 composition 未 commit 截断
   const [ready, setReady]         = useState(false);
   const [showCall, setShowCall]   = useState(false);
@@ -371,11 +386,13 @@ export default function ChatRoom() {
               // ★ 本地有、服务器没有 → 补传上去(老用户首次升级的迁移)
               const syncedFlag = await AsyncStorage.getItem(CHATLOG_SYNCED_KEY(chatId));
               if (!syncedFlag && localMsgs.length > 0) {
-                const toMigrate = localMsgs.slice(-500);   // 尽量多传,别再漏
+                const toMigrate = localMsgs.slice(-500).filter((m: any) => !isEphemeralUiMessage(m));
                 toMigrate.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
-                syncToServer(FIXED_USER_ID, chatId, toMigrate)
-                  .then(() => AsyncStorage.setItem(CHATLOG_SYNCED_KEY(chatId), '1'))
-                  .catch(() => {});
+                if (toMigrate.length > 0) {
+                  syncToServer(FIXED_USER_ID, chatId, toMigrate)
+                    .then(() => AsyncStorage.setItem(CHATLOG_SYNCED_KEY(chatId), '1'))
+                    .catch(() => {});
+                }
               }
             }
           }
@@ -423,9 +440,10 @@ export default function ChatRoom() {
     messagesRef.current = messages;
 
     // ★ 写入失败必须能看见 —— 不再 .catch(() => {}) 静默吞掉
-    const toCache = messages.length > LOCAL_CACHE_MAX
-      ? messages.slice(-LOCAL_CACHE_MAX)
-      : messages;
+    const persistable = messages.filter(m => !isEphemeralUiMessage(m));
+    const toCache = persistable.length > LOCAL_CACHE_MAX
+      ? persistable.slice(-LOCAL_CACHE_MAX)
+      : persistable;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(toCache)).catch((e: any) => {
       console.warn('[本地缓存] 写入失败(服务器仍有记录):', e?.message);
     });
@@ -434,6 +452,9 @@ export default function ChatRoom() {
     //   注意:这段【不依赖】上面的本地写入,本地坏了服务器照常收
     if (!isGroup && messages.length > 0) {
       const pending = messages.filter(m => {
+        if (isEphemeralUiMessage(m)) return false;
+        if ((m as any).localOnly) return false;
+        if ((m as any).generationFailure) return false;
         const mid = String((m as any).id || '');
         if (!mid || syncedIdsRef.current.has(mid)) return false;
         if (mid.startsWith('srv_')) return false;      // 从服务器拉下来的,别再传回去
@@ -1079,21 +1100,9 @@ export default function ChatRoom() {
     pruneAudioFiles();
   };
 
-  // ★ 兜底气泡:后端返回空 segments / 网络挂时用,不再弹系统 Alert
-  //   Alert.alert('回复异常', ...) 会瞬间把角色扮演那层皮撕开,
-  //   塞条 "没听清,再说一遍" 的气泡当他自己走神,沉浸感不断。
-  const appendFallbackBubble = () => {
-    const line = FALLBACK_LINES[Math.floor(Math.random() * FALLBACK_LINES.length)];
-    const msg: Message = {
-      id: `fallback_${Date.now()}`,
-      role: 'gojo',
-      text: line.jp,
-      subtitle: line.zh,
-      time: nowTime(),
-      timestamp: Date.now(),
-    };
-    setMessages(prev => [...prev, msg]);
-    scrollRef.current?.scrollToEnd({ animated: true });
+  // ★ 基础设施失败（模型空回复 / 网络错误）用独立 UI 提示，绝不伪装成角色说话。
+  const noteGenerationFailure = () => {
+    setGenerationFailed(true);
   };
 
   // ★ 已读标记:把所有还没读的 user 消息标为"对方已读"
@@ -1141,6 +1150,7 @@ export default function ChatRoom() {
   const sendImage = async (
     base64: string, mediaType: string, localUri: string, caption: string,
     video?: { frames: { data: string; media_type: string }[] },   // ★ 传了就是视频
+    opts?: { retry?: boolean },
   ) => {
     // ★ 打断互动
     if (isGroup && interactionActiveRef.current) {
@@ -1149,21 +1159,25 @@ export default function ChatRoom() {
       await sleep(100);
     }
     if (loading) return;
+    setGenerationFailed(false);
+    lastFailedSendRef.current = { kind: 'image', base64, mediaType, localUri, caption, video };
     setLoading(true);
     const userMsg: Message = {
       id: Date.now().toString(), role: 'user',
       text: caption || (video ? '🎬 [视频]' : '📷 [图片]'),
       time: nowTime(), timestamp: Date.now(), imageUri: localUri,
     };
-    setMessages(prev => [...prev, userMsg]);
-    scrollRef.current?.scrollToEnd({ animated: true });
-    if (isGroup) bumpRead(1);
+    if (!opts?.retry) {
+      setMessages(prev => [...prev, userMsg]);
+      scrollRef.current?.scrollToEnd({ animated: true });
+      if (isGroup) bumpRead(1);
+    }
 
     try {
       if (isGroup) {
         if (video) {
           Alert.alert('群聊暂不支持视频', '先在单聊里发给他吧，群聊的视频支持稍后再加。');
-          setMessages(prev => prev.filter(m => m.id !== userMsg.id));
+          if (!opts?.retry) setMessages(prev => prev.filter(m => m.id !== userMsg.id));
           setLoading(false);
           return;
         }
@@ -1209,35 +1223,45 @@ export default function ChatRoom() {
         }
         const res = await axios.post(`${SERVER_URL}/chat/image`, payload,
           { timeout: video ? 90000 : 60000 });
+        if (isGenerationFailedPayload(res.data)) {
+          noteGenerationFailure();
+          return;
+        }
         await processResponseExtras(res.data);
         // ★ 同上:busy 时他没看,别秒已读
-        if (!res.data?.busy) {
-          markPendingUserMessagesRead();
-        }
+        if (res.data?.busy) return;
+        markPendingUserMessagesRead();
         const segments: Segment[] = res.data?.messages || [];
-        if (segments.length === 0) { appendFallbackBubble(); return; }
+        if (segments.length === 0) { noteGenerationFailure(); return; }
+        setGenerationFailed(false);
         await appendSegments(segments, `${Date.now()}`);
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
       pruneAudioFiles();
     } catch (e: any) {
-      // ★ 不弹 Alert.alert('发送失败') —— 出戏。塞条角色气泡替代,当他自己走神/信号差
-      console.warn('[sendImage] failed:', e?.message);
-      appendFallbackBubble();
+      const data = e?.response?.data;
+      if (isGenerationFailedPayload(data)) {
+        console.warn('[sendImage] generation_failed');
+      } else {
+        console.warn('[sendImage] failed:', e?.message);
+      }
+      noteGenerationFailure();
     } finally { setLoading(false); }
   };
 
-  const sendText = async (textOverride?: string) => {
+  const sendText = async (textOverride?: string, opts?: { retry?: boolean }) => {
     const text = (textOverride ?? inputText).trim();
     if (!text) return;
     // ★ 防抖：2秒内同样内容不重复发（挡网络卡顿/重试导致的双发，也省一次 API+TTS）
     const now = Date.now();
-    if (text === lastSentRef.current.text && now - lastSentRef.current.at < 2000) {
+    if (!opts?.retry && text === lastSentRef.current.text && now - lastSentRef.current.at < 2000) {
       console.log('[防抖] 拦截重复发送：', text);
       return;
     }
-    lastSentRef.current = { text, at: now };
+    if (!opts?.retry) {
+      lastSentRef.current = { text, at: now };
+    }
     // ★ 打断:如果群里还在互动,立刻停掉,让新消息优先
     if (isGroup && interactionActiveRef.current) {
       interactionActiveRef.current = false;
@@ -1245,17 +1269,28 @@ export default function ChatRoom() {
       await sleep(100);
     }
     if (loading) return;
-    setInputText('');
-    inputTextRef.current = '';   // ★ 顺手清 ref
-    setShowMention(false);
-    if (searchMode) { setSearchMode(false); setSearchQuery(''); }
+    setGenerationFailed(false);
 
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now(),
-      ...(replyingTo ? { replyTo: { id: replyingTo.id, text: replyingTo.subtitle || replyingTo.text || '', name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')) } } : {}),
-    };
-    setReplyingTo(null);   // ★ 发送后清掉引用
-    setMessages(prev => [...prev, userMsg]);
-    if (isGroup) bumpRead(1);
+    let sourceEventId: string;
+    if (opts?.retry) {
+      sourceEventId = lastFailedSendRef.current && lastFailedSendRef.current.kind === 'text'
+        ? lastFailedSendRef.current.sourceEventId
+        : Date.now().toString();
+    } else {
+      setInputText('');
+      inputTextRef.current = '';   // ★ 顺手清 ref
+      setShowMention(false);
+      if (searchMode) { setSearchMode(false); setSearchQuery(''); }
+
+      const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now(),
+        ...(replyingTo ? { replyTo: { id: replyingTo.id, text: replyingTo.subtitle || replyingTo.text || '', name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')) } } : {}),
+      };
+      sourceEventId = userMsg.id;
+      lastFailedSendRef.current = { kind: 'text', text, sourceEventId };
+      setReplyingTo(null);   // ★ 发送后清掉引用
+      setMessages(prev => [...prev, userMsg]);
+      if (isGroup) bumpRead(1);
+    }
     setLoading(true);
 
     try {
@@ -1299,32 +1334,52 @@ export default function ChatRoom() {
       } else {
         const res = await axios.post(`${SERVER_URL}/chat/text`, {
           text, user_id: FIXED_USER_ID, character_id: chatId,
-          source_event_id: userMsg.id,
+          source_event_id: sourceEventId,
         });
+        if (isGenerationFailedPayload(res.data)) {
+          noteGenerationFailure();
+          return;
+        }
         await processResponseExtras(res.data);
         // ★ 已读的语义:【他真的看到并回复了】才算已读。
         //   busy=true 时他正忙着,消息进了 promise 队列,他自己都没看 —— 不该秒已读。
         //   等他忙完通过 proactive 或下次交互回复时,那时候才会通过其他路径标已读。
-        if (!res.data?.busy) {
-          markPendingUserMessagesRead();
-        }
+        if (res.data?.busy) return;
+        markPendingUserMessagesRead();
         let segments: Segment[] = [];
         if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
           segments = res.data.messages;
         } else if (res.data?.jp) {
           segments = [{ jp: res.data.jp, zh: res.data.zh ?? '', audio_b64: res.data.audio_b64 ?? '' }];
         }
-        if (segments.length === 0) { appendFallbackBubble(); return; }
+        if (segments.length === 0) { noteGenerationFailure(); return; }
+        setGenerationFailed(false);
         await appendSegments(segments, `${Date.now()}`);
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
       pruneAudioFiles();
     } catch (e: any) {
-      // ★ 不弹 Alert.alert('连接失败') —— 出戏。塞条角色气泡替代,当他自己走神/信号差
-      console.warn('[sendText] failed:', e?.message);
-      appendFallbackBubble();
+      const data = e?.response?.data;
+      if (isGenerationFailedPayload(data)) {
+        console.warn('[sendText] generation_failed');
+      } else {
+        console.warn('[sendText] failed:', e?.message);
+      }
+      noteGenerationFailure();
     } finally { setLoading(false); }
+  };
+
+  const retryLastGeneration = () => {
+    if (loading) return;
+    const last = lastFailedSendRef.current;
+    if (!last) return;
+    setGenerationFailed(false);
+    if (last.kind === 'text') {
+      sendText(last.text, { retry: true });
+    } else {
+      sendImage(last.base64, last.mediaType, last.localUri, last.caption, last.video, { retry: true });
+    }
   };
 
   const handleSend = async () => {
@@ -1797,6 +1852,19 @@ export default function ChatRoom() {
         </View>
       )}
 
+      {generationFailed && (
+        <View style={s.failBanner}>
+          <Text style={s.failBannerText}>回复生成失败，点击重试</Text>
+          <TouchableOpacity
+            onPress={retryLastGeneration}
+            disabled={loading}
+            style={s.failRetryBtn}
+          >
+            <Text style={s.failRetryText}>重试</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       <View style={[s.inputBar, { marginBottom: keyboardHeight }]}>
         <TouchableOpacity style={s.attachBtn} onPress={showImagePicker} disabled={loading}>
           <Text style={s.attachBtnText}>📎</Text>
@@ -1923,6 +1991,10 @@ const s = StyleSheet.create({
   mentionName:       { color: C.text, fontSize: 14 },
 
   inputBar:        { flexDirection: 'row', alignItems: 'flex-end', backgroundColor: C.card, paddingHorizontal: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.border, gap: 8 },
+  failBanner:      { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.border, gap: 10 },
+  failBannerText:  { flex: 1, color: C.textMute, fontSize: 13, lineHeight: 18 },
+  failRetryBtn:    { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: C.accent },
+  failRetryText:   { color: C.accent, fontSize: 13, fontWeight: '600' },
 
   // ★ 引用回复
   replyBar:        { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 6, borderTopWidth: 1, borderTopColor: C.border, gap: 8 },
