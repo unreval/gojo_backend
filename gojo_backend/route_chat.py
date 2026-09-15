@@ -40,7 +40,7 @@ from ai_client import extract_text
 from tts import tts_to_b64, transcribe_audio_b64
 from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
-    save_short_memory, get_short_memory,
+    save_short_memory, save_user_short_memory_once, get_short_memory,
     update_chat_days, SHORT_MEMORY_MAX,
 )
 from memory_jobs import enqueue_private_extraction
@@ -128,14 +128,16 @@ def _commit_ready(msgs) -> bool:
     return bool(msgs) and all(_valid_msg(m) for m in msgs)
 
 
-def _generation_failed_response(user_id: str, character_id: str, total_days):
-    print(f'[{user_id}][{character_id}] generation_failed after 3 attempts; commit skipped')
-    return JSONResponse({
+def _generation_failed_response(user_id: str, character_id: str, total_days=None, attempts=3):
+    print(f'[{user_id}][{character_id}] generation_failed after {attempts} attempts; commit skipped')
+    body = {
         'error': 'generation_failed',
         'generation_failed': True,
         'messages': [],
-        'total_days': total_days,
-    }, status_code=502)
+    }
+    if total_days is not None:
+        body['total_days'] = total_days
+    return JSONResponse(body, status_code=502)
 
 
 def _parse_reply(raw: str):
@@ -144,18 +146,85 @@ def _parse_reply(raw: str):
     return parsed
 
 
-def _ingest(raw: str, user_id: str, character_id: str):
-    """所有模型原文的统一入口：拆内部状态 → 保存 → 返回 (parsed, visible)。"""
-    visible, parsed, state = ingest_model_output(raw)
-    if state:
+def _parse_generation(raw: str):
+    """只拆模型原文：visible / parsed / state。绝不写数据库。"""
+    visible, parsed, state = ingest_model_output(raw or '')
+    return parsed, visible, state
+
+
+def _ingest(raw: str, user_id: str = None, character_id: str = None):
+    """兼容旧调用名。parse-only，不再隐式保存 OFFLINE_CHARACTER_STATES。"""
+    return _parse_generation(raw)
+
+
+def _commit_offline_state(user_id, character_id, state):
+    if not state:
+        return
+    try:
+        from relationship_state import save_offline_character_state
+        save_offline_character_state(user_id, character_id, state)
+        print(f'[{user_id}][{character_id}] 已保存 OFFLINE_CHARACTER_STATES '
+              f'keys={list(state.keys())}')
+    except Exception as e:
+        print(f'[{user_id}][{character_id}] 保存 OFFLINE_CHARACTER_STATES 失败: {e}')
+
+
+def _parsed_ready(parsed, min_messages=1) -> bool:
+    if not parsed or not isinstance(parsed.get('messages'), list):
+        return False
+    if len(parsed['messages']) < min_messages:
+        return False
+    return all(_valid_msg(m) for m in parsed['messages'])
+
+
+def _generate_or_none(
+    model, max_tokens, system_blocks, messages, *,
+    attempts, log_tag, cache_tag, min_messages=1, salvage=False, reject_fn=None,
+):
+    """LLM → parse → validate → retry。成功返回 (parsed, state)，失败 (None, None)。"""
+    result = None
+    last_visible = ''
+    committed_state = None
+    for attempt in range(attempts):
         try:
-            from relationship_state import save_offline_character_state
-            save_offline_character_state(user_id, character_id, state)
-            print(f'[{user_id}][{character_id}] 已保存 OFFLINE_CHARACTER_STATES '
-                  f'keys={list(state.keys())}')
+            raw, response = _create_json(model, max_tokens, system_blocks, messages)
+            log_cache_usage(cache_tag, response)
+            print(f'[{log_tag}] attempt {attempt+1}: {(raw or "")[:120]}...')
+            parsed, visible, state = _parse_generation(raw)
+            if visible:
+                last_visible = visible
+            elif raw:
+                last_visible = sanitize_user_reply(raw)
+            if _parsed_ready(parsed, min_messages):
+                if reject_fn:
+                    reason = reject_fn(parsed)
+                    if reason:
+                        last_visible = ''
+                        continue
+                result = parsed
+                committed_state = state
+                break
         except Exception as e:
-            print(f'[{user_id}][{character_id}] 保存 OFFLINE_CHARACTER_STATES 失败: {e}')
-    return parsed, visible
+            print(f'[{log_tag}] attempt {attempt+1} error: {e}')
+    if not result and salvage and last_visible:
+        salvaged = _salvage_japanese(last_visible)
+        if salvaged and _valid_msg(salvaged):
+            result = {'emotion': '平静', 'messages': [salvaged]}
+            print(f'[{log_tag}] 纯日语救援：{salvaged["jp"][:40]}')
+    return result, committed_state
+
+
+def _finalize_committed(result, min_messages=1):
+    """finalize + 最终 commit gate。通过则 (emotion, msgs)，否则 (None, None)。"""
+    if not result:
+        return None, None
+    emotion = result.get('emotion', '平静')
+    if emotion not in EMOTIONS:
+        emotion = '平静'
+    msgs = _finalize_msgs(result.get('messages', []))
+    if not _commit_ready(msgs) or len(msgs) < min_messages:
+        return None, None
+    return emotion, msgs
 
 
 def _finalize_msgs(msgs):
@@ -337,7 +406,8 @@ async def chat_text(data: dict):
         act = db_schedule.get_current_activity(character_id, user_id, _now_dt)
         if act and not act['can_reply']:
             # 先把这句话存进短期记忆,不然他忙完回来不知道你说了啥
-            save_short_memory(user_id, 'user', user_text, character_id)
+            save_user_short_memory_once(
+                user_id, user_text, character_id, source_event_id=source_event_id)
             record_user_message(
                 user_id, character_id, source='chat_text_busy',
                 prior_snapshot=temporal_snapshot,
@@ -420,79 +490,52 @@ async def chat_text(data: dict):
     system_blocks = build_system_blocks(
         user_id, character_id, recall_query, temporal_snapshot=temporal_snapshot)
 
-    result = None
-    last_visible = ''
-    committed_state = None
-    for attempt in range(3):
-        try:
-            raw, response = _create_json(MODEL_MAIN, 1500, system_blocks, messages)
-            log_cache_usage(f'chat:{character_id}', response)
-            print(f'[{user_id}][{character_id}] attempt {attempt+1}: {raw[:120]}...')
-            # 失败轮次不写入内部状态：只在最终 commit 通过后再保存。
-            visible, parsed, state = ingest_model_output(raw)
-            if visible:
-                last_visible = visible
-            elif raw:
-                last_visible = sanitize_user_reply(raw)
-            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(_valid_msg(m) for m in parsed['messages']):
-                    reply_text = ' '.join(
-                        f'{m.get("jp", "")} {m.get("zh", "")}'
-                        for m in parsed['messages']
-                    )
-                    calendar_conflict = find_reply_calendar_conflict(
-                        user_text,
-                        reply_text,
-                        now_utc=temporal_snapshot.get('now_utc'),
-                    )
-                    if calendar_conflict:
-                        last_raw = ''
-                        last_visible = ''
-                        system_blocks = system_blocks + [{
-                            'type': 'text',
-                            'text': (
-                                '上一候选回复违反了后端确定的日历事实，错误代码：'
-                                f'{calendar_conflict}。必须按“确定性日历锚点”重新生成；'
-                                '已经过去的今天中午不能当作未来，明天中午也不能改成今天中午。'
-                            ),
-                        }]
-                        print(f'[{user_id}][{character_id}] 时间矛盾，拒绝候选并重试：'
-                              f'{calendar_conflict}')
-                        continue
-                    result = parsed
-                    committed_state = state
-                    break
-        except Exception as e:
-            print(f'attempt {attempt+1} error: {e}')
+    save_user_short_memory_once(
+        user_id, user_text, character_id, source_event_id=source_event_id)
 
-    if not result and last_visible:
-        salvaged = _salvage_japanese(last_visible)
-        if salvaged and _valid_msg(salvaged):
-            result = {'emotion': '平静', 'messages': [salvaged]}
-            print(f'[{user_id}][{character_id}] 纯日语救援：{salvaged["jp"][:40]}')
+    def reject_calendar(parsed):
+        reply_text = ' '.join(
+            f'{m.get("jp", "")} {m.get("zh", "")}'
+            for m in parsed['messages']
+        )
+        calendar_conflict = find_reply_calendar_conflict(
+            user_text,
+            reply_text,
+            now_utc=temporal_snapshot.get('now_utc'),
+        )
+        if not calendar_conflict:
+            return None
+        system_blocks.append({
+            'type': 'text',
+            'text': (
+                '上一候选回复违反了后端确定的日历事实，错误代码：'
+                f'{calendar_conflict}。必须按“确定性日历锚点”重新生成；'
+                '已经过去的今天中午不能当作未来，明天中午也不能改成今天中午。'
+            ),
+        })
+        print(f'[{user_id}][{character_id}] 时间矛盾，拒绝候选并重试：'
+              f'{calendar_conflict}')
+        return calendar_conflict
+
+    result, committed_state = _generate_or_none(
+        MODEL_MAIN, 1500, system_blocks, messages,
+        attempts=3,
+        log_tag=f'{user_id}][{character_id}',
+        cache_tag=f'chat:{character_id}',
+        salvage=True,
+        reject_fn=reject_calendar,
+    )
 
     if not result:
-        return _generation_failed_response(user_id, character_id, total_days)
+        return _generation_failed_response(user_id, character_id, total_days, attempts=3)
 
-    emotion = result.get('emotion', '平静')
-    if emotion not in EMOTIONS:
-        emotion = '平静'
+    emotion, msgs = _finalize_committed(result)
+    if msgs is None:
+        return _generation_failed_response(user_id, character_id, total_days, attempts=3)
 
-    msgs = _finalize_msgs(result.get('messages', []))
-    if not _commit_ready(msgs):
-        return _generation_failed_response(user_id, character_id, total_days)
-
-    if committed_state:
-        try:
-            from relationship_state import save_offline_character_state
-            save_offline_character_state(user_id, character_id, committed_state)
-            print(f'[{user_id}][{character_id}] 已保存 OFFLINE_CHARACTER_STATES '
-                  f'keys={list(committed_state.keys())}')
-        except Exception as e:
-            print(f'[{user_id}][{character_id}] 保存 OFFLINE_CHARACTER_STATES 失败: {e}')
+    _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    save_short_memory(user_id, 'user', user_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id, source='chat_text',
@@ -707,38 +750,23 @@ async def chat_story(data: dict):
         temporal_snapshot=temporal_snapshot,
     )
 
-    result = None
-    for attempt in range(5):
-        try:
-            raw, response = _create_json(MODEL_MAIN, 4000, system_blocks, messages)
-            log_cache_usage(f'story:{character_id}', response)
-            print(f'[story] attempt {attempt+1}: {raw[:120]}...')
-            parsed, _ = _ingest(raw, user_id, character_id)
-            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(_valid_msg(m) for m in parsed['messages']):
-                    result = parsed
-                    break
-        except Exception as e:
-            print(f'[story] attempt {attempt+1} error: {e}')
+    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    save_user_short_memory_once(
+        user_id, user_text, character_id, source_event_id=source_event_id)
 
-    if not result:
-        result = {
-            'emotion': '平静',
-            'messages': [
-                {'jp': 'まあ、いいよ。話を聞かせてあげる。', 'zh': '嘛，好啊，讲个故事给你听。'},
-                {'jp': '昔々、最強の呪術師がいてね。', 'zh': '很久很久以前，有一个最强的咒术师。'},
-                {'jp': 'まあ、それ僕のことなんだけど。', 'zh': '嘛，虽然那说的就是我啦。'},
-            ],
-        }
+    result, committed_state = _generate_or_none(
+        MODEL_MAIN, 4000, system_blocks, messages,
+        attempts=5,
+        log_tag=f'story:{character_id}',
+        cache_tag=f'story:{character_id}',
+    )
+    emotion, msgs = _finalize_committed(result)
+    if msgs is None:
+        return _generation_failed_response(user_id, character_id, total_days, attempts=5)
 
-    emotion = result.get('emotion', '平静')
-    if emotion not in EMOTIONS:
-        emotion = '平静'
-
-    msgs = _finalize_msgs(result.get('messages', []))
+    _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    save_short_memory(user_id, 'user', user_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id, source='chat_story',
@@ -793,30 +821,18 @@ async def chat_proactive(data: dict):
     system_blocks = build_system_blocks(
         user_id, character_id, task_title, temporal_snapshot=temporal_snapshot)
 
-    result = None
-    for attempt in range(3):
-        try:
-            raw, response = _create_json(MODEL_MAIN, 400, system_blocks, messages)
-            log_cache_usage(f'proactive:{character_id}', response)
-            parsed, _ = _ingest(raw, user_id, character_id)
-            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(_valid_msg(m) for m in parsed['messages']):
-                    result = parsed
-                    break
-        except Exception as e:
-            print(f'[proactive] attempt {attempt+1} error: {e}')
+    result, committed_state = _generate_or_none(
+        MODEL_MAIN, 400, system_blocks, messages,
+        attempts=3,
+        log_tag=f'proactive:{character_id}',
+        cache_tag=f'proactive:{character_id}',
+    )
+    emotion, msgs = _finalize_committed(result)
+    if msgs is None:
+        print(f'[{user_id}][{character_id}] proactive generation_failed mode={mode} task={task_title}')
+        return _generation_failed_response(user_id, character_id, attempts=3)
 
-    if not result:
-        if mode == 'remind':
-            result = {'emotion': '调皮', 'messages': [{'jp': f'おい、{task_title}の時間だよ。', 'zh': f'喂，该{task_title}了哦。'}]}
-        else:
-            result = {'emotion': '疑惑', 'messages': [{'jp': f'{task_title}、ちゃんとやった？', 'zh': f'{task_title}，好好做了吗？'}]}
-
-    emotion = result.get('emotion', '平静')
-    if emotion not in EMOTIONS:
-        emotion = '平静'
-
-    msgs = _finalize_msgs(result.get('messages', []))
+    _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
@@ -868,30 +884,24 @@ async def chat_voice_text(data: dict):
         temporal_snapshot=temporal_snapshot,
     )
 
-    result = None
-    for attempt in range(3):
-        try:
-            raw, response = _create_json(MODEL_JP_AUX, 500, system_blocks, messages)
-            log_cache_usage(f'voice:{character_id}', response)
-            parsed, _ = _ingest(raw, user_id, character_id)
-            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(_valid_msg(m) for m in parsed['messages']):
-                    result = parsed
-                    break
-        except Exception as e:
-            print(f'[voice_text] attempt {attempt+1} error: {e}')
+    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    save_user_short_memory_once(
+        user_id, user_text, character_id, source_event_id=source_event_id)
 
-    if not result:
-        result = {'emotion': '调皮', 'messages': [{'jp': 'ふっ、何か言った？', 'zh': '哼，你说了什么？'}]}
+    result, committed_state = _generate_or_none(
+        MODEL_JP_AUX, 500, system_blocks, messages,
+        attempts=3,
+        log_tag=f'voice:{character_id}',
+        cache_tag=f'voice:{character_id}',
+        salvage=True,
+    )
+    emotion, msgs = _finalize_committed(result)
+    if msgs is None:
+        return _generation_failed_response(user_id, character_id, attempts=3)
 
-    emotion = result.get('emotion', '平静')
-    if emotion not in EMOTIONS:
-        emotion = '平静'
-
-    msgs = _finalize_msgs(result.get('messages', []))
+    _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    save_short_memory(user_id, 'user', user_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id, source='chat_voice_text',
@@ -948,37 +958,24 @@ async def chat_voice_story(data: dict):
         temporal_snapshot=temporal_snapshot,
     )
 
-    result = None
-    for attempt in range(5):
-        try:
-            raw, response = _create_json(MODEL_MAIN, 3000, system_blocks, messages)
-            log_cache_usage(f'voice_story:{character_id}', response)
-            parsed, _ = _ingest(raw, user_id, character_id)
-            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) >= 3:
-                if all(_valid_msg(m) for m in parsed['messages']):
-                    result = parsed
-                    break
-        except Exception as e:
-            print(f'[voice_story] attempt {attempt+1} error: {e}')
+    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    save_user_short_memory_once(
+        user_id, user_text, character_id, source_event_id=source_event_id)
 
-    if not result:
-        result = {
-            'emotion': '平静',
-            'messages': [
-                {'jp': 'さて、どんな話をしようか。', 'zh': '那么，讲个什么故事呢。'},
-                {'jp': '昔々、最強の呪術師がいてね。', 'zh': '很久很久以前，有一个最强的咒术师。'},
-                {'jp': 'まあ、それ僕のことなんだけど。', 'zh': '嘛，虽然那说的就是我啦。'},
-            ],
-        }
+    result, committed_state = _generate_or_none(
+        MODEL_MAIN, 3000, system_blocks, messages,
+        attempts=5,
+        log_tag=f'voice_story:{character_id}',
+        cache_tag=f'voice_story:{character_id}',
+        min_messages=3,
+    )
+    emotion, msgs = _finalize_committed(result, min_messages=3)
+    if msgs is None:
+        return _generation_failed_response(user_id, character_id, attempts=5)
 
-    emotion = result.get('emotion', '平静')
-    if emotion not in EMOTIONS:
-        emotion = '平静'
-
-    msgs = _finalize_msgs(result.get('messages', []))
+    _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    save_short_memory(user_id, 'user', user_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id, source='chat_voice_story',
@@ -1069,35 +1066,22 @@ async def chat_voice_proactive(data: dict):
         temporal_snapshot=temporal_snapshot,
     )
 
-    result = None
-    for attempt in range(3):
-        try:
-            raw, response = _create_json(MODEL_JP_AUX, 300, system_blocks, messages)
-            log_cache_usage(f'voice_proactive:{character_id}', response)
-            parsed, _ = _ingest(raw, user_id, character_id)
-            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(_valid_msg(m) for m in parsed['messages']):
-                    result = parsed
-                    break
-        except Exception as e:
-            print(f'[voice_proactive] attempt {attempt+1} error: {e}')
+    result, committed_state = _generate_or_none(
+        MODEL_JP_AUX, 300, system_blocks, messages,
+        attempts=3,
+        log_tag=f'voice_proactive:{character_id}',
+        cache_tag=f'voice_proactive:{character_id}',
+    )
+    emotion, msgs = _finalize_committed(result)
+    if msgs is None:
+        print(f'[{user_id}][{character_id}] voice_proactive generation_failed mode={mode}')
+        return _generation_failed_response(user_id, character_id, attempts=3)
 
-    if not result:
-        if mode == 'greeting':
-            result = {'emotion': '调皮', 'messages': [{'jp': 'もしもし、どうした？', 'zh': '喂，怎么啦？'}]}
-        elif mode == 'missed':
-            result = {'emotion': '疑惑', 'messages': [{'jp': 'おい、聞こえてる？', 'zh': '喂，能听到吗？'}]}
-        elif silence_seconds > 30:
-            result = {'emotion': '调皮', 'messages': [{'jp': 'ねえ、寝ちゃった？', 'zh': '喂，睡着了吗？'}]}
-        else:
-            result = {'emotion': '平静', 'messages': [{'jp': 'どうした？', 'zh': '怎么了？'}]}
-
-    emotion = result.get('emotion', '平静')
-    if emotion not in EMOTIONS:
-        emotion = '平静'
-
-    msgs = _finalize_msgs(result.get('messages', []))
     msgs = msgs[:2] if mode == 'greeting' else msgs[:1]
+    if not _commit_ready(msgs):
+        return _generation_failed_response(user_id, character_id, attempts=3)
+
+    _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
     save_short_memory(user_id, 'assistant', full_jp, character_id)

@@ -77,20 +77,66 @@ def _all_character_names():
 
 # ────────── 短期记忆 ──────────
 
-def save_short_memory(user_id, role, content, character_id=DEFAULT_CHARACTER_ID):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        'INSERT INTO short_memory (user_id, character_id, role, content) VALUES (%s, %s, %s, %s)',
-        (user_id, character_id, role, content)
-    )
+def _prune_short_memory(cur, user_id, character_id):
     cur.execute('''DELETE FROM short_memory WHERE user_id = %s AND character_id = %s AND id NOT IN (
         SELECT id FROM short_memory WHERE user_id = %s AND character_id = %s
         ORDER BY timestamp DESC LIMIT 100)''',
         (user_id, character_id, user_id, character_id))
+
+
+def save_short_memory(user_id, role, content, character_id=DEFAULT_CHARACTER_ID,
+                      source_event_id=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
+           VALUES (%s, %s, %s, %s, %s)''',
+        (user_id, character_id, role, content, _normalize_event_id(source_event_id))
+    )
+    _prune_short_memory(cur, user_id, character_id)
     conn.commit()
     cur.close()
     conn.close()
+
+
+def _normalize_event_id(source_event_id):
+    value = str(source_event_id).strip() if source_event_id else ''
+    return value or None
+
+
+def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER_ID,
+                                source_event_id=None):
+    """保存真实发生的用户发言。同一 source_event_id 重试不会再 INSERT。
+
+    有 event id 时按 (user, character, role, source_event_id) 去重。
+    没有 event id 时每次都插入——无法可靠区分“重试”和“用户又说了同一句”。
+    """
+    event_id = _normalize_event_id(source_event_id)
+    conn = get_conn()
+    cur = conn.cursor()
+    if event_id:
+        cur.execute(
+            '''SELECT id FROM short_memory
+               WHERE user_id = %s AND character_id = %s AND role = 'user'
+                 AND source_event_id = %s
+               LIMIT 1''',
+            (user_id, character_id, event_id)
+        )
+        if cur.fetchone():
+            print(f'[memory] skip duplicate user event {event_id}')
+            cur.close()
+            conn.close()
+            return False
+    cur.execute(
+        '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
+           VALUES (%s, %s, %s, %s, %s)''',
+        (user_id, character_id, 'user', content, event_id)
+    )
+    _prune_short_memory(cur, user_id, character_id)
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
 
 
 def _short_limit(n):

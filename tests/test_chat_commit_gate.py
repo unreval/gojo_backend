@@ -45,9 +45,34 @@ class ChatCommitGateTests(unittest.TestCase):
         self.client = Mock()
         router = Mock()
         router.post.side_effect = lambda *_args, **_kwargs: lambda function: function
+        self.short_rows = []
+
+        def _save_user_once(user_id, content, character_id='gojo', source_event_id=None):
+            sid = (str(source_event_id).strip() if source_event_id else '') or None
+            if sid:
+                for row in self.short_rows:
+                    if (row['role'] == 'user'
+                            and row.get('source_event_id') == sid
+                            and row.get('character_id') == character_id):
+                        return False
+            self.short_rows.append({
+                'role': 'user', 'content': content,
+                'character_id': character_id, 'source_event_id': sid,
+            })
+            return True
+
+        def _save_short(user_id, role, content, character_id='gojo', source_event_id=None):
+            self.short_rows.append({
+                'role': role, 'content': content,
+                'character_id': character_id, 'source_event_id': source_event_id,
+            })
+
+        self.save_user_once = Mock(side_effect=_save_user_once)
+        self.save_short = Mock(side_effect=_save_short)
         self.memory = stub(
             'user_memory',
-            save_short_memory=Mock(),
+            save_short_memory=self.save_short,
+            save_user_short_memory_once=self.save_user_once,
             get_short_memory=Mock(return_value=[]),
             update_chat_days=Mock(return_value=3),
             SHORT_MEMORY_MAX=20,
@@ -55,6 +80,7 @@ class ChatCommitGateTests(unittest.TestCase):
         self.jobs = Mock()
         self.state = Mock()
         self.record_turn = Mock()
+        self.record_assistant = Mock()
         self.tts = Mock(return_value='audio')
         self.rel = Mock()
         self.diary = Mock()
@@ -95,7 +121,7 @@ class ChatCommitGateTests(unittest.TestCase):
                 find_reply_calendar_conflict=Mock(return_value=None),
                 record_turn=self.record_turn,
                 record_user_message=Mock(),
-                record_assistant_message=Mock(),
+                record_assistant_message=self.record_assistant,
             ),
             'characters': stub(
                 'characters',
@@ -133,19 +159,28 @@ class ChatCommitGateTests(unittest.TestCase):
         self.log = log_patch.start()
         self.addCleanup(log_patch.stop)
 
-    def send(self, raws, text='你好'):
+    def send(self, raws, text='你好', source_event_id='evt-1', handler=None, extra=None):
         queue = list(raws)
         self.route._create_json = Mock(
             side_effect=lambda *_args, **_kwargs: (queue.pop(0) if queue else '', Mock()))
-        response = asyncio.run(self.route.chat_text({
+        payload = {
             'user_id': 'u',
             'character_id': 'gojo',
             'text': text,
-        }))
+            'source_event_id': source_event_id,
+        }
+        if extra:
+            payload.update(extra)
+        fn = handler or self.route.chat_text
+        response = asyncio.run(fn(payload))
         return response, json.loads(response.body)
 
-    def assert_commit_skipped(self):
-        self.memory.save_short_memory.assert_not_called()
+    def user_memory_roles(self):
+        return [row['role'] for row in self.short_rows]
+
+    def assert_assistant_commit_skipped(self):
+        self.assertNotIn('assistant', self.user_memory_roles())
+        self.save_short.assert_not_called()
         self.jobs.assert_not_called()
         self.record_turn.assert_not_called()
         self.tts.assert_not_called()
@@ -154,15 +189,19 @@ class ChatCommitGateTests(unittest.TestCase):
         self.diary.assert_not_called()
         self.promise.assert_not_called()
         self.grumble.assert_not_called()
+        self.record_assistant.assert_not_called()
 
-    def assert_generation_failed(self, response, body, attempts=3):
+    def assert_generation_failed(self, response, body, attempts=3, user_saved=True):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(body['error'], 'generation_failed')
         self.assertTrue(body['generation_failed'])
         self.assertEqual(body['messages'], [])
         self.assertEqual(self.route._create_json.call_count, attempts)
-        self.assert_commit_skipped()
-        self.assertIn('generation_failed after 3 attempts; commit skipped',
+        self.assert_assistant_commit_skipped()
+        if user_saved:
+            self.assertEqual(self.user_memory_roles(), ['user'])
+            self.assertEqual(self.save_user_once.call_count, 1)
+        self.assertIn(f'generation_failed after {attempts} attempts; commit skipped',
                       ' '.join(str(c) for c in self.log.call_args_list))
 
     def test_valid_short_reply_commits_memory_rel_and_tts(self):
@@ -172,7 +211,9 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(len(body['messages']), 1)
         self.assertIn('そうだね', body['messages'][0]['jp'])
         self.assertEqual(body['messages'][0]['zh'], '是啊')
-        self.assertEqual(self.memory.save_short_memory.call_count, 2)
+        self.assertEqual(self.save_user_once.call_count, 1)
+        self.assertEqual(self.save_short.call_count, 1)
+        self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
         self.jobs.assert_called_once()
         self.record_turn.assert_called_once()
         self.tts.assert_called()
@@ -206,7 +247,8 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('ん？', body['messages'][0]['jp'])
         self.assertEqual(body['messages'][0]['zh'], '嗯？')
-        self.memory.save_short_memory.assert_called()
+        self.save_user_once.assert_called()
+        self.save_short.assert_called()
         self.jobs.assert_called_once()
 
     def test_json_debris_as_visible_text_is_rejected(self):
@@ -235,6 +277,10 @@ class ChatCommitGateTests(unittest.TestCase):
         src = Path(ROUTE_CHAT).read_text(encoding='utf-8')
         self.assertNotIn('fallback_pool', src)
         self.assertNotIn('へえ、それで？', src)
+        self.assertNotIn('話を聞かせてあげる', src)
+        self.assertNotIn('ふっ、何か言った？', src)
+        self.assertNotIn('もしもし、どうした？', src)
+        self.assertNotIn('の時間だよ', src)
         tree = ast.parse(src)
         assigned = {
             node.targets[0].id
@@ -244,6 +290,95 @@ class ChatCommitGateTests(unittest.TestCase):
             and isinstance(node.targets[0], ast.Name)
         }
         self.assertNotIn('fallback_pool', assigned)
+
+    def test_generation_failed_keeps_user_event_once_and_retry_does_not_duplicate(self):
+        response, body = self.send(['', '', ''], source_event_id='evt-retry')
+        self.assert_generation_failed(response, body)
+        self.assertEqual(self.user_memory_roles(), ['user'])
+
+        self.route._create_json.reset_mock()
+        response, body = self.send(['', '', ''], source_event_id='evt-retry')
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self.user_memory_roles(), ['user'])
+        self.assertEqual(self.save_user_once.call_count, 2)
+        self.assertEqual(self.save_short.call_count, 0)
+        self.assert_assistant_commit_skipped()
+
+    def test_retry_success_only_appends_assistant(self):
+        self.send(['', '', ''], source_event_id='evt-ok')
+        self.assertEqual(self.user_memory_roles(), ['user'])
+        self.jobs.assert_not_called()
+        self.rel.assert_not_called()
+        self.tts.assert_not_called()
+
+        self.route._create_json.reset_mock()
+        response, body = self.send([chat_reply('そうだね', '是啊')], source_event_id='evt-ok')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
+        self.assertEqual(self.save_user_once.call_count, 2)
+        self.assertEqual(self.save_short.call_count, 1)
+        self.jobs.assert_called_once()
+        self.rel.assert_called_once()
+        self.tts.assert_called()
+
+    def test_parse_generation_does_not_write_offline_state(self):
+        raw = '<<<OFFLINE_CHARACTER_STATES>>> {"inner":"wait","intent":"silent","moodshift":"none"}'
+        parsed, visible, state = self.route._ingest(raw, 'u', 'gojo')
+        self.state.assert_not_called()
+        self.assertIsNotNone(state)
+        self.assertFalse(parsed)
+
+    def test_story_empty_generation_does_not_fabricate_or_commit(self):
+        response, body = self.send(['', '', '', '', ''], handler=self.route.chat_story)
+        self.assert_generation_failed(response, body, attempts=5)
+        self.assertEqual(self.user_memory_roles(), ['user'])
+
+    def test_story_valid_reply_commits_assistant_only_once(self):
+        raw = json.dumps({
+            'emotion': '平静',
+            'messages': [
+                {'jp': '昔々、最強の呪術師がいてね。', 'zh': '很久很久以前，有一个最强的咒术师。'},
+            ],
+        }, ensure_ascii=False)
+        response, body = self.send([raw], handler=self.route.chat_story)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
+        self.jobs.assert_called_once()
+        self.tts.assert_called()
+        self.state.assert_not_called()
+
+    def test_proactive_empty_generation_does_not_fabricate_or_commit(self):
+        response, body = self.send(
+            ['', '', ''],
+            handler=self.route.chat_proactive,
+            extra={'task_title': '吃药', 'mode': 'remind'},
+        )
+        self.assertEqual(response.status_code, 502)
+        self.assertTrue(body['generation_failed'])
+        self.assertEqual(body['messages'], [])
+        self.assertEqual(self.user_memory_roles(), [])
+        self.save_user_once.assert_not_called()
+        self.assert_assistant_commit_skipped()
+        self.record_assistant.assert_not_called()
+
+    def test_voice_text_empty_generation_does_not_fabricate(self):
+        response, body = self.send(['', '', ''], handler=self.route.chat_voice_text)
+        self.assert_generation_failed(response, body, attempts=3)
+
+    def test_voice_story_empty_generation_does_not_fabricate(self):
+        response, body = self.send(['', '', '', '', ''], handler=self.route.chat_voice_story)
+        self.assert_generation_failed(response, body, attempts=5)
+
+    def test_voice_proactive_empty_generation_does_not_fabricate(self):
+        response, body = self.send(
+            ['', '', ''],
+            handler=self.route.chat_voice_proactive,
+            extra={'mode': 'greeting'},
+        )
+        self.assertEqual(response.status_code, 502)
+        self.assertTrue(body['generation_failed'])
+        self.assertEqual(self.user_memory_roles(), [])
+        self.assert_assistant_commit_skipped()
 
 
 class FrontendCommitGateGuardTests(unittest.TestCase):
