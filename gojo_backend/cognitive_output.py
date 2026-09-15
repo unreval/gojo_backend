@@ -4,6 +4,8 @@ import re
 from datetime import timedelta
 
 from cognitive_config import (
+    COGNITIVE_BELIEF_COMMIT_MIN_CONFIDENCE,
+    COGNITIVE_BELIEF_COMMIT_MIN_INDEPENDENT_EVIDENCE,
     COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS,
     COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS,
     PREDICTION_NUMERIC_OPERATORS,
@@ -14,10 +16,12 @@ from cognitive_predictions import validate_signal_prediction_contract
 
 ROOT_FIELDS = frozenset({
     'cycle_summary',
+    'question_updates',
     'belief_updates',
     'hypothesis_updates',
     'new_predictions',
     'evidence_refs',
+    'reflection_note',
 })
 OPTIONAL_ROOT_FIELDS = frozenset({
     'sticky_note_updates',
@@ -28,6 +32,14 @@ SUMMARY_FIELDS = frozenset({
 })
 BELIEF_STATUSES = frozenset({'active', 'retracted'})
 HYPOTHESIS_STATUSES = frozenset({'open', 'supported', 'rejected', 'archived'})
+QUESTION_STATUSES = frozenset({'active', 'dormant', 'resolved', 'archived'})
+HYPOTHESIS_TYPES = frozenset({
+    'self_model', 'relationship', 'user_model', 'interaction_pattern',
+})
+BELIEF_TYPES = frozenset({
+    'general', 'self_model', 'relationship_observation',
+    'user_model', 'interaction_pattern',
+})
 STICKY_NOTE_STATUSES = frozenset({'active', 'completed', 'expired', 'archived'})
 DIARY_REFLECTION_KINDS = frozenset({'event', 'periodic', 'repair', 'uncertainty'})
 CONFIDENCE_LABELS = frozenset({'low', 'medium', 'high'})
@@ -112,7 +124,14 @@ def _event_id(value, field, allowed_event_ids):
     return result
 
 
-def _update_refs(value, field, allowed_event_ids, declared_event_ids):
+def _update_refs(
+    value,
+    field,
+    allowed_event_ids,
+    declared_event_ids,
+    *,
+    allow_empty=False,
+):
     refs = _array(value, field, MAX_OUTPUT_ITEMS)
     result = []
     for index, item in enumerate(refs):
@@ -123,12 +142,17 @@ def _update_refs(value, field, allowed_event_ids, declared_event_ids):
             raise SlowLoopOutputError(f'{field}_{index}_not_declared')
         if event_id not in result:
             result.append(event_id)
-    if not result:
+    if not result and not allow_empty:
         raise SlowLoopOutputError(f'{field}_must_not_be_empty')
     return result
 
 
-def validate_slow_loop_output(value, *, allowed_event_ids):
+def _require_current_ref(refs, field, current_event_ids):
+    if current_event_ids and not any(event_id in current_event_ids for event_id in refs):
+        raise SlowLoopOutputError(f'{field}_must_reference_current_evidence')
+
+
+def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=None):
     """Return a normalized output or reject any ungrounded/model-invented field."""
     root = _object(value, 'root')
     missing = ROOT_FIELDS - set(root)
@@ -142,6 +166,10 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
             'unexpected_root_fields:' + ','.join(sorted(extra)),
         )
     allowed_ids = {int(item) for item in allowed_event_ids}
+    current_ids = (
+        {int(item) for item in current_event_ids}
+        if current_event_ids is not None else set()
+    )
 
     summary = _object(root['cycle_summary'], 'cycle_summary')
     if set(summary) != SUMMARY_FIELDS:
@@ -180,6 +208,43 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
     if allowed_ids and not evidence_refs:
         raise SlowLoopOutputError('evidence_refs_must_not_be_empty')
 
+    question_updates = []
+    question_keys = set()
+    for index, item in enumerate(
+        _array(root['question_updates'], 'question_updates', MAX_OUTPUT_ITEMS)
+    ):
+        update = _object(item, f'question_update_{index}')
+        expected = {
+            'question_key', 'question_text', 'status', 'evidence_refs',
+        }
+        if set(update) != expected:
+            raise SlowLoopOutputError(f'question_update_{index}_fields_invalid')
+        key = _key(update['question_key'], f'question_update_{index}_key')
+        if key in question_keys:
+            raise SlowLoopOutputError(f'question_update_{index}_duplicate_key')
+        question_keys.add(key)
+        status = _text(update['status'], f'question_update_{index}_status', 16)
+        if status not in QUESTION_STATUSES:
+            raise SlowLoopOutputError(f'question_update_{index}_status_invalid')
+        refs = _update_refs(
+            update['evidence_refs'],
+            f'question_update_{index}_evidence_refs',
+            allowed_ids, declared_ids,
+        )
+        _require_current_ref(
+            refs, f'question_update_{index}_evidence_refs', current_ids,
+        )
+        question_updates.append({
+            'question_key': key,
+            'question_text': _text(
+                update['question_text'],
+                f'question_update_{index}_question_text',
+                800,
+            ),
+            'status': status,
+            'evidence_refs': refs,
+        })
+
     belief_updates = []
     belief_keys = set()
     for index, item in enumerate(
@@ -187,7 +252,8 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
     ):
         update = _object(item, f'belief_update_{index}')
         expected = {
-            'belief_key', 'statement', 'confidence', 'status', 'evidence_refs',
+            'belief_key', 'statement', 'confidence', 'status', 'belief_type',
+            'from_hypothesis_key', 'evidence_refs',
         }
         if set(update) != expected:
             raise SlowLoopOutputError(f'belief_update_{index}_fields_invalid')
@@ -198,6 +264,23 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
         status = _text(update['status'], f'belief_update_{index}_status', 16)
         if status not in BELIEF_STATUSES:
             raise SlowLoopOutputError(f'belief_update_{index}_status_invalid')
+        belief_type = _text(
+            update['belief_type'], f'belief_update_{index}_belief_type', 32,
+        )
+        if belief_type not in BELIEF_TYPES:
+            raise SlowLoopOutputError(f'belief_update_{index}_belief_type_invalid')
+        from_hypothesis_key = _key(
+            update['from_hypothesis_key'],
+            f'belief_update_{index}_from_hypothesis_key',
+        )
+        refs = _update_refs(
+            update['evidence_refs'],
+            f'belief_update_{index}_evidence_refs',
+            allowed_ids, declared_ids,
+        )
+        _require_current_ref(
+            refs, f'belief_update_{index}_evidence_refs', current_ids,
+        )
         belief_updates.append({
             'belief_key': key,
             'statement': _text(
@@ -207,11 +290,9 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
                 update['confidence'], f'belief_update_{index}_confidence',
             ),
             'status': status,
-            'evidence_refs': _update_refs(
-                update['evidence_refs'],
-                f'belief_update_{index}_evidence_refs',
-                allowed_ids, declared_ids,
-            ),
+            'belief_type': belief_type,
+            'from_hypothesis_key': from_hypothesis_key,
+            'evidence_refs': refs,
         })
 
     hypothesis_updates = []
@@ -221,10 +302,11 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
     ):
         update = _object(item, f'hypothesis_update_{index}')
         required = {
-            'hypothesis_key', 'statement', 'status', 'evidence_refs',
+            'hypothesis_key', 'statement', 'hypothesis_type', 'confidence',
+            'status', 'question_key', 'supporting_evidence_refs',
+            'contradicting_evidence_refs',
         }
-        optional = {'question_key'}
-        if not required.issubset(update) or set(update) - required - optional:
+        if set(update) != required:
             raise SlowLoopOutputError(f'hypothesis_update_{index}_fields_invalid')
         key = _key(
             update['hypothesis_key'], f'hypothesis_update_{index}_key',
@@ -235,22 +317,54 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
         status = _text(update['status'], f'hypothesis_update_{index}_status', 16)
         if status not in HYPOTHESIS_STATUSES:
             raise SlowLoopOutputError(f'hypothesis_update_{index}_status_invalid')
-        question_key = update.get('question_key')
+        hypothesis_type = _text(
+            update['hypothesis_type'],
+            f'hypothesis_update_{index}_hypothesis_type',
+            32,
+        )
+        if hypothesis_type not in HYPOTHESIS_TYPES:
+            raise SlowLoopOutputError(
+                f'hypothesis_update_{index}_hypothesis_type_invalid',
+            )
+        question_key = _key(
+            update['question_key'], f'hypothesis_update_{index}_question_key',
+        )
+        supporting_refs = _update_refs(
+            update['supporting_evidence_refs'],
+            f'hypothesis_update_{index}_supporting_evidence_refs',
+            allowed_ids, declared_ids, allow_empty=True,
+        )
+        contradicting_refs = _update_refs(
+            update['contradicting_evidence_refs'],
+            f'hypothesis_update_{index}_contradicting_evidence_refs',
+            allowed_ids, declared_ids, allow_empty=True,
+        )
+        combined_refs = supporting_refs + [
+            event_id for event_id in contradicting_refs
+            if event_id not in supporting_refs
+        ]
+        if not combined_refs:
+            raise SlowLoopOutputError(
+                f'hypothesis_update_{index}_evidence_refs_must_not_be_empty',
+            )
+        _require_current_ref(
+            combined_refs, f'hypothesis_update_{index}_evidence_refs',
+            current_ids,
+        )
         hypothesis_updates.append({
             'hypothesis_key': key,
             'statement': _text(
                 update['statement'], f'hypothesis_update_{index}_statement', 1200,
             ),
+            'hypothesis_type': hypothesis_type,
+            'confidence': _confidence(
+                update['confidence'],
+                f'hypothesis_update_{index}_confidence',
+            ),
             'status': status,
-            'question_key': (
-                _key(question_key, f'hypothesis_update_{index}_question_key')
-                if question_key is not None else None
-            ),
-            'evidence_refs': _update_refs(
-                update['evidence_refs'],
-                f'hypothesis_update_{index}_evidence_refs',
-                allowed_ids, declared_ids,
-            ),
+            'question_key': question_key,
+            'supporting_evidence_refs': supporting_refs,
+            'contradicting_evidence_refs': contradicting_refs,
         })
 
     new_predictions = []
@@ -261,10 +375,11 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
         prediction = _object(item, f'new_prediction_{index}')
         required = {
             'prediction_key', 'resolver_name', 'fulfillment_operator',
-            'fulfillment_value', 'expires_in_seconds', 'evidence_refs',
+            'fulfillment_value', 'expires_in_seconds', 'question_key',
+            'hypothesis_key', 'evidence_refs',
         }
         optional = {
-            'violation_operator', 'violation_value', 'hypothesis_key', 'metadata',
+            'violation_operator', 'violation_value', 'metadata',
         }
         if not required.issubset(prediction) or set(prediction) - required - optional:
             raise SlowLoopOutputError(f'new_prediction_{index}_fields_invalid')
@@ -317,7 +432,13 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
             raise SlowLoopOutputError(f'new_prediction_{index}_ttl_invalid')
         if ttl < MIN_PREDICTION_TTL_SECONDS or ttl > MAX_PREDICTION_TTL_SECONDS:
             raise SlowLoopOutputError(f'new_prediction_{index}_ttl_out_of_range')
-        hypothesis_key = prediction.get('hypothesis_key')
+        question_key = _key(
+            prediction['question_key'], f'new_prediction_{index}_question_key',
+        )
+        hypothesis_key = _key(
+            prediction['hypothesis_key'],
+            f'new_prediction_{index}_hypothesis_key',
+        )
         metadata = prediction.get('metadata', {})
         if not isinstance(metadata, dict):
             raise SlowLoopOutputError(f'new_prediction_{index}_metadata_invalid')
@@ -336,6 +457,14 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
             raise SlowLoopOutputError(
                 f'new_prediction_{index}_{exc}',
             ) from exc
+        refs = _update_refs(
+            prediction['evidence_refs'],
+            f'new_prediction_{index}_evidence_refs',
+            allowed_ids, declared_ids,
+        )
+        _require_current_ref(
+            refs, f'new_prediction_{index}_evidence_refs', current_ids,
+        )
         new_predictions.append({
             'prediction_key': key,
             'resolver_name': resolver,
@@ -344,16 +473,10 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
             'violation_operator': violation_operator,
             'violation_value': violation_value,
             'expires_in_seconds': ttl,
-            'hypothesis_key': (
-                _key(hypothesis_key, f'new_prediction_{index}_hypothesis_key')
-                if hypothesis_key is not None else None
-            ),
+            'question_key': question_key,
+            'hypothesis_key': hypothesis_key,
             'metadata': metadata,
-            'evidence_refs': _update_refs(
-                prediction['evidence_refs'],
-                f'new_prediction_{index}_evidence_refs',
-                allowed_ids, declared_ids,
-            ),
+            'evidence_refs': refs,
         })
 
     sticky_note_updates = []
@@ -392,6 +515,14 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
                 raise SlowLoopOutputError(
                     f'sticky_note_update_{index}_ttl_out_of_range',
                 )
+        refs = _update_refs(
+            update['evidence_refs'],
+            f'sticky_note_update_{index}_evidence_refs',
+            allowed_ids, declared_ids,
+        )
+        _require_current_ref(
+            refs, f'sticky_note_update_{index}_evidence_refs', current_ids,
+        )
         sticky_note_updates.append({
             'note_key': key,
             'content': _text(
@@ -401,11 +532,7 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
             ),
             'status': status,
             'expires_in_seconds': ttl,
-            'evidence_refs': _update_refs(
-                update['evidence_refs'],
-                f'sticky_note_update_{index}_evidence_refs',
-                allowed_ids, declared_ids,
-            ),
+            'evidence_refs': refs,
         })
 
     diary_entries = []
@@ -426,34 +553,141 @@ def validate_slow_loop_output(value, *, allowed_event_ids):
         )
         if reflection_kind not in DIARY_REFLECTION_KINDS:
             raise SlowLoopOutputError(f'diary_entry_{index}_kind_invalid')
+        refs = _update_refs(
+            entry['evidence_refs'],
+            f'diary_entry_{index}_evidence_refs',
+            allowed_ids, declared_ids,
+        )
+        _require_current_ref(
+            refs, f'diary_entry_{index}_evidence_refs', current_ids,
+        )
         diary_entries.append({
             'diary_key': key,
             'content': _text(
                 entry['content'], f'diary_entry_{index}_content', 1200,
             ),
             'reflection_kind': reflection_kind,
-            'evidence_refs': _update_refs(
-                entry['evidence_refs'],
-                f'diary_entry_{index}_evidence_refs',
-                allowed_ids, declared_ids,
-            ),
+            'evidence_refs': refs,
         })
+
+    note = _object(root['reflection_note'], 'reflection_note')
+    if set(note) != {'content', 'evidence_refs'}:
+        raise SlowLoopOutputError('reflection_note_fields_invalid')
+    reflection_content = _text(
+        note['content'], 'reflection_note_content', 800, allow_empty=True,
+    )
+    reflection_refs = _update_refs(
+        note['evidence_refs'],
+        'reflection_note_evidence_refs',
+        allowed_ids,
+        declared_ids,
+        allow_empty=not bool(reflection_content),
+    )
+    if reflection_content:
+        _require_current_ref(
+            reflection_refs, 'reflection_note_evidence_refs', current_ids,
+        )
+    elif reflection_refs:
+        raise SlowLoopOutputError('empty_reflection_note_must_not_cite_evidence')
 
     return {
         'cycle_summary': normalized_summary,
+        'question_updates': question_updates,
         'belief_updates': belief_updates,
         'hypothesis_updates': hypothesis_updates,
         'new_predictions': new_predictions,
         'evidence_refs': evidence_refs,
+        'reflection_note': {
+            'content': reflection_content,
+            'evidence_refs': reflection_refs,
+        },
         'sticky_note_updates': sticky_note_updates,
         'diary_entries': diary_entries,
     }
 
 
+def _load_event_metadata(cur, user_id, character_id, event_ids):
+    if not event_ids:
+        return {}
+    cur.execute(
+        '''SELECT id, source_event_type, source_event_id, source, payload
+           FROM cognitive_events
+           WHERE user_id = %s AND character_id = %s AND id = ANY(%s)''',
+        (user_id, character_id, sorted(event_ids)),
+    )
+    result = {}
+    for row in cur.fetchall():
+        payload = row[4]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = {}
+        result[int(row[0])] = {
+            'source_event_type': row[1],
+            'source_event_id': row[2],
+            'source': row[3],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
+    return result
+
+
+def _event_evidence_category(metadata):
+    payload = metadata.get('payload') if isinstance(metadata, dict) else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return payload.get('evidence_category') or metadata.get('source_event_type')
+
+
+def _belief_commit_decision(update, source_refs, event_metadata, hypothesis_id):
+    independent = set()
+    categories = []
+    for ref in source_refs:
+        event_id = ref['event_id']
+        metadata = event_metadata.get(event_id, {})
+        if metadata:
+            independent.add(
+                f'{metadata.get("source_event_type")}:{metadata.get("source_event_id")}'
+            )
+        else:
+            independent.add(f'event:{event_id}')
+        categories.append(_event_evidence_category(metadata))
+
+    base = {
+        'belief_key': update['belief_key'],
+        'from_hypothesis_key': update['from_hypothesis_key'],
+        'confidence': update['confidence'],
+        'independent_evidence_count': len(independent),
+        'required_confidence': COGNITIVE_BELIEF_COMMIT_MIN_CONFIDENCE,
+        'required_independent_evidence_count': (
+            COGNITIVE_BELIEF_COMMIT_MIN_INDEPENDENT_EVIDENCE
+        ),
+    }
+    if hypothesis_id is None:
+        return {**base, 'action': 'held', 'reason': 'missing_hypothesis'}
+    if update['status'] == 'retracted':
+        return {**base, 'action': 'retracted', 'reason': 'retraction_update'}
+    if update['confidence'] < COGNITIVE_BELIEF_COMMIT_MIN_CONFIDENCE:
+        return {**base, 'action': 'held', 'reason': 'confidence_below_threshold'}
+    if len(independent) < COGNITIVE_BELIEF_COMMIT_MIN_INDEPENDENT_EVIDENCE:
+        return {
+            **base,
+            'action': 'held',
+            'reason': 'insufficient_independent_evidence',
+        }
+    if categories and all(category == 'character_self_claim' for category in categories):
+        return {
+            **base,
+            'action': 'held',
+            'reason': 'character_self_claim_only',
+        }
+    return {**base, 'action': 'committed', 'reason': 'commit_gate_passed'}
+
+
 def persist_slow_loop_output(
     cur, *, cycle_id, user_id, character_id, output, now,
 ):
-    """Apply durable beliefs, hypotheses, and predictions in the cycle txn."""
+    """Apply durable questions, hypotheses, predictions, and gated beliefs."""
     refs_by_id = {
         item['event_id']: item for item in output['evidence_refs']
     }
@@ -461,98 +695,196 @@ def persist_slow_loop_output(
     def full_refs(event_ids):
         return [refs_by_id[event_id] for event_id in event_ids]
 
-    for update in output['belief_updates']:
+    all_referenced_event_ids = {
+        int(item['event_id']) for item in output['evidence_refs']
+    }
+    event_metadata = _load_event_metadata(
+        cur, user_id, character_id, all_referenced_event_ids,
+    )
+
+    question_ids = {}
+    for update in output['question_updates']:
+        source_refs = full_refs(update['evidence_refs'])
+        metadata = {
+            'updated_by': 'cognitive_slow_loop',
+            'lifecycle_separate_from_predictions': True,
+        }
         cur.execute(
-            '''INSERT INTO cognitive_beliefs (
-                   user_id, character_id, belief_key, statement, confidence,
-                   status, evidence_refs, created_by_cycle_id,
+            '''INSERT INTO cognitive_questions (
+                   user_id, character_id, question_key, question_text,
+                   status, metadata, source_event_refs, created_by_cycle_id,
                    updated_by_cycle_id, updated_at
-               ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
-               ON CONFLICT (user_id, character_id, belief_key) DO UPDATE
-               SET statement = EXCLUDED.statement,
-                   confidence = EXCLUDED.confidence,
+               ) VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
+                         %s, %s, %s)
+               ON CONFLICT (user_id, character_id, question_key) DO UPDATE
+               SET question_text = EXCLUDED.question_text,
                    status = EXCLUDED.status,
-                   evidence_refs = EXCLUDED.evidence_refs,
+                   metadata = EXCLUDED.metadata,
+                   source_event_refs = EXCLUDED.source_event_refs,
                    updated_by_cycle_id = EXCLUDED.updated_by_cycle_id,
-                   updated_at = EXCLUDED.updated_at''',
+                   updated_at = EXCLUDED.updated_at
+               RETURNING id''',
             (
-                user_id, character_id, update['belief_key'],
-                update['statement'], update['confidence'], update['status'],
-                json.dumps(full_refs(update['evidence_refs']), ensure_ascii=False),
+                user_id, character_id, update['question_key'],
+                update['question_text'], update['status'],
+                json.dumps(metadata, ensure_ascii=False),
+                json.dumps(source_refs, ensure_ascii=False),
                 cycle_id, cycle_id, now,
             ),
         )
+        question_ids[update['question_key']] = cur.fetchone()[0]
+
+    def resolve_question_id(question_key):
+        if question_key in question_ids:
+            return question_ids[question_key]
+        cur.execute(
+            '''SELECT id FROM cognitive_questions
+               WHERE user_id = %s AND character_id = %s
+                 AND question_key = %s''',
+            (user_id, character_id, question_key),
+        )
+        row = cur.fetchone()
+        question_id = row[0] if row else None
+        if question_id is not None:
+            question_ids[question_key] = question_id
+        return question_id
 
     hypothesis_ids = {}
     for update in output['hypothesis_updates']:
-        question_id = None
-        if update['question_key']:
-            cur.execute(
-                '''SELECT id FROM cognitive_questions
-                   WHERE user_id = %s AND character_id = %s
-                     AND question_key = %s''',
-                (user_id, character_id, update['question_key']),
-            )
-            row = cur.fetchone()
-            question_id = row[0] if row else None
+        question_id = resolve_question_id(update['question_key'])
+        supporting_refs = full_refs(update['supporting_evidence_refs'])
+        contradicting_refs = full_refs(update['contradicting_evidence_refs'])
         evidence_entry = [{
             'cycle_id': cycle_id,
-            'evidence_refs': full_refs(update['evidence_refs']),
+            'confidence': update['confidence'],
+            'status': update['status'],
+            'supporting_evidence_refs': supporting_refs,
+            'contradicting_evidence_refs': contradicting_refs,
         }]
+        metadata = {
+            'updated_by': 'cognitive_slow_loop',
+            'confidence_requires_current_evidence': True,
+        }
         cur.execute(
             '''INSERT INTO cognitive_hypotheses (
                    user_id, character_id, question_id, hypothesis_key,
-                   statement, status, evidence, created_by_cycle_id,
+                   statement, status, hypothesis_type, confidence,
+                   supporting_evidence_refs, contradicting_evidence_refs,
+                   evidence, metadata, created_by_cycle_id,
                    updated_by_cycle_id, updated_at
-               ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                         %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
+                         %s, %s, %s)
                ON CONFLICT (user_id, character_id, hypothesis_key) DO UPDATE
                SET question_id = COALESCE(
                        EXCLUDED.question_id, cognitive_hypotheses.question_id),
                    statement = EXCLUDED.statement,
                    status = EXCLUDED.status,
+                   hypothesis_type = EXCLUDED.hypothesis_type,
+                   confidence = EXCLUDED.confidence,
+                   supporting_evidence_refs =
+                       cognitive_hypotheses.supporting_evidence_refs
+                       || EXCLUDED.supporting_evidence_refs,
+                   contradicting_evidence_refs =
+                       cognitive_hypotheses.contradicting_evidence_refs
+                       || EXCLUDED.contradicting_evidence_refs,
                    evidence = cognitive_hypotheses.evidence || EXCLUDED.evidence,
+                   metadata = EXCLUDED.metadata,
                    updated_by_cycle_id = EXCLUDED.updated_by_cycle_id,
                    updated_at = EXCLUDED.updated_at
                RETURNING id''',
             (
                 user_id, character_id, question_id,
                 update['hypothesis_key'], update['statement'], update['status'],
+                update['hypothesis_type'], update['confidence'],
+                json.dumps(supporting_refs, ensure_ascii=False),
+                json.dumps(contradicting_refs, ensure_ascii=False),
                 json.dumps(evidence_entry, ensure_ascii=False),
+                json.dumps(metadata, ensure_ascii=False),
                 cycle_id, cycle_id, now,
             ),
         )
         hypothesis_ids[update['hypothesis_key']] = cur.fetchone()[0]
 
+    def resolve_hypothesis_id(hypothesis_key):
+        if hypothesis_key in hypothesis_ids:
+            return hypothesis_ids[hypothesis_key]
+        cur.execute(
+            '''SELECT id FROM cognitive_hypotheses
+               WHERE user_id = %s AND character_id = %s
+                 AND hypothesis_key = %s''',
+            (user_id, character_id, hypothesis_key),
+        )
+        row = cur.fetchone()
+        hypothesis_id = row[0] if row else None
+        if hypothesis_id is not None:
+            hypothesis_ids[hypothesis_key] = hypothesis_id
+        return hypothesis_id
+
+    belief_commit_decisions = []
+    for update in output['belief_updates']:
+        hypothesis_id = resolve_hypothesis_id(update['from_hypothesis_key'])
+        source_refs = full_refs(update['evidence_refs'])
+        decision = _belief_commit_decision(
+            update, source_refs, event_metadata, hypothesis_id,
+        )
+        belief_commit_decisions.append(decision)
+        if decision['action'] == 'held':
+            continue
+        metadata = {
+            'created_by': 'cognitive_slow_loop',
+            'commit_gate': decision,
+        }
+        cur.execute(
+            '''INSERT INTO cognitive_beliefs (
+                   user_id, character_id, belief_key, statement, confidence,
+                   status, belief_type, evidence_refs,
+                   committed_from_hypothesis_id, metadata,
+                   created_by_cycle_id, updated_by_cycle_id, updated_at
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                         %s, %s::jsonb, %s, %s, %s)
+               ON CONFLICT (user_id, character_id, belief_key) DO UPDATE
+               SET statement = EXCLUDED.statement,
+                   confidence = EXCLUDED.confidence,
+                   status = EXCLUDED.status,
+                   belief_type = EXCLUDED.belief_type,
+                   evidence_refs = EXCLUDED.evidence_refs,
+                   committed_from_hypothesis_id =
+                       EXCLUDED.committed_from_hypothesis_id,
+                   metadata = EXCLUDED.metadata,
+                   updated_by_cycle_id = EXCLUDED.updated_by_cycle_id,
+                   updated_at = EXCLUDED.updated_at''',
+            (
+                user_id, character_id, update['belief_key'],
+                update['statement'], update['confidence'], update['status'],
+                update['belief_type'],
+                json.dumps(source_refs, ensure_ascii=False),
+                hypothesis_id, json.dumps(metadata, ensure_ascii=False),
+                cycle_id, cycle_id, now,
+            ),
+        )
+
     for prediction in output['new_predictions']:
-        hypothesis_id = None
-        hypothesis_key = prediction['hypothesis_key']
-        if hypothesis_key:
-            hypothesis_id = hypothesis_ids.get(hypothesis_key)
-            if hypothesis_id is None:
-                cur.execute(
-                    '''SELECT id FROM cognitive_hypotheses
-                       WHERE user_id = %s AND character_id = %s
-                         AND hypothesis_key = %s''',
-                    (user_id, character_id, hypothesis_key),
-                )
-                row = cur.fetchone()
-                hypothesis_id = row[0] if row else None
+        question_id = resolve_question_id(prediction['question_key'])
+        hypothesis_id = resolve_hypothesis_id(prediction['hypothesis_key'])
         metadata = dict(prediction['metadata'])
         metadata.update({
             'created_by': 'cognitive_slow_loop',
+            'question_key': prediction['question_key'],
+            'hypothesis_key': prediction['hypothesis_key'],
             'evidence_refs': full_refs(prediction['evidence_refs']),
         })
         cur.execute(
             '''INSERT INTO cognitive_predictions (
-                   user_id, character_id, hypothesis_id, prediction_key,
-                   resolver_name, fulfillment_operator, fulfillment_value,
-                   violation_operator, violation_value, expires_at,
-                   created_by_cycle_id, metadata
-               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                   user_id, character_id, question_id, hypothesis_id,
+                   prediction_key, resolver_name, fulfillment_operator,
+                   fulfillment_value, violation_operator, violation_value,
+                   expires_at, created_by_cycle_id, metadata
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                          %s, %s::jsonb)
                ON CONFLICT (user_id, character_id, prediction_key) DO NOTHING''',
             (
-                user_id, character_id, hypothesis_id,
+                user_id, character_id, question_id, hypothesis_id,
                 prediction['prediction_key'], prediction['resolver_name'],
                 prediction['fulfillment_operator'],
                 prediction['fulfillment_value'],
@@ -609,3 +941,5 @@ def persist_slow_loop_output(
                 json.dumps(source_refs, ensure_ascii=False), cycle_id, now,
             ),
         )
+
+    return belief_commit_decisions

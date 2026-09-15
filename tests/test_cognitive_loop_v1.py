@@ -652,6 +652,8 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(result['status'], 'pending')
         self.assertEqual(create.call_args.kwargs['trigger_class'], 'scheduled_reflection')
         source = inspect.getsource(cognitive_scheduler.enqueue_scheduled_reflection)
+        self.assertIn('pg_advisory_xact_lock', source)
+        self.assertIn('stable_advisory_lock_key', source)
         self.assertNotIn('aggregate_pending_triggers', source)
         self.assertNotIn('INSERT INTO cognitive_cycles', source)
         queue_source = inspect.getsource(cognitive_queue.aggregate_pending_triggers)

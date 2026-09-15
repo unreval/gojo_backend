@@ -45,31 +45,42 @@ hidden mental states. Distinguish direct evidence from hypotheses. A user saying
 something about the character does not prove the character reciprocates it.
 
 Return one JSON object and no markdown. It must contain these root keys:
-cycle_summary, belief_updates, hypothesis_updates, new_predictions,
-evidence_refs.
+cycle_summary, question_updates, belief_updates, hypothesis_updates,
+new_predictions, evidence_refs, reflection_note.
 It may also contain optional root keys sticky_note_updates and diary_entries.
 
 Schema:
 {
   "cycle_summary": {
-    "summary": "concise Chinese factual synthesis",
+    "summary": "concise Chinese audit synthesis; not a belief",
     "salient_change": "what changed from prior knowledge, or empty string",
     "uncertainty": "what remains unknown, or empty string",
     "confidence": "low|medium|high"
   },
+  "question_updates": [{
+    "question_key": "stable.lowercase.key",
+    "question_text": "unresolved question in Chinese",
+    "status": "active|dormant|resolved|archived",
+    "evidence_refs": [123]
+  }],
   "belief_updates": [{
     "belief_key": "stable.lowercase.key",
-    "statement": "durable factual belief in Chinese",
+    "statement": "candidate durable belief in Chinese",
     "confidence": 0.0,
     "status": "active|retracted",
+    "belief_type": "general|self_model|relationship_observation|user_model|interaction_pattern",
+    "from_hypothesis_key": "stable.lowercase.key",
     "evidence_refs": [123]
   }],
   "hypothesis_updates": [{
     "hypothesis_key": "stable.lowercase.key",
     "statement": "testable interpretation in Chinese",
+    "hypothesis_type": "self_model|relationship|user_model|interaction_pattern",
+    "confidence": 0.0,
     "status": "open|supported|rejected|archived",
-    "question_key": null,
-    "evidence_refs": [123]
+    "question_key": "stable.lowercase.key",
+    "supporting_evidence_refs": [123],
+    "contradicting_evidence_refs": []
   }],
   "new_predictions": [{
     "prediction_key": "stable.lowercase.key",
@@ -79,7 +90,8 @@ Schema:
     "violation_operator": "<=",
     "violation_value": -1,
     "expires_in_seconds": 86400,
-    "hypothesis_key": null,
+    "question_key": "stable.lowercase.key",
+    "hypothesis_key": "stable.lowercase.key",
     "metadata": {
       "description": "falsifiable expectation",
       "fulfillment_signals": [{
@@ -94,8 +106,47 @@ Schema:
     },
     "evidence_refs": [123]
   }],
-  "evidence_refs": [{"event_id": 123, "reason": "why it supports output"}]
+  "evidence_refs": [{"event_id": 123, "reason": "why it supports output"}],
+  "reflection_note": {
+    "content": "compact internal note for next generator prompt, or empty string",
+    "evidence_refs": [123]
+  }
 }
+
+Question rules:
+- Create or update questions when current evidence exposes conflict,
+  prediction error, repeated behavior, self-model uncertainty, or relationship
+  ambiguity. A question is "what remains unresolved"; it is not an answer.
+- Do not resolve a question merely because a prediction was fulfilled or
+  violated. Use prediction settlement only as evidence for or against a
+  hypothesis; question lifecycle is separate.
+
+Hypothesis rules:
+- Hypotheses answer questions provisionally. Every confidence value must be
+  grounded in current-cycle evidence, with supporting and contradicting refs
+  separated.
+- A character_self_claim event is only evidence that the character said a
+  self-explanation. It does not prove the self-model. Use hypothesis_type
+  "self_model" for "I may be the kind of person who..." claims, keep initial
+  confidence low unless there is independent behavioral evidence.
+- Never raise confidence because an older hypothesis, diary, summary, or memory
+  says the same thing. Prior state is context, not new proof.
+
+Belief commit rules:
+- belief_updates are commit candidates, not guaranteed writes. The application
+  code will hold any candidate below the evidence threshold.
+- Only propose an active belief when it comes from a named hypothesis, has high
+  confidence, and cites multiple independent evidence events including current
+  evidence. If the evidence is still thin, leave belief_updates empty and keep
+  the idea as a hypothesis.
+- Do not turn cycle_summary, reflection_note, diary text, or a single generated
+  self-explanation into a belief.
+
+Reflection note rules:
+- reflection_note is a compact internal note for the next generator prompt.
+  It is not a database belief, not relationship state, and not proof.
+- If there is no useful next-turn note, set content to "" and evidence_refs to
+  [].
 
 Optional sticky_note_updates schema:
 [{
@@ -127,18 +178,21 @@ Write only when cited events justify a reflective record.
 
 Every referenced event_id must exist in the supplied context. Historical IDs
 may be reused only when they already appear in a prior belief, hypothesis, or
-prediction evidence_refs. Every update, prediction, sticky note, and diary
-entry must cite at least one event declared in top-level evidence_refs. A scheduled_reflection event is a
-clock tick, not factual evidence by itself. Use empty update arrays when the
-evidence does not justify a change. Never invent IDs.
+prediction evidence_refs. Every question update, hypothesis update, belief
+candidate, prediction, reflection note, sticky note, and diary entry must cite
+at least one current cycle event declared in top-level evidence_refs. A
+scheduled_reflection event is a clock tick, not factual evidence by itself. Use
+empty update arrays when the evidence does not justify a change. Never invent
+IDs.
 
 The only prediction resolver is current_event_signal_outcome. It checks the
 next extracted relationship signals against declarative selectors. Use exactly
 fulfillment >= 1 and violation <= -1. Each selector must contain signal_type
 and actor; confidence and a subset of attributes are optional. Both selector
-lists must be non-empty. Predict an observable future signal, not a hidden
-feeling, message count, elapsed time, relationship score, or final romantic
-outcome. Omit predictions that cannot be represented this way.
+lists must be non-empty. Every prediction must bind both question_key and
+hypothesis_key. Predict an observable future signal, not a hidden feeling,
+message count, elapsed time, relationship score, or final romantic outcome.
+Omit predictions that cannot be represented this way.
 
 When settled_predictions are present, use their linked hypothesis_key,
 description, selectors, status, and the settling event as a feedback signal.
@@ -258,6 +312,13 @@ def generate_cycle_output(context, *, create_chat_fn=None):
     else:
         call_model = create_chat_fn
     allowed_event_ids = _event_ids(context)
+    current_event_ids = {
+        int(event.get('event_id'))
+        for event in context.get('events', [])
+        if isinstance(event, dict)
+        and isinstance(event.get('event_id'), int)
+        and not isinstance(event.get('event_id'), bool)
+    }
     messages = [{
         'role': 'user',
         'content': 'Consolidate this cognitive cycle:\n' + _serialize_context(context),
@@ -273,7 +334,9 @@ def generate_cycle_output(context, *, create_chat_fn=None):
         try:
             parsed = parse_slow_loop_output(raw)
             output = validate_slow_loop_output(
-                parsed, allowed_event_ids=allowed_event_ids,
+                parsed,
+                allowed_event_ids=allowed_event_ids,
+                current_event_ids=current_event_ids,
             )
             return output, usage
         except SlowLoopOutputError as exc:

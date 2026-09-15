@@ -28,10 +28,13 @@ COGNITIVE_DDL = (
         output_state_version BIGINT,
         reasoning_context JSONB,
         cycle_summary JSONB,
+        question_updates JSONB NOT NULL DEFAULT '[]'::jsonb,
         belief_updates JSONB NOT NULL DEFAULT '[]'::jsonb,
+        belief_commit_decisions JSONB NOT NULL DEFAULT '[]'::jsonb,
         hypothesis_updates JSONB NOT NULL DEFAULT '[]'::jsonb,
         new_predictions JSONB NOT NULL DEFAULT '[]'::jsonb,
         evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+        reflection_note JSONB,
         worker_model TEXT,
         worker_usage JSONB,
         failure_code TEXT,
@@ -65,6 +68,12 @@ COGNITIVE_DDL = (
     '''ALTER TABLE cognitive_cycles
        ADD COLUMN IF NOT EXISTS worker_usage JSONB''',
     '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS question_updates JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS belief_commit_decisions JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_cycles
+       ADD COLUMN IF NOT EXISTS reflection_note JSONB''',
+    '''ALTER TABLE cognitive_cycles
        ADD COLUMN IF NOT EXISTS sticky_note_updates JSONB NOT NULL DEFAULT '[]'::jsonb''',
     '''ALTER TABLE cognitive_cycles
        ADD COLUMN IF NOT EXISTS diary_entries JSONB NOT NULL DEFAULT '[]'::jsonb''',
@@ -75,7 +84,8 @@ COGNITIVE_DDL = (
         character_id TEXT NOT NULL,
         trigger_class TEXT NOT NULL CHECK (trigger_class IN (
             'prediction_error', 'prediction_confirmation', 'question_reactivation',
-            'high_weight_evidence', 'scheduled_reflection'
+            'high_weight_evidence', 'self_model_evidence',
+            'scheduled_reflection'
         )),
         occurrence_key TEXT NOT NULL DEFAULT 'default',
         priority INTEGER NOT NULL,
@@ -119,7 +129,7 @@ COGNITIVE_DDL = (
            IF NOT EXISTS (
                SELECT 1 FROM pg_constraint
                WHERE conrelid = 'cognitive_event_triggers'::regclass
-                 AND conname = 'ck_cognitive_trigger_class_v2'
+                 AND conname = 'ck_cognitive_trigger_class_v3'
            ) THEN
                FOR trigger_class_constraint IN
                    SELECT conname FROM pg_constraint
@@ -134,11 +144,11 @@ COGNITIVE_DDL = (
                    );
                END LOOP;
                ALTER TABLE cognitive_event_triggers
-                   ADD CONSTRAINT ck_cognitive_trigger_class_v2 CHECK (
+                   ADD CONSTRAINT ck_cognitive_trigger_class_v3 CHECK (
                        trigger_class IN (
                            'prediction_error', 'prediction_confirmation',
                            'question_reactivation', 'high_weight_evidence',
-                           'scheduled_reflection'
+                           'self_model_evidence', 'scheduled_reflection'
                        )
                    );
            END IF;
@@ -171,6 +181,9 @@ COGNITIVE_DDL = (
             CHECK (status IN ('active', 'dormant', 'resolved', 'archived')),
         embedding_json TEXT,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        source_event_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
+        updated_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (user_id, character_id, question_key)
@@ -178,6 +191,12 @@ COGNITIVE_DDL = (
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_questions_dormant
        ON cognitive_questions (user_id, character_id, status)
        WHERE status = 'dormant' ''',
+    '''ALTER TABLE cognitive_questions
+       ADD COLUMN IF NOT EXISTS source_event_refs JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_questions
+       ADD COLUMN IF NOT EXISTS created_by_cycle_id BIGINT REFERENCES cognitive_cycles(id)''',
+    '''ALTER TABLE cognitive_questions
+       ADD COLUMN IF NOT EXISTS updated_by_cycle_id BIGINT REFERENCES cognitive_cycles(id)''',
     '''CREATE TABLE IF NOT EXISTS cognitive_beliefs (
         id BIGSERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -188,7 +207,14 @@ COGNITIVE_DDL = (
             CHECK (confidence >= 0 AND confidence <= 1),
         status TEXT NOT NULL DEFAULT 'active'
             CHECK (status IN ('active', 'retracted')),
+        belief_type TEXT NOT NULL DEFAULT 'general'
+            CHECK (belief_type IN (
+                'general', 'self_model', 'relationship_observation',
+                'user_model', 'interaction_pattern'
+            )),
         evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+        committed_from_hypothesis_id BIGINT,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
         updated_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -198,6 +224,12 @@ COGNITIVE_DDL = (
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_beliefs_active
        ON cognitive_beliefs (user_id, character_id, updated_at DESC)
        WHERE status = 'active' ''',
+    '''ALTER TABLE cognitive_beliefs
+       ADD COLUMN IF NOT EXISTS belief_type TEXT NOT NULL DEFAULT 'general' ''',
+    '''ALTER TABLE cognitive_beliefs
+       ADD COLUMN IF NOT EXISTS committed_from_hypothesis_id BIGINT''',
+    '''ALTER TABLE cognitive_beliefs
+       ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb''',
     '''CREATE TABLE IF NOT EXISTS cognitive_hypotheses (
         id BIGSERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -207,13 +239,33 @@ COGNITIVE_DDL = (
         statement TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'open'
             CHECK (status IN ('open', 'supported', 'rejected', 'archived')),
+        hypothesis_type TEXT NOT NULL DEFAULT 'relationship'
+            CHECK (hypothesis_type IN (
+                'self_model', 'relationship', 'user_model',
+                'interaction_pattern'
+            )),
+        confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5
+            CHECK (confidence >= 0 AND confidence <= 1),
+        supporting_evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+        contradicting_evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
         evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
         updated_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (user_id, character_id, hypothesis_key)
     )''',
+    '''ALTER TABLE cognitive_hypotheses
+       ADD COLUMN IF NOT EXISTS hypothesis_type TEXT NOT NULL DEFAULT 'relationship' ''',
+    '''ALTER TABLE cognitive_hypotheses
+       ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5''',
+    '''ALTER TABLE cognitive_hypotheses
+       ADD COLUMN IF NOT EXISTS supporting_evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_hypotheses
+       ADD COLUMN IF NOT EXISTS contradicting_evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb''',
+    '''ALTER TABLE cognitive_hypotheses
+       ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb''',
     '''CREATE TABLE IF NOT EXISTS cognitive_predictions (
         id BIGSERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,

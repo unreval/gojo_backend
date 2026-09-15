@@ -9,6 +9,7 @@ from cognitive_config import (
 )
 from cognitive_events import record_source_event
 from cognitive_predictions import settle_pending_predictions
+from cognitive_queue import stable_advisory_lock_key
 from cognitive_triggers import create_trigger_occurrence
 
 
@@ -50,6 +51,15 @@ def enqueue_scheduled_reflection(
         user_id, character_id, event_time,
     )
     try:
+        cur = database.cursor()
+        try:
+            cur.execute(
+                'SELECT pg_advisory_xact_lock(%s)',
+                (stable_advisory_lock_key(user_id, character_id),),
+            )
+        finally:
+            cur.close()
+
         event_id = record_source_event(
             database,
             user_id=user_id,

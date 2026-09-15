@@ -11,6 +11,7 @@ from cognitive_config import (
     COGNITIVE_MAX_HYPOTHESES_IN_CONTEXT,
     COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT,
     COGNITIVE_MAX_QUESTIONS_PER_CYCLE,
+    COGNITIVE_MAX_QUESTIONS_IN_CONTEXT,
     COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
     COGNITIVE_MAX_RETRY,
     COGNITIVE_MAX_TRIGGERS_PER_CYCLE,
@@ -456,6 +457,7 @@ def commit_cycle_success(
             raise ValueError('cycle claim is missing or expired')
         output_version = successful_output_version(input_version)
         normalized_output = None
+        belief_commit_decisions = None
         if structured_output is not None:
             cur.execute(
                 '''SELECT DISTINCT trigger.event_id
@@ -465,7 +467,8 @@ def commit_cycle_success(
                    WHERE link.cycle_id = %s''',
                 (cycle_id,),
             )
-            allowed_event_ids = {int(row[0]) for row in cur.fetchall()}
+            current_event_ids = {int(row[0]) for row in cur.fetchall()}
+            allowed_event_ids = set(current_event_ids)
             historical_candidates = (
                 _context_evidence_ids(reasoning_context) - allowed_event_ids
             )
@@ -486,9 +489,11 @@ def commit_cycle_success(
                 validate_slow_loop_output,
             )
             normalized_output = validate_slow_loop_output(
-                structured_output, allowed_event_ids=allowed_event_ids,
+                structured_output,
+                allowed_event_ids=allowed_event_ids,
+                current_event_ids=current_event_ids,
             )
-            persist_slow_loop_output(
+            belief_commit_decisions = persist_slow_loop_output(
                 cur,
                 cycle_id=cycle_id,
                 user_id=user_id,
@@ -509,11 +514,16 @@ def commit_cycle_success(
                 if normalized_output is not None else None
             )
             for key in (
-                'cycle_summary', 'belief_updates', 'hypothesis_updates',
-                'new_predictions', 'evidence_refs',
+                'cycle_summary', 'question_updates', 'belief_updates',
+                'hypothesis_updates', 'new_predictions', 'evidence_refs',
+                'reflection_note',
                 'sticky_note_updates', 'diary_entries',
             )
         }
+        belief_commit_decisions_json = (
+            json.dumps(belief_commit_decisions or [], ensure_ascii=False)
+            if normalized_output is not None else None
+        )
         usage_json = (
             json.dumps(worker_usage, ensure_ascii=False)
             if worker_usage is not None else None
@@ -523,10 +533,14 @@ def commit_cycle_success(
                SET status = 'succeeded', output_state_version = %s,
                    reasoning_context = COALESCE(%s::jsonb, reasoning_context),
                    cycle_summary = COALESCE(%s::jsonb, cycle_summary),
+                   question_updates = COALESCE(%s::jsonb, question_updates),
                    belief_updates = COALESCE(%s::jsonb, belief_updates),
+                   belief_commit_decisions =
+                       COALESCE(%s::jsonb, belief_commit_decisions),
                    hypothesis_updates = COALESCE(%s::jsonb, hypothesis_updates),
                    new_predictions = COALESCE(%s::jsonb, new_predictions),
                    evidence_refs = COALESCE(%s::jsonb, evidence_refs),
+                   reflection_note = COALESCE(%s::jsonb, reflection_note),
                    sticky_note_updates = COALESCE(%s::jsonb, sticky_note_updates),
                    diary_entries = COALESCE(%s::jsonb, diary_entries),
                    worker_model = COALESCE(%s, worker_model),
@@ -535,9 +549,11 @@ def commit_cycle_success(
                WHERE id = %s''',
             (
                 output_version, context_json,
-                output_json['cycle_summary'], output_json['belief_updates'],
+                output_json['cycle_summary'], output_json['question_updates'],
+                output_json['belief_updates'], belief_commit_decisions_json,
                 output_json['hypothesis_updates'], output_json['new_predictions'],
                 output_json['evidence_refs'],
+                output_json['reflection_note'],
                 output_json['sticky_note_updates'], output_json['diary_entries'],
                 worker_model, usage_json,
                 current_time, cycle_id,
@@ -580,7 +596,11 @@ def commit_cycle_success(
         return {
             'status': 'succeeded',
             'output_state_version': output_version,
-            'output': normalized_output,
+            'output': (
+                {**normalized_output,
+                 'belief_commit_decisions': belief_commit_decisions or []}
+                if normalized_output is not None else None
+            ),
         }
     except Exception:
         database.rollback()
@@ -777,6 +797,28 @@ def build_reasoning_context(cycle_id, *, conn=None):
                     item.update(question_facts.get(item['question_id'], {}))
 
         cur.execute(
+            '''SELECT question_key, question_text, status,
+                      source_event_refs, updated_at
+               FROM cognitive_questions
+               WHERE user_id = %s AND character_id = %s
+                 AND status IN ('active', 'dormant')
+               ORDER BY updated_at DESC, id DESC
+               LIMIT %s''',
+            (user_id, character_id, COGNITIVE_MAX_QUESTIONS_IN_CONTEXT),
+        )
+        current_questions = [
+            {
+                'question_key': row[0],
+                'question_text': row[1],
+                'status': row[2],
+                'source_event_refs': _json_value(row[3], []),
+                'updated_at': row[4],
+                'lifecycle': 'separate_from_prediction_status',
+            }
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(
             '''SELECT belief_key, statement, confidence, status,
                       evidence_refs, updated_at
                FROM cognitive_beliefs
@@ -799,7 +841,9 @@ def build_reasoning_context(cycle_id, *, conn=None):
         ]
 
         cur.execute(
-            '''SELECT hypothesis_key, statement, status, evidence, updated_at
+            '''SELECT hypothesis_key, statement, status, hypothesis_type,
+                      confidence, supporting_evidence_refs,
+                      contradicting_evidence_refs, evidence, updated_at
                FROM cognitive_hypotheses
                WHERE user_id = %s AND character_id = %s
                  AND status <> 'archived'
@@ -812,20 +856,33 @@ def build_reasoning_context(cycle_id, *, conn=None):
                 'hypothesis_key': row[0],
                 'statement': row[1],
                 'status': row[2],
-                'evidence': _json_value(row[3], []),
-                'updated_at': row[4],
+                'hypothesis_type': row[3],
+                'confidence': row[4],
+                'supporting_evidence_refs': _json_value(row[5], []),
+                'contradicting_evidence_refs': _json_value(row[6], []),
+                'evidence': _json_value(row[7], []),
+                'updated_at': row[8],
             }
             for row in cur.fetchall()
         ]
 
         cur.execute(
-            '''SELECT prediction_key, resolver_name, fulfillment_operator,
-                      fulfillment_value, violation_operator, violation_value,
-                      expires_at, observed_value, metadata, created_at
-               FROM cognitive_predictions
-               WHERE user_id = %s AND character_id = %s
-                 AND status = 'pending'
-               ORDER BY created_at DESC, id DESC
+            '''SELECT prediction.prediction_key, prediction.resolver_name,
+                      prediction.fulfillment_operator,
+                      prediction.fulfillment_value,
+                      prediction.violation_operator,
+                      prediction.violation_value,
+                      prediction.expires_at, prediction.observed_value,
+                      prediction.metadata, prediction.created_at,
+                      question.question_key, hypothesis.hypothesis_key
+               FROM cognitive_predictions AS prediction
+               LEFT JOIN cognitive_questions AS question
+                 ON question.id = prediction.question_id
+               LEFT JOIN cognitive_hypotheses AS hypothesis
+                 ON hypothesis.id = prediction.hypothesis_id
+               WHERE prediction.user_id = %s AND prediction.character_id = %s
+                 AND prediction.status = 'pending'
+               ORDER BY prediction.created_at DESC, prediction.id DESC
                LIMIT %s''',
             (user_id, character_id, COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT),
         )
@@ -841,6 +898,8 @@ def build_reasoning_context(cycle_id, *, conn=None):
                 'observed_value': row[7],
                 'metadata': _json_value(row[8], {}),
                 'created_at': row[9],
+                'question_key': row[10],
+                'hypothesis_key': row[11],
             }
             for row in cur.fetchall()
         ]
@@ -880,6 +939,7 @@ def build_reasoning_context(cycle_id, *, conn=None):
             'triggers': triggers,
             'settled_predictions': settled_predictions,
             'reactivated_questions': reactivated_questions,
+            'current_questions': current_questions,
             'current_beliefs': current_beliefs,
             'current_hypotheses': current_hypotheses,
             'pending_predictions': pending_predictions,

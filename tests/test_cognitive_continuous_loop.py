@@ -36,16 +36,26 @@ class ReaderCursor:
                 'salient_change': '角色首次明确承认在意。',
                 'uncertainty': '后续是否出现对等回应仍未知。',
                 'confidence': 'medium',
+            }, {
+                'content': '若她继续询问关系，保持关心但承认仍不确定。',
+                'evidence_refs': [{'event_id': 27, 'reason': '本轮'}],
             }, NOW)
+        elif compact.startswith('SELECT question_key'):
+            self.many = [(
+                'character.care.boundary.question',
+                '角色的关心是否仍停留在保持边界的照看？',
+                'active', NOW,
+            )]
         elif compact.startswith('SELECT belief_key'):
             self.many = [(
                 'character.practical_care', '角色多次给出具体生活关怀。',
-                0.82, NOW,
+                0.82, 'relationship_observation', NOW,
             )]
         elif compact.startswith('SELECT hypothesis_key'):
             self.many = [(
                 'character.care_without_commitment',
-                '角色的关心目前可能仍停留在友情。', 'open', NOW,
+                '角色的关心目前可能仍停留在友情。',
+                'open', 'relationship', 0.58, NOW,
             )]
         elif compact.startswith('SELECT id, note_key'):
             self.many = [(
@@ -115,10 +125,14 @@ class CognitiveReaderTests(unittest.TestCase):
         )
         self.assertIn('近期认知复盘', context)
         self.assertIn('不是关系定论', context)
+        self.assertIn('最近内部笔记', context)
+        self.assertIn('仍未解决的问题', context)
         self.assertIn('待验证理解（不能当成事实）', context)
-        self.assertIn('后续是否出现对等回应仍未知', context)
+        self.assertIn('保持关心但承认仍不确定', context)
+        self.assertIn('角色的关心是否仍停留在保持边界的照看', context)
         self.assertIn('便利贴备忘', context)
         self.assertIn('不是长期记忆或关系证据', context)
+        self.assertNotIn('角色保持实际关心，同时没有确认爱情。', context)
         self.assertNotIn('近期反思日记', context)
         self.assertNotIn('我把这件事先记下来，但不能当成结论。', context)
         self.assertNotIn('reasoning_context', context)

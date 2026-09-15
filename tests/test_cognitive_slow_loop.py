@@ -30,19 +30,22 @@ def valid_output():
             'uncertainty': '这份关心是否会发展为双向爱情仍未知。',
             'confidence': 'high',
         },
-        'belief_updates': [{
-            'belief_key': 'user.long_term_care',
-            'statement': '用户持续、明确地表达长期在意。',
-            'confidence': 0.9,
+        'question_updates': [{
+            'question_key': 'character.care.boundary.question',
+            'question_text': '角色的关心是否仍停留在保持边界的照看？',
             'status': 'active',
             'evidence_refs': [27],
         }],
+        'belief_updates': [],
         'hypothesis_updates': [{
             'hypothesis_key': 'character.care_without_commitment',
             'statement': '角色存在关心，但尚未形成对等承诺。',
+            'hypothesis_type': 'relationship',
+            'confidence': 0.62,
             'status': 'supported',
-            'question_key': None,
-            'evidence_refs': [27],
+            'question_key': 'character.care.boundary.question',
+            'supporting_evidence_refs': [27],
+            'contradicting_evidence_refs': [],
         }],
         'new_predictions': [{
             'prediction_key': 'care_signal.repeats.v1',
@@ -52,6 +55,7 @@ def valid_output():
             'violation_operator': '<=',
             'violation_value': -1,
             'expires_in_seconds': 86400,
+            'question_key': 'character.care.boundary.question',
             'hypothesis_key': 'character.care_without_commitment',
             'metadata': {
                 'description': '等待角色后续是否仍明确保持边界。',
@@ -71,7 +75,30 @@ def valid_output():
             'event_id': 27,
             'reason': '该事件同时包含用户表态和角色明确立场。',
         }],
+        'reflection_note': {
+            'content': '下次若继续谈在一起，保留关心与边界之间的不确定性。',
+            'evidence_refs': [27],
+        },
     }
+
+
+def committable_output():
+    output = valid_output()
+    output['evidence_refs'] = [
+        {'event_id': 12, 'reason': '历史事件显示角色多次保持边界。'},
+        {'event_id': 27, 'reason': '本轮事件再次显示角色保持边界。'},
+    ]
+    output['belief_updates'] = [{
+        'belief_key': 'character.boundary_care_pattern',
+        'statement': '角色常以保持边界的方式继续照看用户。',
+        'confidence': 0.84,
+        'status': 'active',
+        'belief_type': 'interaction_pattern',
+        'from_hypothesis_key': 'character.care_without_commitment',
+        'evidence_refs': [12, 27],
+    }]
+    output['hypothesis_updates'][0]['supporting_evidence_refs'] = [12, 27]
+    return output
 
 
 class TransactionConnection:
@@ -114,6 +141,10 @@ class StructuredCommitCursor:
             self.one = (1, 1)
         elif compact.startswith('SELECT DISTINCT trigger.event_id'):
             self.many = [(27,)]
+        elif compact.startswith('SELECT id FROM cognitive_events'):
+            self.many = [(12,)]
+        elif compact.startswith('INSERT INTO cognitive_questions'):
+            self.one = (71,)
         elif compact.startswith('INSERT INTO cognitive_hypotheses'):
             self.one = (81,)
         elif compact.startswith('SELECT COUNT(*) FROM cognitive_cycles'):
@@ -141,22 +172,31 @@ class SnapshotCursor:
             self.many = [(
                 7, 'succeeded', 'high_weight_evidence', 4, 5,
                 json.dumps(valid_output()['cycle_summary'], ensure_ascii=False),
+                json.dumps(valid_output()['question_updates'], ensure_ascii=False),
                 json.dumps(valid_output()['belief_updates'], ensure_ascii=False),
+                '[]',
                 json.dumps(valid_output()['hypothesis_updates'], ensure_ascii=False),
                 json.dumps(valid_output()['new_predictions'], ensure_ascii=False),
                 json.dumps(valid_output()['evidence_refs'], ensure_ascii=False),
+                json.dumps(valid_output()['reflection_note'], ensure_ascii=False),
                 '[]', '[]',
                 'test-model', None, NOW, NOW, NOW,
+            )]
+        elif 'FROM cognitive_questions' in compact:
+            self.many = [(
+                'character.care.boundary.question',
+                '角色的关心是否仍停留在保持边界的照看？',
+                'active', '[]', 7, NOW,
             )]
         elif 'FROM cognitive_beliefs' in compact:
             self.many = [(
                 'user.long_term_care', '用户持续表达在意。', 0.9, 'active',
-                '[]', 7, NOW,
+                'user_model', '[]', 81, '{}', 7, NOW,
             )]
         elif 'FROM cognitive_hypotheses' in compact:
             self.many = [(
                 'character.care_without_commitment', '角色关心但尚未承诺。',
-                'supported', '[]', 7, NOW,
+                'supported', 'relationship', 0.62, '[]', '[]', '[]', 7, NOW,
             )]
         elif 'FROM cognitive_predictions' in compact:
             self.many = [(
@@ -191,8 +231,12 @@ class SlowLoopValidationTests(unittest.TestCase):
             valid_output(), allowed_event_ids={27},
         )
         self.assertEqual(result['cycle_summary']['confidence'], 'high')
-        self.assertEqual(result['belief_updates'][0]['evidence_refs'], [27])
+        self.assertEqual(result['question_updates'][0]['evidence_refs'], [27])
+        self.assertEqual(
+            result['hypothesis_updates'][0]['supporting_evidence_refs'], [27],
+        )
         self.assertEqual(result['new_predictions'][0]['fulfillment_value'], 1.0)
+        self.assertEqual(result['reflection_note']['evidence_refs'], [27])
 
     def test_json_fence_is_tolerated_but_reasoning_is_not_saved(self):
         raw = 'preface\n```json\n' + json.dumps(valid_output()) + '\n```'
@@ -212,10 +256,25 @@ class SlowLoopValidationTests(unittest.TestCase):
 
     def test_update_must_reference_declared_evidence(self):
         output = valid_output()
-        output['belief_updates'][0]['evidence_refs'] = [28]
+        output['hypothesis_updates'][0]['supporting_evidence_refs'] = [28]
         with self.assertRaises(cognitive_output.SlowLoopOutputError):
             cognitive_output.validate_slow_loop_output(
                 output, allowed_event_ids={27, 28},
+            )
+
+    def test_confidence_update_must_reference_current_evidence(self):
+        output = valid_output()
+        output['evidence_refs'].insert(0, {
+            'event_id': 12,
+            'reason': '历史事件不能单独给本轮 confidence 加分。',
+        })
+        output['hypothesis_updates'][0]['supporting_evidence_refs'] = [12]
+        with self.assertRaisesRegex(
+            cognitive_output.SlowLoopOutputError,
+            'must_reference_current_evidence',
+        ):
+            cognitive_output.validate_slow_loop_output(
+                output, allowed_event_ids={12, 27}, current_event_ids={27},
             )
 
     def test_arbitrary_prediction_resolver_is_rejected(self):
@@ -251,6 +310,27 @@ class SlowLoopValidationTests(unittest.TestCase):
         self.assertEqual(result['sticky_note_updates'][0]['status'], 'active')
         self.assertEqual(result['diary_entries'][0]['reflection_kind'], 'event')
 
+    def test_self_claim_only_cannot_commit_belief(self):
+        update = committable_output()['belief_updates'][0]
+        refs = [{'event_id': 1}, {'event_id': 2}]
+        metadata = {
+            1: {
+                'source_event_type': 'character_self_claim',
+                'source_event_id': 'a',
+                'payload': {'evidence_category': 'character_self_claim'},
+            },
+            2: {
+                'source_event_type': 'character_self_claim',
+                'source_event_id': 'b',
+                'payload': {'evidence_category': 'character_self_claim'},
+            },
+        }
+        decision = cognitive_output._belief_commit_decision(
+            update, refs, metadata, hypothesis_id=81,
+        )
+        self.assertEqual(decision['action'], 'held')
+        self.assertEqual(decision['reason'], 'character_self_claim_only')
+
 
 class SlowLoopTransactionTests(unittest.TestCase):
     def test_structured_output_and_trigger_consumption_commit_together(self):
@@ -273,12 +353,14 @@ class SlowLoopTransactionTests(unittest.TestCase):
         self.assertEqual(connection.rollbacks, 0)
         sql = '\n'.join(item[0] for item in cursor.executed)
         for table in (
-            'cognitive_beliefs', 'cognitive_hypotheses',
+            'cognitive_questions', 'cognitive_hypotheses',
             'cognitive_predictions', 'cognitive_cycles',
         ):
             self.assertIn(table, sql)
+        self.assertNotIn('INSERT INTO cognitive_beliefs', sql)
         self.assertIn("SET status = 'consumed'", sql)
         self.assertIn('cycle_summary', sql)
+        self.assertIn('belief_commit_decisions', sql)
         self.assertIn('evidence_refs', sql)
         cycle_update = next(
             params for statement, params in cursor.executed
@@ -286,11 +368,35 @@ class SlowLoopTransactionTests(unittest.TestCase):
         )
         self.assertIn('2026-09-13T08:00:00+00:00', cycle_update[1])
 
+    def test_belief_commit_candidate_passes_gate_with_independent_evidence(self):
+        cursor = StructuredCommitCursor()
+        connection = TransactionConnection(cursor)
+        result = cognitive_queue.commit_cycle_success(
+            7,
+            reasoning_context={
+                'events': [{'event_id': 27, 'occurred_at': NOW}],
+                'current_beliefs': [{
+                    'evidence_refs': [{'event_id': 12, 'reason': 'earlier'}],
+                }],
+                'temporal': {'queued_at': NOW},
+            },
+            structured_output=committable_output(),
+            worker_model='test-model',
+            conn=connection,
+            now=NOW,
+        )
+        sql = '\n'.join(item[0] for item in cursor.executed)
+        self.assertIn('INSERT INTO cognitive_beliefs', sql)
+        self.assertEqual(
+            result['output']['belief_commit_decisions'][0]['action'],
+            'committed',
+        )
+
     def test_invalid_output_rolls_back_before_consuming_triggers(self):
         cursor = StructuredCommitCursor()
         connection = TransactionConnection(cursor)
         output = valid_output()
-        output['belief_updates'][0]['evidence_refs'] = [404]
+        output['hypothesis_updates'][0]['supporting_evidence_refs'] = [404]
         with self.assertRaises(cognitive_output.SlowLoopOutputError):
             cognitive_queue.commit_cycle_success(
                 7, structured_output=output, conn=connection, now=NOW,
@@ -402,6 +508,10 @@ class SlowLoopWorkerTests(unittest.TestCase):
         prompt = cognitive_worker._SYSTEM_PROMPT
         self.assertIn('Do not write dialogue', prompt)
         self.assertIn('modify relationship scores', prompt)
+        self.assertIn('question_updates', prompt)
+        self.assertIn('character_self_claim', prompt)
+        self.assertIn('belief_updates are commit candidates', prompt)
+        self.assertIn('reflection_note is a compact internal note', prompt)
         source = inspect.getsource(cognitive_worker)
         self.assertNotIn('UPDATE rel_state', source)
         self.assertNotIn('INSERT INTO rel_state', source)
@@ -411,11 +521,15 @@ class SlowLoopSchemaTests(unittest.TestCase):
     def test_schema_contains_all_structured_outputs_and_beliefs(self):
         ddl = '\n'.join(cognitive_db.ddl_statements())
         for field in (
-            'cycle_summary', 'belief_updates', 'hypothesis_updates',
-            'new_predictions', 'evidence_refs',
+            'cycle_summary', 'question_updates', 'belief_updates',
+            'belief_commit_decisions', 'hypothesis_updates',
+            'new_predictions', 'evidence_refs', 'reflection_note',
         ):
             self.assertIn(field, ddl)
         self.assertIn('CREATE TABLE IF NOT EXISTS cognitive_beliefs', ddl)
+        self.assertIn('supporting_evidence_refs', ddl)
+        self.assertIn('contradicting_evidence_refs', ddl)
+        self.assertIn('self_model_evidence', ddl)
         self.assertIn('cognitive_worker_migrations', ddl)
 
     def test_datetime_serialization_failures_are_requeued_once(self):
@@ -442,11 +556,26 @@ class SlowLoopInspectionTests(unittest.TestCase):
         )
         self.assertEqual(snapshot['cycles'][0]['cycle_id'], 7)
         self.assertEqual(snapshot['cycles'][0]['cycle_summary']['confidence'], 'high')
+        self.assertEqual(snapshot['cycles'][0]['reflection_note']['evidence_refs'], [27])
+        self.assertEqual(snapshot['questions'][0]['status'], 'active')
         self.assertEqual(snapshot['beliefs'][0]['status'], 'active')
+        self.assertEqual(snapshot['beliefs'][0]['belief_type'], 'user_model')
         self.assertEqual(snapshot['hypotheses'][0]['status'], 'supported')
+        self.assertEqual(snapshot['hypotheses'][0]['confidence'], 0.62)
         self.assertEqual(snapshot['predictions'][0]['status'], 'pending')
         self.assertNotIn('reasoning_context', snapshot['cycles'][0])
         self.assertEqual(connection._cursor.executed[0][1], ('u', 'gojo', 5))
+
+
+class MemoryContaminationGuardTests(unittest.TestCase):
+    def test_character_self_claims_are_routed_away_from_bond_memory(self):
+        with open(os.path.join(BACKEND, 'user_memory.py'), encoding='utf-8') as handle:
+            source = handle.read()
+        self.assertIn('character_self_claim', source)
+        self.assertIn('not_bond_memory', source)
+        self.assertIn('self_model_evidence', source)
+        self.assertIn('bond 改道自我陈述证据', source)
+        self.assertIn('_looks_like_character_self_claim(content)', source)
 
 
 if __name__ == '__main__':

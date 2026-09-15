@@ -28,7 +28,9 @@
 提取只用一次 Haiku 调用，同时产出 1/2/3 三类，成本和原来一样。
 """
 import anthropic
+import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
@@ -825,6 +827,104 @@ def _clean_content(raw_content):
     return (raw_content or '').strip().strip('「」"\'').rstrip('。.')
 
 
+_SELF_CLAIM_RE = re.compile(
+    r'(我的(风格|性格|方式|习惯|倾向)|'
+    r'我(就是|本来就是|一向|向来|通常|习惯|倾向|不擅长|擅长|属于)|'
+    r'我(是|算是).{0,12}(这种|那种|这样|那样).{0,12}(人|性格)|'
+    r'我(不太|很|比较)?(会|不会).{0,8}(直接|主动|轻易).{0,8}(回应|表达|承认))'
+)
+
+
+def _looks_like_character_self_claim(content):
+    """Detect first-person self-model claims before they become bond facts."""
+    text = re.sub(r'\s+', '', str(content or ''))
+    if not text.startswith('我'):
+        return False
+    return bool(_SELF_CLAIM_RE.search(text))
+
+
+def _short_excerpt(text, limit=160):
+    return re.sub(r'\s+', ' ', str(text or '')).strip()[:limit]
+
+
+def _record_character_self_claim_evidence(
+    user_id,
+    character_id,
+    content,
+    *,
+    source_event_id=None,
+    user_text='',
+    assistant_text='',
+):
+    """Send self-claims to cognitive evidence instead of bond memory."""
+    if not content:
+        return None
+    seed = f'{user_id}\x00{character_id}\x00{source_event_id or ""}\x00{content}'
+    digest = hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]
+    event_source_id = (
+        f'memory-self-claim:{source_event_id}'
+        if source_event_id is not None else f'memory-self-claim:{digest}'
+    )
+    try:
+        from cognitive_events import record_source_event
+        from cognitive_triggers import create_trigger_occurrence
+        from cognitive_queue import aggregate_pending_triggers
+
+        conn = get_conn()
+        try:
+            event_id = record_source_event(
+                conn,
+                user_id=user_id,
+                character_id=character_id,
+                source_event_type='character_self_claim',
+                source_event_id=event_source_id,
+                source='memory_extractor_guard',
+                occurred_at=datetime.now(timezone.utc),
+                payload={
+                    'evidence_category': 'character_self_claim',
+                    'claim_text': content,
+                    'confidence': 'low',
+                    'storage_boundary': 'not_bond_memory',
+                    'user_text_excerpt': _short_excerpt(user_text),
+                    'assistant_text_excerpt': _short_excerpt(assistant_text),
+                },
+            )
+            if event_id is None:
+                conn.commit()
+                return {'status': 'duplicate', 'event_id': None}
+            trigger_id = create_trigger_occurrence(
+                conn,
+                event_id=event_id,
+                user_id=user_id,
+                character_id=character_id,
+                trigger_class='self_model_evidence',
+                occurrence_key='character_self_claim',
+                payload={
+                    'evidence_category': 'character_self_claim',
+                    'confidence_weight': 0.35,
+                    'claim_text': content,
+                },
+            )
+            conn.commit()
+            cycle = aggregate_pending_triggers(
+                user_id, character_id, conn=conn,
+            )
+            return {
+                'status': 'inserted',
+                'event_id': event_id,
+                'trigger_id': trigger_id,
+                'cycle': cycle,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f'[{user_id}] ⚠️ self-claim evidence skipped:{exc}')
+        return None
+
+
 def _valid_user_fact(user_id, content, char_names, category=''):
     """用户事实：必须"她"开头、不含任何角色名（角色相关的应归入 bond/told）。
 
@@ -853,6 +953,9 @@ def _valid_user_fact(user_id, content, char_names, category=''):
 def _valid_bond(user_id, content, char_name=''):
     """羁绊记忆：主语可以是 她 / 他们 / 角色本人（他的表态记成他的）。"""
     if not content or content == '无' or len(content) < 4:
+        return False
+    if _looks_like_character_self_claim(content):
+        print(f'[{user_id}] ❌ bond 拒绝（自我解释只入 self-claim evidence）：{content}')
         return False
     ok_prefixes = ['我', '我们', '她', '他们']
     if char_name:
@@ -897,12 +1000,12 @@ def _norm_category(cat: str) -> str:
     return '其他'
 
 
-# ────────── ★ 统一三桶提取（私聊）──────────
+# ────────── ★ 统一提取（私聊）──────────
 
 def extract_and_save_memory(user_id, user_text, assistant_text,
                             character_id=DEFAULT_CHARACTER_ID,
                             temporal_context=None, source_event_id=None):
-    """一次 Haiku 调用同时提取三类记忆：
+    """一次 Haiku 调用同时提取三类记忆和一类 self-claim 证据：
     A user_fact —— 她透露的关于她自己的新事实 → long_memory(shared)
     B bond      —— 她和这个角色之间发生的事/约定/共同经历 → bond_memory(between)
     C told      —— 她告诉这个角色的、关于角色本人或其世界的信息（含剧透）→ bond_memory(told)
@@ -958,7 +1061,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
         # ★ 记忆提取:纯中文结构化任务,走 MODEL_CN_AUX(默认 deepseek-chat 便宜好用)
         from ai_client import create_chat
         from config import MODEL_CN_AUX
-        prompt_content = f'''你是记忆整理助手。从下面这轮对话中提取值得长期记住的信息，分成三类。
+        prompt_content = f'''你是记忆整理助手。从下面这轮对话中提取值得长期记住的信息，分成四类。
 
 【对话双方】
 - "她" = 用户
@@ -977,7 +1080,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
 她说：{user_text}
 {char_name}回复：{assistant_text}
 
-【三类记忆的定义——每类独立判断，可以同时有，也可以都没有】
+【四类记忆/证据的定义——每类独立判断，可以同时有，也可以都没有】
 A. user_fact：她透露的、关于她自己的新事实（生日/喜好/近况/经历等）。
    - 内容里【不许】出现角色名字，只写她自己的事。
    - 【只记她本人】：她在讲别人（朋友/同事/家人）的事时，不属于 user_fact，填 null。见通用规则第 9 条。
@@ -992,6 +1095,10 @@ B. bond：她和{char_name}之间这次发生的、值得记住的事——约�
 C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信息——包括原作剧情、他的未来、他不知道的设定。
    - content 用"她说过..."或"她告诉过{char_name}..."开头的转述。例："她说过{char_name}的未来会发生某某事"。
    - 只有当她明确在陈述这类信息时才提取；她提问、开玩笑不算。
+D. character_self_claim：{char_name}对"我是什么样的人/我为什么这样做/这是我的风格"的自我解释。
+   - 这不是 bond，不是长期事实，不是关系事实；最多只是低置信 self-model evidence。
+   - 例："我就是这种性格"、"被人说想念就直接应一声是我的风格"、"我不擅长直接表达"。
+   - content 用第一人称简短转述，如"我说被人想念就直接回应是我的风格"。
 
 【通用规则】
 
@@ -1020,6 +1127,8 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
 2. 【我的话记成我的】：{char_name}（也就是"我"）的重要表态可以记入 bond，写成"我说过/我认为/我答应了…"，
    绝不写成"她说过"。我随口报的数字、天数、结论（如"我们认识35天了"）多半只是顺着聊，一般不值得记；
    真要记也只能记成"我当时说…"，绝不能当客观事实。
+   ★ 但"我是这种人/这是我的风格/我不擅长表达/我习惯这样"这类自我解释，不许记成 bond；
+     只能放进 character_self_claim，交给持续认知层以后用更多行为证据验证。
 3. 撒娇/调侃/情绪宣泄/问候/提问/简单回应都不算。"她问了XX"这类只有在话题本身重大时才值得记。
 4. "确认了认识多少天"这类元对话不要提取；"讨论了是什么关系"只有当某一方给出了值得记住的正式表态时才记，且主语写对。
 5. 时间换算成绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
@@ -1152,9 +1261,9 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
     · 记不清旧记忆原文 → null
 
 【输出格式——严格 JSON，只输出一行】
-{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版"}}}}
+{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}},"character_self_claim":{{"content":"我说被人想念就直接回应是我的风格"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版"}}}}
 没有的类填 null，例如全都没有：
-{{"user_fact":null,"bond":null,"told":null,"bond_merge":null}}
+{{"user_fact":null,"bond":null,"told":null,"character_self_claim":null,"bond_merge":null}}
 category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         raw, _usage = create_chat(
             model=MODEL_CN_AUX, max_tokens=2000,
@@ -1245,11 +1354,32 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                 else:
                     print(f'[{user_id}] ❌ 合并内容格式不合规,跳过:{merge_content[:40]}')
 
+        # B-guard. 角色临场自我解释不进 bond，只入持续认知层的低置信证据。
+        sc = parsed.get('character_self_claim')
+        if isinstance(sc, dict):
+            content = _clean_content(sc.get('content'))
+            if _looks_like_character_self_claim(content):
+                result = _record_character_self_claim_evidence(
+                    user_id, character_id, content,
+                    source_event_id=source_event_id,
+                    user_text=user_text,
+                    assistant_text=assistant_text,
+                )
+                print(f'[{user_id}] 🧠 自我陈述证据（{character_id}）：{content} -> {result}')
+
         # B. 我们之间的事 → bond_memory(between)
         bd = parsed.get('bond')
         if isinstance(bd, dict):
             content = _clean_content(bd.get('content'))
-            if _valid_bond(user_id, content, char_name):
+            if _looks_like_character_self_claim(content):
+                result = _record_character_self_claim_evidence(
+                    user_id, character_id, content,
+                    source_event_id=source_event_id,
+                    user_text=user_text,
+                    assistant_text=assistant_text,
+                )
+                print(f'[{user_id}] 🧠 bond 改道自我陈述证据（{character_id}）：{content} -> {result}')
+            elif _valid_bond(user_id, content, char_name):
                 if save_bond_memory(user_id, character_id, 'between', content):
                     print(f'[{user_id}] ✅ 羁绊记忆（{character_id}）：{content}')
 

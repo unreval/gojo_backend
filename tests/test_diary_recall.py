@@ -230,7 +230,10 @@ class DiaryRecallTests(unittest.TestCase):
 
         output = valid_output()
         output['evidence_refs'][0]['event_id'] = 7
-        output['hypothesis_updates'][0]['evidence_refs'] = [7]
+        output['hypothesis_updates'][0]['supporting_evidence_refs'] = [7]
+        output['question_updates'][0]['evidence_refs'] = [7]
+        output['new_predictions'][0]['evidence_refs'] = [7]
+        output['reflection_note']['evidence_refs'] = [7]
         with self.assertRaises(cognitive_output.SlowLoopOutputError):
             cognitive_output.validate_slow_loop_output(output, allowed_event_ids=set())
 

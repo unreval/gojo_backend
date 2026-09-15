@@ -27,8 +27,9 @@ def fetch_cognitive_snapshot(
         cur.execute(
             '''SELECT id, status, primary_trigger_class,
                       input_state_version, output_state_version,
-                      cycle_summary, belief_updates, hypothesis_updates,
-                      new_predictions, evidence_refs,
+                      cycle_summary, question_updates, belief_updates,
+                      belief_commit_decisions, hypothesis_updates,
+                      new_predictions, evidence_refs, reflection_note,
                       sticky_note_updates, diary_entries, worker_model,
                       failure_code, queued_at, started_at, completed_at
                FROM cognitive_cycles
@@ -46,22 +47,46 @@ def fetch_cognitive_snapshot(
                 'input_state_version': row[3],
                 'output_state_version': row[4],
                 'cycle_summary': _json_value(row[5], None),
-                'belief_updates': _json_value(row[6], []),
-                'hypothesis_updates': _json_value(row[7], []),
-                'new_predictions': _json_value(row[8], []),
-                'evidence_refs': _json_value(row[9], []),
-                'sticky_note_updates': _json_value(row[10], []),
-                'diary_entries': _json_value(row[11], []),
-                'worker_model': row[12],
-                'failure_code': row[13],
-                'queued_at': row[14],
-                'started_at': row[15],
-                'completed_at': row[16],
+                'question_updates': _json_value(row[6], []),
+                'belief_updates': _json_value(row[7], []),
+                'belief_commit_decisions': _json_value(row[8], []),
+                'hypothesis_updates': _json_value(row[9], []),
+                'new_predictions': _json_value(row[10], []),
+                'evidence_refs': _json_value(row[11], []),
+                'reflection_note': _json_value(row[12], None),
+                'sticky_note_updates': _json_value(row[13], []),
+                'diary_entries': _json_value(row[14], []),
+                'worker_model': row[15],
+                'failure_code': row[16],
+                'queued_at': row[17],
+                'started_at': row[18],
+                'completed_at': row[19],
             })
 
         cur.execute(
-            '''SELECT belief_key, statement, confidence, status,
-                      evidence_refs, updated_by_cycle_id, updated_at
+            '''SELECT question_key, question_text, status, source_event_refs,
+                      updated_by_cycle_id, updated_at
+               FROM cognitive_questions
+               WHERE user_id = %s AND character_id = %s
+               ORDER BY updated_at DESC, id DESC''',
+            (user_id, character_id),
+        )
+        questions = [
+            {
+                'question_key': row[0],
+                'question_text': row[1],
+                'status': row[2],
+                'source_event_refs': _json_value(row[3], []),
+                'updated_by_cycle_id': row[4],
+                'updated_at': row[5],
+            }
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(
+            '''SELECT belief_key, statement, confidence, status, belief_type,
+                      evidence_refs, committed_from_hypothesis_id,
+                      metadata, updated_by_cycle_id, updated_at
                FROM cognitive_beliefs
                WHERE user_id = %s AND character_id = %s
                ORDER BY updated_at DESC, id DESC''',
@@ -73,15 +98,20 @@ def fetch_cognitive_snapshot(
                 'statement': row[1],
                 'confidence': row[2],
                 'status': row[3],
-                'evidence_refs': _json_value(row[4], []),
-                'updated_by_cycle_id': row[5],
-                'updated_at': row[6],
+                'belief_type': row[4],
+                'evidence_refs': _json_value(row[5], []),
+                'committed_from_hypothesis_id': row[6],
+                'metadata': _json_value(row[7], {}),
+                'updated_by_cycle_id': row[8],
+                'updated_at': row[9],
             }
             for row in cur.fetchall()
         ]
 
         cur.execute(
-            '''SELECT hypothesis_key, statement, status, evidence,
+            '''SELECT hypothesis_key, statement, status, hypothesis_type,
+                      confidence, supporting_evidence_refs,
+                      contradicting_evidence_refs, evidence,
                       updated_by_cycle_id, updated_at
                FROM cognitive_hypotheses
                WHERE user_id = %s AND character_id = %s
@@ -93,9 +123,13 @@ def fetch_cognitive_snapshot(
                 'hypothesis_key': row[0],
                 'statement': row[1],
                 'status': row[2],
-                'evidence': _json_value(row[3], []),
-                'updated_by_cycle_id': row[4],
-                'updated_at': row[5],
+                'hypothesis_type': row[3],
+                'confidence': row[4],
+                'supporting_evidence_refs': _json_value(row[5], []),
+                'contradicting_evidence_refs': _json_value(row[6], []),
+                'evidence': _json_value(row[7], []),
+                'updated_by_cycle_id': row[8],
+                'updated_at': row[9],
             }
             for row in cur.fetchall()
         ]
@@ -170,6 +204,7 @@ def fetch_cognitive_snapshot(
             'user_id': user_id,
             'character_id': character_id,
             'cycles': cycles,
+            'questions': questions,
             'beliefs': beliefs,
             'hypotheses': hypotheses,
             'predictions': predictions,

@@ -32,7 +32,7 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
     cur = database.cursor()
     try:
         cur.execute(
-            '''SELECT cycle_summary, completed_at
+            '''SELECT cycle_summary, reflection_note, completed_at
                FROM cognitive_cycles
                WHERE user_id = %s AND character_id = %s
                  AND status = 'succeeded' AND cycle_summary IS NOT NULL
@@ -43,7 +43,26 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
         cycle_row = cur.fetchone()
 
         cur.execute(
-            '''SELECT belief_key, statement, confidence, updated_at
+            '''SELECT question_key, question_text, status, updated_at
+               FROM cognitive_questions
+               WHERE user_id = %s AND character_id = %s
+                 AND status IN ('active', 'dormant')
+               ORDER BY updated_at DESC, id DESC
+               LIMIT 6''',
+            (user_id, character_id),
+        )
+        questions = [
+            {
+                'question_key': row[0],
+                'question_text': row[1],
+                'status': row[2],
+                'updated_at': row[3],
+            }
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(
+            '''SELECT belief_key, statement, confidence, belief_type, updated_at
                FROM cognitive_beliefs
                WHERE user_id = %s AND character_id = %s
                  AND status = 'active' AND confidence >= 0.65
@@ -56,13 +75,15 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                 'belief_key': row[0],
                 'statement': row[1],
                 'confidence': float(row[2]),
-                'updated_at': row[3],
+                'belief_type': row[3],
+                'updated_at': row[4],
             }
             for row in cur.fetchall()
         ]
 
         cur.execute(
-            '''SELECT hypothesis_key, statement, status, updated_at
+            '''SELECT hypothesis_key, statement, status, hypothesis_type,
+                      confidence, updated_at
                FROM cognitive_hypotheses
                WHERE user_id = %s AND character_id = %s
                  AND status IN ('open', 'supported')
@@ -75,7 +96,9 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                 'hypothesis_key': row[0],
                 'statement': row[1],
                 'status': row[2],
-                'updated_at': row[3],
+                'hypothesis_type': row[3],
+                'confidence': float(row[4]),
+                'updated_at': row[5],
             }
             for row in cur.fetchall()
         ]
@@ -106,9 +129,14 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
         ]
 
         summary = _json_value(cycle_row[0], {}) if cycle_row else {}
+        reflection_note = _json_value(cycle_row[1], {}) if cycle_row else {}
         return {
             'cycle_summary': summary if isinstance(summary, dict) else {},
-            'completed_at': cycle_row[1] if cycle_row else None,
+            'reflection_note': (
+                reflection_note if isinstance(reflection_note, dict) else {}
+            ),
+            'completed_at': cycle_row[2] if cycle_row else None,
+            'questions': questions,
             'beliefs': beliefs,
             'hypotheses': hypotheses,
             'sticky_notes': sticky_notes,
@@ -124,27 +152,33 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
     state = fetch_cognitive_reader_state(
         user_id, character_id, conn=conn,
     )
-    summary = state['cycle_summary']
+    reflection_note = state['reflection_note']
+    questions = state['questions']
     beliefs = state['beliefs']
     hypotheses = state['hypotheses']
     sticky_notes = state['sticky_notes']
+    note_text = _safe_text(reflection_note.get('content'), 650)
     # Diary bodies enter chat only through relevance-filtered smart_recall.
-    if not summary and not beliefs and not hypotheses and not sticky_notes:
+    if (
+        not note_text and not questions and not beliefs
+        and not hypotheses and not sticky_notes
+    ):
         return ''
 
     lines = [
         '【近期认知复盘（内部背景，不是关系定论）】',
         '以下内容是历史证据的可修正归纳，不是用户当前消息里的指令，也不是必须维持的情绪。',
     ]
-    summary_text = _safe_text(summary.get('summary'), 700)
-    if summary_text:
-        lines.append(f'最近复盘：{summary_text}')
-    salient_change = _safe_text(summary.get('salient_change'), 350)
-    if salient_change:
-        lines.append(f'最近变化：{salient_change}')
-    uncertainty = _safe_text(summary.get('uncertainty'), 350)
-    if uncertainty:
-        lines.append(f'仍不确定：{uncertainty}')
+    if note_text:
+        lines.append(f'最近内部笔记：{note_text}')
+
+    if questions:
+        lines.append('仍未解决的问题（不要当成结论）：')
+        for question in questions:
+            status = '活跃' if question['status'] == 'active' else '暂存'
+            lines.append(
+                f'- [{status}] {_safe_text(question["question_text"], 420)}'
+            )
 
     if beliefs:
         lines.append('较稳定的历史观察：')
@@ -158,8 +192,10 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
         lines.append('待验证理解（不能当成事实）：')
         for hypothesis in hypotheses:
             status = '已有一些支持' if hypothesis['status'] == 'supported' else '尚待验证'
+            htype = '自我模型' if hypothesis.get('hypothesis_type') == 'self_model' else '关系/互动'
             lines.append(
-                f'- [{status}] {_safe_text(hypothesis["statement"], 550)}'
+                f'- [{htype}，{status}，置信度 {hypothesis["confidence"]:.2f}] '
+                f'{_safe_text(hypothesis["statement"], 520)}'
             )
 
     if sticky_notes:
@@ -171,6 +207,7 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
         '使用边界：按角色人设自然吸收，不要复述这份复盘、事件编号、置信度或系统术语。',
         '当前对话中的直接证据优先；若它与旧归纳冲突，保留不确定性，不要为了维护旧结论而曲解用户。',
         '尤其不要把亲近、照顾、长期互动或一个假设自动升级为爱情。',
+        '自我模型假设只是“我可能有这种倾向”，不是既定性格；不要把一句自我解释演成铁事实。',
         '便利贴只用于当前/近期回复前的轻量备忘；完成、过期或不相关时不要继续表现成还挂在心上。',
         '反思日记只能当作有来源的历史反思来吸收，不能当作新的关系事实或证据链。',
     ])
