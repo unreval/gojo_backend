@@ -71,17 +71,23 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
                 'character_id': character_id, 'source_event_id': source_event_id,
             })
 
+        def _get_short(user_id, n=6, character_id='gojo'):
+            rows = [r for r in self.short_rows if r.get('character_id') == character_id]
+            return [(r['role'], r['content']) for r in rows[-n:]]
+
         self.save_user_once = Mock(side_effect=_save_user_once)
         self.save_short = Mock(side_effect=_save_short)
+        self.get_short = Mock(side_effect=_get_short)
         self.jobs = Mock()
         self.record_turn = Mock()
         self.tts = Mock(return_value='audio' * 40)
         self.llm_text = ''
+        self.stream_calls = []
         self.memory = stub(
             'user_memory',
             save_short_memory=self.save_short,
             save_user_short_memory_once=self.save_user_once,
-            get_short_memory=Mock(return_value=[]),
+            get_short_memory=self.get_short,
         )
         modules = {
             'anthropic': stub('anthropic', Anthropic=Mock(), AsyncAnthropic=Mock()),
@@ -120,7 +126,12 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         module_patch.start()
         self.addCleanup(module_patch.stop)
         self.route = load_source('route_voice_stream', modules)
-        self.route.async_claude.messages.stream = lambda **_kwargs: FakeStream(self.llm_text)
+
+        def _stream(**kwargs):
+            self.stream_calls.append(kwargs)
+            return FakeStream(self.llm_text)
+
+        self.route.async_claude.messages.stream = _stream
         log_patch = patch('builtins.print')
         self.log = log_patch.start()
         self.addCleanup(log_patch.stop)
@@ -196,6 +207,30 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         events = self.events('JP: "jp"\nZH: "messages"\n')
         self.assertNotIn('audio', self.types(events))
         self.assertIn('generation_failed', self.types(events))
+        self.save_short.assert_not_called()
+
+    def test_current_user_turn_appears_once_in_stream_messages(self):
+        self.short_rows.append({
+            'role': 'user', 'content': '上次的话',
+            'character_id': 'gojo', 'source_event_id': 'old',
+        })
+        events = self.events(
+            'EMOTION: 平静\nJP: ...\nZH: ...\n',
+            text='你好啊',
+            source_event_id='voice-now',
+        )
+        self.assertEqual(len(self.stream_calls), 1)
+        msgs = self.stream_calls[0]['messages']
+        self.assertEqual([m['content'] for m in msgs], ['上次的话', '你好啊'])
+        current = [m for m in msgs if m.get('role') == 'user' and m.get('content') == '你好啊']
+        self.assertEqual(len(current), 1)
+        self.assertIn('generation_failed', self.types(events))
+        saved_current = [
+            r for r in self.short_rows
+            if r['role'] == 'user' and r['content'] == '你好啊'
+        ]
+        self.assertEqual(len(saved_current), 1)
+        self.assertEqual(saved_current[0]['source_event_id'], 'voice-now')
         self.save_short.assert_not_called()
 
 
