@@ -198,7 +198,43 @@ When settled_predictions are present, use their linked hypothesis_key,
 description, selectors, status, and the settling event as a feedback signal.
 A fulfillment may support a hypothesis and a violation may weaken or reject
 it, but one observation is not automatically conclusive. Preserve uncertainty
-and cite the actual event, not the prediction record, as evidence.'''
+and cite the actual event, not the prediction record, as evidence.
+
+Belief vs event:
+- Do not commit a single episode, quoted utterance, or "tonight/just now/this
+  turn" recap as a stable belief. Keep it as event, diary, sticky note, or
+  hypothesis.
+- Beliefs are abstract, revisable patterns supported by multiple evidences.
+
+Belief revision:
+- Optional belief fields: evidence_relation (support|contradiction|scope_limiter|irrelevant),
+  evidence_strength (weak|normal|strong), scope, independent_contexts, revision_reason,
+  frame_kind.
+- When current evidence relates to an existing belief, you MUST set evidence_relation.
+  Application code applies a bounded confidence delta; do not jump confidence to 0.95.
+- contradiction lowers confidence. scope_limiter narrows the statement.
+- Sticky notes are short follow-ups only. Never put "old judgment may be wrong"
+  only in a sticky note; that must be a contradiction/scope_limiter belief update
+  plus a question/hypothesis.
+
+Scope:
+- one topic: topic or relationship_context. Two independent contexts: cross_context
+  hypothesis at most. Three or more long-consistent contexts: general_tendency.
+- Describe behavior patterns. Do not stamp global personality labels.
+
+Questions:
+- Every open/supported hypothesis must keep a real unresolved question_key.
+- Reuse the same question_key instead of creating near-duplicates.
+
+Shared relationship frame:
+- Maintain belief_key shared.relationship.frame when evidence supports how both
+  sides currently treat the relationship (friends, playful_ambiguous, probing,
+  serious_unconfirmed, committed_romantic, frame_shifting).
+- Friendship frames are revisable. Later romantic evidence can challenge them.
+
+High-salience events may open a romantic reappraisal question/hypothesis.
+They must not be treated as a direct passion or relationship-score change.
+Time elapsed is a significance modifier, not romantic evidence by itself.'''
 
 _SYSTEM_PROMPT += (
     '\nFor character_stance_declared selectors, actor must be character and '

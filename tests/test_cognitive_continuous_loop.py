@@ -49,7 +49,7 @@ class ReaderCursor:
         elif compact.startswith('SELECT belief_key'):
             self.many = [(
                 'character.practical_care', '角色多次给出具体生活关怀。',
-                0.82, 'relationship_observation', NOW,
+                0.82, 'relationship_observation', NOW, {},
             )]
         elif compact.startswith('SELECT hypothesis_key'):
             self.many = [(
@@ -127,10 +127,13 @@ class CognitiveReaderTests(unittest.TestCase):
         self.assertIn('不是关系定论', context)
         self.assertIn('最近内部笔记', context)
         self.assertIn('仍未解决的问题', context)
-        self.assertIn('待验证理解（不能当成事实）', context)
+        self.assertIn('【关于我与用户关系的认识】', context)
+        self.assertIn('【当前仍未解决的问题】', context)
+        self.assertIn('【正在观察的理解】', context)
+        self.assertIn('【近期需要留意的事】', context)
+        self.assertNotIn('较稳定的历史观察', context)
         self.assertIn('保持关心但承认仍不确定', context)
         self.assertIn('角色的关心是否仍停留在保持边界的照看', context)
-        self.assertIn('便利贴备忘', context)
         self.assertIn('不是长期记忆或关系证据', context)
         self.assertNotIn('角色保持实际关心，同时没有确认爱情。', context)
         self.assertNotIn('近期反思日记', context)

@@ -11,6 +11,7 @@ Generator 允许看到全部状态，但职责只是【表达状态】，不判�
 from typing import Dict, List, Optional
 
 from db import get_conn
+from relationship_initiative import initiative_guidance
 from relationship_state import load_state, list_active_stances
 from relationship_config import (
     PASSION_TO_LOVE_REQUIRED_TRUST,
@@ -128,6 +129,12 @@ def build_state_summary(user_id: str, character_id: str) -> str:
     # 表达指引
     lines.append('【怎么在这一刻表达——基于以上状态，按你的人设落地】')
     lines.append(label.get('expression_guidance', ''))
+    extra = initiative_guidance(
+        character_id, state,
+        is_love=(label.get('primary') == '爱情'),
+    )
+    if extra:
+        lines.append(extra)
 
     return '\n'.join(lines)
 
@@ -254,6 +261,20 @@ def derive_label(state: Dict) -> Dict:
 
     # 深厚友情/亲情：高 Attachment + 高 Commitment
     if attach >= 60 and c >= 60:
+        if p >= 15:
+            return {
+                'primary': '深厚的挚友 / 亲情',
+                'complex_note': (
+                    '关系基础非常深，同时存在一定尚未确认的心动或暧昧张力。'
+                    '目前不足以把底层关系状态判定为爱情。'
+                ),
+                'expression_guidance': (
+                    '关系基础非常深，同时存在一定尚未确认的心动或暧昧张力；'
+                    '目前不足以将 durable relationship state 判定为爱情。'
+                    '允许你依据性格与当前认知主动表现出试探、调情、靠近、回避或其他关系行为，'
+                    '但这些行为本身不代表底层关系状态已经升级。'
+                ),
+            }
         return {
             'primary': '深厚的挚友 / 亲情',
             'complex_note': None,

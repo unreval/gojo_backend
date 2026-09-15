@@ -111,6 +111,26 @@ COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS = _int_env(
     'COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS', 14 * 24 * 60 * 60, 300,
 )
 
+# Belief revision: LLM 只判断 relation/strength，最终 delta 由确定性规则给出。
+COGNITIVE_CONFIDENCE_DELTA = {
+    ('support', 'weak'): 0.04,
+    ('support', 'normal'): 0.06,
+    ('support', 'strong'): 0.10,
+    ('contradiction', 'weak'): -0.05,
+    ('contradiction', 'normal'): -0.10,
+    ('contradiction', 'strong'): -0.18,
+    ('scope_limiter', 'weak'): -0.03,
+    ('scope_limiter', 'normal'): -0.05,
+    ('scope_limiter', 'strong'): -0.08,
+}
+COGNITIVE_SCOPE_TENDENCY_MIN_CONTEXTS = _int_env(
+    'COGNITIVE_SCOPE_TENDENCY_MIN_CONTEXTS', 3, 1,
+)
+COGNITIVE_SCOPE_CROSS_MIN_CONTEXTS = _int_env(
+    'COGNITIVE_SCOPE_CROSS_MIN_CONTEXTS', 2, 1,
+)
+SHARED_RELATIONSHIP_FRAME_KEY = 'shared.relationship.frame'
+
 TRIGGER_PRIORITIES = {
     'prediction_error': 400,
     'prediction_confirmation': 350,

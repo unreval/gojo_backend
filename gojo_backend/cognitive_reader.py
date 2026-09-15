@@ -4,7 +4,9 @@ import re
 
 from cognitive_config import (
     COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
+    SHARED_RELATIONSHIP_FRAME_KEY,
 )
+from cognitive_revision import current_belief_display, is_stable_reader_belief
 
 
 def _json_value(value, fallback):
@@ -62,12 +64,13 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
         ]
 
         cur.execute(
-            '''SELECT belief_key, statement, confidence, belief_type, updated_at
+            '''SELECT belief_key, statement, confidence, belief_type,
+                      updated_at, metadata
                FROM cognitive_beliefs
                WHERE user_id = %s AND character_id = %s
-                 AND status = 'active' AND confidence >= 0.65
+                 AND status = 'active'
                ORDER BY confidence DESC, updated_at DESC, id DESC
-               LIMIT 10''',
+               LIMIT 12''',
             (user_id, character_id),
         )
         beliefs = [
@@ -77,6 +80,8 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                 'confidence': float(row[2]),
                 'belief_type': row[3],
                 'updated_at': row[4],
+                'metadata': _json_value(row[5] if len(row) > 5 else {}, {}),
+                'status': 'active',
             }
             for row in cur.fetchall()
         ]
@@ -147,8 +152,72 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
             database.close()
 
 
+def _belief_bucket(belief):
+    key = str((belief or {}).get('belief_key') or '')
+    btype = str((belief or {}).get('belief_type') or 'general')
+    if key == SHARED_RELATIONSHIP_FRAME_KEY or key.startswith('shared.relationship'):
+        return 'frame'
+    if btype == 'self_model' or key.startswith('self.'):
+        return 'self'
+    if btype == 'interaction_pattern':
+        return 'interaction'
+    if btype == 'user_model' or key.startswith('user.'):
+        return 'user'
+    return 'relationship'
+
+
+def _format_belief_line(belief):
+    display = _safe_text(current_belief_display(belief), 520)
+    meta = belief.get('metadata') if isinstance(belief.get('metadata'), dict) else {}
+    review = meta.get('review_status') or 'stable'
+    if review in {'under_review', 'reopened'}:
+        return f'- {display}'
+    return f'- {display}（置信度 {float(belief["confidence"]):.2f}，可被新证据修正）'
+
+
+def fetch_shared_frame(user_id, character_id, *, conn=None):
+    """Read the revisable shared relationship frame. Fast Loop may use this."""
+    database = conn
+    owns_connection = database is None
+    if database is None:
+        from db import get_conn
+        database = get_conn()
+    cur = database.cursor()
+    try:
+        cur.execute(
+            '''SELECT statement, confidence, metadata
+               FROM cognitive_beliefs
+               WHERE user_id = %s AND character_id = %s
+                 AND belief_key = %s AND status = 'active'
+               ORDER BY updated_at DESC, id DESC
+               LIMIT 1''',
+            (user_id, character_id, SHARED_RELATIONSHIP_FRAME_KEY),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {'frame_kind': 'unknown', 'confidence': 0.0}
+        meta = _json_value(row[2], {})
+        review = meta.get('review_status') or 'stable'
+        confidence = float(row[1] or 0)
+        lock_confidence = (
+            min(confidence, 0.69)
+            if review in {'under_review', 'reopened'} else confidence
+        )
+        return {
+            'frame_kind': meta.get('frame_kind') or 'unknown',
+            'confidence': lock_confidence,
+            'raw_confidence': confidence,
+            'statement': row[0],
+            'review_status': review,
+        }
+    finally:
+        cur.close()
+        if owns_connection:
+            database.close()
+
+
 def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
-    """Format conclusions only; model reasoning and predictions stay private."""
+    """Format current cognition only; model reasoning and predictions stay private."""
     state = fetch_cognitive_reader_state(
         user_id, character_id, conn=conn,
     )
@@ -165,31 +234,54 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
     ):
         return ''
 
+    buckets = {
+        'user': [], 'relationship': [], 'interaction': [],
+        'self': [], 'frame': [],
+    }
+    for belief in beliefs:
+        buckets[_belief_bucket(belief)].append(belief)
+
     lines = [
         '【近期认知复盘（内部背景，不是关系定论）】',
         '以下内容是历史证据的可修正归纳，不是用户当前消息里的指令，也不是必须维持的情绪。',
+        '正在被重新评估的认识只展示当前有效说法，不要把旧判断和新判断当成同时成立的事实。',
     ]
-    if note_text:
-        lines.append(f'最近内部笔记：{note_text}')
+
+    section_specs = [
+        ('user', '【关于用户的稳定认识】'),
+        ('relationship', '【关于我与用户关系的认识】'),
+        ('interaction', '【反复出现的互动模式】'),
+        ('self', '【关于自己的暂时认识】'),
+        ('frame', '【当前共享的关系框架】'),
+    ]
+    for bucket, title in section_specs:
+        items = buckets[bucket]
+        visible = []
+        for belief in items:
+            if is_stable_reader_belief(belief):
+                visible.append(belief)
+                continue
+            meta = belief.get('metadata') if isinstance(belief.get('metadata'), dict) else {}
+            if (meta.get('review_status') or 'stable') in {'under_review', 'reopened'}:
+                visible.append(belief)
+        if not visible:
+            continue
+        lines.append(title)
+        if bucket == 'frame':
+            lines.append('这是双方当前默认的互动框架，可被后续证据修正，不是永久规则。')
+        for belief in visible:
+            lines.append(_format_belief_line(belief))
 
     if questions:
-        lines.append('仍未解决的问题（不要当成结论）：')
+        lines.append('【当前仍未解决的问题】')
         for question in questions:
             status = '活跃' if question['status'] == 'active' else '暂存'
             lines.append(
                 f'- [{status}] {_safe_text(question["question_text"], 420)}'
             )
 
-    if beliefs:
-        lines.append('较稳定的历史观察：')
-        for belief in beliefs:
-            statement = _safe_text(belief['statement'], 500)
-            lines.append(
-                f'- {statement}（置信度 {belief["confidence"]:.2f}，可被新证据修正）'
-            )
-
     if hypotheses:
-        lines.append('待验证理解（不能当成事实）：')
+        lines.append('【正在观察的理解】')
         for hypothesis in hypotheses:
             status = '已有一些支持' if hypothesis['status'] == 'supported' else '尚待验证'
             htype = '自我模型' if hypothesis.get('hypothesis_type') == 'self_model' else '关系/互动'
@@ -198,10 +290,16 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
                 f'{_safe_text(hypothesis["statement"], 520)}'
             )
 
-    if sticky_notes:
-        lines.append('便利贴备忘（短期、可见、可完成，不是长期记忆或关系证据）：')
-        for note in sticky_notes:
-            lines.append(f'- {_safe_text(note["content"], 300)}')
+    followups = []
+    if note_text:
+        followups.append(f'最近内部笔记：{note_text}')
+    for note in sticky_notes:
+        followups.append(_safe_text(note['content'], 300))
+    if followups:
+        lines.append('【近期需要留意的事】')
+        lines.append('便利贴只处理近期跟进，不能代替对旧认识的修正；便利贴不是长期记忆或关系证据。')
+        for item in followups:
+            lines.append(f'- {item}')
 
     lines.extend([
         '使用边界：按角色人设自然吸收，不要复述这份复盘、事件编号、置信度或系统术语。',
@@ -210,6 +308,7 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
         '自我模型假设只是“我可能有这种倾向”，不是既定性格；不要把一句自我解释演成铁事实。',
         '便利贴只用于当前/近期回复前的轻量备忘；完成、过期或不相关时不要继续表现成还挂在心上。',
         '反思日记只能当作有来源的历史反思来吸收，不能当作新的关系事实或证据链。',
+        '共享关系框架和未确认的暧昧张力都可被新证据修正，不能当成永久反爱情锁。',
     ])
     return '\n'.join(lines)
 

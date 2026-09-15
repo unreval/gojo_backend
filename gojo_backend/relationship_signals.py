@@ -57,8 +57,8 @@ _OBSERVER_SYSTEM_PROMPT = '''你是一个中立的对话观察员。你的任务
 - small_care              问候、注意休息这类小关心
 - genuine_care            记住细节、主动关注具体情况
 - self_disclosure         用户主动分享自己的事（attributes: {"depth": "outer"|"middle"|"core"}）
-- flirt_signal            调情/暧昧信号（attributes: {"explicit": bool}）
-- positive_reciprocal     对角色暧昧信号的对等回应（一起延伸话题，不是笑而不答）
+- flirt_signal            调情/暧昧信号（attributes: {"explicit": bool, "flirt_interpretation": "playful_flirt"|"habitual_flirt"|"social_flirt"|"romantic_probe"|"romantic_admission"|"ambiguous_flirt", "frame_break": bool, "meta_serious": bool, "exclusive_to_character": bool, "habitual_with_others": bool}）
+- positive_reciprocal     对角色暧昧信号的对等回应（一起延伸话题，不是笑而不答；同样可带 flirt_interpretation / frame_break / meta_serious）
 - explicit_rejection      明确拒绝暧昧信号
 - ambiguous_response      笑而不答/沉默/生硬转移话题
 - promise_kept            承诺兑现（说到做到）
@@ -87,7 +87,15 @@ _OBSERVER_SYSTEM_PROMPT = '''你是一个中立的对话观察员。你的任务
   ★★ 每轮对话最多提取 1 条 stance！大部分对话不应该提取任何 stance！
   ★★ content 字段必须用中文简短归纳（不超过 30 字），不要塞角色的日语原文
 - character_boundary_stated 角色明确表态某话题是底线（attributes: {"topic_hint": string}）
-- character_reciprocal      角色对用户暧昧信号的对等回应
+- character_reciprocal      角色对用户暧昧信号的对等回应（attributes 可含 flirt_interpretation / frame_break / meta_serious）
+
+【flirt_interpretation 只描述这一句的互动形态，不判断关系是不是爱情】
+- playful_flirt / habitual_flirt / social_flirt：玩笑、习惯互叫、社交起哄
+- romantic_probe：认真试探对方是否把这当浪漫
+- romantic_admission：认真承认心动/喜欢
+- ambiguous_flirt：分不清玩笑还是认真，不要强行分类
+- 若出现“这次不是开玩笑 / 这次我是认真的”，设 frame_break=true 且 meta_serious=true
+- 若这人对谁都这样叫，habitual_with_others=true；若几乎只对这个角色这样，exclusive_to_character=true
 
 【confidence 判定标准】
 - high：话说得很直接，理解成别的意思很难

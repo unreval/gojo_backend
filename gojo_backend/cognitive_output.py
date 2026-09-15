@@ -12,6 +12,20 @@ from cognitive_config import (
     PREDICTION_RESOLVER_WHITELIST,
 )
 from cognitive_predictions import validate_signal_prediction_contract
+from cognitive_revision import (
+    EVIDENCE_RELATIONS,
+    EVIDENCE_STRENGTHS,
+    FRAME_KINDS,
+    apply_confidence_delta,
+    append_revision_history,
+    infer_hypothesis_relation,
+    is_episodic_statement,
+    is_global_personality_judgment,
+    looks_like_belief_revision_sticky,
+    normalize_scope,
+    review_status_after_confidence,
+    scope_exceeds_evidence,
+)
 
 
 ROOT_FIELDS = frozenset({
@@ -31,6 +45,13 @@ SUMMARY_FIELDS = frozenset({
     'summary', 'salient_change', 'uncertainty', 'confidence',
 })
 BELIEF_STATUSES = frozenset({'active', 'retracted'})
+BELIEF_OPTIONAL_FIELDS = frozenset({
+    'evidence_relation', 'evidence_strength', 'scope',
+    'independent_contexts', 'revision_reason', 'frame_kind',
+})
+HYPOTHESIS_OPTIONAL_FIELDS = frozenset({
+    'scope', 'independent_contexts',
+})
 HYPOTHESIS_STATUSES = frozenset({'open', 'supported', 'rejected', 'archived'})
 QUESTION_STATUSES = frozenset({'active', 'dormant', 'resolved', 'archived'})
 HYPOTHESIS_TYPES = frozenset({
@@ -152,6 +173,18 @@ def _require_current_ref(refs, field, current_event_ids):
         raise SlowLoopOutputError(f'{field}_must_reference_current_evidence')
 
 
+def _independent_contexts(value, field):
+    if value is None:
+        return []
+    items = _array(value, field, 8)
+    result = []
+    for index, item in enumerate(items):
+        text = _text(item, f'{field}_{index}', 80)
+        if text not in result:
+            result.append(text)
+    return result
+
+
 def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=None):
     """Return a normalized output or reject any ungrounded/model-invented field."""
     root = _object(value, 'root')
@@ -255,7 +288,8 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
             'belief_key', 'statement', 'confidence', 'status', 'belief_type',
             'from_hypothesis_key', 'evidence_refs',
         }
-        if set(update) != expected:
+        extra = set(update) - expected - BELIEF_OPTIONAL_FIELDS
+        if not expected.issubset(update) or extra:
             raise SlowLoopOutputError(f'belief_update_{index}_fields_invalid')
         key = _key(update['belief_key'], f'belief_update_{index}_key')
         if key in belief_keys:
@@ -281,6 +315,33 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
         _require_current_ref(
             refs, f'belief_update_{index}_evidence_refs', current_ids,
         )
+        relation = update.get('evidence_relation')
+        if relation is not None:
+            relation = _text(
+                relation, f'belief_update_{index}_evidence_relation', 24,
+            )
+            if relation not in EVIDENCE_RELATIONS:
+                raise SlowLoopOutputError(
+                    f'belief_update_{index}_evidence_relation_invalid',
+                )
+        strength = update.get('evidence_strength')
+        if strength is not None:
+            strength = _text(
+                strength, f'belief_update_{index}_evidence_strength', 16,
+            )
+            if strength not in EVIDENCE_STRENGTHS:
+                raise SlowLoopOutputError(
+                    f'belief_update_{index}_evidence_strength_invalid',
+                )
+        frame_kind = update.get('frame_kind')
+        if frame_kind is not None:
+            frame_kind = _text(
+                frame_kind, f'belief_update_{index}_frame_kind', 32,
+            )
+            if frame_kind not in FRAME_KINDS:
+                raise SlowLoopOutputError(
+                    f'belief_update_{index}_frame_kind_invalid',
+                )
         belief_updates.append({
             'belief_key': key,
             'statement': _text(
@@ -293,6 +354,20 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
             'belief_type': belief_type,
             'from_hypothesis_key': from_hypothesis_key,
             'evidence_refs': refs,
+            'evidence_relation': relation,
+            'evidence_strength': strength or 'normal',
+            'scope': normalize_scope(update.get('scope')),
+            'independent_contexts': _independent_contexts(
+                update.get('independent_contexts'),
+                f'belief_update_{index}_independent_contexts',
+            ),
+            'revision_reason': _text(
+                update.get('revision_reason') or '',
+                f'belief_update_{index}_revision_reason',
+                400,
+                allow_empty=True,
+            ),
+            'frame_kind': frame_kind,
         })
 
     hypothesis_updates = []
@@ -306,7 +381,8 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
             'status', 'question_key', 'supporting_evidence_refs',
             'contradicting_evidence_refs',
         }
-        if set(update) != required:
+        extra = set(update) - required - HYPOTHESIS_OPTIONAL_FIELDS
+        if not required.issubset(update) or extra:
             raise SlowLoopOutputError(f'hypothesis_update_{index}_fields_invalid')
         key = _key(
             update['hypothesis_key'], f'hypothesis_update_{index}_key',
@@ -365,6 +441,11 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
             'question_key': question_key,
             'supporting_evidence_refs': supporting_refs,
             'contradicting_evidence_refs': contradicting_refs,
+            'scope': normalize_scope(update.get('scope')),
+            'independent_contexts': _independent_contexts(
+                update.get('independent_contexts'),
+                f'hypothesis_update_{index}_independent_contexts',
+            ),
         })
 
     new_predictions = []
@@ -590,6 +671,15 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
     elif reflection_refs:
         raise SlowLoopOutputError('empty_reflection_note_must_not_cite_evidence')
 
+    revision_relations = {
+        item.get('evidence_relation')
+        for item in belief_updates
+        if item.get('evidence_relation') in {'contradiction', 'scope_limiter'}
+    }
+    for sticky in sticky_note_updates:
+        if looks_like_belief_revision_sticky(sticky['content']) and not revision_relations:
+            raise SlowLoopOutputError('sticky_note_cannot_replace_revision')
+
     return {
         'cycle_summary': normalized_summary,
         'question_updates': question_updates,
@@ -639,7 +729,37 @@ def _event_evidence_category(metadata):
     return payload.get('evidence_category') or metadata.get('source_event_type')
 
 
-def _belief_commit_decision(update, source_refs, event_metadata, hypothesis_id):
+def _json_meta(value):
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _load_keyed_map(cur, table, key_column, user_id, character_id, keys, columns):
+    if not keys:
+        return {}
+    column_sql = ', '.join(columns)
+    cur.execute(
+        f'''SELECT {key_column}, {column_sql}
+            FROM {table}
+            WHERE user_id = %s AND character_id = %s
+              AND {key_column} = ANY(%s)''',
+        (user_id, character_id, list(keys)),
+    )
+    result = {}
+    for row in cur.fetchall() or []:
+        result[row[0]] = row[1:]
+    return result
+
+
+def _belief_commit_decision(update, source_refs, event_metadata, hypothesis_id,
+                            existing=None):
     independent = set()
     categories = []
     for ref in source_refs:
@@ -653,23 +773,79 @@ def _belief_commit_decision(update, source_refs, event_metadata, hypothesis_id):
             independent.add(f'event:{event_id}')
         categories.append(_event_evidence_category(metadata))
 
+    statement = update['statement']
+    relation = update.get('evidence_relation')
+    strength = update.get('evidence_strength') or 'normal'
+    scope = normalize_scope(update.get('scope'), legacy=bool(existing))
+    contexts = update.get('independent_contexts') or []
+    proposed = float(update['confidence'])
+    final_confidence = proposed
+    review_status = 'stable'
+    write_statement = statement
+
+    if existing:
+        old_confidence = float(existing.get('confidence') or 0)
+        if relation not in EVIDENCE_RELATIONS:
+            relation = None
+            final_confidence = old_confidence
+            write_statement = existing.get('statement') or statement
+        else:
+            if relation == 'irrelevant':
+                final_confidence = old_confidence
+            else:
+                final_confidence = apply_confidence_delta(
+                    old_confidence, relation, strength,
+                )
+            if relation in {'support', 'irrelevant'} or is_episodic_statement(statement):
+                write_statement = existing.get('statement') or statement
+            else:
+                write_statement = statement
+        was_committed = existing.get('status') == 'active' and old_confidence >= (
+            COGNITIVE_BELIEF_COMMIT_MIN_CONFIDENCE
+        )
+        review_status = review_status_after_confidence(
+            final_confidence, was_committed=was_committed,
+        )
+    else:
+        write_statement = statement
+
     base = {
         'belief_key': update['belief_key'],
         'from_hypothesis_key': update['from_hypothesis_key'],
-        'confidence': update['confidence'],
+        'confidence': final_confidence,
+        'proposed_confidence': proposed,
         'independent_evidence_count': len(independent),
         'required_confidence': COGNITIVE_BELIEF_COMMIT_MIN_CONFIDENCE,
         'required_independent_evidence_count': (
             COGNITIVE_BELIEF_COMMIT_MIN_INDEPENDENT_EVIDENCE
         ),
+        'evidence_relation': relation,
+        'scope': scope,
+        'review_status': review_status,
+        'statement': write_statement,
     }
     if hypothesis_id is None:
         return {**base, 'action': 'held', 'reason': 'missing_hypothesis'}
     if update['status'] == 'retracted':
         return {**base, 'action': 'retracted', 'reason': 'retraction_update'}
-    if update['confidence'] < COGNITIVE_BELIEF_COMMIT_MIN_CONFIDENCE:
+    if existing and relation not in EVIDENCE_RELATIONS:
+        return {**base, 'action': 'held', 'reason': 'missing_evidence_relation'}
+    if not existing and is_episodic_statement(statement):
+        return {**base, 'action': 'held', 'reason': 'episodic_not_belief'}
+    if not existing and is_global_personality_judgment(statement) and scope_exceeds_evidence(
+        'general_tendency', contexts,
+    ):
+        return {**base, 'action': 'held', 'reason': 'scope_too_wide'}
+    if not existing and scope_exceeds_evidence(scope, contexts):
+        return {**base, 'action': 'held', 'reason': 'scope_too_wide'}
+    if existing and relation == 'irrelevant':
+        return {**base, 'action': 'held', 'reason': 'irrelevant_no_change'}
+    if not existing and final_confidence < COGNITIVE_BELIEF_COMMIT_MIN_CONFIDENCE:
         return {**base, 'action': 'held', 'reason': 'confidence_below_threshold'}
-    if len(independent) < COGNITIVE_BELIEF_COMMIT_MIN_INDEPENDENT_EVIDENCE:
+    required_independent = (
+        1 if existing else COGNITIVE_BELIEF_COMMIT_MIN_INDEPENDENT_EVIDENCE
+    )
+    if len(independent) < required_independent:
         return {
             **base,
             'action': 'held',
@@ -681,6 +857,8 @@ def _belief_commit_decision(update, source_refs, event_metadata, hypothesis_id):
             'action': 'held',
             'reason': 'character_self_claim_only',
         }
+    if existing and review_status == 'under_review':
+        return {**base, 'action': 'under_review', 'reason': 'confidence_reopened'}
     return {**base, 'action': 'committed', 'reason': 'commit_gate_passed'}
 
 
@@ -749,22 +927,61 @@ def persist_slow_loop_output(
             question_ids[question_key] = question_id
         return question_id
 
+    existing_hypotheses = {}
+    for key, row in _load_keyed_map(
+        cur, 'cognitive_hypotheses', 'hypothesis_key',
+        user_id, character_id,
+        [item['hypothesis_key'] for item in output['hypothesis_updates']],
+        ('statement', 'confidence', 'status', 'metadata'),
+    ).items():
+        existing_hypotheses[key] = {
+            'statement': row[0],
+            'confidence': float(row[1] or 0),
+            'status': row[2],
+            'metadata': _json_meta(row[3]),
+        }
+
     hypothesis_ids = {}
     for update in output['hypothesis_updates']:
         question_id = resolve_question_id(update['question_key'])
         supporting_refs = full_refs(update['supporting_evidence_refs'])
         contradicting_refs = full_refs(update['contradicting_evidence_refs'])
+        existing = existing_hypotheses.get(update['hypothesis_key'])
+        if existing:
+            relation = infer_hypothesis_relation(
+                update['supporting_evidence_refs'],
+                update['contradicting_evidence_refs'],
+            )
+            confidence = apply_confidence_delta(
+                existing['confidence'], relation, 'normal',
+            )
+            hypo_meta = append_revision_history(
+                existing['metadata'],
+                old_statement=existing['statement'],
+                old_confidence=existing['confidence'],
+                new_statement=update['statement'],
+                new_confidence=confidence,
+                relation=relation,
+                reason='slow_loop_hypothesis_revision',
+                evidence_refs=supporting_refs + contradicting_refs,
+                cycle_id=cycle_id,
+            )
+        else:
+            confidence = update['confidence']
+            hypo_meta = _json_meta(None)
         evidence_entry = [{
             'cycle_id': cycle_id,
-            'confidence': update['confidence'],
+            'confidence': confidence,
             'status': update['status'],
             'supporting_evidence_refs': supporting_refs,
             'contradicting_evidence_refs': contradicting_refs,
         }]
-        metadata = {
+        hypo_meta.update({
             'updated_by': 'cognitive_slow_loop',
             'confidence_requires_current_evidence': True,
-        }
+            'scope': update.get('scope') or 'unknown',
+            'independent_contexts': update.get('independent_contexts') or [],
+        })
         cur.execute(
             '''INSERT INTO cognitive_hypotheses (
                    user_id, character_id, question_id, hypothesis_key,
@@ -796,11 +1013,11 @@ def persist_slow_loop_output(
             (
                 user_id, character_id, question_id,
                 update['hypothesis_key'], update['statement'], update['status'],
-                update['hypothesis_type'], update['confidence'],
+                update['hypothesis_type'], confidence,
                 json.dumps(supporting_refs, ensure_ascii=False),
                 json.dumps(contradicting_refs, ensure_ascii=False),
                 json.dumps(evidence_entry, ensure_ascii=False),
-                json.dumps(metadata, ensure_ascii=False),
+                json.dumps(hypo_meta, ensure_ascii=False),
                 cycle_id, cycle_id, now,
             ),
         )
@@ -821,20 +1038,55 @@ def persist_slow_loop_output(
             hypothesis_ids[hypothesis_key] = hypothesis_id
         return hypothesis_id
 
+    existing_beliefs = {}
+    for key, row in _load_keyed_map(
+        cur, 'cognitive_beliefs', 'belief_key',
+        user_id, character_id,
+        [item['belief_key'] for item in output['belief_updates']],
+        ('statement', 'confidence', 'status', 'metadata'),
+    ).items():
+        existing_beliefs[key] = {
+            'statement': row[0],
+            'confidence': float(row[1] or 0),
+            'status': row[2],
+            'metadata': _json_meta(row[3]),
+        }
+
     belief_commit_decisions = []
     for update in output['belief_updates']:
         hypothesis_id = resolve_hypothesis_id(update['from_hypothesis_key'])
         source_refs = full_refs(update['evidence_refs'])
+        existing = existing_beliefs.get(update['belief_key'])
         decision = _belief_commit_decision(
             update, source_refs, event_metadata, hypothesis_id,
+            existing=existing,
         )
         belief_commit_decisions.append(decision)
         if decision['action'] == 'held':
             continue
-        metadata = {
+        statement = decision.get('statement') or update['statement']
+        confidence = decision['confidence']
+        meta = dict(existing['metadata']) if existing else {}
+        if existing:
+            meta = append_revision_history(
+                meta,
+                old_statement=existing['statement'],
+                old_confidence=existing['confidence'],
+                new_statement=statement,
+                new_confidence=confidence,
+                relation=decision.get('evidence_relation') or 'support',
+                reason=update.get('revision_reason') or decision.get('reason'),
+                evidence_refs=source_refs,
+                cycle_id=cycle_id,
+            )
+        meta.update({
             'created_by': 'cognitive_slow_loop',
             'commit_gate': decision,
-        }
+            'scope': decision.get('scope') or update.get('scope') or 'unknown',
+            'review_status': decision.get('review_status') or 'stable',
+            'independent_contexts': update.get('independent_contexts') or [],
+            'frame_kind': update.get('frame_kind'),
+        })
         cur.execute(
             '''INSERT INTO cognitive_beliefs (
                    user_id, character_id, belief_key, statement, confidence,
@@ -856,10 +1108,10 @@ def persist_slow_loop_output(
                    updated_at = EXCLUDED.updated_at''',
             (
                 user_id, character_id, update['belief_key'],
-                update['statement'], update['confidence'], update['status'],
+                statement, confidence, update['status'],
                 update['belief_type'],
                 json.dumps(source_refs, ensure_ascii=False),
-                hypothesis_id, json.dumps(metadata, ensure_ascii=False),
+                hypothesis_id, json.dumps(meta, ensure_ascii=False),
                 cycle_id, cycle_id, now,
             ),
         )

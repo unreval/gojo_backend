@@ -37,6 +37,10 @@ from relationship_state import (
 from relationship_db import ensure_state_row
 
 from relationship_signals import extract_signals
+from relationship_flirt import (
+    interpret_flirt_effect, salient_event_allows_reappraisal,
+    utterance_suggests_frame_break,
+)
 from relationship_boundary import (
     handle_boundary_hit, handle_boundary_respected, mark_boundary_known,
 )
@@ -168,7 +172,9 @@ def _route_signal(user_id: str, character_id: str, sig: Dict,
         return _handle_flirt_signal(user_id, character_id, conf, conf_mult, attrs, sig, session_id)
 
     if stype == 'positive_reciprocal' and actor == 'user':
-        return _handle_reciprocal(user_id, character_id, conf, conf_mult, session_id)
+        return _handle_reciprocal(
+            user_id, character_id, conf, conf_mult, session_id, attrs, sig,
+        )
 
     if stype == 'ambiguous_response' and actor == 'user':
         # ★ 铁律 4：不算默许，也不算拒绝，什么都不做
@@ -242,8 +248,10 @@ def _route_signal(user_id: str, character_id: str, sig: Dict,
         return {'action': 'boundary_known', 'topic': topic}
 
     if stype == 'character_reciprocal' and actor == 'character':
-        # 角色方也回应了 → 视作双向确认
-        return _handle_reciprocal(user_id, character_id, conf, conf_mult, session_id)
+        # 角色方也回应了 → 视作双向确认，但仍按 flirt 解释决定是否进入 pending passion
+        return _handle_reciprocal(
+            user_id, character_id, conf, conf_mult, session_id, attrs, sig,
+        )
 
     return {'action': 'ignored', 'reason': f'unknown_or_unhandled: {stype}/{actor}'}
 
@@ -265,6 +273,10 @@ def _apply_care(user_id, character_id, stype, conf, conf_mult, sig):
     apply_warmth(user_id, character_id, delta,
                  signal_type=stype, confidence=conf, rule='care_to_warmth',
                  note=sig.get('brief', ''))
+    if stype == 'genuine_care':
+        _maybe_mark_romantic_reappraisal(
+            user_id, character_id, signal=stype, brief=sig.get('brief', ''),
+        )
     return {'action': 'warmth+', 'delta': delta}
 
 
@@ -290,6 +302,10 @@ def _apply_self_disclosure(user_id, character_id, conf, conf_mult, attrs, sig):
                     signal_type='self_disclosure_core', confidence=conf,
                     rule='trust_from_core_disclosure',
                     note=sig.get('brief', ''))
+        _maybe_mark_romantic_reappraisal(
+            user_id, character_id, signal='self_disclosure_core',
+            brief=sig.get('brief', ''),
+        )
     return {'action': 'intimacy+', 'delta': delta, 'depth': depth}
 
 
@@ -428,13 +444,58 @@ def _handle_rejection(user_id, character_id, conf, conf_mult):
 # ══════════════════════════════════════════════════════════════
 # ★ Passion 阶段门控（v4 修复：不再是"未拒绝即累积"）
 # ══════════════════════════════════════════════════════════════
+def _shared_frame(user_id, character_id) -> Dict:
+    try:
+        from cognitive_reader import fetch_shared_frame
+        frame = fetch_shared_frame(user_id, character_id)
+        if isinstance(frame, dict):
+            return frame
+    except Exception:
+        pass
+    return {'frame_kind': 'unknown', 'confidence': 0.0}
+
+
+def _flirt_effect(user_id, character_id, attrs, sig, *, reciprocal):
+    attrs = attrs or {}
+    brief = (sig or {}).get('brief', '') if isinstance(sig, dict) else ''
+    frame = _shared_frame(user_id, character_id)
+    meta_serious = bool(attrs.get('meta_serious')) or utterance_suggests_frame_break(brief)
+    frame_break = bool(attrs.get('frame_break')) or meta_serious
+    return interpret_flirt_effect(
+        attrs.get('flirt_interpretation') or attrs.get('interpretation'),
+        reciprocal=reciprocal,
+        frame_kind=frame.get('frame_kind'),
+        frame_confidence=frame.get('confidence') or 0.0,
+        frame_break=frame_break,
+        exclusive_to_character=bool(attrs.get('exclusive_to_character')),
+        habitual_with_others=bool(attrs.get('habitual_with_others')),
+        meta_serious=meta_serious,
+    )
+
+
+def _apply_playful_deltas(user_id, character_id, effect, conf, rule_prefix):
+    if effect.get('warmth_delta'):
+        apply_warmth(
+            user_id, character_id, effect['warmth_delta'],
+            signal_type='flirt_signal', confidence=conf,
+            rule=f'{rule_prefix}_warmth',
+            note=effect.get('reason') or '',
+        )
+    if effect.get('intimacy_delta'):
+        apply_intimacy(
+            user_id, character_id, effect['intimacy_delta'],
+            signal_type='flirt_signal', confidence=conf,
+            rule=f'{rule_prefix}_intimacy',
+            note=effect.get('reason') or '',
+        )
+
+
 def _handle_flirt_signal(user_id, character_id, conf, conf_mult, attrs, sig, session_id):
-    """收到暧昧/调情信号时先看阶段。"""
+    """收到暧昧/调情信号时先看阶段，再按 flirt interpretation 路由。"""
     state = _load_state(user_id, character_id)
     stage = _get_stage(state)
 
     if stage == 'stranger':
-        # ★ 陌生人阶段：双重冒犯，直接进 F，不进 P
         base = BASE_DELTA['flirt_signal']
         f_delta = base * conf_mult * 3.0
         apply_friction(user_id, character_id, 'flirt_at_stranger_stage',
@@ -445,7 +506,6 @@ def _handle_flirt_signal(user_id, character_id, conf, conf_mult, attrs, sig, ses
         return {'action': 'stranger_reject_x3', 'f_delta': f_delta, 'stage': stage}
 
     if stage == 'negative':
-        # 关系已负面：读作骚扰，只加 F
         base = BASE_DELTA['flirt_signal']
         f_delta = base * conf_mult
         apply_friction(user_id, character_id, 'flirt_at_negative_stage',
@@ -458,50 +518,93 @@ def _handle_flirt_signal(user_id, character_id, conf, conf_mult, attrs, sig, ses
     if stage in ('acquaintance',):
         baseline = state.get('banter_baseline', 'reserved')
         if baseline in ('reserved',):
-            # 保守型 + 认识不深：轻度摩擦
             apply_friction(user_id, character_id, 'flirt_too_early',
                            BASE_DELTA['flirt_signal'] * conf_mult * 0.5,
                            signal_type='flirt_signal', confidence=conf,
                            rule='acquaintance_baseline_reserved',
                            note='')
             return {'action': 'mild_friction'}
-        # playful / flirty → 进"待定池"
-        # fallthrough
 
-    # 到这里意味着：
-    # - 阶段是 acquaintance 且角色开放型
-    # - 或 stage 是 ambiguous / friend / love_candidate
-    # 单个 flirt 信号本身 **不入 P**，等待 positive_reciprocal 才算数
-    # 只是把这条 flirt 挂在 pending_hypothesis 里等确认
+    effect = _flirt_effect(user_id, character_id, attrs, sig, reciprocal=False)
+    _apply_playful_deltas(user_id, character_id, effect, conf, 'flirt_nonreciprocal')
+    hypo_type = (
+        'relationship_frame_break' if effect.get('frame_break_candidate')
+        else 'pending_passion_ambiguous'
+    )
     push_hypothesis_evidence(
         user_id, character_id,
-        hypothesis_type='pending_passion_ambiguous',
+        hypothesis_type=hypo_type,
         evidence={
-            'signal': 'flirt_signal', 'conf': conf,
+            'signal': 'flirt_signal',
+            'conf': conf,
             'session_id': session_id,
             'ts': _now_iso(),
-            'brief': sig.get('brief', ''),
+            'brief': (sig or {}).get('brief', ''),
+            'interpretation': effect.get('interpretation'),
+            'reason': effect.get('reason'),
         },
     )
-    return {'action': 'flirt_pending_wait_for_reciprocal'}
+    if salient_event_allows_reappraisal(state, salience='high' if effect.get('frame_break_candidate') else 'normal'):
+        push_hypothesis_evidence(
+            user_id, character_id,
+            hypothesis_type='romantic_reappraisal',
+            evidence={
+                'signal': 'flirt_signal',
+                'conf': conf,
+                'session_id': session_id,
+                'ts': _now_iso(),
+                'brief': (sig or {}).get('brief', ''),
+            },
+        )
+    return {
+        'action': 'flirt_interpreted',
+        'pending_passion_delta': 0,
+        'romantic_evidence': False,
+        **effect,
+    }
 
 
-def _handle_reciprocal(user_id, character_id, conf, conf_mult, session_id):
-    """双向对等回应 → 才是真正的 pending_passion += 1"""
+def _handle_reciprocal(user_id, character_id, conf, conf_mult, session_id,
+                       attrs=None, sig=None):
+    """双向对等回应：playful 只动 W/I；romantic 才进入 pending_passion。"""
     state = _load_state(user_id, character_id)
     stage = _get_stage(state)
     if stage in ('stranger', 'negative'):
-        # 特殊阶段：即使有互惠也不算 passion 累积
         return {'action': 'reciprocal_but_stage_blocks', 'stage': stage}
 
-    new_val = state['pending_passion'] + 1
+    effect = _flirt_effect(user_id, character_id, attrs, sig, reciprocal=True)
+    _apply_playful_deltas(user_id, character_id, effect, conf, 'reciprocal')
+    if not effect.get('pending_passion_delta'):
+        if effect.get('unresolved') or effect.get('frame_break_candidate'):
+            push_hypothesis_evidence(
+                user_id, character_id,
+                hypothesis_type=(
+                    'relationship_frame_break'
+                    if effect.get('frame_break_candidate')
+                    else 'pending_passion_ambiguous'
+                ),
+                evidence={
+                    'signal': 'positive_reciprocal',
+                    'conf': conf,
+                    'session_id': session_id,
+                    'ts': _now_iso(),
+                    'interpretation': effect.get('interpretation'),
+                },
+            )
+        return {
+            'action': 'reciprocal_non_romantic',
+            'pending_passion_delta': 0,
+            **effect,
+        }
+
+    new_val = state['pending_passion'] + int(effect['pending_passion_delta'])
     update_pending_passion(user_id, character_id, new_val,
                            signal_type='positive_reciprocal', confidence=conf,
                            rule='pending_passion_increment',
-                           note='')
-
-    # 检查是否够转正
-    return _maybe_convert_pending_passion(user_id, character_id, conf)
+                           note=effect.get('reason') or '')
+    converted = _maybe_convert_pending_passion(user_id, character_id, conf)
+    converted.update(effect)
+    return converted
 
 
 def _maybe_convert_pending_passion(user_id, character_id, conf) -> Dict:
@@ -681,6 +784,23 @@ def _log_temporal_observation(user_id, character_id, temporal_context):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _maybe_mark_romantic_reappraisal(user_id, character_id, *, signal, brief):
+    """High-salience care/understanding may open cognition, never a passion jump."""
+    state = _load_state(user_id, character_id)
+    if not salient_event_allows_reappraisal(state, salience='high'):
+        return
+    push_hypothesis_evidence(
+        user_id, character_id,
+        hypothesis_type='romantic_reappraisal',
+        evidence={
+            'signal': signal,
+            'brief': brief,
+            'ts': _now_iso(),
+            'note': 'salient_event_reappraisal_only',
+        },
+    )
 
 
 # ══════════════════════════════════════════════════════════════
