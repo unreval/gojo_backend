@@ -12,12 +12,11 @@
 
 Observer 的输出是原子事件（signal），不是结论。
 """
-import json
-import re
 from typing import Dict, List, Optional
 
 from ai_client import create_chat
 from config import MODEL_MAIN
+from utils import extract_json
 from relationship_config import (
     SIGNAL_EXTRACTOR_MAX_TOKENS,
 )
@@ -137,23 +136,7 @@ def _build_user_prompt(
 
 
 def _extract_json(text: str) -> Optional[Dict]:
-    """从 LLM 返回里挖出 JSON。宽容处理围栏和前后缀。"""
-    text = text.strip()
-    # 剥掉可能的 markdown 围栏
-    text = re.sub(r'^```(?:json)?\s*', '', text)
-    text = re.sub(r'\s*```$', '', text)
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except Exception:
-        # 尝试抓第一个 {...} 块
-        m = re.search(r'\{.*\}', text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                return None
-    return None
+    return extract_json(text)
 
 
 def extract_signals(
@@ -181,23 +164,45 @@ def extract_signals(
         character_core_snippet, recent_context, temporal_context,
     )
 
-    try:
-        # ★ 注意：不传 temperature —— 中转 API 的 create_chat 不接受该参数
-        #   Observer 的判断本来就靠 prompt 的严格约束，不靠低 temperature
-        raw_text, _usage = create_chat(
-            model=model or MODEL_MAIN,
-            messages=[{'role': 'user', 'content': user_prompt}],
-            system=_OBSERVER_SYSTEM_PROMPT,
-            max_tokens=SIGNAL_EXTRACTOR_MAX_TOKENS,
-        )
-    except Exception as e:
-        return {'signals': [], 'raw': '', 'model': model or MODEL_MAIN,
-                'error': f'llm_call_failed: {e}'}
-
-    parsed = _extract_json(raw_text)
-    if parsed is None or 'signals' not in parsed:
-        return {'signals': [], 'raw': raw_text, 'model': model or MODEL_MAIN,
-                'error': 'json_parse_failed'}
+    messages = [{'role': 'user', 'content': user_prompt}]
+    max_tokens = SIGNAL_EXTRACTOR_MAX_TOKENS
+    for attempt in range(2):
+        try:
+            raw_text, usage = create_chat(
+                model=model or MODEL_MAIN,
+                messages=messages,
+                system=_OBSERVER_SYSTEM_PROMPT,
+                max_tokens=max_tokens,
+            )
+        except Exception as e:
+            return {'signals': [], 'raw': '', 'model': model or MODEL_MAIN,
+                    'error': f'llm_call_failed: {e}'}
+        stop = usage.get('stop_reason') or usage.get('finish_reason')
+        parsed = _extract_json(raw_text)
+        error = None
+        if stop in {'refusal', 'content_filter'}:
+            error = 'model_refused'
+        elif stop in {'max_tokens', 'length'}:
+            error = 'truncated_response'
+            max_tokens = min(max_tokens * 2, 2400)
+        elif not raw_text or not raw_text.strip():
+            error = 'empty_response'
+        elif parsed is None:
+            error = 'json_parse_failed'
+        elif not isinstance(parsed.get('signals'), list):
+            error = 'signals_schema_invalid'
+        if error is None:
+            break
+        print(f'[relationship_signals] attempt={attempt + 1} error={error} '
+              f'stop={stop} output_tokens={usage.get("output_tokens")} '
+              f'chars={len(raw_text or "")} response_id={usage.get("response_id")}')
+        if attempt == 1 or stop in {'refusal', 'content_filter'}:
+            return {'signals': [], 'raw': raw_text, 'model': model or MODEL_MAIN,
+                    'error': error}
+        messages = [{'role': 'user', 'content': user_prompt + (
+            '\n上次输出为空、被截断或不符合格式。请重新只输出完整 JSON 对象，'
+            'signals 必须是数组；没有事件时返回 {"signals":[]}。保持 brief 简短。'
+        )}]
 
     # 简单清洗：确保每个 signal 有 signal_type/actor/confidence 三个必填
     valid_signals = []

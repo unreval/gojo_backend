@@ -76,6 +76,16 @@ def process_turn(
         model=signal_model,
     )
     signals = extraction.get('signals', [])
+    if extraction.get('error'):
+        # A failed observation is not a new evidence event or a successful turn.
+        return {
+            'signals_extracted': 0,
+            'signals_applied': 0,
+            'observer_error': extraction['error'],
+            'cognitive_ingress': None,
+            'cognitive_ingress_error': None,
+            'applied': [],
+        }
 
     # 2. 记录交互统计（Tone / Reciprocity 用）
     _log_interaction_stats(user_id, character_id, signals, session_id)

@@ -302,6 +302,50 @@ class SlowLoopTransactionTests(unittest.TestCase):
 
 
 class SlowLoopWorkerTests(unittest.TestCase):
+    def test_invalid_stance_is_corrected_using_the_validator_enum(self):
+        from cognitive_predictions import PREDICTION_STANCE_TYPES
+
+        bad = valid_output()
+        bad['new_predictions'][0]['metadata']['violation_signals'] = [{
+            'signal_type': 'character_stance_declared',
+            'actor': 'character',
+            'attributes': {'stance_type': 'romantic_rejection'},
+        }]
+        call_model = Mock(side_effect=[
+            (json.dumps(bad), {}),
+            (json.dumps(valid_output()), {}),
+        ])
+        output, _ = cognitive_worker.generate_cycle_output(
+            {'events': [{'event_id': 27}]}, create_chat_fn=call_model)
+        self.assertEqual(call_model.call_count, 2)
+        prompt = call_model.call_args.kwargs['system']
+        for stance in PREDICTION_STANCE_TYPES:
+            self.assertIn(stance, prompt)
+        self.assertIn('violation_signals', prompt)
+        self.assertIn('new_predictions may be []', prompt)
+        self.assertEqual(output['evidence_refs'][0]['event_id'], 27)
+        self.assertNotIn('romantic_rejection', json.dumps(output))
+
+    def test_unsupported_stance_still_rejected_after_retry(self):
+        bad = valid_output()
+        bad['new_predictions'][0]['metadata']['violation_signals'] = [{
+            'signal_type': 'character_stance_declared',
+            'actor': 'character',
+            'attributes': {'stance_type': 'invented_stance'},
+        }]
+        with self.assertRaisesRegex(cognitive_output.SlowLoopOutputError,
+                                    'violation_signals_0_stance_type_invalid'):
+            cognitive_worker.generate_cycle_output(
+                {'events': [{'event_id': 27}]},
+                create_chat_fn=Mock(return_value=(json.dumps(bad), {})))
+
+    def test_empty_output_retry_does_not_send_empty_assistant_message(self):
+        call_model = Mock(side_effect=[('', {}), (json.dumps(valid_output()), {})])
+        cognitive_worker.generate_cycle_output(
+            {'events': [{'event_id': 27}]}, create_chat_fn=call_model)
+        self.assertTrue(all(message['content'].strip()
+                            for message in call_model.call_args.kwargs['messages']))
+
     def test_generate_retries_invalid_json_then_accepts_valid_output(self):
         responses = [
             ('not-json', {}),

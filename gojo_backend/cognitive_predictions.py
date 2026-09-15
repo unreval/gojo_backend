@@ -34,6 +34,10 @@ _SELECTOR_FIELDS = frozenset({
     'signal_type', 'actor', 'confidence', 'attributes',
 })
 _MAX_SIGNAL_SELECTORS = 8
+PREDICTION_STANCE_TYPES = frozenset({
+    'care_admission', 'promise', 'relationship_confirm',
+    'retreat_boundary', 'boundary_stated',
+})
 _SIGNAL_ATTRIBUTE_FIELDS = {
     'self_disclosure': frozenset({'depth'}),
     'flirt_signal': frozenset({'explicit'}),
@@ -147,10 +151,7 @@ def _normalize_selector(value, field):
             signal_type == 'character_stance_declared'
             and 'stance_type' in clean_attributes
         ):
-            if clean_attributes.get('stance_type') not in {
-                'care_admission', 'promise', 'relationship_confirm',
-                'retreat_boundary', 'boundary_stated',
-            }:
+            if clean_attributes.get('stance_type') not in PREDICTION_STANCE_TYPES:
                 raise ValueError(f'{field}_stance_type_invalid')
         result['attributes'] = clean_attributes
     return result

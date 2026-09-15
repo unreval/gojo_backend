@@ -27,6 +27,7 @@ from cognitive_queue import (
     fail_cycle,
 )
 from cognitive_scheduler import enqueue_due_reflections
+from cognitive_predictions import PREDICTION_STANCE_TYPES
 
 
 _THREAD = None
@@ -144,6 +145,17 @@ description, selectors, status, and the settling event as a feedback signal.
 A fulfillment may support a hypothesis and a violation may weaken or reject
 it, but one observation is not automatically conclusive. Preserve uncertainty
 and cite the actual event, not the prediction record, as evidence.'''
+
+_SYSTEM_PROMPT += (
+    '\nFor character_stance_declared selectors, actor must be character and '
+    'attributes.stance_type must be exactly one of: '
+    + ', '.join(sorted(PREDICTION_STANCE_TYPES))
+    + '. This applies to BOTH fulfillment_signals and violation_signals. '
+    'Do not invent synonyms or combine multiple stance types into one string. '
+    'If no allowed selector expresses the prediction, omit that prediction '
+    '(new_predictions may be []). Do not remove a restrictive attribute just '
+    'to bypass validation; that would change what the prediction means.'
+)
 
 
 def _utc_now():
@@ -268,8 +280,9 @@ def generate_cycle_output(context, *, create_chat_fn=None):
             last_error = exc
             if attempt + 1 >= COGNITIVE_WORKER_MODEL_ATTEMPTS:
                 break
+            if raw and str(raw).strip():
+                messages.append({'role': 'assistant', 'content': str(raw)[:12000]})
             messages.extend([
-                {'role': 'assistant', 'content': str(raw or '')[:12000]},
                 {
                     'role': 'user',
                     'content': (

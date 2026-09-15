@@ -82,6 +82,21 @@ def create_chat(model, messages, system=None, max_tokens=1000, temperature=None)
         raise ValueError(f'未知的 model 前缀: {model}')
 
 
+def response_metadata(response):
+    """Diagnostic fields only: never include image data or thinking content."""
+    usage = getattr(response, 'usage', None)
+    return {
+        'input_tokens': getattr(usage, 'input_tokens', 0),
+        'output_tokens': getattr(usage, 'output_tokens', 0),
+        'stop_reason': getattr(response, 'stop_reason', None),
+        'response_id': getattr(response, 'id', None),
+        'content_types': [
+            block.get('type') if isinstance(block, dict) else getattr(block, 'type', None)
+            for block in (getattr(response, 'content', None) or [])
+        ],
+    }
+
+
 def _call_anthropic(model, messages, system, max_tokens, temperature):
     client = _get_anthropic()
     kwargs = {
@@ -96,8 +111,7 @@ def _call_anthropic(model, messages, system, max_tokens, temperature):
     resp = client.messages.create(**kwargs)
     text = extract_text(resp)
     return text, {
-        'input_tokens': getattr(resp.usage, 'input_tokens', 0),
-        'output_tokens': getattr(resp.usage, 'output_tokens', 0),
+        **response_metadata(resp),
         'provider': 'anthropic',
     }
 
