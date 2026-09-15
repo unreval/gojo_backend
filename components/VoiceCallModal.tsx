@@ -500,7 +500,7 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
       setCallMsgs(prev => [...prev, userMsg]);
       scrollRef.current?.scrollToEnd({ animated: true });
 
-      await sendToGojo(text);
+      await sendToGojo(text, userMsg.id);
 
     } catch (e: any) {
       setDebugText(`❌ ${e?.message || e}`);
@@ -511,7 +511,7 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
 
   // ★ B档流式:XHR + onprogress 逐行解析 NDJSON,音频入队边收边播
   //   老的 axios.post + 完整 JSON 兜底见下方 sendToGojoLegacy
-  const sendToGojo = async (text: string) => {
+  const sendToGojo = async (text: string, sourceEventId?: string) => {
     if (!activeRef.current) return;
 
     interface AudioChunk {
@@ -594,9 +594,9 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           drainQueue();  // 有可能音频都播完了,靠这个触发 finalize
           return;
         }
-        if (evt.type === 'error') {
-          console.warn('[voice_stream] server error:', evt.msg);
-          setDebugText(`❌ ${evt.msg}`);
+        if (evt.type === 'error' || evt.type === 'generation_failed') {
+          console.warn('[voice_stream] server error:', evt.msg || evt.error);
+          setDebugText(evt.type === 'generation_failed' ? '❌ 回复生成失败' : `❌ ${evt.msg}`);
           setTimeout(() => setDebugText(''), 3000);
           streamDone = true;
           drainQueue();
@@ -663,6 +663,7 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
           text,
           user_id: userId,
           character_id: 'gojo',
+          source_event_id: sourceEventId || undefined,
         }));
       } catch (e) {
         console.warn('[voice_stream] send err:', e);

@@ -176,6 +176,65 @@ def sanitize_user_reply(text: str) -> str:
     return text.strip()
 
 
+# 真正的可见正文：字母 / 数字 / 假名 / 汉字。纯空白、纯标点（...、……、!!!）不能过。
+VISIBLE_CONTENT_RE = re.compile(
+    r'[A-Za-z0-9'
+    r'\u3040-\u30ff'   # 平假名 + 片假名
+    r'\u3400-\u9fff'   # CJK
+    r'\uff10-\uff19'   # 全角数字
+    r'\uff21-\uff3a'   # 全角 A-Z
+    r'\uff41-\uff5a'   # 全角 a-z
+    r'\uff66-\uff9d'   # 半角片假名
+    r']'
+)
+_JSON_DEBRIS_KEYS = ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"')
+
+
+def has_visible_text(text) -> bool:
+    """至少存在真正的文字/数字/kana/汉字。None、空串、纯空白、纯标点一律 False。"""
+    if text is None:
+        return False
+    s = str(text).strip()
+    if not s:
+        return False
+    return bool(VISIBLE_CONTENT_RE.search(s))
+
+
+def msg_has_json_debris(m: dict) -> bool:
+    """jp/zh 含 JSON 残骸或内部状态块 → True，不能当角色正文。"""
+    if not isinstance(m, dict):
+        return True
+    jp = str(m.get('jp', '') or '')
+    zh = str(m.get('zh', '') or '')
+    if contains_offline_marker(jp) or contains_offline_marker(zh):
+        return True
+    for kw in _JSON_DEBRIS_KEYS:
+        if kw in jp or kw in zh:
+            return True
+    return False
+
+
+def valid_reply_msg(m: dict) -> bool:
+    """统一验证：jp/zh 都有真正可见正文 + 没 JSON 残骸。
+    「ん？」「え？」可通过；「...」「……」以及 {"jp":"..."} 残骸不能通过。"""
+    if not isinstance(m, dict):
+        return False
+    if msg_has_json_debris(m):
+        return False
+    jp = sanitize_user_reply(str(m.get('jp', '') or ''))
+    zh = sanitize_user_reply(str(m.get('zh', '') or ''))
+    return has_visible_text(jp) and has_visible_text(zh)
+
+
+def valid_reply_pair(jp, zh) -> bool:
+    return valid_reply_msg({'jp': jp, 'zh': zh})
+
+
+def commit_ready_msgs(msgs) -> bool:
+    """最终 commit gate：非空且每条正文有效。"""
+    return bool(msgs) and all(valid_reply_msg(m) for m in msgs)
+
+
 def _extract_state_from_messages(messages):
     if not isinstance(messages, list):
         return None

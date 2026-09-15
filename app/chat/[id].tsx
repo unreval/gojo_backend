@@ -229,6 +229,7 @@ export default function ChatRoom() {
     localUri: string;
     caption: string;
     video?: { frames: { data: string; media_type: string }[] };
+    sourceEventId: string;
   }>(null);
   const inputTextRef = useRef('');   // ★ IME 双写:发送时从 ref 读最新值,防 composition 未 commit 截断
   const [ready, setReady]         = useState(false);
@@ -568,14 +569,18 @@ export default function ChatRoom() {
         let mode: 'remind' | 'overdue' | null = null;
 
         if (minsSince >= -3 && minsSince < 60 && !taskState.reminded) {
-          mode = 'remind'; taskState.reminded = true;
+          mode = 'remind';
         } else if (minsSince >= 60 && minsSince < 1440 && !taskState.askedOverdue) {
-          mode = 'overdue'; taskState.askedOverdue = true;
+          mode = 'overdue';
         }
         if (mode) {
-          state[stateKey] = taskState;
-          await AsyncStorage.setItem(PROACTIVE_KEY, JSON.stringify(state));
-          await sendProactive(task.title, mode);
+          const ok = await sendProactive(task.title, mode);
+          if (ok) {
+            if (mode === 'remind') taskState.reminded = true;
+            else taskState.askedOverdue = true;
+            state[stateKey] = taskState;
+            await AsyncStorage.setItem(PROACTIVE_KEY, JSON.stringify(state));
+          }
           break;
         }
       }
@@ -588,7 +593,9 @@ export default function ChatRoom() {
       const res = await axios.post(`${SERVER_URL}/chat/proactive`, {
         user_id: FIXED_USER_ID, task_title: taskTitle, mode,
       });
+      if (isGenerationFailedPayload(res.data)) return false;
       const segments: Segment[] = res.data?.messages || [];
+      if (segments.length === 0) return false;
       for (let i = 0; i < segments.length; i++) {
         const seg = segments[i];
         const msgId = `proactive_${Date.now()}_${i}`;
@@ -604,7 +611,15 @@ export default function ChatRoom() {
         if (i < segments.length - 1) await sleep(MSG_DELAY_MS);
       }
       pruneAudioFiles();
-    } catch (e) { console.warn('sendProactive error', e); }
+      return true;
+    } catch (e: any) {
+      if (isGenerationFailedPayload(e?.response?.data)) {
+        console.warn('[sendProactive] generation_failed');
+      } else {
+        console.warn('sendProactive error', e);
+      }
+      return false;
+    }
   };
 
   // ★ 往前翻更早的聊天记录（服务器永久保存,随便翻）—— 群聊和单聊都走这个
@@ -1160,10 +1175,15 @@ export default function ChatRoom() {
     }
     if (loading) return;
     setGenerationFailed(false);
-    lastFailedSendRef.current = { kind: 'image', base64, mediaType, localUri, caption, video };
     setLoading(true);
+    const sourceEventId = opts?.retry && lastFailedSendRef.current?.kind === 'image'
+      ? lastFailedSendRef.current.sourceEventId
+      : Date.now().toString();
+    lastFailedSendRef.current = {
+      kind: 'image', base64, mediaType, localUri, caption, video, sourceEventId,
+    };
     const userMsg: Message = {
-      id: Date.now().toString(), role: 'user',
+      id: sourceEventId, role: 'user',
       text: caption || (video ? '🎬 [视频]' : '📷 [图片]'),
       time: nowTime(), timestamp: Date.now(), imageUri: localUri,
     };
@@ -1213,6 +1233,7 @@ export default function ChatRoom() {
           user_id: FIXED_USER_ID,
           text: caption,
           character_id: chatId,
+          source_event_id: sourceEventId,
         };
         if (video) {
           payload.images = video.frames;

@@ -104,39 +104,74 @@ def _normalize_event_id(source_event_id):
     return value or None
 
 
+INSERT_USER_EVENT_ONCE_SQL = '''
+INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
+VALUES (%s, %s, 'user', %s, %s)
+ON CONFLICT (user_id, character_id, role, source_event_id)
+WHERE source_event_id IS NOT NULL
+DO NOTHING
+RETURNING id
+'''.strip()
+
+
 def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER_ID,
                                 source_event_id=None):
-    """保存真实发生的用户发言。同一 source_event_id 重试不会再 INSERT。
+    """保存真实发生的用户发言。同一 source_event_id 用原子 INSERT ON CONFLICT 去重。
 
-    有 event id 时按 (user, character, role, source_event_id) 去重。
-    没有 event id 时每次都插入——无法可靠区分“重试”和“用户又说了同一句”。
+    有 event id：INSERT ... ON CONFLICT DO NOTHING RETURNING id
+      - RETURNING 有行 = 本次新插入，返回 True
+      - RETURNING 空 = 已存在，返回 False
+    无 event id：普通 INSERT，每次都写入。
     """
     event_id = _normalize_event_id(source_event_id)
-    conn = get_conn()
-    cur = conn.cursor()
-    if event_id:
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        if event_id:
+            cur.execute(
+                INSERT_USER_EVENT_ONCE_SQL,
+                (user_id, character_id, content, event_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.commit()
+                print(f'[memory] skip duplicate user event {event_id}')
+                return False
+            _prune_short_memory(cur, user_id, character_id)
+            conn.commit()
+            return True
         cur.execute(
-            '''SELECT id FROM short_memory
-               WHERE user_id = %s AND character_id = %s AND role = 'user'
-                 AND source_event_id = %s
-               LIMIT 1''',
-            (user_id, character_id, event_id)
+            '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
+               VALUES (%s, %s, %s, %s, %s)''',
+            (user_id, character_id, 'user', content, None)
         )
-        if cur.fetchone():
-            print(f'[memory] skip duplicate user event {event_id}')
-            cur.close()
-            conn.close()
+        _prune_short_memory(cur, user_id, character_id)
+        conn.commit()
+        return True
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        pgcode = getattr(e, 'pgcode', None)
+        if event_id and pgcode == '23505':
+            print(f'[memory] skip duplicate user event {event_id} (unique)')
             return False
-    cur.execute(
-        '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
-           VALUES (%s, %s, %s, %s, %s)''',
-        (user_id, character_id, 'user', content, event_id)
-    )
-    _prune_short_memory(cur, user_id, character_id)
-    conn.commit()
-    cur.close()
-    conn.close()
-    return True
+        raise
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _short_limit(n):

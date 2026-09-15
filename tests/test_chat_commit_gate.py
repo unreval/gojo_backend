@@ -401,6 +401,29 @@ class FrontendCommitGateGuardTests(unittest.TestCase):
         self.assertIn('回复生成失败，点击重试', self.src)
         self.assertNotRegex(self.src, r"role:\s*'gojo'[^\n]*generationFailure")
 
+    def test_send_image_passes_source_event_id(self):
+        self.assertIn('source_event_id: sourceEventId', self.src)
+        self.assertIn("lastFailedSendRef.current?.kind === 'image'", self.src)
+        self.assertIn('sourceEventId', self.src)
+
+    def test_proactive_flags_commit_only_after_success(self):
+        self.assertNotIn('mode = \'remind\'; taskState.reminded = true;', self.src)
+        self.assertNotIn("mode = 'overdue'; taskState.askedOverdue = true;", self.src)
+        self.assertIn('const ok = await sendProactive', self.src)
+        self.assertIn('if (ok)', self.src)
+        self.assertIn('taskState.reminded = true', self.src)
+        self.assertIn('taskState.askedOverdue = true', self.src)
+
+
+class VoiceCallModalGateTests(unittest.TestCase):
+    def setUp(self):
+        self.src = Path(os.path.join(ROOT, 'components', 'VoiceCallModal.tsx')).read_text(encoding='utf-8')
+
+    def test_voice_stream_sends_source_event_id(self):
+        self.assertIn('sendToGojo(text, userMsg.id)', self.src)
+        self.assertIn('source_event_id: sourceEventId', self.src)
+        self.assertIn("evt.type === 'generation_failed'", self.src)
+
 
 if __name__ == '__main__':
     unittest.main()

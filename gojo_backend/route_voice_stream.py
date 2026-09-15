@@ -14,6 +14,8 @@
                                       TTS 生成好的一段音频(前端入播放队列)
 - {"type":"done","emotion":"...","segments":3}   结束事件
 - {"type":"error","msg":"..."}    出错
+- {"type":"generation_failed","error":"generation_failed","generation_failed":true}
+                                      整轮没有任何有效 JP/ZH pair，不伪造台词
 
 ★ 兼容策略:老的 /chat/voice_text 保留不动,前端可以自由切换。
 """
@@ -27,10 +29,11 @@ from fastapi.responses import StreamingResponse
 from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
 from tts import tts_to_b64
 from prompt import build_system_blocks
-from user_memory import save_short_memory, get_short_memory
+from user_memory import save_short_memory, save_user_short_memory_once, get_short_memory
 from memory_jobs import enqueue_private_extraction
 from characters import get_character
 from temporal_awareness import get_temporal_snapshot, record_turn
+from utils import has_visible_text, valid_reply_pair
 
 router = APIRouter()
 
@@ -85,6 +88,7 @@ async def chat_voice_stream(data: dict):
     user_text = (data.get('text') or '').strip()
     user_id = data.get('user_id', 'default')
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
+    source_event_id = str(data.get('source_event_id') or '').strip() or None
 
     def _err(msg: str):
         return StreamingResponse(
@@ -97,6 +101,11 @@ async def chat_voice_stream(data: dict):
     char = get_character(character_id)
     if not char:
         return _err(f'character {character_id} not found')
+
+    # 真实用户发言：请求一开始就幂等保存，生成失败也不能丢。
+    save_user_short_memory_once(
+        user_id, user_text, character_id, source_event_id=source_event_id,
+    )
 
     voice_id = char.get('voice_id')
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
@@ -132,15 +141,20 @@ async def chat_voice_stream(data: dict):
                 return out
             if tag == 'JP':
                 current_jp = value
-                out.append(json.dumps({'type': 'text_jp', 'jp': value}) + '\n')
+                # 纯标点不预显示；有效短句（ん？）可以预显示
+                if has_visible_text(value):
+                    out.append(json.dumps({'type': 'text_jp', 'jp': value}) + '\n')
                 return out
             if tag == 'ZH':
-                # 有 JP 才可以合成
+                # 有 JP 才可以合成；segment-level gate：过校验才 TTS / yield / 持久化
                 if not current_jp:
                     return out
                 jp_to_tts = current_jp
                 zh_final = value
                 current_jp = ''
+                if not valid_reply_pair(jp_to_tts, zh_final):
+                    print(f'[voice_stream] skip invalid pair jp={jp_to_tts!r} zh={zh_final!r}')
+                    return out
                 try:
                     audio_b64 = await loop.run_in_executor(
                         None, tts_to_b64, jp_to_tts, emotion, voice_id
@@ -185,34 +199,42 @@ async def chat_voice_stream(data: dict):
                 outs = await _process_line(buffer.strip())
                 for o in outs:
                     yield o.encode()
-
-            # done 事件
-            yield (json.dumps({
-                'type': 'done', 'emotion': emotion, 'segments': seq,
-            }) + '\n').encode()
-
-            # 后台保存短期记忆 + 提取长期记忆
-            if all_jps:
-                full_jp = ' '.join(all_jps)
-                try:
-                    save_short_memory(user_id, 'user', user_text, character_id)
-                    save_short_memory(user_id, 'assistant', full_jp, character_id)
-                    record_turn(
-                        user_id, character_id, source='chat_voice_stream',
-                        prior_snapshot=temporal_snapshot,
-                    )
-                except Exception as e:
-                    print(f'[voice_stream] short_memory 保存失败:{e}')
-                enqueue_private_extraction(
-                    user_id, user_text, full_jp, character_id,
-                    temporal_context=temporal_snapshot,
-                )
-                print(f'[voice_stream] ✅ {character_id} 流式回复完成,共 {seq} 段')
-            else:
-                print(f'[voice_stream] ⚠️ {character_id} 流式回复没抓到任何 JP+ZH 对,可能 LLM 格式漂了')
-
         except Exception as e:
             print(f'[voice_stream] 主流程出错:{e}')
             yield (json.dumps({'type': 'error', 'msg': str(e)}) + '\n').encode()
+
+        if not all_jps:
+            print(f'[voice_stream] ⚠️ {character_id} 无有效 JP+ZH pair，generation_failed')
+            yield (json.dumps({
+                'type': 'generation_failed',
+                'error': 'generation_failed',
+                'generation_failed': True,
+                'messages': [],
+                'segments': 0,
+            }) + '\n').encode()
+            yield (json.dumps({
+                'type': 'done', 'emotion': emotion, 'segments': 0,
+                'generation_failed': True,
+            }) + '\n').encode()
+            return
+
+        # 已通过 gate 并 yield 过的 segment 是真实角色行为，即使后续流失败也要持久化
+        yield (json.dumps({
+            'type': 'done', 'emotion': emotion, 'segments': seq,
+        }) + '\n').encode()
+        full_jp = ' '.join(all_jps)
+        try:
+            save_short_memory(user_id, 'assistant', full_jp, character_id)
+            record_turn(
+                user_id, character_id, source='chat_voice_stream',
+                prior_snapshot=temporal_snapshot,
+            )
+        except Exception as e:
+            print(f'[voice_stream] short_memory 保存失败:{e}')
+        enqueue_private_extraction(
+            user_id, user_text, full_jp, character_id,
+            temporal_context=temporal_snapshot,
+        )
+        print(f'[voice_stream] ✅ {character_id} 流式回复完成,共 {seq} 段')
 
     return StreamingResponse(event_stream(), media_type='application/x-ndjson')

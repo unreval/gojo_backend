@@ -59,7 +59,9 @@ class ImageFailureTests(unittest.TestCase):
         router = Mock()
         router.post.side_effect = lambda *_args, **_kwargs: lambda function: function
         self.memory = stub('user_memory',
-                           save_short_memory=Mock(), get_short_memory=Mock(return_value=[]),
+                           save_short_memory=Mock(),
+                           save_user_short_memory_once=Mock(return_value=True),
+                           get_short_memory=Mock(return_value=[]),
                            update_chat_days=Mock(return_value=3))
         self.jobs = Mock()
         self.state = Mock()
@@ -108,14 +110,38 @@ class ImageFailureTests(unittest.TestCase):
         self.state.assert_not_called()
         self.record_turn.assert_not_called()
 
+    def assert_generation_failed(self, response, result):
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(result['error'], 'generation_failed')
+        self.assertTrue(result['generation_failed'])
+        self.assertEqual(result['messages'], [])
+        self.assert_no_memory_writes()
+        self.memory.save_user_short_memory_once.assert_called()
+
     def test_empty_responses_are_bounded_and_do_not_pretend_image_was_seen(self):
         self.client.messages.create.return_value = model_response()
-        _, result = self.send()
+        response, result = self.send()
         self.assertEqual(self.client.messages.create.call_count, 3)
-        self.assertEqual(result['error'], 'image_model_unavailable')
-        self.assertIn('没能读出图片', result['messages'][0]['zh'])
-        self.assertNotIn('这是什么', result['messages'][0]['zh'])
-        self.assert_no_memory_writes()
+        self.assert_generation_failed(response, result)
+        self.assertNotIn('没能读出图片', json.dumps(result, ensure_ascii=False))
+
+    def test_ellipsis_is_rejected_by_commit_gate(self):
+        self.client.messages.create.return_value = model_response(json.dumps({
+            'emotion': '平静',
+            'messages': [{'jp': '...', 'zh': '...'}],
+        }, ensure_ascii=False))
+        response, result = self.send()
+        self.assertEqual(self.client.messages.create.call_count, 3)
+        self.assert_generation_failed(response, result)
+
+    def test_source_event_id_is_forwarded_to_user_memory(self):
+        self.client.messages.create.return_value = model_response()
+        self.send(source_event_id='img-evt-1')
+        self.memory.save_user_short_memory_once.assert_called()
+        self.assertEqual(
+            self.memory.save_user_short_memory_once.call_args.kwargs['source_event_id'],
+            'img-evt-1',
+        )
 
     def test_thinking_only_truncation_retries_with_more_tokens_and_same_image(self):
         self.client.messages.create.side_effect = [
@@ -128,7 +154,8 @@ class ImageFailureTests(unittest.TestCase):
             source = call.kwargs['messages'][-1]['content'][0]['source']
             self.assertEqual(source, {'type': 'base64', 'media_type': 'image/png', 'data': PNG})
         self.assertNotIn('error', result)
-        self.assertEqual(self.memory.save_short_memory.call_count, 2)
+        self.assertEqual(self.memory.save_short_memory.call_count, 1)
+        self.memory.save_user_short_memory_once.assert_called()
         self.assertNotIn('PRIVATE_THINKING', str(self.log.call_args_list))
         self.assertIn('max_tokens', str(self.log.call_args_list))
 
@@ -145,21 +172,25 @@ class ImageFailureTests(unittest.TestCase):
                                                   model_response(REPLY)]
         self.send()
         self.assertEqual(self.client.messages.create.call_count, 2)
-        self.assertEqual(self.memory.save_short_memory.call_count, 2)
+        self.assertEqual(self.memory.save_short_memory.call_count, 1)
 
     def test_bad_request_and_refusal_stop_without_blind_retries(self):
         error = RuntimeError('invalid image request')
         error.status_code = 400
         self.client.messages.create.side_effect = error
-        _, result = self.send()
+        response, result = self.send()
         self.assertEqual(self.client.messages.create.call_count, 1)
         self.assertFalse(result['retryable'])
-        self.assert_no_memory_writes()
+        self.assert_generation_failed(response, result)
         self.client.messages.create.reset_mock(side_effect=True)
+        self.memory.save_short_memory.reset_mock()
+        self.jobs.reset_mock()
+        self.state.reset_mock()
+        self.record_turn.reset_mock()
         self.client.messages.create.return_value = model_response(stop='refusal')
-        self.send()
+        response, result = self.send()
         self.assertEqual(self.client.messages.create.call_count, 1)
-        self.assert_no_memory_writes()
+        self.assert_generation_failed(response, result)
 
     def test_upload_normalization_accepts_data_url_and_rejects_invalid_bytes(self):
         normalized = self.route._normalize_image({'data': 'data:image/jpeg;base64,' + PNG})
@@ -170,6 +201,7 @@ class ImageFailureTests(unittest.TestCase):
         response, _ = self.send(image_base64='not base64!')
         self.assertEqual(response.status_code, 400)
         self.client.messages.create.assert_not_called()
+        self.memory.save_user_short_memory_once.assert_not_called()
 
     def test_video_frames_are_preserved_and_prompt_does_not_request_invention(self):
         self.client.messages.create.return_value = model_response(REPLY)
@@ -183,14 +215,14 @@ class ImageFailureTests(unittest.TestCase):
     def test_failed_reply_does_not_persist_offline_state(self):
         self.client.messages.create.return_value = model_response(
             '<<<OFFLINE_CHARACTER_STATES>>> {"inner":"guess","intent":"wait"}')
-        self.send()
-        self.assert_no_memory_writes()
+        response, result = self.send()
+        self.assert_generation_failed(response, result)
 
     def test_exhausted_time_budget_stops_requests(self):
         self.route.time = types.SimpleNamespace(monotonic=Mock(side_effect=[0, 46]))
-        self.send()
+        response, result = self.send()
         self.client.messages.create.assert_not_called()
-        self.assert_no_memory_writes()
+        self.assert_generation_failed(response, result)
 
 
 class ObserverFailureTests(unittest.TestCase):

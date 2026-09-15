@@ -35,6 +35,7 @@ from db import get_conn
 from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
     finalize_user_messages,
+    has_visible_text, valid_reply_msg, commit_ready_msgs, msg_has_json_debris,
 )
 from ai_client import extract_text
 from tts import tts_to_b64, transcribe_audio_b64
@@ -75,57 +76,11 @@ def _create_json(model, max_tokens, system_blocks, messages):
     return raw, response
 
 
-# 真正的可见正文：字母 / 数字 / 假名 / 汉字。纯空白、纯标点（...、……、!!!）不能过。
-_VISIBLE_CONTENT_RE = re.compile(
-    r'[A-Za-z0-9'
-    r'\u3040-\u30ff'   # 平假名 + 片假名
-    r'\u3400-\u9fff'   # CJK
-    r'\uff10-\uff19'   # 全角数字
-    r'\uff21-\uff3a'   # 全角 A-Z
-    r'\uff41-\uff5a'   # 全角 a-z
-    r'\uff66-\uff9d'   # 半角片假名
-    r']'
-)
-
-
-def _has_visible_text(text) -> bool:
-    """至少存在真正的文字/数字/kana/汉字。None、空串、纯空白、纯标点一律 False。"""
-    if text is None:
-        return False
-    s = str(text).strip()
-    if not s:
-        return False
-    return bool(_VISIBLE_CONTENT_RE.search(s))
-
-
-def _msg_has_json_debris(m: dict) -> bool:
-    """检测消息 dict 里的 jp/zh 是否含 JSON 结构残骸(如 `","messages":"jp":"`)。
-    True = 消息脏了,不该用。用于所有 LLM 消息数组验证。"""
-    jp = str(m.get('jp', '') or '')
-    zh = str(m.get('zh', '') or '')
-    if contains_offline_marker(jp) or contains_offline_marker(zh):
-        return True
-    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"'):
-        if kw in jp or kw in zh:
-            return True
-    return False
-
-
-def _valid_msg(m: dict) -> bool:
-    """统一验证：jp/zh 都有真正可见正文 + 没 JSON 残骸。
-    「ん？」「え？」可通过；「...」「……」以及 {"jp":"..."} 残骸不能通过。"""
-    if not isinstance(m, dict):
-        return False
-    if _msg_has_json_debris(m):
-        return False
-    jp = sanitize_user_reply(str(m.get('jp', '') or ''))
-    zh = sanitize_user_reply(str(m.get('zh', '') or ''))
-    return _has_visible_text(jp) and _has_visible_text(zh)
-
-
-def _commit_ready(msgs) -> bool:
-    """最终 commit gate：finalize 之后仍须非空且每条正文有效。"""
-    return bool(msgs) and all(_valid_msg(m) for m in msgs)
+# 共享校验（utils）在本模块保留旧名，避免调用点大面积改名。
+_has_visible_text = has_visible_text
+_msg_has_json_debris = msg_has_json_debris
+_valid_msg = valid_reply_msg
+_commit_ready = commit_ready_msgs
 
 
 def _generation_failed_response(user_id: str, character_id: str, total_days=None, attempts=3):

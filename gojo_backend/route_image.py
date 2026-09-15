@@ -17,12 +17,12 @@ from fastapi.responses import JSONResponse
 
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
 from db import get_conn
-from utils import ingest_model_output, finalize_user_messages
+from utils import ingest_model_output, finalize_user_messages, valid_reply_msg, commit_ready_msgs
 from ai_client import extract_text, response_metadata
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
-    save_short_memory, get_short_memory,
+    save_short_memory, save_user_short_memory_once, get_short_memory,
     update_chat_days,
 )
 from memory_jobs import enqueue_private_extraction
@@ -181,6 +181,11 @@ async def chat_image(data: dict):
 
     messages.append({'role': 'user', 'content': user_content})
 
+    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    save_user_short_memory_once(
+        user_id, display_text, character_id, source_event_id=source_event_id,
+    )
+
     # 用 caption 做背景记忆检索（聊到甜食的照片→召回喜久福那条）
     recall_query = user_text if user_text else ''
     system_blocks = build_system_blocks(
@@ -229,11 +234,8 @@ async def chat_image(data: dict):
                 max_tokens = min(max_tokens * 2, 6400)
                 continue
             _visible, parsed, state = ingest_model_output(raw)
-            if parsed and isinstance(parsed.get('messages'), list) and len(parsed['messages']) > 0:
-                if all(isinstance(m, dict)
-                       and isinstance(m.get('jp'), str) and m['jp'].strip()
-                       and isinstance(m.get('zh'), str) and m['zh'].strip()
-                       for m in parsed['messages']):
+            if parsed and isinstance(parsed.get('messages'), list) and parsed['messages']:
+                if all(valid_reply_msg(m) for m in parsed['messages']):
                     result = parsed
                     offline_state = state
                     break
@@ -252,18 +254,16 @@ async def chat_image(data: dict):
                 retryable = status == 429
                 break
 
-    if not result:
-        # Do not teach future turns that an unread image was successfully seen.
+    msgs = finalize_user_messages(result.get('messages', [])) if result else []
+    if not commit_ready_msgs(msgs):
+        print(f'[{user_id}][{character_id}] image generation_failed; commit skipped')
         return JSONResponse({
-            'emotion': '疑惑',
-            'messages': [{
-                'jp': '画像をうまく読み取れなかった。もう一度送ってくれる？',
-                'zh': '这次没能读出图片，能再发一次吗？',
-            }],
+            'error': 'generation_failed',
+            'generation_failed': True,
+            'messages': [],
             'total_days': total_days,
-            'error': 'image_model_unavailable',
             'retryable': retryable,
-        })
+        }, status_code=502)
 
     if offline_state:
         try:
@@ -276,11 +276,8 @@ async def chat_image(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
-    msgs = finalize_user_messages(result.get('messages', []))
-
     full_jp = ' '.join(m['jp'] for m in msgs)
 
-    save_short_memory(user_id, 'user', display_text, character_id)
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id,
