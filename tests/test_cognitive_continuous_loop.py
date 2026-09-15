@@ -119,8 +119,8 @@ class CognitiveReaderTests(unittest.TestCase):
         self.assertIn('后续是否出现对等回应仍未知', context)
         self.assertIn('便利贴备忘', context)
         self.assertIn('不是长期记忆或关系证据', context)
-        self.assertIn('近期反思日记', context)
-        self.assertIn('不可拿来做自我证明', context)
+        self.assertNotIn('近期反思日记', context)
+        self.assertNotIn('我把这件事先记下来，但不能当成结论。', context)
         self.assertNotIn('reasoning_context', context)
         self.assertNotIn('new_predictions', context)
 

@@ -11,6 +11,10 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from config import CN_TZ
+from cognitive_config import (
+    COGNITIVE_DIARY_RECALL_ENTRY_CHARS,
+    COGNITIVE_DIARY_RECALL_LIMIT,
+)
 from db import get_conn
 
 
@@ -759,8 +763,64 @@ def recall_sticky_notes(user_id, character_id, user_message='', limit=3):
         conn.close()
 
 
+def _diary_query_terms(user_message):
+    # Remove conversational scaffolding before matching Chinese bigrams/words.
+    query = re.sub(
+        r'怎么想|怎么看|为什么|还记得|记不记得|那段时间|那时候|那件事|'
+        r'当时|之前|今天|最近|现在|那天|想起|觉得|自己|我们|你们|什么|时候|'
+        r'[我你她他的是了呢吗啊呀又还在和与]',
+        ' ', (user_message or '').lower(),
+    )
+    terms = set()
+    for chunk in re.findall(r'[\u4e00-\u9fff]+|[a-z0-9]+', query):
+        if re.fullmatch(r'[\u4e00-\u9fff]+', chunk):
+            terms.update(chunk[i:i + 2] for i in range(len(chunk) - 1))
+        elif len(chunk) >= 3 and chunk not in {
+            'the', 'and', 'you', 'was', 'were', 'that', 'this', 'about',
+            'how', 'did', 'think', 'remember', 'then', 'what', 'your',
+        }:
+            terms.add(chunk)
+    return sorted(terms)
+
+
+def _select_diary_memories(items, terms, limit):
+    topic_terms = set(GOAL_TERMS).union(*STATE_TOPIC_TERMS.values())
+    selected = []
+    for item in items:
+        content = item['content'] or ''
+        matched_terms = {
+            term for term in terms
+            if (re.search(r'\b' + re.escape(term) + r'\b', content.lower())
+                if term.isascii() else term in content.lower())
+        }
+        relevance = len(matched_terms) / len(terms)
+        # An explicit shared topic remains relevant when the user corrects its details.
+        if relevance < 0.5 and not matched_terms.intersection(topic_terms):
+            continue
+        # Bound the visible excerpt around a match, keeping the original entry ID.
+        maximum = COGNITIVE_DIARY_RECALL_ENTRY_CHARS
+        first_match = min(content.lower().find(term) for term in matched_terms)
+        start = max(0, first_match - maximum // 3) if len(content) > maximum else 0
+        item['content'] = content[start:start + maximum]
+        item['excerpt_truncated'] = start > 0 or len(content) > maximum
+        item['score'] = relevance
+        ts = item.get('timestamp')
+        if ts and ts.tzinfo is None:
+            item['timestamp'] = ts.replace(tzinfo=timezone.utc)
+        selected.append(item)
+    # Recency only breaks ties among relevant entries; it never grants eligibility.
+    selected.sort(key=lambda item: (
+        item['score'], item['timestamp'].timestamp() if item.get('timestamp') else 0,
+    ), reverse=True)
+    return selected[:limit]
+
+
 def recall_diary_memories(user_id, character_id, user_message='', limit=3):
-    """Recall a small number of subjective diary/reflection entries."""
+    """Read relevant subjective entries without creating or reinforcing evidence."""
+    limit = max(0, min(limit, COGNITIVE_DIARY_RECALL_LIMIT))
+    terms = _diary_query_terms(user_message)
+    if not limit or not terms:
+        return []
     conn = get_conn()
     cur = conn.cursor()
     items = []
@@ -769,8 +829,11 @@ def recall_diary_memories(user_id, character_id, user_message='', limit=3):
             '''SELECT id, diary_key, content, reflection_kind, source_event_refs, occurred_at
                FROM cognitive_diary_entries
                WHERE user_id = %s AND character_id = %s
-               ORDER BY occurred_at DESC LIMIT %s''',
-            (user_id, character_id, limit * 2),
+                 AND EXISTS (
+                     SELECT 1 FROM unnest(%s::text[]) AS term(value)
+                     WHERE strpos(lower(content), term.value) > 0)
+               ORDER BY occurred_at DESC, id DESC LIMIT %s''',
+            (user_id, character_id, terms, 30),
         )
         for row in cur.fetchall():
             item = {
@@ -781,16 +844,24 @@ def recall_diary_memories(user_id, character_id, user_message='', limit=3):
                 'source_event_refs': _parse_refs(row[4]),
                 'timestamp': row[5],
                 'source_type': 'reflection',
+                'source_ref': {
+                    'source_type': 'cognitive_diary_entries',
+                    'source_id': row[0],
+                    'user_id': user_id,
+                    'character_id': character_id,
+                },
             }
-            item['score'] = _score_recall_entry(item['content'], user_message, 0.45, item['timestamp'])
             items.append(item)
 
         cur.execute(
             '''SELECT id, content, emotion, created_at
                FROM char_diary
                WHERE user_id = %s AND character_id = %s
-               ORDER BY created_at DESC LIMIT %s''',
-            (user_id, character_id, limit * 2),
+                 AND EXISTS (
+                     SELECT 1 FROM unnest(%s::text[]) AS term(value)
+                     WHERE strpos(lower(content), term.value) > 0)
+               ORDER BY created_at DESC, id DESC LIMIT %s''',
+            (user_id, character_id, terms, 30),
         )
         for row in cur.fetchall():
             item = {
@@ -807,10 +878,9 @@ def recall_diary_memories(user_id, character_id, user_message='', limit=3):
                 'timestamp': row[3],
                 'source_type': 'diary',
             }
-            item['score'] = _score_recall_entry(item['content'], user_message, 0.35, item['timestamp'])
+            item['source_ref'] = dict(item['source_event_refs'][0])
             items.append(item)
-        items.sort(key=lambda it: (it['score'], it['timestamp'] or datetime.min), reverse=True)
-        return items[:limit]
+        return _select_diary_memories(items, terms, limit)
     except Exception as e:
         print(f'[memory_lifecycle] diary recall failed: {e}')
         return []

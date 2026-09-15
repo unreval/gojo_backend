@@ -3,7 +3,6 @@ import json
 import re
 
 from cognitive_config import (
-    COGNITIVE_MAX_DIARY_ENTRIES_IN_CONTEXT,
     COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
 )
 
@@ -106,29 +105,6 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
             for row in cur.fetchall()
         ]
 
-        cur.execute(
-            '''SELECT id, diary_key, content, reflection_kind,
-                      source_event_refs, occurred_at
-               FROM cognitive_diary_entries
-               WHERE user_id = %s AND character_id = %s
-               ORDER BY occurred_at DESC, id DESC
-               LIMIT %s''',
-            (
-                user_id, character_id,
-                COGNITIVE_MAX_DIARY_ENTRIES_IN_CONTEXT,
-            ),
-        )
-        diary_entries = [
-            {
-                'id': row[0],
-                'diary_key': row[1],
-                'content': row[2],
-                'reflection_kind': row[3],
-                'source_event_refs': _json_value(row[4], []),
-                'occurred_at': row[5],
-            }
-            for row in cur.fetchall()
-        ]
         summary = _json_value(cycle_row[0], {}) if cycle_row else {}
         return {
             'cycle_summary': summary if isinstance(summary, dict) else {},
@@ -136,7 +112,6 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
             'beliefs': beliefs,
             'hypotheses': hypotheses,
             'sticky_notes': sticky_notes,
-            'diary_entries': diary_entries,
         }
     finally:
         cur.close()
@@ -153,8 +128,8 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
     beliefs = state['beliefs']
     hypotheses = state['hypotheses']
     sticky_notes = state['sticky_notes']
-    diary_entries = state['diary_entries']
-    if not summary and not beliefs and not hypotheses and not sticky_notes and not diary_entries:
+    # Diary bodies enter chat only through relevance-filtered smart_recall.
+    if not summary and not beliefs and not hypotheses and not sticky_notes:
         return ''
 
     lines = [
@@ -191,14 +166,6 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
         lines.append('便利贴备忘（短期、可见、可完成，不是长期记忆或关系证据）：')
         for note in sticky_notes:
             lines.append(f'- {_safe_text(note["content"], 300)}')
-
-    if diary_entries:
-        lines.append('近期反思日记（有来源的认知输出，不可拿来做自我证明）：')
-        for entry in diary_entries:
-            lines.append(
-                f'- [{entry["reflection_kind"]}] '
-                f'{_safe_text(entry["content"], 420)}'
-            )
 
     lines.extend([
         '使用边界：按角色人设自然吸收，不要复述这份复盘、事件编号、置信度或系统术语。',

@@ -41,7 +41,7 @@ class DiaryCursor:
             self.rows = [(
                 7,
                 'uncertainty.like',
-                '我当时觉得自己可能有点在意她，但这只是我的反思。',
+                '她准备考试时，我觉得自己可能有点在意她，但这只是我的反思。',
                 'uncertainty',
                 [{'source_type': 'cognitive_event', 'source_id': 27}],
                 datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc),
