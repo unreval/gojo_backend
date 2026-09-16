@@ -40,6 +40,7 @@ def init_db():
         role TEXT,
         content TEXT,
         source_event_id TEXT,
+        event_meta TEXT DEFAULT '',
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
     # ── 用户长期记忆 ──
@@ -113,6 +114,7 @@ def init_db():
     # ── 老表自动加列(向后兼容)──
     cur.execute("ALTER TABLE short_memory ADD COLUMN IF NOT EXISTS character_id TEXT DEFAULT 'gojo'")
     cur.execute("ALTER TABLE short_memory ADD COLUMN IF NOT EXISTS source_event_id TEXT")
+    cur.execute("ALTER TABLE short_memory ADD COLUMN IF NOT EXISTS event_meta TEXT DEFAULT ''")
     cur.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_short_memory_user_event
                    ON short_memory (user_id, character_id, role, source_event_id)
                    WHERE source_event_id IS NOT NULL''')

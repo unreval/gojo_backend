@@ -56,9 +56,15 @@ async def schedule_now(character_id: str = DEFAULT_CHARACTER_ID,
     now = datetime.now(CN_TZ)
     act = db_schedule.get_current_activity(character_id, user_id, now)
     if not act:
-        return JSONResponse({'busy': False, 'activity': None, 'now': now.strftime('%H:%M')})
+        return JSONResponse({
+            'busy': False,
+            'reply_state': 'free',
+            'activity': None,
+            'now': now.strftime('%H:%M'),
+        })
     return JSONResponse({
-        'busy': not act['can_reply'],
+        'busy': act.get('reply_state') != 'free',
+        'reply_state': act.get('reply_state') or ('free' if act.get('can_reply') else 'hard_busy'),
         'activity': act['title'],
         'location': act.get('location', ''),
         'note': act.get('note', ''),

@@ -4,6 +4,7 @@
 """
 import threading
 import time
+import re
 from datetime import datetime
 from config import CN_TZ, ANTHROPIC_KEY, MODEL_MAIN
 import anthropic
@@ -144,6 +145,14 @@ def generate_from_promise(promise, now):
             character_id, user_id, 'promise', jp, zh, emotion, audio_b64, created_at=now
         )
         print(f'[promise] ✅ #{promise["id"]} → msg #{mid}: {jp[:40]}')
+
+        phone_match = re.search(r'phone_check_id=(\d+)', context or '')
+        if phone_match:
+            try:
+                import db_schedule
+                db_schedule.resolve_phone_check(int(phone_match.group(1)))
+            except Exception as e:
+                print(f'[promise] phone_check resolve skipped: {e}')
 
         try:
             save_short_memory(user_id, 'assistant', jp, character_id)

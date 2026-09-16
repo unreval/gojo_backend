@@ -187,6 +187,50 @@ def _finalize_msgs(msgs):
     return finalize_user_messages(msgs)
 
 
+def _safe_reply_to(data):
+    reply_to = data.get('reply_to') or data.get('replyTo')
+    if not isinstance(reply_to, dict):
+        return None
+    text = sanitize_user_reply(str(reply_to.get('text') or ''))[:500]
+    if not text:
+        return None
+    return {
+        'id': str(reply_to.get('id') or '')[:120],
+        'name': str(reply_to.get('name') or '')[:60],
+        'text': text,
+        'role': str(reply_to.get('role') or '')[:20],
+    }
+
+
+def _user_prompt_with_reply(user_text, reply_to):
+    if not reply_to:
+        return user_text
+    speaker = reply_to.get('name') or '上一条消息'
+    return (
+        f'【引用回复】她这次是在回复 {speaker} 的这条消息：'
+        f'「{reply_to["text"]}」\n'
+        f'【她的新消息】{user_text}'
+    )
+
+
+def _prompt_messages(user_id, character_id, short_memories, limit=24):
+    """角色经历层优先走 short_memory，不把 chat_log 当记忆 source of truth。
+
+    chat_log 删除气泡后，短时记忆里真实发生过的事仍应进入下一轮 prompt。
+    """
+    try:
+        from user_memory import get_short_memory_for_prompt
+        history = get_short_memory_for_prompt(
+            user_id, n=limit, character_id=character_id)
+        if history:
+            return history
+    except Exception as e:
+        print(f'[{user_id}][{character_id}] short_memory prompt fallback:{e}')
+    if short_memories and isinstance(short_memories[0], dict):
+        return list(short_memories)
+    return [{'role': r, 'content': c} for r, c in (short_memories or [])]
+
+
 def _salvage_japanese(raw: str):
     """从模型没包成 JSON 的原始回复里，抢救出可用的日语当回复。
     用于：模型直接吐日语大白话、没输出 JSON 时，别浪费他真说的话。
@@ -340,6 +384,7 @@ async def chat_text(data: dict):
     user_id      = data.get('user_id', 'default')
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
     source_event_id = str(data.get('source_event_id') or '').strip() or None
+    reply_to = _safe_reply_to(data)
 
     if not user_text:
         return JSONResponse({'error': 'no input'}, status_code=400)
@@ -350,82 +395,54 @@ async def chat_text(data: dict):
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
 
-    # ★ 角色日程:他现在可能真的走不开(上课/出任务/洗澡)。
-    #   走不开就【只已读不回】,并排一条 promise 等忙完再回 ——
-    #   这比秒回一句"我在忙"更像真人。
+    # ★ 角色日程:free / soft_busy / hard_busy。
+    #   soft_busy 会把“看手机机会”持久化,同一段忙碌里连续发消息不会重复抽概率。
+    #   promise 只做兜底唤醒,真正 pending 状态在 char_phone_check。
     try:
-        import db_schedule, db_promise
-        from datetime import datetime as _dt, timedelta as _td
-        from config import CN_TZ as _CN_TZ
-        _now_dt = _dt.now(_CN_TZ)
-        act = db_schedule.get_current_activity(character_id, user_id, _now_dt)
-        if act and not act['can_reply']:
-            # 先把这句话存进短期记忆,不然他忙完回来不知道你说了啥
-            save_user_short_memory_once(
-                user_id, user_text, character_id, source_event_id=source_event_id)
-            record_user_message(
-                user_id, character_id, source='chat_text_busy',
-                prior_snapshot=temporal_snapshot,
-            )
-
-            free_at = db_schedule.get_next_free_time(character_id, user_id, _now_dt) or act['end_time']
-            try:
-                hh, mm = free_at.split(':')
-                trigger_at = _now_dt.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-                if trigger_at <= _now_dt:          # 跨到明天了
-                    trigger_at += _td(days=1)
-
-                # ★ 关键去重:用户在你忙的期间连发几条,不要每条都建 promise ——
-                #   否则你"忙完"那一刻 scheduler 会一次触发多条 promise,
-                #   生成 4-5 条内容相似的复读消息(实测踩过的坑,图2 的锅)。
-                #   做法:查一下最近 6h 内有没有还没触发的 once promise,
-                #   有 → 合并进那条的 context;没有 → 才新建。
-                _conn = get_conn()
-                _cur = _conn.cursor()
-                try:
-                    _cur.execute(
-                        """SELECT id, context FROM proactive_promise
-                           WHERE character_id=%s AND user_id=%s
-                             AND trigger_kind='once'
-                             AND is_fired=FALSE AND is_active=TRUE
-                             AND created_at >= NOW() - INTERVAL '6 hours'
-                           ORDER BY created_at DESC LIMIT 1""",
-                        (character_id, user_id))
-                    _row = _cur.fetchone()
-                    if _row:
-                        # 已经有一条待触发的 promise → 追加这句进去,并把触发时间刷成最新的 free_at
-                        _pid, _existing_ctx = _row
-                        _new_ctx = (_existing_ctx or '') + f'\n她后来又说:「{user_text[:150]}」'
-                        _cur.execute(
-                            """UPDATE proactive_promise
-                               SET context=%s, trigger_at=%s
-                               WHERE id=%s""",
-                            (_new_ctx, trigger_at, _pid))
-                        _conn.commit()
-                        print(f'[{user_id}] 📵 追加到已有 promise #{_pid},合并回复不复读')
-                    else:
-                        db_promise.add_promise(
-                            character_id=character_id, user_id=user_id,
-                            trigger_kind='once', trigger_at=trigger_at,
-                            context=(f'刚才我在{act["title"]}(走不开),没能回她。'
-                                     f'她当时说:「{user_text[:150]}」。'
-                                     f'现在忙完了,回一下她 —— 可以顺口提一句刚才在忙什么。'
-                                     f'如果她期间还说了别的事,把话头拢起来一起回,别逐条应答。'),
-                            origin_text=user_text[:200],
-                        )
-                        print(f'[{user_id}] 📵 {character_id} 正在「{act["title"]}」,只已读,{free_at} 忙完再回')
-                finally:
-                    _cur.close()
-                    _conn.close()
-            except Exception as _e:
-                print(f'[{user_id}] 排延迟回复失败:{_e}')
-
+        from reply_availability import check_reply_availability
+        availability = check_reply_availability(
+            character_id, user_id,
+            source_event_id=source_event_id or '',
+            pending_text=user_text,
+            event_meta={
+                'kind': 'text',
+                'reply_to': reply_to,
+                'source_event_id': source_event_id,
+            },
+        )
+        if not availability.get('can_reply'):
+            act = availability.get('activity') or {}
+            if availability.get('seen'):
+                save_user_short_memory_once(
+                    user_id, user_text, character_id,
+                    source_event_id=source_event_id)
+                record_user_message(
+                    user_id, character_id, source='chat_text_seen_busy',
+                    prior_snapshot=temporal_snapshot,
+                )
+            print(f'[{user_id}] {character_id} {availability.get("reply_state")} '
+                  f'seen={availability.get("seen")} pending phone_check='
+                  f'{availability.get("opportunity_id")}')
             return JSONResponse({
                 'busy': True,
-                'activity': act['title'],
+                'seen': bool(availability.get('seen')),
+                'can_reply': False,
+                'reply_state': availability.get('reply_state'),
+                'activity': act.get('title', ''),
                 'location': act.get('location', ''),
-                'until': act['end_time'],
-                'free_at': free_at,
+                'until': act.get('end_time', ''),
+                'free_at': availability.get('free_at'),
+                'phone_check_id': availability.get('opportunity_id'),
+                'seen_at': (
+                    availability.get('seen_at').isoformat()
+                    if getattr(availability.get('seen_at'), 'isoformat', None)
+                    else availability.get('seen_at')
+                ),
+                'next_phone_check_at': (
+                    availability.get('next_phone_check_at').isoformat()
+                    if getattr(availability.get('next_phone_check_at'), 'isoformat', None)
+                    else availability.get('next_phone_check_at')
+                ),
                 'total_days': update_chat_days(user_id),
             })
     except Exception as _e:
@@ -435,8 +452,8 @@ async def chat_text(data: dict):
     total_days = update_chat_days(user_id)
     short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
 
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
-    messages.append({'role': 'user', 'content': user_text})
+    messages = _prompt_messages(user_id, character_id, short_memories)
+    messages.append({'role': 'user', 'content': _user_prompt_with_reply(user_text, reply_to)})
 
     recall_query = user_text
     if short_memories:

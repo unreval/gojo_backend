@@ -20,6 +20,8 @@ const FIXED_USER_ID = 'user_mofpiyd7442ia7';
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
   }),

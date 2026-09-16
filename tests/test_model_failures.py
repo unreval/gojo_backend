@@ -51,6 +51,19 @@ PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/
 REPLY = json.dumps({'emotion': '平静', 'messages': [{
     'jp': '赤い画像が見えるよ。', 'zh': '能看到红色的图片。',
 }]}, ensure_ascii=False)
+REPLY_WITH_VISUAL = json.dumps({
+    'emotion': '平静',
+    'visual_summary': '画面里是一块红色区域，没有可读文字。',
+    'event_meta': {'lighting': 'flat'},
+    'messages': [{
+        'jp': '赤い画像が見えるよ。', 'zh': '能看到红色的图片。',
+    }],
+}, ensure_ascii=False)
+
+
+ANALYSIS = json.dumps({
+    'visual_summary': '画面里是一块红色区域，没有可读文字。',
+}, ensure_ascii=False)
 
 
 class ImageFailureTests(unittest.TestCase):
@@ -62,6 +75,8 @@ class ImageFailureTests(unittest.TestCase):
                            save_short_memory=Mock(),
                            save_user_short_memory_once=Mock(return_value=True),
                            get_short_memory=Mock(return_value=[]),
+                           get_short_memory_for_prompt=Mock(return_value=[]),
+                           attach_short_memory_event_meta=Mock(return_value=True),
                            update_chat_days=Mock(return_value=3))
         self.jobs = Mock()
         self.state = Mock()
@@ -104,6 +119,9 @@ class ImageFailureTests(unittest.TestCase):
         response = asyncio.run(self.route.chat_image(data))
         return response, json.loads(response.body)
 
+    def _reply_calls(self):
+        return self.client.messages.create.call_args_list
+
     def assert_no_memory_writes(self):
         self.memory.save_short_memory.assert_not_called()
         self.jobs.assert_not_called()
@@ -119,36 +137,77 @@ class ImageFailureTests(unittest.TestCase):
         self.memory.save_user_short_memory_once.assert_called()
 
     def test_empty_responses_are_bounded_and_do_not_pretend_image_was_seen(self):
-        self.client.messages.create.return_value = model_response()
+        self.client.messages.create.side_effect = [
+            model_response(), model_response(), model_response(),
+        ]
         response, result = self.send()
-        self.assertEqual(self.client.messages.create.call_count, 3)
+        self.assertEqual(len(self._reply_calls()), 3)
         self.assert_generation_failed(response, result)
         self.assertNotIn('没能读出图片', json.dumps(result, ensure_ascii=False))
 
     def test_ellipsis_is_rejected_by_commit_gate(self):
-        self.client.messages.create.return_value = model_response(json.dumps({
+        bad = json.dumps({
             'emotion': '平静',
             'messages': [{'jp': '...', 'zh': '...'}],
-        }, ensure_ascii=False))
+        }, ensure_ascii=False)
+        self.client.messages.create.side_effect = [
+            model_response(bad), model_response(bad), model_response(bad),
+        ]
         response, result = self.send()
-        self.assertEqual(self.client.messages.create.call_count, 3)
+        self.assertEqual(len(self._reply_calls()), 3)
         self.assert_generation_failed(response, result)
 
     def test_source_event_id_is_forwarded_to_user_memory(self):
-        self.client.messages.create.return_value = model_response()
+        self.client.messages.create.side_effect = [
+            model_response(), model_response(), model_response(),
+        ]
         self.send(source_event_id='img-evt-1')
         self.memory.save_user_short_memory_once.assert_called()
+        args, kwargs = self.memory.save_user_short_memory_once.call_args
+        self.assertEqual(kwargs['source_event_id'], 'img-evt-1')
+        self.assertEqual(args[1], '📷 看这张图')
+        self.assertNotIn('【图片摘要】', args[1])
+
+    def test_visual_summary_and_event_meta_are_returned_for_chatlog_linkage(self):
+        self.client.messages.create.return_value = model_response(REPLY_WITH_VISUAL)
+        _, result = self.send(source_event_id='img-evt-1')
+        self.assertEqual(self.client.messages.create.call_count, 1)
+        self.assertEqual(result['visual_summary'], '画面里是一块红色区域，没有可读文字。')
+        self.assertEqual(result['event_meta']['source_event_id'], 'img-evt-1')
+        self.assertEqual(result['event_meta']['kind'], 'image')
+        self.assertEqual(result['event_meta']['lighting'], 'flat')
+        self.assertEqual(result['event_meta']['visual_summary'],
+                         '画面里是一块红色区域，没有可读文字。')
+        self.memory.attach_short_memory_event_meta.assert_called()
+
+    def test_free_image_does_not_run_separate_visual_analysis(self):
+        self.client.messages.create.return_value = model_response(REPLY_WITH_VISUAL)
+        _, result = self.send()
+        self.assertEqual(self.client.messages.create.call_count, 1)
         self.assertEqual(
-            self.memory.save_user_short_memory_once.call_args.kwargs['source_event_id'],
-            'img-evt-1',
-        )
+            self.client.messages.create.call_args.kwargs['max_tokens'], 1600)
+        self.assertIn('红色', result['visual_summary'])
+
+    def test_image_reply_to_reaches_multimodal_prompt(self):
+        self.client.messages.create.return_value = model_response(REPLY)
+        self.send(reply_to={
+            'id': 'old-1',
+            'name': '五条悟',
+            'text': '刚才那张照片有点糊。',
+            'role': 'gojo',
+        })
+        blocks = self._reply_calls()[0].kwargs['messages'][-1]['content']
+        text_blocks = [b['text'] for b in blocks if b['type'] == 'text']
+        self.assertIn('【引用回复】', text_blocks[-1])
+        self.assertIn('刚才那张照片有点糊。', text_blocks[-1])
 
     def test_thinking_only_truncation_retries_with_more_tokens_and_same_image(self):
         self.client.messages.create.side_effect = [
-            model_response(stop='max_tokens', thinking=True), model_response(REPLY),
+            model_response(stop='max_tokens', thinking=True),
+            model_response(REPLY),
         ]
         _, result = self.send()
-        first, second = self.client.messages.create.call_args_list
+        first, second = self._reply_calls()
         self.assertGreater(second.kwargs['max_tokens'], first.kwargs['max_tokens'])
         for call in (first, second):
             source = call.kwargs['messages'][-1]['content'][0]['source']
@@ -160,18 +219,22 @@ class ImageFailureTests(unittest.TestCase):
         self.assertIn('max_tokens', str(self.log.call_args_list))
 
     def test_empty_retry_adds_guidance_without_empty_assistant_turn(self):
-        self.client.messages.create.side_effect = [model_response(), model_response(REPLY)]
+        self.client.messages.create.side_effect = [
+            model_response(), model_response(REPLY),
+        ]
         _, result = self.send()
-        first, second = self.client.messages.create.call_args_list
+        first, second = self._reply_calls()
         self.assertGreater(len(second.kwargs['system']), len(first.kwargs['system']))
         self.assertEqual(first.kwargs['messages'], second.kwargs['messages'])
         self.assertNotIn('error', result)
 
     def test_truncated_json_is_not_accepted_even_if_a_complete_object_can_be_parsed(self):
-        self.client.messages.create.side_effect = [model_response(REPLY, 'max_tokens'),
-                                                  model_response(REPLY)]
+        self.client.messages.create.side_effect = [
+            model_response(REPLY, 'max_tokens'),
+            model_response(REPLY),
+        ]
         self.send()
-        self.assertEqual(self.client.messages.create.call_count, 2)
+        self.assertEqual(len(self._reply_calls()), 2)
         self.assertEqual(self.memory.save_short_memory.call_count, 1)
 
     def test_bad_request_and_refusal_stop_without_blind_retries(self):
@@ -179,7 +242,7 @@ class ImageFailureTests(unittest.TestCase):
         error.status_code = 400
         self.client.messages.create.side_effect = error
         response, result = self.send()
-        self.assertEqual(self.client.messages.create.call_count, 1)
+        self.assertEqual(len(self._reply_calls()), 1)
         self.assertFalse(result['retryable'])
         self.assert_generation_failed(response, result)
         self.client.messages.create.reset_mock(side_effect=True)
@@ -189,7 +252,7 @@ class ImageFailureTests(unittest.TestCase):
         self.record_turn.reset_mock()
         self.client.messages.create.return_value = model_response(stop='refusal')
         response, result = self.send()
-        self.assertEqual(self.client.messages.create.call_count, 1)
+        self.assertEqual(len(self._reply_calls()), 1)
         self.assert_generation_failed(response, result)
 
     def test_upload_normalization_accepts_data_url_and_rejects_invalid_bytes(self):
@@ -206,19 +269,72 @@ class ImageFailureTests(unittest.TestCase):
     def test_video_frames_are_preserved_and_prompt_does_not_request_invention(self):
         self.client.messages.create.return_value = model_response(REPLY)
         self.send(images=[{'data': PNG}, {'data': PNG}], is_video=True)
-        sent = self.client.messages.create.call_args.kwargs
+        sent = self._reply_calls()[0].kwargs
         blocks = sent['messages'][-1]['content']
         self.assertEqual(len([block for block in blocks if block['type'] == 'image']), 2)
         self.assertNotIn('脑补中间', str(blocks))
         self.assertIn('不得编造', str(blocks))
 
+    def test_busy_image_runs_backend_vision_but_skips_character_reply(self):
+        """busy: 系统仍做 Vision 摘要；不等于角色 seen / 角色回复。"""
+        self.client.messages.create.return_value = model_response(ANALYSIS)
+        activity = {
+            'id': 9,
+            'start_time': '11:00',
+            'end_time': '11:10',
+            'title': '洗澡',
+            'location': '家',
+            'reply_state': 'hard_busy',
+            'can_reply': False,
+        }
+        schedule = stub(
+            'db_schedule',
+            get_current_activity=Mock(return_value=activity),
+            decide_phone_check=Mock(return_value={
+                'reply_state': 'hard_busy',
+                'seen': False,
+                'can_reply': False,
+                'activity': activity,
+                'opportunity_id': 77,
+                'fallback_promise_id': None,
+                'seen_at': None,
+                'next_phone_check_at': None,
+            }),
+            get_next_free_time=Mock(return_value='11:10'),
+            attach_fallback_promise=Mock(),
+            merge_phone_check_event_meta=Mock(),
+        )
+        promise = stub('db_promise', add_promise=Mock(return_value=88))
+        with patch.dict(sys.modules, {'db_schedule': schedule, 'db_promise': promise}):
+            response, result = self.send(source_event_id='img-busy-1')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(result['busy'])
+        self.assertFalse(result['seen'])
+        self.assertIsNone(result.get('seen_at'))
+        self.assertEqual(result['reply_state'], 'hard_busy')
+        self.assertEqual(result['phone_check_id'], 77)
+        self.assertEqual(result['event_meta']['kind'], 'image')
+        self.assertEqual(result['event_meta']['source_event_id'], 'img-busy-1')
+        self.assertIn('红色', result['visual_summary'])
+        self.assertIn('红色', result['event_meta']['visual_summary'])
+        # 只有后台 Vision 摘要，没有角色回复生成
+        self.assertEqual(self.client.messages.create.call_count, 1)
+        self.memory.save_short_memory.assert_not_called()
+
     def test_failed_reply_does_not_persist_offline_state(self):
-        self.client.messages.create.return_value = model_response(
-            '<<<OFFLINE_CHARACTER_STATES>>> {"inner":"guess","intent":"wait"}')
+        self.client.messages.create.side_effect = [
+            model_response(
+                '<<<OFFLINE_CHARACTER_STATES>>> {"inner":"guess","intent":"wait"}'),
+            model_response(
+                '<<<OFFLINE_CHARACTER_STATES>>> {"inner":"guess","intent":"wait"}'),
+            model_response(
+                '<<<OFFLINE_CHARACTER_STATES>>> {"inner":"guess","intent":"wait"}'),
+        ]
         response, result = self.send()
         self.assert_generation_failed(response, result)
 
     def test_exhausted_time_budget_stops_requests(self):
+        self.client.messages.create.return_value = model_response(REPLY)
         self.route.time = types.SimpleNamespace(monotonic=Mock(side_effect=[0, 46]))
         response, result = self.send()
         self.client.messages.create.assert_not_called()

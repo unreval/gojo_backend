@@ -25,6 +25,7 @@ interface SchedItem {
   location: string;
   note: string;
   can_reply: boolean;
+  reply_state?: 'free' | 'soft_busy' | 'hard_busy';
 }
 
 interface CharacterMeta { id: string; name: string; }
@@ -40,6 +41,22 @@ function isNow(item: SchedItem, nowMin: number): boolean {
   const s = toMin(item.start_time);
   const e = toMin(item.end_time);
   return s <= e ? (nowMin >= s && nowMin < e) : (nowMin >= s || nowMin < e);
+}
+
+function replyState(item: SchedItem): 'free' | 'soft_busy' | 'hard_busy' {
+  return item.reply_state || (item.can_reply ? 'free' : 'hard_busy');
+}
+
+function replyStateLabel(state: 'free' | 'soft_busy' | 'hard_busy'): string {
+  if (state === 'free') return '有空搭理你';
+  if (state === 'soft_busy') return '忙着,可能瞄一眼';
+  return '完全走不开';
+}
+
+function replyStateColor(state: 'free' | 'soft_busy' | 'hard_busy'): string {
+  if (state === 'free') return C.income;
+  if (state === 'soft_busy') return '#F59E0B';
+  return '#EF4444';
 }
 
 export default function ScheduleScreen() {
@@ -121,6 +138,7 @@ export default function ScheduleScreen() {
 
   const nowMin = serverNow ? toMin(serverNow) : -1;
   const current = items.find(it => isNow(it, nowMin));
+  const currentReplyState = current ? replyState(current) : 'free';
   const activeName = chars.find(c => c.id === activeId)?.name || activeId;
 
   return (
@@ -162,10 +180,10 @@ export default function ScheduleScreen() {
       {/* 此刻在做什么 */}
       {current && (
         <View style={s.nowCard}>
-          <View style={[s.nowDot, { backgroundColor: current.can_reply ? C.income : '#F59E0B' }]} />
+          <View style={[s.nowDot, { backgroundColor: replyStateColor(currentReplyState) }]} />
           <View style={{ flex: 1 }}>
             <Text style={s.nowLabel}>
-              此刻 · {current.can_reply ? '有空搭理你' : '走不开,只会已读'}
+              此刻 · {replyStateLabel(currentReplyState)}
             </Text>
             <Text style={s.nowTitle} numberOfLines={1}>{current.title}</Text>
             {!!current.location && <Text style={s.nowLoc}>{current.location}</Text>}
@@ -195,6 +213,7 @@ export default function ScheduleScreen() {
         >
           {items.map((it, idx) => {
             const now = isNow(it, nowMin);
+            const state = replyState(it);
             const past = nowMin >= 0 && !now && toMin(it.end_time) <= nowMin
                          && toMin(it.start_time) <= toMin(it.end_time);
             return (
@@ -227,11 +246,13 @@ export default function ScheduleScreen() {
                     </Text>
                     <View style={[
                       s.statusDot,
-                      { backgroundColor: it.can_reply ? C.income : '#F59E0B' },
+                      { backgroundColor: replyStateColor(state) },
                       past && { opacity: 0.4 },
                     ]} />
-                    {!it.can_reply && (
-                      <Text style={[s.busyTag, past && s.dim]}>走不开</Text>
+                    {state !== 'free' && (
+                      <Text style={[s.busyTag, state === 'hard_busy' && s.hardBusyTag, past && s.dim]}>
+                        {state === 'soft_busy' ? '可能看一眼' : '走不开'}
+                      </Text>
                     )}
                   </View>
                   {!!it.note && (
@@ -246,7 +267,7 @@ export default function ScheduleScreen() {
           })}
 
           <Text style={s.footHint}>
-            标橙的时段他走不开,消息只会显示已读 · 忙完会回你
+            橙色是可能瞄手机的忙碌,红色是真的走不开 · 忙完会合并回复
           </Text>
         </ScrollView>
       )}
@@ -327,6 +348,7 @@ const s = StyleSheet.create({
   rangeNow: { color: C.accent2 },
   statusDot: { width: 7, height: 7, borderRadius: 4 },
   busyTag: { color: '#F59E0B', fontSize: 10, fontWeight: '600' },
+  hardBusyTag: { color: '#EF4444' },
   divider: { height: 1, backgroundColor: C.border, marginTop: 10, marginBottom: 8 },
   note: { color: C.textMute, fontSize: 12, lineHeight: 18, fontStyle: 'italic' },
   dim: { opacity: 0.6 },

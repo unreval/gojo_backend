@@ -15,6 +15,25 @@ export const C = {
   expense:   '#ef4444',
 };
 
+export const Colors = {
+  light: {
+    text: '#11181C',
+    background: '#fff',
+    tint: C.accent,
+    icon: '#687076',
+    tabIconDefault: '#687076',
+    tabIconSelected: C.accent,
+  },
+  dark: {
+    text: C.text,
+    background: C.bg,
+    tint: C.accent2,
+    icon: C.textDim,
+    tabIconDefault: C.textDim,
+    tabIconSelected: C.accent2,
+  },
+};
+
 export const EMOTION_COLORS: Record<string,string> = {
   平静:'#4a90a4', 自信:'#c9a84c', 嘲讽:'#8e6b9e',
   开心:'#3b82f6', 激动:'#e05c5c', 温柔:'#5ba88a',

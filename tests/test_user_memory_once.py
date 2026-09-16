@@ -115,7 +115,7 @@ class SaveUserShortMemoryOnceSqlTests(unittest.TestCase):
         self.assertIn('ON CONFLICT', insert_sql)
         self.assertIn('DO NOTHING', insert_sql)
         self.assertIn('RETURNING id', insert_sql)
-        self.assertEqual(self.cursor.params_list[0], ('u', 'gojo', 'hello', 'evt-new'))
+        self.assertEqual(self.cursor.params_list[0], ('u', 'gojo', 'hello', 'evt-new', ''))
         self.assertIn('DELETE FROM short_memory', self.cursor.statements[1])
         self.assertEqual(self.conn.commits, 1)
         self.assertTrue(self.cursor.closed)
@@ -137,7 +137,7 @@ class SaveUserShortMemoryOnceSqlTests(unittest.TestCase):
         inserted = self.memory.save_user_short_memory_once('u', 'hello', 'gojo')
         self.assertTrue(inserted)
         self.assertNotIn('ON CONFLICT', self.cursor.statements[0])
-        self.assertEqual(self.cursor.params_list[0], ('u', 'gojo', 'user', 'hello', None))
+        self.assertEqual(self.cursor.params_list[0], ('u', 'gojo', 'user', 'hello', None, ''))
         self.assertTrue(self.cursor.closed)
         self.assertTrue(self.conn.closed)
 

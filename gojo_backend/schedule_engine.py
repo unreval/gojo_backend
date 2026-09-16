@@ -19,10 +19,10 @@ def _now():
     return datetime.now(CN_TZ)
 
 
-MAX_BUSY_SLOTS = 4
-MAX_BUSY_MINUTES = 240
+MAX_HARD_BUSY_SLOTS = 4
+MAX_HARD_BUSY_MINUTES = 240
 MIN_BUSY_PRIORITY = 4
-SLEEP_CAN_REPLY = True
+SLEEP_REPLY_STATE = db_schedule.REPLY_FREE
 
 _BUSY_PRIORITY = [
     (10, ('任务', '讨伐', '战斗', '出勤', '祓除', '交战', '出击')),
@@ -207,16 +207,17 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 
 8. 不全是好评!有时踩雷就吐槽。
 
-9. can_reply 标注(能不能回手机消息):
-   false = 走不开:上课、出任务、战斗、洗澡
-   true = 能摸鱼:吃饭、逛街、探店、景点、休息
-   can_reply=false 一天最多 4 段,总共不超 4 小时。
+9. reply_state 标注(手机消息状态):
+   "free" = 能正常看手机并回复:吃饭、休息、逛街、探店、发呆
+   "soft_busy" = 手上有事但可能瞄一眼手机:备课、通勤、排队、买东西、散步
+   "hard_busy" = 真的不能看手机:上课、出任务、战斗、洗澡、开会、驾驶
+   hard_busy 一天最多 4 段,总共不超 4 小时。soft_busy 不算 hard_busy。
 
 10. 每天要不一样。
 
 【输出:严格 JSON 一行,不要解释】
 {{"schedule":[
-  {{"start_time":"07:00","end_time":"07:45","title":"5-15字","location":"具体地点","note":"碎碎念","can_reply":true}},
+  {{"start_time":"07:00","end_time":"07:45","title":"5-15字","location":"具体地点","note":"碎碎念","reply_state":"free"}},
   ...
 ]}}'''
 
@@ -254,11 +255,12 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         # ★ 自动保存打卡记录(地图打点)
         _save_visited_places(character_id, user_id, items, real_places, target_date)
 
-        busy = [i for i in items if not i['can_reply']]
+        busy = [i for i in items if i['reply_state'] != db_schedule.REPLY_FREE]
+        hard_busy = [i for i in items if i['reply_state'] == db_schedule.REPLY_HARD_BUSY]
         food_cnt = sum(1 for i in items if any(k in i.get('title','') for k in ('吃','喝','咖啡','面','甜','brunch','午餐','晚餐','早餐')))
         act_cnt = sum(1 for i in items if any(k in i.get('title','') for k in ('逛','看','散步','打卡','参拜','花火','展','公园','温泉','泡')))
         print(f'[schedule] ✅ {char_name} {target_date} 共 {len(items)} 段,'
-              f'走不开 {len(busy)} 段, 吃≈{food_cnt} 活动≈{act_cnt}')
+              f'忙碌 {len(busy)} 段(硬忙 {len(hard_busy)}), 吃≈{food_cnt} 活动≈{act_cnt}')
         return items
 
     except Exception as e:
@@ -325,11 +327,15 @@ def _sanitize(raw_items, character_id=None):
         it['title'] = title
         it['location'] = (it.get('location') or '').strip()
         it['note'] = (it.get('note') or '').strip()
-        it['can_reply'] = bool(it.get('can_reply', True))
+        reply_state = db_schedule.normalize_reply_state(
+            it.get('reply_state'), it.get('can_reply', True))
 
         is_sleep = any(k in title for k in SLEEP_KEYWORDS)
         if is_sleep:
-            it['can_reply'] = SLEEP_CAN_REPLY
+            reply_state = SLEEP_REPLY_STATE
+
+        it['reply_state'] = reply_state
+        it['can_reply'] = db_schedule.can_reply_from_state(reply_state)
 
         if sleep_start and not is_sleep:
             if _in_sleep(it['start_time']) and _in_sleep(it['end_time']):
@@ -342,31 +348,33 @@ def _sanitize(raw_items, character_id=None):
 
     ok.sort(key=lambda x: x['start_time'])
 
-    busy = [it for it in ok
-            if not it['can_reply']
+    hard_busy = [it for it in ok
+            if it.get('reply_state') == db_schedule.REPLY_HARD_BUSY
             and not any(k in it['title'] for k in SLEEP_KEYWORDS)]
 
-    for it in list(busy):
+    for it in list(hard_busy):
         if _busy_priority(it['title']) < MIN_BUSY_PRIORITY:
-            it['can_reply'] = True
-            busy.remove(it)
+            it['reply_state'] = db_schedule.REPLY_SOFT_BUSY
+            it['can_reply'] = False
+            hard_busy.remove(it)
 
-    busy.sort(key=lambda it: (-_busy_priority(it['title']), -_dur(it)))
+    hard_busy.sort(key=lambda it: (-_busy_priority(it['title']), -_dur(it)))
 
     kept_count = 0
     kept_minutes = 0
     keep_ids = set()
-    for it in busy:
+    for it in hard_busy:
         d = _dur(it)
-        if kept_count >= MAX_BUSY_SLOTS or kept_minutes + d > MAX_BUSY_MINUTES:
+        if kept_count >= MAX_HARD_BUSY_SLOTS or kept_minutes + d > MAX_HARD_BUSY_MINUTES:
             continue
         keep_ids.add(id(it))
         kept_count += 1
         kept_minutes += d
 
-    for it in busy:
+    for it in hard_busy:
         if id(it) not in keep_ids:
-            it['can_reply'] = True
+            it['reply_state'] = db_schedule.REPLY_SOFT_BUSY
+            it['can_reply'] = False
 
     return ok
 

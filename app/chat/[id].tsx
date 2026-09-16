@@ -8,7 +8,7 @@
 //   - 群聊@功能：输入"@"弹成员面板；长按角色消息的头像/名字快速@；发送时自动传 mentioned_id
 //   - 图片头像:头部、消息行、@面板都支持 avatar_url 图片头像
 //   - ★★ 发送防抖：2秒内同样内容不重复发（挡网络卡顿/重试导致的双发，顺便省一次 API+TTS）
-//   - ★★ 长按气泡 → 复制 / 删除（删除对用户和角色气泡都生效，只删本地画面+落盘，不动后端记忆）
+//   - ★★ 长按气泡 → 复制 / 删除（单聊会同步删除云端 chat_log；只删聊天记录，不删角色记忆）
 // ★ 记账升级：单聊里 LLM 检测到 pending_transaction → 塞一条卡片消息进对话
 //   - 每次进本页 focus 时刷新账户列表（在别的 tab 加了账户,回来立刻能用）
 //   - 卡片状态(pending/saved/dismissed)随 messages 一起持久化,重开 App 状态还在
@@ -46,6 +46,8 @@ import type { Message } from '../../types/message';
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
   }),
@@ -68,6 +70,13 @@ const CHATLOG_SYNCED_KEY = (id: string) => `chatlog_synced_${id}`;
 
 /** 本地 Message → 服务器格式 */
 function toServerMsg(m: any) {
+  const extra: any = {};
+  if (m.imageUri) extra.imageUri = m.imageUri;
+  if (m.replyTo) extra.reply_to = m.replyTo;
+  if (m.sourceEventId) extra.source_event_id = m.sourceEventId;
+  if (m.replyToSourceEventId) extra.reply_to_source_event_id = m.replyToSourceEventId;
+  if (m.visualSummary) extra.visual_summary = m.visualSummary;
+  if (m.eventMeta) extra.event_meta = m.eventMeta;
   return {
     client_msg_id: String(m.id || ''),
     // ★ 带上消息真实时间。之前没传,补传的 200 条 ts 全是同一刻,
@@ -77,8 +86,8 @@ function toServerMsg(m: any) {
     text: m.text || '',
     subtitle: m.subtitle || '',
     emotion: m.emotion || '',
-    kind: m.imageUri ? 'image' : (m.callLog ? 'call_log' : 'text'),
-    extra: m.imageUri ? JSON.stringify({ imageUri: m.imageUri }) : '',
+    kind: m.eventMeta?.kind === 'video' ? 'video' : (m.imageUri ? 'image' : (m.callLog ? 'call_log' : 'text')),
+    extra: Object.keys(extra).length > 0 ? JSON.stringify(extra) : '',
     has_audio: !!m.audioB64 || !!m.hasAudio,
   };
 }
@@ -110,6 +119,11 @@ function fromServerMsg(m: any): any {
     subtitle: m.subtitle || undefined,
     emotion: m.emotion || undefined,
     imageUri: extra.imageUri,
+    replyTo: extra.reply_to || extra.replyTo,
+    sourceEventId: extra.source_event_id,
+    replyToSourceEventId: extra.reply_to_source_event_id,
+    visualSummary: extra.visual_summary,
+    eventMeta: extra.event_meta,
     time: `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
     timestamp: d.getTime(),
     hasAudio: !!m.has_audio,
@@ -222,6 +236,7 @@ export default function ChatRoom() {
     kind: 'text';
     text: string;
     sourceEventId: string;
+    replyTo?: Message['replyTo'];
   } | {
     kind: 'image';
     base64: string;
@@ -230,6 +245,7 @@ export default function ChatRoom() {
     caption: string;
     video?: { frames: { data: string; media_type: string }[] };
     sourceEventId: string;
+    replyTo?: Message['replyTo'];
   }>(null);
   const inputTextRef = useRef('');   // ★ IME 双写:发送时从 ref 读最新值,防 composition 未 commit 截断
   const [ready, setReady]         = useState(false);
@@ -1010,7 +1026,16 @@ export default function ChatRoom() {
   };
 
   // 把后端返回的 segments 渲染成消息并配音
-  const appendSegments = async (segments: Segment[], baseId: string) => {
+  const appendSegments = async (
+    segments: Segment[],
+    baseId: string,
+    meta?: {
+      sourceEventId?: string;
+      replyTo?: Message['replyTo'];
+      visualSummary?: string;
+      eventMeta?: Record<string, any>;
+    },
+  ) => {
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       const msgId = `${baseId}_${i}`;
@@ -1019,7 +1044,19 @@ export default function ChatRoom() {
         audioUri = await saveAudioFile(msgId, seg.audio_b64);
         if (audioUri) audioCacheRef.current[msgId] = audioUri;
       }
-      const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now() };
+      const msg: Message = {
+        id: msgId,
+        role: 'gojo',
+        text: seg.jp,
+        subtitle: seg.zh,
+        time: nowTime(),
+        timestamp: Date.now(),
+        sourceEventId: meta?.sourceEventId ? `${meta.sourceEventId}:reply:${i}` : undefined,
+        replyToSourceEventId: meta?.sourceEventId,
+        replyTo: meta?.replyTo,
+        visualSummary: meta?.visualSummary,
+        eventMeta: meta?.eventMeta,
+      };
       if (focusedRef.current) {
         setMessages(prev => [...prev, msg]);
         scrollRef.current?.scrollToEnd({ animated: true });
@@ -1121,8 +1158,10 @@ export default function ChatRoom() {
   };
 
   // ★ 已读标记:把所有还没读的 user 消息标为"对方已读"
-  //   语义 = 微信:后端返回 200(不管是正常回复还是 busy=true),都算他"看到了"。
-  //   什么时候不标:HTTP 失败/超时 —— 那说明消息压根没送到,还是"未读"。
+  //   语义 = 微信式已读，但 seen 与 HTTP 200 / reply 分离：
+  //     · 只有后端明确返回 seen=true（phone-check 到点看过）或正常生成回复时才标已读
+  //     · busy=true 且 seen=false → 保持未读（角色还没看手机）
+  //     · HTTP 失败/超时 → 未读（消息可能没送到）
   //
   //   ★ 时机:加 800-2000ms 随机延迟,让"读"这个动作看起来自然,
   //     不然 busy 响应几百毫秒就回来,已读瞬间亮起来很出戏。
@@ -1179,15 +1218,32 @@ export default function ChatRoom() {
     const sourceEventId = opts?.retry && lastFailedSendRef.current?.kind === 'image'
       ? lastFailedSendRef.current.sourceEventId
       : Date.now().toString();
+    const imageReplyTo: Message['replyTo'] = opts?.retry && lastFailedSendRef.current?.kind === 'image'
+      ? lastFailedSendRef.current.replyTo
+      : (replyingTo ? {
+          id: replyingTo.id,
+          text: replyingTo.subtitle || replyingTo.text || '',
+          name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')),
+          role: replyingTo.role,
+        } : undefined);
     lastFailedSendRef.current = {
-      kind: 'image', base64, mediaType, localUri, caption, video, sourceEventId,
+      kind: 'image', base64, mediaType, localUri, caption, video, sourceEventId, replyTo: imageReplyTo,
     };
     const userMsg: Message = {
       id: sourceEventId, role: 'user',
       text: caption || (video ? '🎬 [视频]' : '📷 [图片]'),
       time: nowTime(), timestamp: Date.now(), imageUri: localUri,
+      sourceEventId,
+      replyTo: imageReplyTo,
+      eventMeta: {
+        kind: video ? 'video' : 'image',
+        source_event_id: sourceEventId,
+        caption: caption || (video ? '🎬 [视频]' : '📷 [图片]'),
+        frame_count: video?.frames?.length || 1,
+      },
     };
     if (!opts?.retry) {
+      setReplyingTo(null);
       setMessages(prev => [...prev, userMsg]);
       scrollRef.current?.scrollToEnd({ animated: true });
       if (isGroup) bumpRead(1);
@@ -1234,6 +1290,7 @@ export default function ChatRoom() {
           text: caption,
           character_id: chatId,
           source_event_id: sourceEventId,
+          reply_to: imageReplyTo,
         };
         if (video) {
           payload.images = video.frames;
@@ -1249,13 +1306,29 @@ export default function ChatRoom() {
           return;
         }
         await processResponseExtras(res.data);
-        // ★ 同上:busy 时他没看,别秒已读
-        if (res.data?.busy) return;
+        // ★ busy 时 seen 和 reply 分离:看到了但没空回才标已读;没看见保持未读。
+        //   后台 Vision 摘要仍可先落在气泡上（系统看图 ≠ 角色 seen）。
+        if (res.data?.visual_summary || res.data?.event_meta) {
+          setMessages(prev => prev.map(m => m.id === sourceEventId ? {
+            ...m,
+            visualSummary: res.data.visual_summary,
+            eventMeta: res.data.event_meta,
+          } : m));
+        }
+        if (res.data?.busy) {
+          if (res.data?.seen) markPendingUserMessagesRead();
+          return;
+        }
         markPendingUserMessagesRead();
         const segments: Segment[] = res.data?.messages || [];
         if (segments.length === 0) { noteGenerationFailure(); return; }
         setGenerationFailed(false);
-        await appendSegments(segments, `${Date.now()}`);
+        await appendSegments(segments, `${Date.now()}`, {
+          sourceEventId,
+          replyTo: imageReplyTo,
+          visualSummary: res.data?.visual_summary,
+          eventMeta: res.data?.event_meta,
+        });
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
@@ -1303,11 +1376,19 @@ export default function ChatRoom() {
       setShowMention(false);
       if (searchMode) { setSearchMode(false); setSearchQuery(''); }
 
+      const replyToPayload: Message['replyTo'] = replyingTo ? {
+        id: replyingTo.id,
+        text: replyingTo.subtitle || replyingTo.text || '',
+        name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')),
+        role: replyingTo.role,
+      } : undefined;
       const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now(),
-        ...(replyingTo ? { replyTo: { id: replyingTo.id, text: replyingTo.subtitle || replyingTo.text || '', name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')) } } : {}),
+        sourceEventId: '',
+        replyTo: replyToPayload,
       };
       sourceEventId = userMsg.id;
-      lastFailedSendRef.current = { kind: 'text', text, sourceEventId };
+      userMsg.sourceEventId = sourceEventId;
+      lastFailedSendRef.current = { kind: 'text', text, sourceEventId, replyTo: replyToPayload };
       setReplyingTo(null);   // ★ 发送后清掉引用
       setMessages(prev => [...prev, userMsg]);
       if (isGroup) bumpRead(1);
@@ -1356,16 +1437,18 @@ export default function ChatRoom() {
         const res = await axios.post(`${SERVER_URL}/chat/text`, {
           text, user_id: FIXED_USER_ID, character_id: chatId,
           source_event_id: sourceEventId,
+          reply_to: lastFailedSendRef.current?.kind === 'text' ? lastFailedSendRef.current.replyTo : undefined,
         });
         if (isGenerationFailedPayload(res.data)) {
           noteGenerationFailure();
           return;
         }
         await processResponseExtras(res.data);
-        // ★ 已读的语义:【他真的看到并回复了】才算已读。
-        //   busy=true 时他正忙着,消息进了 promise 队列,他自己都没看 —— 不该秒已读。
-        //   等他忙完通过 proactive 或下次交互回复时,那时候才会通过其他路径标已读。
-        if (res.data?.busy) return;
+        // ★ busy 时 seen 和 reply 分离:看到了但没空回才标已读;没看见保持未读。
+        if (res.data?.busy) {
+          if (res.data?.seen) markPendingUserMessagesRead();
+          return;
+        }
         markPendingUserMessagesRead();
         let segments: Segment[] = [];
         if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
@@ -1375,7 +1458,10 @@ export default function ChatRoom() {
         }
         if (segments.length === 0) { noteGenerationFailure(); return; }
         setGenerationFailed(false);
-        await appendSegments(segments, `${Date.now()}`);
+        await appendSegments(segments, `${Date.now()}`, {
+          sourceEventId,
+          replyTo: lastFailedSendRef.current?.kind === 'text' ? lastFailedSendRef.current.replyTo : undefined,
+        });
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
@@ -1465,12 +1551,29 @@ export default function ChatRoom() {
     Alert.alert('已复制', '', [{ text: '好', style: 'cancel' }], { cancelable: true });
   };
 
-  // ★ 删除单个气泡：从画面移除 + 落盘 + 删掉本地语音文件（用户和角色的气泡都能删）
-  //   注意：只删本地画面，不动后端短期记忆——那条很快会滑出上下文窗口，无需硬删。
+  // ★ 删除单条气泡会同步删除单聊云端 chat_log；
+  //   这里只删除聊天记录，不删除角色记忆、关系账本或认知证据。
   const deleteMessage = (msg: Message) => {
     Alert.alert('删除这条', msg.subtitle || msg.text || '', [
       { text: '取消', style: 'cancel' },
       { text: '删除', style: 'destructive', onPress: async () => {
+        if (!isGroup) {
+          try {
+            await axios.delete(`${SERVER_URL}/chatlog/message`, {
+              params: {
+                user_id: FIXED_USER_ID,
+                chat_id: chatId,
+                client_msg_id: String(msg.id),
+                server_id: (msg as any).serverId,
+              },
+              timeout: 8000,
+            });
+          } catch (e: any) {
+            console.warn('[chatlog] 单条删除服务器失败:', e?.message);
+            Alert.alert('删除失败', '云端记录没有删掉，请稍后再试。');
+            return;
+          }
+        }
         setMessages(prev => prev.filter(m => m.id !== msg.id));
         // 顺手删掉这条的本地语音文件（如果有）
         const uri = audioCacheRef.current[msg.id];

@@ -220,6 +220,25 @@ class ChatCommitGateTests(unittest.TestCase):
         self.rel.assert_called_once()
         self.assertEqual(self.route._create_json.call_count, 1)
 
+    def test_reply_to_reaches_model_but_not_memory_or_relationship_input(self):
+        response, body = self.send(
+            [chat_reply('その話ね。', '你说那件事啊。')],
+            text='我接着说',
+            extra={'reply_to': {
+                'id': 'old-1',
+                'name': '五条悟',
+                'text': '刚才那杯水别碰。',
+                'role': 'gojo',
+            }},
+        )
+        self.assertEqual(response.status_code, 200)
+        sent_messages = self.route._create_json.call_args.args[3]
+        self.assertIn('【引用回复】', sent_messages[-1]['content'])
+        self.assertIn('刚才那杯水别碰。', sent_messages[-1]['content'])
+        self.assertEqual(self.short_rows[0]['content'], '我接着说')
+        self.rel.assert_called_once()
+        self.assertEqual(self.rel.call_args.args[2], '我接着说')
+
     def test_empty_raw_retries_then_generation_failed(self):
         response, body = self.send(['', '', ''])
         self.assert_generation_failed(response, body)
@@ -405,6 +424,16 @@ class FrontendCommitGateGuardTests(unittest.TestCase):
         self.assertIn('source_event_id: sourceEventId', self.src)
         self.assertIn("lastFailedSendRef.current?.kind === 'image'", self.src)
         self.assertIn('sourceEventId', self.src)
+
+    def test_reply_and_visual_metadata_are_synced_to_chatlog(self):
+        self.assertIn('extra.reply_to = m.replyTo', self.src)
+        self.assertIn('extra.source_event_id = m.sourceEventId', self.src)
+        self.assertIn('extra.visual_summary = m.visualSummary', self.src)
+        self.assertIn('extra.event_meta = m.eventMeta', self.src)
+        self.assertIn('reply_to: imageReplyTo', self.src)
+        self.assertIn('reply_to:', self.src)
+        self.assertIn('visualSummary: res.data?.visual_summary', self.src)
+        self.assertIn('replyToSourceEventId: meta?.sourceEventId', self.src)
 
     def test_proactive_flags_commit_only_after_success(self):
         self.assertNotIn('mode = \'remind\'; taskState.reminded = true;', self.src)

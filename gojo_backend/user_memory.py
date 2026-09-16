@@ -106,9 +106,52 @@ def _normalize_event_id(source_event_id):
     return value or None
 
 
+def _event_meta_json(event_meta):
+    if not event_meta:
+        return ''
+    if isinstance(event_meta, str):
+        return event_meta[:2000]
+    try:
+        return json.dumps(event_meta, ensure_ascii=False)[:2000]
+    except Exception:
+        return ''
+
+
+def parse_event_meta(event_meta):
+    if isinstance(event_meta, dict):
+        return event_meta
+    text = (event_meta or '').strip()
+    if not text:
+        return {}
+    if text.startswith('{'):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    merged = {}
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line.startswith('{'):
+            continue
+        try:
+            parsed = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            merged.update(parsed)
+    return merged
+
+
+def _visual_summary_from_meta(event_meta):
+    extra = parse_event_meta(event_meta)
+    return (extra.get('visual_summary') or extra.get('visualSummary') or '').strip(), extra
+
+
 INSERT_USER_EVENT_ONCE_SQL = '''
-INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
-VALUES (%s, %s, 'user', %s, %s)
+INSERT INTO short_memory (user_id, character_id, role, content, source_event_id, event_meta)
+VALUES (%s, %s, 'user', %s, %s, %s)
 ON CONFLICT (user_id, character_id, role, source_event_id)
 WHERE source_event_id IS NOT NULL
 DO NOTHING
@@ -117,15 +160,17 @@ RETURNING id
 
 
 def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER_ID,
-                                source_event_id=None):
+                                source_event_id=None, event_meta=None):
     """保存真实发生的用户发言。同一 source_event_id 用原子 INSERT ON CONFLICT 去重。
 
+    content 只存用户原文/媒体占位；visual_summary 放 event_meta，prompt 读取时再拼。
     有 event id：INSERT ... ON CONFLICT DO NOTHING RETURNING id
       - RETURNING 有行 = 本次新插入，返回 True
       - RETURNING 空 = 已存在，返回 False
     无 event id：普通 INSERT，每次都写入。
     """
     event_id = _normalize_event_id(source_event_id)
+    meta_text = _event_meta_json(event_meta)
     conn = None
     cur = None
     try:
@@ -134,7 +179,7 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
         if event_id:
             cur.execute(
                 INSERT_USER_EVENT_ONCE_SQL,
-                (user_id, character_id, content, event_id),
+                (user_id, character_id, content, event_id, meta_text),
             )
             row = cur.fetchone()
             if not row:
@@ -145,9 +190,9 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
             conn.commit()
             return True
         cur.execute(
-            '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
-               VALUES (%s, %s, %s, %s, %s)''',
-            (user_id, character_id, 'user', content, None)
+            '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id, event_meta)
+               VALUES (%s, %s, %s, %s, %s, %s)''',
+            (user_id, character_id, 'user', content, None, meta_text)
         )
         _prune_short_memory(cur, user_id, character_id)
         conn.commit()
@@ -174,6 +219,28 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
                 conn.close()
             except Exception:
                 pass
+
+
+def attach_short_memory_event_meta(user_id, character_id, source_event_id, event_meta):
+    """把 visual_summary 等结构字段补到已有 user short_memory 行上，不改 content。"""
+    event_id = _normalize_event_id(source_event_id)
+    meta_text = _event_meta_json(event_meta)
+    if not event_id or not meta_text:
+        return False
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''UPDATE short_memory
+               SET event_meta=%s
+               WHERE user_id=%s AND character_id=%s AND role='user'
+                 AND source_event_id=%s''',
+            (meta_text, user_id, character_id, event_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        cur.close()
+        conn.close()
 
 
 def _short_limit(n):
@@ -226,6 +293,89 @@ def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
                 marker = f'【{day_label}{ts_cn.strftime("%H:%M")}的消息】'
         result.append((role, marker + content if marker else content))
     return result
+
+
+def get_short_memory_for_prompt(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
+    """角色经历层 → Anthropic messages。
+
+    short_memory.content 是用户原文/媒体占位；
+    【图片摘要】只在这里按 event_meta.visual_summary 动态拼出。
+    """
+    limit = _short_limit(n)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT role, content, timestamp, event_meta FROM short_memory
+               WHERE user_id = %s AND character_id = %s
+                 AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
+               ORDER BY timestamp DESC
+               LIMIT %s''',
+            (user_id, character_id, SHORT_MEMORY_HOURS, limit)
+        )
+        rows = cur.fetchall()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        cur.execute(
+            '''SELECT role, content, timestamp FROM short_memory
+               WHERE user_id = %s AND character_id = %s
+                 AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
+               ORDER BY timestamp DESC
+               LIMIT %s''',
+            (user_id, character_id, SHORT_MEMORY_HOURS, limit)
+        )
+        rows = [(*r, '') for r in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+    now = datetime.now(CN_TZ)
+    today = now.date()
+    out = []
+    for row in reversed(rows):
+        role, content, ts = row[0], row[1] or '', row[2]
+        event_meta = row[3] if len(row) > 3 else ''
+        marker = ''
+        if ts is not None:
+            ts_cn = ts.replace(tzinfo=timezone.utc).astimezone(CN_TZ)
+            gap_seconds = (now - ts_cn).total_seconds()
+            if gap_seconds >= 600:
+                d = ts_cn.date()
+                if d == today:
+                    day_label = '今天'
+                elif (today - d).days == 1:
+                    day_label = '昨天'
+                else:
+                    day_label = f'{d.month}月{d.day}日'
+                marker = f'【{day_label}{ts_cn.strftime("%H:%M")}的消息】'
+        text = assemble_prompt_content(marker + content if marker else content, event_meta)
+        if text:
+            out.append({'role': role, 'content': text})
+    return out
+
+
+def assemble_prompt_content(content, event_meta=None):
+    """读取时把 visual_summary 拼进 prompt，不回写 short_memory.content。"""
+    summary, extra = _visual_summary_from_meta(event_meta)
+    if not summary:
+        return (content or '').strip()
+    kind = '视频' if extra.get('kind') == 'video' else '图片'
+    body = (content or '').strip()
+    suffix = f'【{kind}摘要】{summary[:800]}'
+    if suffix in body:
+        return body
+    return f'{body}\n{suffix}'.strip() if body else suffix
+
+
+def format_media_short_memory(display_text, visual_summary='', event_meta=None):
+    """Prompt-time helper。不要把返回值写进 short_memory.content。"""
+    extra = dict(parse_event_meta(event_meta))
+    if visual_summary:
+        extra['visual_summary'] = visual_summary
+    return assemble_prompt_content(display_text, extra)
 
 
 def get_recent_openings(user_id, n=5, character_id=DEFAULT_CHARACTER_ID):

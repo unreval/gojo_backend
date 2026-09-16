@@ -11,6 +11,11 @@ export interface Message {
   time?: string;
   timestamp?: number;  // epoch ms，用于时间分隔条
   imageUri?: string;
+  replyTo?: { id?: string; text: string; name?: string; role?: string };
+  sourceEventId?: string;
+  replyToSourceEventId?: string;
+  visualSummary?: string;
+  eventMeta?: Record<string, any>;
   senderId?: string;
   senderName?: string;
   readAt?: number;

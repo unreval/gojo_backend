@@ -16,6 +16,8 @@
   · 音频不存这里(base64 太占空间),只标记有没有,重播走 TTS 重新合成
   · 按 chat_id 分组,单聊用 character_id,以后要扩展也方便
 """
+import json
+
 from db import get_conn
 
 
@@ -42,6 +44,15 @@ def init_chatlog_table():
     cur.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_chatlog_client
                    ON chat_log (user_id, chat_id, client_msg_id)
                    WHERE client_msg_id IS NOT NULL AND client_msg_id <> \'\'''')
+    # 单条删除墓碑:挡住「DELETE 先到、append 后到」把气泡复活。
+    # 只服务聊天记录删除,与 short/long/bond memory 无关。
+    cur.execute('''CREATE TABLE IF NOT EXISTS chat_log_tombstone (
+        user_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        client_msg_id TEXT NOT NULL,
+        deleted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, chat_id, client_msg_id)
+    )''')
     # ★ 时区修复(幂等,已经是 timestamptz 就跳过)
     #   原来 timestamp without time zone 存不住时区:
     #   前端 toISOString() 传来的是 UTC,Z 被丢掉;读出来没有偏移量,
@@ -63,7 +74,7 @@ def init_chatlog_table():
     conn.commit()
     cur.close()
     conn.close()
-    print('[init] 聊天记录表已就绪：chat_log')
+    print('[init] 聊天记录表已就绪：chat_log / chat_log_tombstone')
 
 
 def append_messages(user_id, chat_id, msgs):
@@ -79,6 +90,17 @@ def append_messages(user_id, chat_id, msgs):
             role = (m.get('role') or '').strip()
             if role not in ('user', 'gojo'):
                 continue
+            client_msg_id = (m.get('client_msg_id') or '')[:120]
+            if client_msg_id:
+                cur.execute(
+                    '''SELECT 1
+                       FROM chat_log_tombstone
+                       WHERE user_id=%s
+                         AND chat_id=%s
+                         AND client_msg_id=%s''',
+                    (user_id, chat_id, client_msg_id))
+                if cur.fetchone():
+                    continue
             # ★ 前端传了真实时间就用它,没传才用当前时间。
             #   补传历史消息时这个很关键,不然全挤在同一时刻。
             ts = (m.get('ts') or '').strip()
@@ -90,12 +112,12 @@ def append_messages(user_id, chat_id, msgs):
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT DO NOTHING''',
                     (user_id, chat_id,
-                     (m.get('client_msg_id') or '')[:120], role,
+                     client_msg_id, role,
                      (m.get('text') or '')[:4000],
                      (m.get('subtitle') or '')[:4000],
                      (m.get('emotion') or '')[:20],
                      (m.get('kind') or 'text')[:20],
-                     (m.get('extra') or '')[:2000],
+                     (m.get('extra') or '')[:6000],
                      bool(m.get('has_audio')), ts)
                 )
             else:
@@ -106,12 +128,12 @@ def append_messages(user_id, chat_id, msgs):
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT DO NOTHING''',
                     (user_id, chat_id,
-                     (m.get('client_msg_id') or '')[:120], role,
+                     client_msg_id, role,
                      (m.get('text') or '')[:4000],
                      (m.get('subtitle') or '')[:4000],
                      (m.get('emotion') or '')[:20],
                      (m.get('kind') or 'text')[:20],
-                     (m.get('extra') or '')[:2000],
+                     (m.get('extra') or '')[:6000],
                      bool(m.get('has_audio')))
                 )
             written += cur.rowcount
@@ -164,6 +186,133 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
     } for r in rows]
     out.reverse()          # 旧→新,前端直接铺
     return out, has_more
+
+
+def _parse_extra(extra):
+    if not extra:
+        return {}
+    try:
+        parsed = json.loads(extra)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _history_content(role, text, subtitle, kind, extra):
+    bits = []
+    reply_to = extra.get('reply_to') or extra.get('replyTo')
+    if isinstance(reply_to, dict) and reply_to.get('text'):
+        name = reply_to.get('name') or '上一条消息'
+        bits.append(f'【引用】{name}: {str(reply_to.get("text") or "")[:500]}')
+
+    visual = extra.get('visual_summary') or extra.get('visualSummary')
+    event_meta = extra.get('event_meta') or extra.get('eventMeta')
+    if kind in ('image', 'video') or visual:
+        label = '视频' if kind == 'video' or (isinstance(event_meta, dict) and event_meta.get('kind') == 'video') else '图片'
+        if visual:
+            bits.append(f'【{label}摘要】{str(visual)[:800]}')
+        elif text:
+            bits.append(f'【{label}】{text}')
+
+    if text:
+        bits.append(text)
+    if role != 'user' and subtitle:
+        bits.append(f'（中文：{subtitle}）')
+    return '\n'.join(bits).strip()
+
+
+def get_prompt_history(user_id, chat_id, limit=24):
+    """Return chat_log as Anthropic-style prompt messages.
+
+    This is read-only UI history, not memory evidence. It lets text and image
+    endpoints share one history source and keeps image/reply metadata available
+    for later turns without writing it into short_memory or relationship state.
+    """
+    limit = max(1, min(80, int(limit or 24)))
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT role, text, subtitle, kind, extra
+               FROM chat_log
+               WHERE user_id=%s AND chat_id=%s
+               ORDER BY id DESC LIMIT %s''',
+            (user_id, chat_id, limit))
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+    rows.reverse()
+    out = []
+    for role, text, subtitle, kind, extra in rows:
+        prompt_role = 'user' if role == 'user' else 'assistant'
+        content = _history_content(
+            role, text or '', subtitle or '',
+            kind or 'text', _parse_extra(extra or ''))
+        if content:
+            out.append({'role': prompt_role, 'content': content})
+    return out
+
+
+def _tombstone_client_msg_id(client_msg_id):
+    """前端旧记录可能用 srv_123 这种合成 id,不能写进墓碑。"""
+    cid = (client_msg_id or '')[:120]
+    if not cid or cid.startswith('srv_'):
+        return ''
+    return cid
+
+
+def delete_message(user_id, chat_id, client_msg_id='', server_id=None):
+    """删除单条聊天记录。
+
+    只动 chat_log / chat_log_tombstone,不删 short/long/bond/character
+    memory,也不改 relationship ledger / provenance / cognitive evidence。
+    先写墓碑再 DELETE,避免 append 晚到把气泡复活。
+    """
+    client_msg_id = (client_msg_id or '')[:120]
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        real_client_msg_id = ''
+        if server_id is not None:
+            cur.execute(
+                '''SELECT client_msg_id
+                   FROM chat_log
+                   WHERE id=%s AND user_id=%s AND chat_id=%s''',
+                (server_id, user_id, chat_id))
+            row = cur.fetchone()
+            if row:
+                real_client_msg_id = (row[0] or '')[:120]
+        tombstone_id = _tombstone_client_msg_id(
+            real_client_msg_id or client_msg_id)
+        if tombstone_id:
+            cur.execute(
+                '''INSERT INTO chat_log_tombstone
+                   (user_id, chat_id, client_msg_id)
+                   VALUES (%s,%s,%s)
+                   ON CONFLICT DO NOTHING''',
+                (user_id, chat_id, tombstone_id))
+        if server_id is not None:
+            cur.execute(
+                '''DELETE FROM chat_log
+                   WHERE id=%s
+                     AND user_id=%s
+                     AND chat_id=%s''',
+                (server_id, user_id, chat_id))
+        else:
+            cur.execute(
+                '''DELETE FROM chat_log
+                   WHERE user_id=%s
+                     AND chat_id=%s
+                     AND client_msg_id=%s''',
+                (user_id, chat_id, client_msg_id))
+        n = cur.rowcount
+        conn.commit()
+        return n
+    finally:
+        cur.close()
+        conn.close()
 
 
 def clear_chat(user_id, chat_id):

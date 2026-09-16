@@ -2,13 +2,21 @@ import inspect
 import json
 import os
 import sys
+import types
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 BACKEND = os.path.join(ROOT, 'gojo_backend')
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
+
+sys.modules.setdefault('requests', types.ModuleType('requests'))
+sys.modules.setdefault(
+    'anthropic',
+    types.SimpleNamespace(Anthropic=Mock()),
+)
 
 import cognitive_output
 import cognitive_reader

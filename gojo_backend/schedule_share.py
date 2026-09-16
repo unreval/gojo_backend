@@ -67,7 +67,10 @@ def _has_any_history(character_id, user_id):
 
 
 def _worth_sharing(activity):
-    if not activity or not activity.get('can_reply'):
+    if not activity:
+        return False
+    state = activity.get('reply_state') or ('free' if activity.get('can_reply') else 'hard_busy')
+    if state != 'free':
         return False
     title = activity.get('title', '')
     if any(k in title for k in NEVER_SHARE):

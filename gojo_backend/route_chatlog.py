@@ -2,6 +2,8 @@
 
   GET    /chatlog?user_id=&chat_id=&limit=&before_id=   拉历史(旧→新)
   POST   /chatlog/append                                追加消息(幂等)
+  DELETE /chatlog/message?user_id=&chat_id=&client_msg_id=&server_id=
+                                                        删单条(只删 chat_log,不动记忆)
   DELETE /chatlog?user_id=&chat_id=                     清空
   GET    /chatlog/count?user_id=&chat_id=               条数
 
@@ -47,6 +49,35 @@ async def append_chatlog(data: dict):
         print(f'[chatlog] 写入失败:{e}')
         return JSONResponse({'ok': False, 'error': str(e)}, status_code=500)
     return JSONResponse({'ok': True, 'written': written})
+
+
+@router.delete('/chatlog/message')
+async def delete_chatlog_message(user_id: str, chat_id: str,
+                                 client_msg_id: str = '',
+                                 server_id: int = None):
+    """删除单条聊天记录。只删 chat_log,不删角色记忆。"""
+    user_id = (user_id or '').strip()
+    chat_id = (chat_id or '').strip()
+    client_msg_id = client_msg_id or ''
+    if not user_id or not chat_id:
+        return JSONResponse(
+            {'error': '需要 user_id / chat_id'}, status_code=400)
+    if not client_msg_id and server_id is None:
+        return JSONResponse(
+            {'error': '需要 client_msg_id 或 server_id'}, status_code=400)
+    try:
+        deleted = db_chatlog.delete_message(
+            user_id, chat_id,
+            client_msg_id=client_msg_id,
+            server_id=server_id)
+    except Exception as e:
+        print(f'[chatlog] 单条删除失败:{e}')
+        return JSONResponse({'ok': False, 'error': str(e)}, status_code=500)
+    return JSONResponse({
+        'ok': True,
+        'deleted': deleted,
+        'client_msg_id': client_msg_id,
+    })
 
 
 @router.delete('/chatlog')
