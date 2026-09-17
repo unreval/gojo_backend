@@ -109,12 +109,38 @@ async def chat_voice_stream(data: dict):
     save_user_short_memory_once(
         user_id, user_text, character_id, source_event_id=source_event_id,
     )
-    short_memories = get_short_memory(user_id, 6, character_id)
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    pack = None
+    messages = []
+    failed_closed = False
+    try:
+        from context_layer import build_chat_context
+        pack = build_chat_context(
+            user_id, character_id,
+            user_message=user_text,
+            profile='voice',
+            include_recall=True,
+        )
+        if getattr(pack, 'failed_closed', False):
+            failed_closed = True
+            messages = []
+        elif pack and pack.messages:
+            messages = list(pack.messages)
+    except Exception as exc:
+        print(f'[{user_id}][{character_id}] voice context_layer skipped:{exc}')
+    if not messages and not failed_closed:
+        short_memories = get_short_memory(user_id, 6, character_id)
+        messages = [{'role': r, 'content': c} for r, c in short_memories]
+    if user_text and not (
+        messages
+        and messages[-1].get('role') == 'user'
+        and messages[-1].get('content') == user_text
+    ):
+        messages.append({'role': 'user', 'content': user_text})
 
     system_blocks = build_system_blocks(
         user_id, character_id, user_text, extra_suffix=VOICE_STREAM_SCENE,
         temporal_snapshot=temporal_snapshot,
+        context_pack=pack,
     )
 
     async def event_stream():

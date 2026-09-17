@@ -56,12 +56,39 @@ def _safe_reply_to(data):
 
 
 def _prompt_messages(user_id, character_id, short_memories, limit=24):
-    """Recent context for the model. Deleted Raw Events are excluded.
+    """Recent context for the model. Deleted Raw Events are excluded."""
+    _pack, messages = _turn_context(user_id, character_id, limit=limit)
+    return messages
 
-    Source validity unknown != active: never fall back to unverified cache.
-    """
+
+def _turn_context(user_id, character_id, user_message='', limit=24):
+    pack = None
     try:
-        return list(get_short_memory_for_prompt(
+        from context_layer import build_chat_context
+        pack = build_chat_context(
+            user_id, character_id,
+            user_message=user_message or '',
+            profile='image',
+            include_recall=True,
+        )
+        if getattr(pack, 'failed_closed', False):
+            return pack, []
+        if pack and pack.messages:
+            return pack, list(pack.messages)
+    except Exception as e:
+        try:
+            from raw_events import SourceValidityError
+            if isinstance(e, SourceValidityError):
+                print(
+                    f'[{user_id}][{character_id}] image prompt history skipped: '
+                    f'source validity unknown:{e}')
+                return pack, []
+        except Exception:
+            pass
+        print(f'[{user_id}][{character_id}] image context_layer skipped:{e}')
+    try:
+        from raw_events import SourceValidityError
+        return pack, list(get_short_memory_for_prompt(
             user_id, n=limit, character_id=character_id) or [])
     except Exception as e:
         try:
@@ -70,11 +97,11 @@ def _prompt_messages(user_id, character_id, short_memories, limit=24):
                 print(
                     f'[{user_id}][{character_id}] image prompt history skipped: '
                     f'source validity unknown:{e}')
-                return []
+                return pack, []
         except Exception:
             pass
         print(f'[{user_id}][{character_id}] image short_memory prompt skipped:{e}')
-        return []
+        return pack, []
 
 
 def _build_visual_summary(result, display_text, is_video, image_count):
@@ -252,7 +279,6 @@ async def chat_image(data: dict):
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     total_days = update_chat_days(user_id)
-    short_memories = get_short_memory(user_id, 6, character_id)
 
     user_content = [
         {
@@ -367,7 +393,8 @@ async def chat_image(data: dict):
         print(f'[{user_id}] image schedule check skipped:{e}')
 
     # ── free / immediate reply：一次 Vision 同时产出回复 + visual_summary ──
-    messages = _prompt_messages(user_id, character_id, short_memories)
+    pack, messages = _turn_context(user_id, character_id, user_text)
+    messages = list(messages)
     messages.append({'role': 'user', 'content': user_content})
 
     save_user_short_memory_once(
@@ -380,6 +407,7 @@ async def chat_image(data: dict):
     system_blocks = build_system_blocks(
         user_id, character_id, recall_query,
         temporal_snapshot=temporal_snapshot,
+        context_pack=pack,
     )
     system_blocks = system_blocks + [{
         'type': 'text',

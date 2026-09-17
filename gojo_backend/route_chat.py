@@ -288,15 +288,43 @@ def _user_prompt_with_reply(user_text, reply_to):
 
 
 def _prompt_messages(user_id, character_id, short_memories, limit=24):
-    """Recent context for the model. Deleted Raw Events are excluded.
+    """Recent context for the model. Deleted Raw Events are excluded."""
+    _pack, messages = _turn_context(
+        user_id, character_id, profile='default', limit=limit)
+    return messages
 
-    short_memory is a compatibility view over the chat_log ledger, not a
-    second source of truth. Source validity unknown != active: never fall
-    back to unverified cache rows.
-    """
+
+def _turn_context(user_id, character_id, user_message='', profile='default',
+                  limit=24):
+    """Hot-context first; fail-closed on source validity; bounded fallback."""
+    pack = None
+    try:
+        from context_layer import build_chat_context
+        pack = build_chat_context(
+            user_id, character_id,
+            user_message=user_message or '',
+            profile=profile,
+            include_recall=True,
+        )
+        if getattr(pack, 'failed_closed', False):
+            return pack, []
+        if pack and pack.messages:
+            return pack, list(pack.messages)
+    except Exception as e:
+        try:
+            from raw_events import SourceValidityError
+            if isinstance(e, SourceValidityError):
+                print(
+                    f'[{user_id}][{character_id}] prompt history skipped: '
+                    f'source validity unknown:{e}')
+                return pack, []
+        except Exception:
+            pass
+        print(f'[{user_id}][{character_id}] context_layer history skipped:{e}')
     try:
         from user_memory import get_short_memory_for_prompt
-        return list(get_short_memory_for_prompt(
+        from raw_events import SourceValidityError
+        return pack, list(get_short_memory_for_prompt(
             user_id, n=limit, character_id=character_id) or [])
     except Exception as e:
         try:
@@ -305,11 +333,12 @@ def _prompt_messages(user_id, character_id, short_memories, limit=24):
                 print(
                     f'[{user_id}][{character_id}] prompt history skipped: '
                     f'source validity unknown:{e}')
-                return []
+                return pack, []
         except Exception:
             pass
         print(f'[{user_id}][{character_id}] short_memory prompt skipped:{e}')
-        return []
+        return pack, []
+
 
 
 def _salvage_japanese(raw: str):
@@ -531,17 +560,25 @@ async def chat_text(data: dict):
 
 
     total_days = update_chat_days(user_id)
+    # Compatibility cache for relationship observer only — not the prompt fact source.
     short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
-
-    messages = _prompt_messages(user_id, character_id, short_memories)
+    pack, messages = _turn_context(
+        user_id, character_id, user_text, profile='text')
+    messages = list(messages)
     messages.append({'role': 'user', 'content': _user_prompt_with_reply(user_text, reply_to)})
 
     recall_query = user_text
-    if short_memories:
-        recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
+    if pack and pack.messages:
+        tails = [
+            m.get('content', '') for m in pack.messages[-2:]
+            if isinstance(m.get('content'), str)
+        ]
+        if tails:
+            recall_query = user_text + ' ' + ' '.join(tails)
 
     system_blocks = build_system_blocks(
-        user_id, character_id, recall_query, temporal_snapshot=temporal_snapshot)
+        user_id, character_id, recall_query, temporal_snapshot=temporal_snapshot,
+        context_pack=pack)
 
     save_user_short_memory_once(
         user_id, user_text, character_id, source_event_id=source_event_id)
@@ -791,19 +828,23 @@ async def chat_story(data: dict):
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     total_days = update_chat_days(user_id)
-    short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
-
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    pack, messages = _turn_context(
+        user_id, character_id, user_text, profile='story')
+    messages = list(messages)
     messages.append({'role': 'user', 'content': user_text})
 
     recall_query = user_text
-    if short_memories:
-        recall_query = user_text + ' ' + ' '.join(c for _, c in short_memories[-2:])
+    if pack and pack.messages:
+        tails = [
+            m.get('content', '') for m in pack.messages[-2:]
+            if isinstance(m.get('content'), str)
+        ]
+        if tails:
+            recall_query = user_text + ' ' + ' '.join(tails)
 
     system_blocks = build_system_blocks(
         user_id, character_id, recall_query, extra_suffix=STORY_SCENE,
-        temporal_snapshot=temporal_snapshot,
-    )
+        temporal_snapshot=temporal_snapshot, context_pack=pack)
 
     source_event_id = str(data.get('source_event_id') or '').strip() or None
     save_user_short_memory_once(
@@ -872,11 +913,19 @@ async def chat_proactive(data: dict):
         trigger = f'【系统触发：超时未完成】对方之前要做"{task_title}"，已经过了时间没动静。主动问她做完了没，带点调侃或假装不在意的关心，1条气泡。'
 
     short_memories = get_short_memory(user_id, 4, character_id)
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    pack, messages = _turn_context(
+        user_id, character_id, task_title, profile='proactive')
+    if pack and getattr(pack, 'failed_closed', False):
+        messages = []
+    elif messages:
+        messages = list(messages)
+    else:
+        messages = [{'role': r, 'content': c} for r, c in short_memories]
     messages.append({'role': 'user', 'content': trigger})
 
     system_blocks = build_system_blocks(
-        user_id, character_id, task_title, temporal_snapshot=temporal_snapshot)
+        user_id, character_id, task_title, temporal_snapshot=temporal_snapshot,
+        context_pack=pack)
 
     result, committed_state = _generate_or_none(
         MODEL_MAIN, 400, system_blocks, messages,
@@ -945,14 +994,14 @@ async def chat_voice_text(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
-    short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    pack, messages = _turn_context(
+        user_id, character_id, user_text, profile='voice')
+    messages = list(messages)
     messages.append({'role': 'user', 'content': user_text})
 
     system_blocks = build_system_blocks(
         user_id, character_id, user_text, extra_suffix=VOICE_CALL_SCENE,
-        temporal_snapshot=temporal_snapshot,
-    )
+        temporal_snapshot=temporal_snapshot, context_pack=pack)
 
     source_event_id = str(data.get('source_event_id') or '').strip() or None
     save_user_short_memory_once(
@@ -1021,14 +1070,14 @@ async def chat_voice_story(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
-    short_memories = get_short_memory(user_id, 4, character_id)
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    pack, messages = _turn_context(
+        user_id, character_id, user_text, profile='voice')
+    messages = list(messages)
     messages.append({'role': 'user', 'content': user_text})
 
     system_blocks = build_system_blocks(
         user_id, character_id, user_text, extra_suffix=VOICE_STORY_SCENE,
-        temporal_snapshot=temporal_snapshot,
-    )
+        temporal_snapshot=temporal_snapshot, context_pack=pack)
 
     source_event_id = str(data.get('source_event_id') or '').strip() or None
     save_user_short_memory_once(
@@ -1131,13 +1180,23 @@ async def chat_voice_proactive(data: dict):
 只输出1条气泡，15字以内，自然简短，像真打电话一样。'''
         n_recent = 4
 
-    short_memories = get_short_memory(user_id, n_recent, character_id)
-    messages = [{'role': r, 'content': c} for r, c in short_memories]
+    pack, messages = _turn_context(
+        user_id, character_id, '', profile='voice')
+    if pack and getattr(pack, 'failed_closed', False):
+        messages = []
+    elif messages:
+        messages = list(messages)
+    else:
+        messages = [
+            {'role': r, 'content': c}
+            for r, c in get_short_memory(user_id, n_recent, character_id)
+        ]
     messages.append({'role': 'user', 'content': trigger})
 
     system_blocks = build_system_blocks(
         user_id, character_id, '', extra_suffix=scene,
         temporal_snapshot=temporal_snapshot,
+        context_pack=pack,
     )
 
     result, committed_state = _generate_or_none(

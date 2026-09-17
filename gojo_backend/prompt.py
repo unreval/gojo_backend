@@ -355,7 +355,8 @@ context 里写清楚为什么触发,让【触发那一刻的你】知道要说�
 ★ 记账、提醒、取消、承诺可以并存，该有的字段都给。绝不能因为加了 pending_transaction 就漏 reminder。'''
 
 def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
-                        user_message='', extra_suffix='', temporal_snapshot=None):
+                        user_message='', extra_suffix='', temporal_snapshot=None,
+                        context_pack=None):
     # ── 1. 角色定义 ──
     char = get_character(character_id)
     if not char:
@@ -388,23 +389,29 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     told_text = ''
     _recall_result = None   # 保存召回结果，后面算 bond_count / fact_count 要用
 
-    try:
-        from smart_recall import two_level_recall, format_recall_for_prompt
+    if context_pack is not None and getattr(context_pack, 'recall_ready', False):
+        memory_text = getattr(context_pack, 'memory_text', '') or ''
+        bond_text = getattr(context_pack, 'bond_text', '') or ''
+        told_text = getattr(context_pack, 'told_text', '') or ''
+        _recall_result = getattr(context_pack, 'recall_result', None)
+    else:
+        try:
+            from smart_recall import two_level_recall, format_recall_for_prompt
 
-        # 如果 RAG 开着，算一下 query embedding
-        _query_emb = None
-        if memory_search.is_vector_ready():
-            _query_emb = memory_search._to_vec(memory_search.embed(user_message))
+            # 如果 RAG 开着，算一下 query embedding
+            _query_emb = None
+            if memory_search.is_vector_ready():
+                _query_emb = memory_search._to_vec(memory_search.embed(user_message))
 
-        _recall_result = two_level_recall(
-            user_id, character_id, user_message,
-            shared_id='shared', query_embedding=_query_emb
-        )
-        if _recall_result is not None:
-            memory_text, bond_text, told_text = format_recall_for_prompt(_recall_result)
-    except Exception as _e:
-        print(f'[prompt] 两级召回失败，退回旧逻辑：{_e}')
-        _recall_result = None
+            _recall_result = two_level_recall(
+                user_id, character_id, user_message,
+                shared_id='shared', query_embedding=_query_emb
+            )
+            if _recall_result is not None:
+                memory_text, bond_text, told_text = format_recall_for_prompt(_recall_result)
+        except Exception as _e:
+            print(f'[prompt] 两级召回失败，退回旧逻辑：{_e}')
+            _recall_result = None
 
     # ── 旧逻辑兜底（smart_recall 出错时走这里，和原来完全一样）──
     if _recall_result is None:
@@ -539,6 +546,12 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     # ── ★ 账户列表（记账用,可能每次不同,放动态尾）──
     accounts_text = _accounts_block(user_id)
 
+    pinned_block = ''
+    summary_block = ''
+    if context_pack is not None:
+        pinned_block = getattr(context_pack, 'pinned_prompt_text', '') or ''
+        summary_block = getattr(context_pack, 'summary_prompt_text', '') or ''
+
     # ── ★ 角色专属铁律 ──
     canon_lock = load_canon_lock(character_id)
 
@@ -557,7 +570,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 
     semi_static = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 
-    dynamic_tail = f"""{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
+    dynamic_tail = f"""{pinned_block}{summary_block}{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}
 
@@ -575,7 +588,8 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 
 
 def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID,
-                        user_message='', extra_suffix='', temporal_snapshot=None):
+                        user_message='', extra_suffix='', temporal_snapshot=None,
+                        context_pack=None):
     """★ 返回 Anthropic system 数组（带缓存断点）。
 
     结构：
@@ -586,7 +600,8 @@ def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID,
     调用方式：client.messages.create(system=build_system_blocks(...), ...)
     """
     static_head, semi_static, dynamic_tail = _build_prompt_parts(
-        user_id, character_id, user_message, extra_suffix, temporal_snapshot
+        user_id, character_id, user_message, extra_suffix, temporal_snapshot,
+        context_pack=context_pack,
     )
     return [
         {'type': 'text', 'text': static_head, 'cache_control': {'type': 'ephemeral'}},
@@ -596,10 +611,12 @@ def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID,
 
 
 def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID,
-                        user_message='', extra_suffix='', temporal_snapshot=None):
+                        user_message='', extra_suffix='', temporal_snapshot=None,
+                        context_pack=None):
     """兼容旧调用：把三段拼成一个字符串（不走缓存）。"""
     a, b, c = _build_prompt_parts(
-        user_id, character_id, user_message, extra_suffix, temporal_snapshot)
+        user_id, character_id, user_message, extra_suffix, temporal_snapshot,
+        context_pack=context_pack)
     return f'{a}\n{b}\n{c}'
 
 

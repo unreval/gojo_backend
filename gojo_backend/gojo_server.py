@@ -104,6 +104,8 @@ init_promise_table()   # ★ 承诺表（承诺驱动的主动消息）
 init_chatlog_table()   # ★ 聊天记录表（卸载重装/换手机都不丢）
 from raw_events import init_raw_event_layer
 init_raw_event_layer()
+from context_layer import init_context_layer_tables
+init_context_layer_tables()
 init_schedule_table()  # ★ 角色日程表（忙的时候只已读不回）
 init_course_tables()   # ★ 课程表（日程驱动的主动分享）
 init_push_table()

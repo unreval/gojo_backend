@@ -111,6 +111,21 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
                 build_system_blocks=Mock(return_value=[{'type': 'text', 'text': '角色设定'}]),
             ),
             'user_memory': self.memory,
+            'context_layer': stub(
+                'context_layer',
+                build_chat_context=Mock(return_value=types.SimpleNamespace(
+                    messages=[],
+                    failed_closed=False,
+                    recent_event_ids=[],
+                    recall_ready=False,
+                    pinned_prompt_text='',
+                    summary_prompt_text='',
+                    memory_text='',
+                    bond_text='',
+                    told_text='',
+                    recall_result=None,
+                )),
+            ),
             'memory_jobs': stub('memory_jobs', enqueue_private_extraction=self.jobs),
             'characters': stub(
                 'characters',

@@ -430,6 +430,68 @@ def get_recent_events(user_id, character_id, n=40, hours=24):
     return out
 
 
+def get_hot_candidate_events(user_id, character_id, n=240, hours=72):
+    """Bounded active-event fetch for adaptive hot context.
+
+    Separate from get_recent_events so the compatibility 40-cap stays intact.
+    Raises SourceValidityError if the active-set query cannot be completed.
+    """
+    n = max(1, min(int(n or 240), 240))
+    hours = max(1, int(hours or 72))
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            '''SELECT COALESCE(chat_log.event_id, chat_log.client_msg_id),
+                      role, text, kind, extra, created_at, subtitle,
+                      COALESCE(reply_to_event_id, '')
+               FROM chat_log
+               WHERE user_id=%s AND chat_id=%s
+                 AND COALESCE(status, 'active') = 'active'
+                 AND created_at >= NOW() - (%s * INTERVAL '1 hour')
+               ORDER BY created_at DESC, id DESC
+               LIMIT %s''',
+            (user_id, character_id, hours, n))
+        rows = cur.fetchall()
+    except SourceValidityError:
+        raise
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise SourceValidityError(str(e) or 'hot-candidate lookup failed') from e
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
+    out = []
+    for event_id, role, text, kind, extra, ts, subtitle, reply_to in reversed(rows):
+        meta = {}
+        if extra:
+            try:
+                parsed = json.loads(extra)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except Exception:
+                meta = {}
+        out.append({
+            'event_id': event_id or '',
+            'role': _prompt_role(role),
+            'content': text or '',
+            'kind': kind or 'text',
+            'metadata': meta,
+            'timestamp': ts,
+            'subtitle': subtitle or '',
+            'reply_to_event_id': reply_to or '',
+        })
+    return out
+
+
 def list_events_for_assistant_turn(user_id, character_id, assistant_turn_id):
     """All active segments that share one assistant_turn_id, oldest first."""
     turn_id = str(assistant_turn_id or '').strip()
