@@ -377,6 +377,7 @@ async def chat_image(data: dict):
                 'until': act.get('end_time', ''),
                 'free_at': availability.get('free_at'),
                 'phone_check_id': availability.get('opportunity_id'),
+                'pending_phone_check_count': availability.get('pending_count') or 0,
                 'seen_at': (
                     availability.get('seen_at').isoformat()
                     if getattr(availability.get('seen_at'), 'isoformat', None)

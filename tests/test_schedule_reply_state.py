@@ -192,6 +192,7 @@ class FakeCursor:
                         row['can_reply'] = False
                         row['next_phone_check_at'] = next_phone_check_at
                         row['seen_watermark'] = seen_watermark
+                        row['fallback_promise_id'] = None
                         self.rowcount = 1
                         return
             return
@@ -607,6 +608,220 @@ class ShortMemoryPromptIsolationTests(unittest.TestCase):
         self.assertIn('_analyze_visual_summary', img_src)
         self.assertIn('busy/pending：单独做 visual summary', img_src)
         self.assertIn('free / immediate reply：一次 Vision', img_src)
+
+
+class ActivityPhoneProfileTests(unittest.TestCase):
+    def test_meeting_is_soft_even_if_llm_said_hard(self):
+        schedule_engine = load_schedule_engine()
+        items = schedule_engine._sanitize([
+            {
+                'start_time': '14:00',
+                'end_time': '15:00',
+                'title': '开会',
+                'location': '会议室',
+                'note': '例会',
+                'reply_state': 'hard_busy',
+            },
+            {
+                'start_time': '15:00',
+                'end_time': '16:30',
+                'title': '备课',
+                'reply_state': 'hard_busy',
+            },
+            {
+                'start_time': '16:30',
+                'end_time': '17:30',
+                'title': '处理报告',
+                'reply_state': 'hard_busy',
+            },
+            {
+                'start_time': '17:30',
+                'end_time': '18:30',
+                'title': '出任务',
+                'reply_state': 'hard_busy',
+            },
+        ])
+        states = {i['title']: i['reply_state'] for i in items}
+        self.assertEqual(states['开会'], 'soft_busy')
+        self.assertEqual(states['备课'], 'soft_busy')
+        self.assertEqual(states['处理报告'], 'soft_busy')
+        self.assertEqual(states['出任务'], 'hard_busy')
+
+    def test_meeting_lesson_report_profiles_differ(self):
+        import activity_phone
+        meeting = activity_phone.profile_for_title('开会')
+        prep = activity_phone.profile_for_title('备课')
+        report = activity_phone.profile_for_title('处理报告')
+        for profile in (meeting, prep, report):
+            self.assertEqual(profile.busy_state, 'soft_busy')
+        self.assertNotEqual(
+            (meeting.check_interval_min, meeting.check_interval_max),
+            (prep.check_interval_min, prep.check_interval_max),
+        )
+        self.assertNotEqual(
+            (prep.check_interval_min, prep.check_interval_max),
+            (report.check_interval_min, report.check_interval_max),
+        )
+        captured = []
+
+        def fake_randint(lo, hi):
+            captured.append((lo, hi))
+            return lo
+
+        now = datetime(2026, 9, 16, 14, 5, tzinfo=timezone.utc)
+        with patch.object(db_schedule.random, 'randint', side_effect=fake_randint):
+            db_schedule.sample_next_phone_check_at(
+                now, {'title': '开会', 'end_time': '15:00', 'reply_state': 'soft_busy'})
+            db_schedule.sample_next_phone_check_at(
+                now, {'title': '备课', 'end_time': '15:00', 'reply_state': 'soft_busy'})
+            db_schedule.sample_next_phone_check_at(
+                now, {'title': '处理报告', 'end_time': '16:00', 'reply_state': 'soft_busy'})
+        self.assertEqual(captured[0], (5, 18))
+        self.assertEqual(captured[1], (12, 30))
+        self.assertEqual(captured[2], (15, 35))
+
+    def test_character_modifier_does_not_branch_on_name(self):
+        import activity_phone
+        fake_chars = types.SimpleNamespace(get_character=lambda cid: {
+            'phone_behavior': {
+                'check_interval_scale': 0.6,
+                'quick_reply_bonus': 0.2,
+            }
+        })
+        with patch.dict(sys.modules, {'characters': fake_chars}):
+            scaled = activity_phone.apply_character_modifier(
+                activity_phone.PROFILES['meeting'], 'not-a-named-branch')
+        base = activity_phone.PROFILES['meeting']
+        self.assertLess(scaled.check_interval_min, base.check_interval_min)
+        self.assertGreater(scaled.quick_reply_probability, base.quick_reply_probability)
+        src = Path(BACKEND, 'activity_phone.py').read_text(encoding='utf-8')
+        self.assertNotIn('if character ==', src)
+        self.assertNotIn("character_id == 'gojo'", src)
+
+    def test_meeting_can_see_mid_activity_with_injected_rng(self):
+        store = PhoneCheckStore()
+        start = datetime(2026, 9, 16, 14, 5, tzinfo=timezone.utc)
+        check_at = datetime(2026, 9, 16, 14, 12, tzinfo=timezone.utc)
+        activity = {
+            'id': 3,
+            'start_time': '14:00',
+            'end_time': '15:00',
+            'title': '开会',
+            'reply_state': 'soft_busy',
+            'can_reply': False,
+        }
+        with patch.object(db_schedule, 'get_conn',
+                          side_effect=lambda: FakeConn(store)), \
+             patch.object(db_schedule, 'sample_next_phone_check_at',
+                          return_value=check_at), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (a[2] if len(a) > 2 else check_at, False)), \
+             patch.object(db_schedule.random, 'random', return_value=0.01):
+            first = db_schedule.decide_phone_check(
+                'gojo', 'u1', start, activity,
+                source_event_id='m1', pending_text='在吗')
+            self.assertFalse(first['seen'])
+            self.assertFalse(first['can_reply'])
+            self.assertEqual(first['next_phone_check_at'], check_at)
+            oid = first['opportunity_id']
+            mid = db_schedule.decide_phone_check(
+                'gojo', 'u1', check_at, activity,
+                source_event_id='m2', pending_text='第二句')
+        self.assertTrue(mid['seen'])
+        self.assertTrue(mid['can_reply'])
+        self.assertTrue(mid.get('check_consumed'))
+        self.assertEqual(mid['opportunity_id'], oid)
+        self.assertLess(check_at.hour * 60 + check_at.minute, 15 * 60)
+        row = next(iter(store.rows.values()))
+        self.assertTrue(row['seen'])
+        self.assertEqual(row['resolved_at'], check_at)
+
+    def test_hard_busy_stays_unseen_until_activity_end(self):
+        store = PhoneCheckStore()
+        start = datetime(2026, 9, 16, 14, 5, tzinfo=timezone.utc)
+        later = datetime(2026, 9, 16, 14, 40, tzinfo=timezone.utc)
+        activity = {
+            'id': 9,
+            'start_time': '14:00',
+            'end_time': '15:00',
+            'title': '出任务',
+            'reply_state': 'hard_busy',
+            'can_reply': False,
+        }
+        with patch.object(db_schedule, 'get_conn',
+                          side_effect=lambda: FakeConn(store)), \
+             patch.object(db_schedule, 'sample_next_phone_check_at',
+                          return_value=later):
+            first = db_schedule.decide_phone_check(
+                'gojo', 'u1', start, activity, source_event_id='h1')
+            second = db_schedule.decide_phone_check(
+                'gojo', 'u1', later, activity, source_event_id='h2')
+        self.assertFalse(first['seen'])
+        self.assertFalse(first['can_reply'])
+        self.assertIsNone(first['next_phone_check_at'])
+        self.assertFalse(second['seen'])
+        self.assertFalse(second['can_reply'])
+        self.assertFalse(second.get('check_consumed'))
+
+    def test_phone_check_persists_across_requests(self):
+        store = PhoneCheckStore()
+        now = datetime(2026, 9, 16, 14, 5, tzinfo=timezone.utc)
+        check_at = datetime(2026, 9, 16, 14, 18, tzinfo=timezone.utc)
+        activity = {
+            'id': 3,
+            'start_time': '14:00',
+            'end_time': '15:00',
+            'title': '开会',
+            'reply_state': 'soft_busy',
+            'can_reply': False,
+        }
+        with patch.object(db_schedule, 'get_conn',
+                          side_effect=lambda: FakeConn(store)), \
+             patch.object(db_schedule, 'sample_next_phone_check_at',
+                          return_value=check_at), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (check_at, False)):
+            first = db_schedule.decide_phone_check(
+                'gojo', 'u1', now, activity, source_event_id='p1')
+            again = db_schedule.decide_phone_check(
+                'gojo', 'u1', now, activity, source_event_id='p2')
+        self.assertEqual(first['opportunity_id'], again['opportunity_id'])
+        self.assertEqual(first['next_phone_check_at'], again['next_phone_check_at'])
+        self.assertEqual(len(store.rows), 1)
+
+    def test_soft_busy_fallback_uses_next_check_not_activity_end(self):
+        now = datetime(2026, 9, 16, 14, 5, tzinfo=timezone.utc)
+        next_check = datetime(2026, 9, 16, 14, 12, tzinfo=timezone.utc)
+        captured = {}
+
+        def add_promise(**kwargs):
+            captured.update(kwargs)
+            return 77
+
+        fake_promise = types.SimpleNamespace(add_promise=add_promise)
+        decision = {
+            'can_reply': False,
+            'reply_state': 'soft_busy',
+            'opportunity_id': 4,
+            'next_phone_check_at': next_check,
+            'seen': False,
+        }
+        activity = {'title': '开会', 'end_time': '15:00'}
+        with patch.dict(sys.modules, {'db_promise': fake_promise}), \
+             patch.object(db_schedule, 'attach_fallback_promise'), \
+             patch.object(db_schedule, 'get_next_free_time', return_value='15:00'):
+            pid = reply_availability.ensure_busy_fallback(
+                'gojo', 'u1', now, activity, decision, user_text='在吗')
+        self.assertEqual(pid, 77)
+        self.assertEqual(captured['trigger_at'], next_check)
+
+    def test_schedule_ui_distinguishes_soft_and_hard_copy(self):
+        src = Path(ROOT, 'app', 'schedule', 'index.tsx').read_text(encoding='utf-8')
+        self.assertIn('可能会看手机', src)
+        self.assertIn('暂时无法查看消息', src)
+        self.assertIn('当前无法使用手机', src)
+        self.assertNotIn('完全走不开', src)
+        self.assertNotRegex(src, r"soft_busy' \? '走不开")
 
 
 if __name__ == '__main__':

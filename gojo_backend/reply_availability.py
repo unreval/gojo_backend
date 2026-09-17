@@ -53,15 +53,25 @@ def ensure_busy_fallback(character_id, user_id, now, activity, decision,
                          user_text='', event_meta=None):
     if decision.get('can_reply'):
         return None
-    if decision.get('fallback_promise_id'):
+    # Defer consumes the previous fallback; a new wake-up must be attached.
+    if decision.get('fallback_promise_id') and not decision.get('check_consumed'):
         return decision.get('fallback_promise_id')
     try:
         import db_schedule
         import db_promise
 
-        free_at = db_schedule.get_next_free_time(character_id, user_id, now) \
-            or activity.get('end_time')
-        trigger_at = _trigger_at_from_hhmm(now, free_at)
+        state = decision.get('reply_state') or _activity_state(activity)
+        next_check = decision.get('next_phone_check_at')
+        if state == 'soft_busy' and next_check:
+            trigger_at = next_check
+            if getattr(trigger_at, 'tzinfo', None) is None and getattr(now, 'tzinfo', None):
+                trigger_at = trigger_at.replace(tzinfo=now.tzinfo)
+            if trigger_at <= now:
+                trigger_at = now + timedelta(minutes=1)
+        else:
+            free_at = db_schedule.get_next_free_time(character_id, user_id, now) \
+                or activity.get('end_time')
+            trigger_at = _trigger_at_from_hhmm(now, free_at)
         pid = db_promise.add_promise(
             character_id=character_id,
             user_id=user_id,
@@ -75,7 +85,9 @@ def ensure_busy_fallback(character_id, user_id, now, activity, decision,
         except Exception:
             pass
         decision['fallback_promise_id'] = pid
-        decision['free_at'] = free_at
+        if 'free_at' not in decision or not decision.get('free_at'):
+            decision['free_at'] = db_schedule.get_next_free_time(
+                character_id, user_id, now) or (activity or {}).get('end_time')
         return pid
     except Exception as exc:
         print(f'[{user_id}] busy fallback promise skipped: {exc}')

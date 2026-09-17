@@ -536,8 +536,9 @@ async def chat_text(data: dict):
                     prior_snapshot=temporal_snapshot,
                 )
             print(f'[{user_id}] {character_id} {availability.get("reply_state")} '
-                  f'seen={availability.get("seen")} pending phone_check='
-                  f'{availability.get("opportunity_id")}')
+                  f'seen={availability.get("seen")} pending_phone_check_count='
+                  f'{availability.get("pending_count")} '
+                  f'phone_check_id={availability.get("opportunity_id")}')
             return JSONResponse({
                 'busy': True,
                 'seen': bool(availability.get('seen')),
@@ -548,6 +549,7 @@ async def chat_text(data: dict):
                 'until': act.get('end_time', ''),
                 'free_at': availability.get('free_at'),
                 'phone_check_id': availability.get('opportunity_id'),
+                'pending_phone_check_count': availability.get('pending_count') or 0,
                 'seen_at': (
                     availability.get('seen_at').isoformat()
                     if getattr(availability.get('seen_at'), 'isoformat', None)

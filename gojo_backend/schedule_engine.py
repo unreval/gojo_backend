@@ -26,8 +26,7 @@ SLEEP_REPLY_STATE = db_schedule.REPLY_FREE
 
 _BUSY_PRIORITY = [
     (10, ('任务', '讨伐', '战斗', '出勤', '祓除', '交战', '出击')),
-    (9,  ('上课', '授课', '教学', '讲课', '辅导', '训练')),
-    (8,  ('会议', '开会', '谈判', '汇报', '高层')),
+    (9,  ('上课', '授课', '教学', '讲课', '辅导')),
     (6,  ('洗澡', '泡澡', '沐浴')),
     (4,  ('开车', '驾驶')),
     (2,  ('起床', '洗漱', '换衣', '打扮', '通勤', '移动')),
@@ -209,9 +208,9 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 
 9. reply_state 标注(手机消息状态):
    "free" = 能正常看手机并回复:吃饭、休息、逛街、探店、发呆
-   "soft_busy" = 手上有事但可能瞄一眼手机:备课、通勤、排队、买东西、散步
-   "hard_busy" = 真的不能看手机:上课、出任务、战斗、洗澡、开会、驾驶
-   hard_busy 一天最多 4 段,总共不超 4 小时。soft_busy 不算 hard_busy。
+   "soft_busy" = 手上有事但可能瞄一眼手机:备课、开会、处理报告、通勤、排队、买东西、散步
+   "hard_busy" = 真的不能看手机:上课、出任务、战斗、洗澡、驾驶
+   开会/备课/写报告不是 hard_busy。hard_busy 一天最多 4 段,总共不超 4 小时。soft_busy 不算 hard_busy。
 
 10. 每天要不一样。
 
@@ -333,6 +332,14 @@ def _sanitize(raw_items, character_id=None):
         is_sleep = any(k in title for k in SLEEP_KEYWORDS)
         if is_sleep:
             reply_state = SLEEP_REPLY_STATE
+        else:
+            try:
+                from activity_phone import classify_activity_kind, PROFILES
+                kind = classify_activity_kind(title)
+                if kind and kind in PROFILES:
+                    reply_state = PROFILES[kind].busy_state
+            except Exception:
+                pass
 
         it['reply_state'] = reply_state
         it['can_reply'] = db_schedule.can_reply_from_state(reply_state)

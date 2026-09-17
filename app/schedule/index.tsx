@@ -49,8 +49,8 @@ function replyState(item: SchedItem): 'free' | 'soft_busy' | 'hard_busy' {
 
 function replyStateLabel(state: 'free' | 'soft_busy' | 'hard_busy'): string {
   if (state === 'free') return '有空搭理你';
-  if (state === 'soft_busy') return '忙着,可能瞄一眼';
-  return '完全走不开';
+  if (state === 'soft_busy') return '在忙，但可能会看手机';
+  return '暂时无法查看消息';
 }
 
 function replyStateColor(state: 'free' | 'soft_busy' | 'hard_busy'): string {
@@ -251,7 +251,7 @@ export default function ScheduleScreen() {
                     ]} />
                     {state !== 'free' && (
                       <Text style={[s.busyTag, state === 'hard_busy' && s.hardBusyTag, past && s.dim]}>
-                        {state === 'soft_busy' ? '可能看一眼' : '走不开'}
+                        {state === 'soft_busy' ? '可能会看手机' : '当前无法使用手机'}
                       </Text>
                     )}
                   </View>
@@ -267,7 +267,7 @@ export default function ScheduleScreen() {
           })}
 
           <Text style={s.footHint}>
-            橙色是可能瞄手机的忙碌,红色是真的走不开 · 忙完会合并回复
+            橙色是在忙但可能会看手机，红色是暂时无法使用手机 · 忙完会合并回复
           </Text>
         </ScrollView>
       )}

@@ -1,8 +1,10 @@
 """db_schedule.py —— 角色自己的一天(日程表)
 
 设计目的:
-  让角色有自己的生活节奏 —— 他不是 24 小时待命的聊天机器人,
-  上课/出任务/洗澡的时候是真的走不开,消息只会显示已读,忙完才回。
+  让角色有自己的生活节奏 —— 他不是 24 小时待命的聊天机器人。
+  上课/出任务/洗澡/驾驶是 hard_busy：没法看手机。
+  开会/备课/处理报告是 soft_busy：可能瞄一眼。
+  探店/逛街/吃饭/发呆是 free：能正常回。
 
 和用户自己的 tasks 表完全无关:
   tasks        —— 【用户】的待办,用户自己排
@@ -10,8 +12,9 @@
 
 关键字段 can_reply:
   由 LLM 生成日程时逐条判断,不是按时间一刀切。
-    上课/出任务/洗澡/开会 → false(走不开,只已读)
-    探店/逛街/查账/吃饭/发呆 → true(能摸鱼回消息)
+    上课/出任务/洗澡/驾驶 → hard_busy(没法看手机)
+    开会/备课/处理报告 → soft_busy(可能瞄一眼)
+    探店/逛街/查账/吃饭/发呆 → free(能摸鱼回消息)
 """
 from datetime import datetime, date as _date
 import json
@@ -266,6 +269,7 @@ def sample_next_phone_check_at(now: datetime, activity, after=None):
     """为 soft_busy activity 抽下一次看手机时间。
 
     after: 若提供，则在 after 之后再抽（用于 defer 后的第二次 check）。
+    Interval comes from ActivityPhoneProfile, not a single global window.
     """
     from datetime import timedelta
     base = after or now
@@ -273,6 +277,15 @@ def sample_next_phone_check_at(now: datetime, activity, after=None):
         base = base.replace(tzinfo=now.tzinfo)
     lo = SOFT_BUSY_CHECK_MIN_MINUTES
     hi = SOFT_BUSY_CHECK_MAX_MINUTES
+    try:
+        from activity_phone import profile_for_activity
+        profile = profile_for_activity(
+            activity, (activity or {}).get('character_id'))
+        if profile and profile.busy_state == REPLY_SOFT_BUSY:
+            lo = max(1, int(profile.check_interval_min or lo))
+            hi = max(lo, int(profile.check_interval_max or hi))
+    except Exception:
+        pass
     delay = random.randint(lo, hi)
     candidate = base + timedelta(minutes=delay)
     end_at = _hhmm_to_dt(now, activity['end_time'])
@@ -331,6 +344,8 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
             'seen_at': None,
         }
 
+    activity = dict(activity)
+    activity.setdefault('character_id', character_id)
     source_event_id = (source_event_id or '')[:120]
     pending_text = (pending_text or '')[:800]
     event_meta_text = ''
@@ -485,7 +500,15 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
         # 真正消费一次 phone check：先把当前 inbox 全部标 seen，再决定是否回复
         seen_at = now
         watermark = count
-        reply_now = random.random() < SOFT_BUSY_REPLY_CHANCE
+        reply_chance = SOFT_BUSY_REPLY_CHANCE
+        try:
+            from activity_phone import profile_for_activity
+            profile = profile_for_activity(activity, character_id)
+            if profile and profile.busy_state == REPLY_SOFT_BUSY:
+                reply_chance = float(profile.quick_reply_probability)
+        except Exception:
+            pass
+        reply_now = random.random() < reply_chance
         if reply_now:
             new_next = None
             can_reply = True
@@ -512,12 +535,19 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
                        can_reply=FALSE,
                        next_phone_check_at=%s,
                        seen_watermark=%s,
+                       fallback_promise_id=NULL,
                        updated_at=CURRENT_TIMESTAMP
                    WHERE id=%s''',
                 (seen_at, new_next, watermark, oid))
         next_check_at = new_next
+        extra = {'check_consumed': True}
+        if not reply_now:
+            fallback_id = None
+            extra['decision'] = 'defer'
+        else:
+            extra['decision'] = 'reply'
         conn.commit()
-        return _decision(True, can_reply, {'check_consumed': True})
+        return _decision(True, can_reply, extra)
     finally:
         cur.close()
         conn.close()

@@ -534,8 +534,13 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
             if _act:
                 _where = f'（在{_act["location"]}）' if _act.get('location') else ''
                 _note = f'\n你当时的想法：{_act["note"]}' if _act.get('note') else ''
-                _busy = '' if _act['can_reply'] else (
-                    '\n★ 这段时间你其实走不开，语气可以带点分心、简短一些。')
+                _busy = ''
+                try:
+                    from activity_phone import busy_prompt_hint
+                    _busy = busy_prompt_hint(_act)
+                except Exception:
+                    _busy = '' if _act.get('can_reply') else (
+                        '\n★ 这段时间你在忙，但偶尔能瞄一眼手机。语气可以简短一些。')
                 schedule_text = f'''
 
 【你此刻正在做的事——这是你自己安排的，不是设定，是真的在做】
