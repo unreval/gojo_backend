@@ -232,6 +232,7 @@ class ChatCommitGateTests(unittest.TestCase):
         self.tts.assert_called()
         self.rel.assert_called_once()
         self.assertEqual(self.route._create_json.call_count, 1)
+        self.grumble.assert_not_called()
 
     def test_reply_to_reaches_model_but_not_memory_or_relationship_input(self):
         response, body = self.send(

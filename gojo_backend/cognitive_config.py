@@ -110,6 +110,9 @@ COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS = _int_env(
 COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS = _int_env(
     'COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS', 14 * 24 * 60 * 60, 300,
 )
+# User-facing 便利贴 is a presentation of Slow Loop stickies only.
+# memory_lifecycle_fast_loop stickies are internal memory cues.
+USER_FACING_STICKY_SOURCE = 'cognitive_slow_loop'
 
 # Belief revision: LLM 只判断 relation/strength，最终 delta 由确定性规则给出。
 COGNITIVE_CONFIDENCE_DELTA = {

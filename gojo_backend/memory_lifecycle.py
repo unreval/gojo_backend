@@ -3,6 +3,10 @@
 This module is intentionally model-free. It decides whether a newly extracted
 user fact should stay as a short-lived state, become a sticky note, wait as an
 episodic/candidate memory, or consolidate into durable long_memory.
+
+Sticky notes written here are internal memory cues
+(source=memory_lifecycle_fast_loop). They are not the user-facing 便利贴.
+The 便利贴 UI only presents Slow Loop stickies (source=cognitive_slow_loop).
 """
 import hashlib
 import json

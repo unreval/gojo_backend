@@ -666,16 +666,6 @@ async def chat_text(data: dict):
     except Exception:
         pass
 
-    # ★ 便利贴吐槽:这一轮聊完,他心里可能会嘀咕一句(不发出来,只写便利贴)
-    #   完全后台,失败也不影响主对话
-    try:
-        import grumble_engine
-        threading.Thread(target=grumble_engine.maybe_write_grumble,
-                         args=(character_id, user_id, user_text, full_jp),
-                         daemon=True).start()
-    except Exception:
-        pass
-
     # ★ v4 感情账本异步更新（传上下文 + stderr 可靠输出，见文件顶部说明）
     _start_relationship_update(user_id, character_id, user_text, full_jp,
                                char, short_memories, temporal_snapshot,

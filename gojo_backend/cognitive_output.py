@@ -10,6 +10,7 @@ from cognitive_config import (
     COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS,
     PREDICTION_NUMERIC_OPERATORS,
     PREDICTION_RESOLVER_WHITELIST,
+    USER_FACING_STICKY_SOURCE,
 )
 from cognitive_predictions import validate_signal_prediction_contract
 from cognitive_revision import (
@@ -1170,10 +1171,30 @@ def persist_slow_loop_output(
                    completed_at = COALESCE(
                        EXCLUDED.completed_at,
                        cognitive_sticky_notes.completed_at),
+                   viewed = CASE
+                       WHEN cognitive_sticky_notes.content IS DISTINCT FROM
+                            EXCLUDED.content THEN FALSE
+                       ELSE cognitive_sticky_notes.viewed
+                   END,
+                   viewed_at = CASE
+                       WHEN cognitive_sticky_notes.content IS DISTINCT FROM
+                            EXCLUDED.content THEN NULL
+                       ELSE cognitive_sticky_notes.viewed_at
+                   END,
+                   user_hidden_at = CASE
+                       WHEN cognitive_sticky_notes.content IS DISTINCT FROM
+                            EXCLUDED.content THEN NULL
+                       ELSE cognitive_sticky_notes.user_hidden_at
+                   END,
+                   user_visible = CASE
+                       WHEN cognitive_sticky_notes.content IS DISTINCT FROM
+                            EXCLUDED.content THEN TRUE
+                       ELSE cognitive_sticky_notes.user_visible
+                   END,
                    updated_at = EXCLUDED.updated_at''',
             (
                 user_id, character_id, note['note_key'], note['content'],
-                note['status'], 'cognitive_slow_loop',
+                note['status'], USER_FACING_STICKY_SOURCE,
                 json.dumps(source_refs, ensure_ascii=False),
                 cycle_id, cycle_id, expires_at, completed_at, now,
             ),

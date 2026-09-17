@@ -90,9 +90,11 @@ queue transaction.
 - **CLV1-INV-022:** The worker receives only structured cycle events, trigger
   facts, current beliefs, hypotheses, and pending predictions. It does not load
   or send complete chat logs.
-- **CLV1-INV-023:** Model output must contain exactly `cycle_summary`,
-  `belief_updates`, `hypothesis_updates`, `new_predictions`, and
-  `evidence_refs`. Hidden reasoning or surrounding prose is not persisted.
+- **CLV1-INV-023:** Model output must contain `cycle_summary`,
+  `question_updates`, `belief_updates`, `hypothesis_updates`,
+  `new_predictions`, `evidence_refs`, and `reflection_note`. Hidden reasoning
+  or surrounding prose is not persisted. `sticky_note_updates` and
+  `diary_entries` are optional.
 - **CLV1-INV-024:** Every update must cite either an event attached to the
   claimed cycle or an existing same-pair event already cited in the supplied
   belief/hypothesis/prediction context. Invented, undeclared, or cross-pair
@@ -128,10 +130,11 @@ migration requeues pre-worker dead letters caused only by expired claims.
 
 ## Structured Output
 
-`cognitive_cycles` stores the complete validated result in five JSONB columns:
+`cognitive_cycles` stores the validated result in JSONB columns:
 
 - `cycle_summary`: factual synthesis, salient change, uncertainty, and a
   low/medium/high confidence label.
+- `question_updates`: unresolved questions with lifecycle status.
 - `belief_updates`: durable keyed beliefs with numeric confidence, status, and
   evidence references. Current values are upserted into `cognitive_beliefs`.
 - `hypothesis_updates`: keyed, testable interpretations with lifecycle status
@@ -142,6 +145,12 @@ migration requeues pre-worker dead letters caused only by expired claims.
   inserted into `cognitive_predictions`.
 - `evidence_refs`: current or previously registered same-pair event IDs plus a
   concise explanation of why each event supports the output.
+- `reflection_note`: compact internal note for the next generator prompt. It
+  is not shown on the user-facing 便利贴.
+- optional `sticky_note_updates`: Slow Loop working notes persisted to
+  `cognitive_sticky_notes` with `source='cognitive_slow_loop'`. This is the
+  only user-facing 便利贴 source.
+- optional `diary_entries`: first-person reflective records.
 
 Predictions are never free-form executable instructions. Unknown fields,
 resolvers, operators, status values, oversized content, invalid TTLs, duplicate
@@ -187,3 +196,55 @@ predictions that used message, evidence-count, or elapsed-time proxies.
 human-labelled reactivation fixtures, and performs no model or embedding API
 calls. Its sweep is the Cartesian product of five cooldowns, four high-weight
 thresholds, and five cosine thresholds: exactly 100 combinations.
+
+## User-facing Sticky Notes
+
+The 便利贴 UI is a presentation surface of the persistent cognitive system.
+It is not a second per-turn roleplay pass.
+
+```text
+chat / events
+    -> Cognitive Fast Loop (no LLM)
+    -> trigger
+    -> Cognitive Slow Loop
+    -> sticky_note_updates
+    -> cognitive_sticky_notes (source=cognitive_slow_loop)
+    -> GET /grumbles
+    -> UI
+```
+
+Rules:
+
+- Fast Loop does not call an LLM and must not write user-facing stickies.
+- Only the Slow Loop worker may generate `sticky_note_updates`.
+- User-facing notes always carry provenance: `source`, `source_event_refs`,
+  `created_by_cycle_id`, `updated_by_cycle_id`.
+- `memory_lifecycle_fast_loop` stickies are internal memory cues (for example
+  a near-term exam reminder). They stay in `cognitive_sticky_notes` for recall
+  but are not listed by `/grumbles`.
+- Stickies written before the user-facing cutoff are kept in place. A one-shot
+  startup migration sets `user_visible=FALSE` on existing
+  `source=cognitive_slow_loop` rows so old internal working notes are not
+  shown on `/grumbles`. New Slow Loop content on the same `note_key` becomes
+  visible again. Rows are not deleted.
+- `viewed` / `viewed_at` are read-state. `status=completed` is semantic
+  lifecycle completion. These are different fields; mark-viewed must not
+  complete a note.
+- User tear-off sets `user_hidden_at`. It does not set `status=completed`.
+
+## Retired: grumble_engine
+
+`grumble_engine` was a per-turn independent inner-monologue generator:
+
+```text
+/chat/text -> maybe_write_grumble -> MODEL_CN_AUX -> char_grumble -> /grumbles
+```
+
+Status: **RETIRED / LEGACY**.
+
+- `char_grumble` is no longer a UI source and receives no new writes.
+- Historical `char_grumble` rows are kept; they are not dropped in this
+  migration and must not re-enter current mind output.
+- Do not add another per-turn inner-monologue classifier or emotion LLM to
+  keep the old 便利贴 colors. If emotion is needed later, it belongs in the
+  Slow Loop output schema with validation and provenance.

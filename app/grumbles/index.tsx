@@ -1,11 +1,11 @@
 // app/grumbles/index.tsx
-// 便利贴:AI 在聊天里没说出口的心里话。
+// 便利贴:Persistent Cognitive System 的表达层。
 //
-// 视觉:每条便利贴一张彩色卡片(按情绪配色),稍微歪一下角度堆叠,像手账上贴的。
+// 视觉:每条便利贴一张彩色卡片,稍微歪一下角度堆叠,像手账上贴的。
 // 交互:长按撕掉;下拉刷新;打开页面时自动标全部已看(清红点)。
 //
-// 数据来源:后端 /grumbles(GET) —— 那些"心里话"由 grumble_engine 在每次
-// /chat/text 结束后后台生成,用户不会在对话里看到,只在这里看到。
+// 数据来源:后端 /grumbles(GET) —— Slow Loop 写入 cognitive_sticky_notes
+// (source=cognitive_slow_loop)。不是每轮 /chat/text 后再跑一套旁路模型。
 import axios from 'axios';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useState } from 'react';
@@ -21,37 +21,18 @@ interface Grumble {
   id: number;
   character_id: string;
   content: string;
-  emotion: string;
-  trigger_snippet: string;
-  viewed: boolean;
+  source?: string;
+  viewed?: boolean;
   created_at: string;
+  updated_at?: string;
+  created_by_cycle_id?: number | null;
+  updated_by_cycle_id?: number | null;
+  note_key?: string;
+  status?: string;
+  trigger_snippet?: string;
 }
 
-// 情绪 → 便利贴底色(马卡龙色系,像真的彩色便签)
-const NOTE_COLORS: Record<string, string> = {
-  '平静': '#FFF9C4',   // 淡黄
-  '调皮': '#FFE0B2',   // 橘色
-  '无奈': '#E1E1E1',   // 灰色
-  '得意': '#C8E6C9',   // 淡绿
-  '嫌弃': '#F5E1F0',   // 淡紫粉
-  '心动': '#FFCDD2',   // 淡红
-  '感慨': '#D1C4E9',   // 淡紫
-  '嘲讽': '#FFCCBC',   // 橘红
-  '自嘲': '#DCDCDC',   // 浅灰
-  '疑惑': '#B3E5FC',   // 淡蓝
-  '开心': '#FFF176',   // 亮黄
-  '温柔': '#F8BBD0',   // 粉
-  '愤怒': '#FFAB91',   // 深橘
-  '悲伤': '#B0BEC5',   // 蓝灰
-};
-
-// 情绪 → 便利贴右上角的小 tag(装饰用)
-const EMOTION_TAGS: Record<string, string> = {
-  '平静': '·', '调皮': 'hh', '无奈': '..', '得意': '哼',
-  '嫌弃': 'tsk', '心动': '♡', '感慨': '...', '嘲讽': '呵',
-  '自嘲': 'hah', '疑惑': '?', '开心': '!', '温柔': '♡',
-  '愤怒': '!!', '悲伤': '..',
-};
+const NOTE_COLORS = ['#FFF9C4', '#FFE0B2', '#E1BEE7', '#BBDEFB', '#C8E6C9'];
 
 export default function GrumblesScreen() {
   const router = useRouter();
@@ -147,7 +128,7 @@ export default function GrumblesScreen() {
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={s.headerTitle}>便利贴</Text>
-          <Text style={s.headerSub}>TA 没说出口的心里话</Text>
+          <Text style={s.headerSub}>TA 心里还挂着的事</Text>
         </View>
       </View>
 
@@ -159,7 +140,7 @@ export default function GrumblesScreen() {
         <View style={s.center}>
           <Text style={s.emptyIcon}>📝</Text>
           <Text style={s.emptyText}>还没有便利贴</Text>
-          <Text style={s.emptySub}>聊得多了,TA 心里的碎碎念会自动贴上来</Text>
+          <Text style={s.emptySub}>认知复盘之后,TA 心里还挂着的事会贴在这里</Text>
         </View>
       ) : (
         <ScrollView
@@ -168,11 +149,9 @@ export default function GrumblesScreen() {
           showsVerticalScrollIndicator={false}
         >
           {grumbles.map((g, idx) => {
-            const bg = NOTE_COLORS[g.emotion] || NOTE_COLORS['平静'];
-            // 隔一张往相反方向歪一下,更像手账
+            const bg = NOTE_COLORS[idx % NOTE_COLORS.length];
             const rotate = (idx % 2 === 0 ? -1.2 : 1.5);
             const charName = charNames[g.character_id] || g.character_id;
-            const tag = EMOTION_TAGS[g.emotion] || '·';
             return (
               <TouchableOpacity
                 key={g.id}
@@ -184,14 +163,14 @@ export default function GrumblesScreen() {
                 ]}
               >
                 <View style={s.noteHead}>
-                  <Text style={s.noteMeta}>{charName} · {g.emotion}</Text>
+                  <Text style={s.noteMeta}>{charName}</Text>
                   <Text style={s.noteMeta}>{formatTime(g.created_at)}</Text>
                 </View>
                 <Text style={s.noteBody}>{g.content}</Text>
                 {g.trigger_snippet ? (
                   <Text style={s.noteTrigger}>关于:「{g.trigger_snippet}」</Text>
                 ) : null}
-                <Text style={s.noteTag}>{tag}</Text>
+                <Text style={s.noteTag}>·</Text>
               </TouchableOpacity>
             );
           })}

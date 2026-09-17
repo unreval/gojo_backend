@@ -307,13 +307,29 @@ COGNITIVE_DDL = (
         updated_by_cycle_id BIGINT REFERENCES cognitive_cycles(id),
         expires_at TIMESTAMPTZ,
         completed_at TIMESTAMPTZ,
+        viewed BOOLEAN NOT NULL DEFAULT FALSE,
+        viewed_at TIMESTAMPTZ,
+        user_hidden_at TIMESTAMPTZ,
+        user_visible BOOLEAN NOT NULL DEFAULT TRUE,
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (user_id, character_id, note_key)
     )''',
+    '''ALTER TABLE cognitive_sticky_notes
+       ADD COLUMN IF NOT EXISTS viewed BOOLEAN NOT NULL DEFAULT FALSE''',
+    '''ALTER TABLE cognitive_sticky_notes
+       ADD COLUMN IF NOT EXISTS viewed_at TIMESTAMPTZ''',
+    '''ALTER TABLE cognitive_sticky_notes
+       ADD COLUMN IF NOT EXISTS user_hidden_at TIMESTAMPTZ''',
+    '''ALTER TABLE cognitive_sticky_notes
+       ADD COLUMN IF NOT EXISTS user_visible BOOLEAN NOT NULL DEFAULT TRUE''',
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_sticky_active
        ON cognitive_sticky_notes (user_id, character_id, expires_at, updated_at DESC)
        WHERE status = 'active' ''',
+    '''CREATE INDEX IF NOT EXISTS idx_cognitive_sticky_unviewed
+       ON cognitive_sticky_notes (user_id, character_id)
+       WHERE status = 'active' AND viewed = FALSE AND user_hidden_at IS NULL
+         AND user_visible''',
     '''CREATE TABLE IF NOT EXISTS cognitive_diary_entries (
         id BIGSERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -350,6 +366,7 @@ def init_cognitive_tables(conn=None):
         conn = get_conn()
     cur = conn.cursor()
     recovered_pre_worker = 0
+    excluded_pre_presentation = 0
     try:
         for statement in COGNITIVE_DDL:
             cur.execute(statement)
@@ -410,6 +427,22 @@ def init_cognitive_tables(conn=None):
                      AND resolver_name <> 'current_event_signal_outcome'
                      AND metadata ->> 'created_by' = 'cognitive_slow_loop' ''',
             )
+        cur.execute(
+            '''INSERT INTO cognitive_worker_migrations (migration_key)
+               VALUES ('user_facing_sticky_v1_exclude_pre_presentation')
+               ON CONFLICT (migration_key) DO NOTHING
+               RETURNING migration_key''',
+        )
+        if cur.fetchone():
+            # Existing Slow Loop stickies were generated as internal working
+            # notes. Keep the rows; only stop showing them on /grumbles.
+            cur.execute(
+                '''UPDATE cognitive_sticky_notes
+                   SET user_visible = FALSE
+                   WHERE source = 'cognitive_slow_loop'
+                     AND user_visible = TRUE''',
+            )
+            excluded_pre_presentation = cur.rowcount
         conn.commit()
     except Exception:
         conn.rollback()
@@ -419,4 +452,6 @@ def init_cognitive_tables(conn=None):
         if owns_connection:
             conn.close()
     print('[init] Cognitive Loop storage ready '
-          f'(recovered pre-worker dead letters: {recovered_pre_worker})')
+          f'(recovered pre-worker dead letters: {recovered_pre_worker}; '
+          f'pre-presentation stickies excluded from /grumbles: '
+          f'{excluded_pre_presentation})')

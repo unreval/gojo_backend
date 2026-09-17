@@ -57,13 +57,7 @@ from route_courses import router as courses_router
 from db_course import init_course_tables                # ★ 日程驱动的主动分享
 
 # ★ 新模块用 try/except 包住：缺文件不会搞崩整个后端
-try:
-    from route_grumble import router as grumble_router
-    from db_grumble import init_grumble_table
-    _HAS_GRUMBLE = True
-except ImportError as e:
-    _HAS_GRUMBLE = False
-    print(f'[init] ⚠️ 便利贴模块未找到({e}),该功能不可用,其他功能不受影响')
+from route_grumble import router as grumble_router
 
 try:
     from route_game import router as game_router
@@ -112,12 +106,6 @@ init_push_table()
 from memory_jobs import init_memory_jobs_table, start_memory_worker
 init_memory_jobs_table()
 start_memory_worker()
-if _HAS_GRUMBLE:
-    try:
-        init_grumble_table()
-    except Exception as e:
-        print(f'[init] ⚠️ 便利贴表初始化失败({e}),不影响其他功能')
-        _HAS_GRUMBLE = False
 if _HAS_EXPLORE:
     try:
         init_visited_places_table()
@@ -156,8 +144,7 @@ app.include_router(voice_stream_router) # ★ B档流式语音
 app.include_router(courses_router)  
 app.include_router(chatlog_router)        # ★ 聊天记录同步
 app.include_router(schedule_router)       # ★ 角色日程
-if _HAS_GRUMBLE:
-    app.include_router(grumble_router)
+app.include_router(grumble_router)
 if _HAS_GAME:
     app.include_router(game_router)
 if _HAS_EXPLORE:
@@ -173,7 +160,7 @@ async def health():
         'arch': 'modular-v8-voice-stream',
         'vector_ready': memory_search.is_vector_ready(),
         'game': _HAS_GAME,
-        'grumble': _HAS_GRUMBLE,
+        'grumble_engine': False,
         'explore': _HAS_EXPLORE,
         'cognitive_worker': cognitive_worker.is_cognitive_worker_running(),
     }

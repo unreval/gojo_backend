@@ -162,8 +162,10 @@ def fetch_cognitive_snapshot(
             for row in cur.fetchall()
         ]
         cur.execute(
-            '''SELECT note_key, content, status, source_event_refs,
-                      expires_at, completed_at, updated_at
+            '''SELECT id, note_key, content, status, source,
+                      source_event_refs, created_by_cycle_id,
+                      updated_by_cycle_id, expires_at, completed_at,
+                      viewed, viewed_at, user_hidden_at, updated_at
                FROM cognitive_sticky_notes
                WHERE user_id = %s AND character_id = %s
                ORDER BY updated_at DESC, id DESC''',
@@ -171,13 +173,20 @@ def fetch_cognitive_snapshot(
         )
         sticky_notes = [
             {
-                'note_key': row[0],
-                'content': row[1],
-                'status': row[2],
-                'source_event_refs': _json_value(row[3], []),
-                'expires_at': row[4],
-                'completed_at': row[5],
-                'updated_at': row[6],
+                'id': row[0],
+                'note_key': row[1],
+                'content': row[2],
+                'status': row[3],
+                'source': row[4],
+                'source_event_refs': _json_value(row[5], []),
+                'created_by_cycle_id': row[6],
+                'updated_by_cycle_id': row[7],
+                'expires_at': row[8],
+                'completed_at': row[9],
+                'viewed': bool(row[10]),
+                'viewed_at': row[11],
+                'user_hidden_at': row[12],
+                'updated_at': row[13],
             }
             for row in cur.fetchall()
         ]

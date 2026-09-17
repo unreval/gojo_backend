@@ -3,7 +3,7 @@
 当角色说了"我会主动找你" "答应你了" "到时候提醒你" 这类话,
 自动在 proactive_promise 表里创建一条记录,让 proactive_scheduler 真的去执行。
 
-★ 由 route_chat.py 在后台线程调用(和 diary_engine / grumble_engine 一样)
+★ 由 route_chat.py 在后台线程调用(和 diary_engine 一样)
 ★ 完全 fail-safe:出错静默吞掉,不影响主对话
 """
 import re

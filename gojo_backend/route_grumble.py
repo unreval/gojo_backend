@@ -1,17 +1,26 @@
-"""便利贴吐槽路由 /grumbles/*
+"""便利贴路由 /grumbles/*
 
   GET    /grumbles                  列表(可选 character_id 过滤;不传就全部角色混着来)
   GET    /grumbles/unviewed_count   未看条数(首页红点用)
   POST   /grumbles/mark_viewed      打开便利贴页时一键标已看
-  DELETE /grumbles/{id}             撕掉一张
+  DELETE /grumbles/{id}             撕掉一张(用户隐藏,不改 cognitive status)
 
-★ 便利贴【只能读和删】,不提供 POST 创建 —— 它是 AI 自己产出的,不是用户能主动添加的东西。
-   写入在 grumble_engine.maybe_write_grumble,由 route_chat 后台线程触发。
+便利贴是 Persistent Cognitive System 的表达层,不是每轮聊天后的第二次角色扮演。
+数据源: cognitive_sticky_notes,且仅 source=cognitive_slow_loop。
+memory_lifecycle_fast_loop 的 sticky 是内部记忆提示,不进入本 API。
+已读/撕掉与 Slow Loop 的 completed/expired 生命周期相互独立。
 """
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-import db_grumble
+from cognitive_config import USER_FACING_STICKY_SOURCE
+from cognitive_reader import (
+    count_unviewed_sticky_notes,
+    hide_sticky_note,
+    list_user_facing_sticky_notes,
+    mark_sticky_notes_viewed,
+)
+
 
 router = APIRouter()
 
@@ -19,33 +28,56 @@ router = APIRouter()
 DEFAULT_USER = 'user_mofpiyd7442ia7'
 
 
+def _public_grumble(note):
+    return {
+        'id': note['id'],
+        'character_id': note['character_id'],
+        'content': note['content'],
+        'source': note.get('source') or USER_FACING_STICKY_SOURCE,
+        'created_at': note.get('created_at'),
+        'updated_at': note.get('updated_at'),
+        'viewed': bool(note.get('viewed')),
+        'source_event_refs': note.get('source_event_refs') or [],
+        'created_by_cycle_id': note.get('created_by_cycle_id'),
+        'updated_by_cycle_id': note.get('updated_by_cycle_id'),
+        'note_key': note.get('note_key'),
+        'status': note.get('status'),
+    }
+
+
 @router.get('/grumbles')
 async def get_grumbles(user_id: str = DEFAULT_USER,
                        character_id: str = None,
                        limit: int = 100):
-    """列出便利贴。character_id 传空就是全部角色混着来(按时间倒序)。"""
-    items = db_grumble.list_grumbles(user_id, character_id, limit=limit)
-    return JSONResponse({'grumbles': items})
+    """列出 user-facing Slow Loop 便利贴。character_id 传空就是全部角色混着来。"""
+    items = list_user_facing_sticky_notes(
+        user_id, character_id or None, limit=limit,
+    )
+    return JSONResponse({'grumbles': [_public_grumble(item) for item in items]})
 
 
 @router.get('/grumbles/unviewed_count')
 async def unviewed_count(user_id: str = DEFAULT_USER, character_id: str = None):
     """首页给便利贴 tile 显示红点用。character_id 可选。"""
-    n = db_grumble.count_unviewed(user_id, character_id)
+    n = count_unviewed_sticky_notes(
+        user_id, character_id or None, source=USER_FACING_STICKY_SOURCE,
+    )
     return JSONResponse({'count': n})
 
 
 @router.post('/grumbles/mark_viewed')
 async def mark_viewed(data: dict):
-    """打开便利贴页时前端调一下,把所有未看的标为已看。"""
+    """打开便利贴页时前端调一下,把未看的标为已看。不改 semantic status。"""
     user_id = data.get('user_id', DEFAULT_USER)
-    character_id = data.get('character_id')   # 可选:只标某个角色的
-    n = db_grumble.mark_all_viewed(user_id, character_id)
+    character_id = data.get('character_id') or None
+    n = mark_sticky_notes_viewed(
+        user_id, character_id, source=USER_FACING_STICKY_SOURCE,
+    )
     return JSONResponse({'ok': True, 'marked': n})
 
 
 @router.delete('/grumbles/{grumble_id}')
 async def del_grumble(grumble_id: int, user_id: str = DEFAULT_USER):
-    """撕掉一张便利贴。带 user_id 做基本鉴权。"""
-    ok = db_grumble.delete_grumble(grumble_id, user_id)
+    """撕掉一张便利贴:用户隐藏,不把 cognitive status 改成 completed。"""
+    ok = hide_sticky_note(user_id, grumble_id)
     return JSONResponse({'ok': ok})

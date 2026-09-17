@@ -5,6 +5,7 @@ import re
 from cognitive_config import (
     COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
     SHARED_RELATIONSHIP_FRAME_KEY,
+    USER_FACING_STICKY_SOURCE,
 )
 from cognitive_revision import current_belief_display, is_stable_reader_belief
 
@@ -386,8 +387,64 @@ def iter_active_cognitive_items(user_id, character_id, *, conn=None):
     return items
 
 
-def list_sticky_notes(user_id, character_id, *, include_inactive=False,
-                      limit=50, conn=None):
+def _iso(value):
+    if value is None:
+        return None
+    if hasattr(value, 'isoformat'):
+        return value.isoformat()
+    return str(value)
+
+
+def _sticky_where(user_id, character_id=None, *, include_inactive=False,
+                  source=None, include_hidden=True, exclude_expired=False,
+                  unviewed_only=False, user_visible_only=False):
+    clauses = ['user_id = %s']
+    params = [user_id]
+    if character_id:
+        clauses.append('character_id = %s')
+        params.append(character_id)
+    if not include_inactive:
+        clauses.append("status = 'active'")
+    if source:
+        clauses.append('source = %s')
+        params.append(source)
+    if not include_hidden:
+        clauses.append('user_hidden_at IS NULL')
+    if exclude_expired:
+        clauses.append('(expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)')
+    if unviewed_only:
+        clauses.append('viewed = FALSE')
+    if user_visible_only:
+        clauses.append('user_visible = TRUE')
+    return ' AND '.join(clauses), params
+
+
+def _serialize_sticky_row(row):
+    return {
+        'id': row[0],
+        'character_id': row[1],
+        'note_key': row[2],
+        'content': row[3],
+        'status': row[4],
+        'source': row[5],
+        'source_event_refs': _json_value(row[6], []),
+        'created_by_cycle_id': row[7],
+        'updated_by_cycle_id': row[8],
+        'expires_at': _iso(row[9]),
+        'completed_at': _iso(row[10]),
+        'created_at': _iso(row[11]),
+        'updated_at': _iso(row[12]),
+        'viewed': bool(row[13]),
+        'viewed_at': _iso(row[14]),
+        'user_hidden': row[15] is not None,
+        'user_hidden_at': _iso(row[15]),
+        'user_visible': bool(row[16]) if len(row) > 16 else True,
+    }
+
+
+def list_sticky_notes(user_id, character_id=None, *, include_inactive=False,
+                      limit=50, conn=None, source=None, include_hidden=True,
+                      exclude_expired=False, user_visible_only=False):
     database = conn
     owns_connection = database is None
     if database is None:
@@ -395,28 +452,148 @@ def list_sticky_notes(user_id, character_id, *, include_inactive=False,
         database = get_conn()
     cur = database.cursor()
     try:
-        status_clause = '' if include_inactive else "AND status = 'active'"
+        where_sql, params = _sticky_where(
+            user_id, character_id,
+            include_inactive=include_inactive,
+            source=source,
+            include_hidden=include_hidden,
+            exclude_expired=exclude_expired,
+            user_visible_only=user_visible_only,
+        )
+        params = list(params)
+        params.append(max(1, min(int(limit), 100)))
         cur.execute(
-            f'''SELECT id, note_key, content, status, source_event_refs,
-                      expires_at, completed_at, created_at, updated_at
+            f'''SELECT id, character_id, note_key, content, status, source,
+                      source_event_refs, created_by_cycle_id,
+                      updated_by_cycle_id, expires_at, completed_at,
+                      created_at, updated_at, viewed, viewed_at,
+                      user_hidden_at, user_visible
                FROM cognitive_sticky_notes
-               WHERE user_id = %s AND character_id = %s
-                 {status_clause}
+               WHERE {where_sql}
                ORDER BY updated_at DESC, id DESC
                LIMIT %s''',
-            (user_id, character_id, max(1, min(int(limit), 100))),
+            params,
         )
-        return [{
-            'id': row[0],
-            'note_key': row[1],
-            'content': row[2],
-            'status': row[3],
-            'source_event_refs': _json_value(row[4], []),
-            'expires_at': row[5],
-            'completed_at': row[6],
-            'created_at': row[7],
-            'updated_at': row[8],
-        } for row in cur.fetchall()]
+        return [_serialize_sticky_row(row) for row in cur.fetchall()]
+    finally:
+        cur.close()
+        if owns_connection:
+            database.close()
+
+
+def list_user_facing_sticky_notes(user_id, character_id=None, *, limit=50,
+                                  conn=None):
+    """便利贴 UI: Slow Loop stickies only, not memory-lifecycle cues."""
+    return list_sticky_notes(
+        user_id,
+        character_id,
+        include_inactive=False,
+        limit=limit,
+        conn=conn,
+        source=USER_FACING_STICKY_SOURCE,
+        include_hidden=False,
+        exclude_expired=True,
+        user_visible_only=True,
+    )
+
+
+def count_unviewed_sticky_notes(user_id, character_id=None, *, source=None,
+                                conn=None):
+    """User-facing unread count. Does not change semantic status."""
+    database = conn
+    owns_connection = database is None
+    if database is None:
+        from db import get_conn
+        database = get_conn()
+    cur = database.cursor()
+    try:
+        where_sql, params = _sticky_where(
+            user_id, character_id,
+            include_inactive=False,
+            source=source,
+            include_hidden=False,
+            exclude_expired=True,
+            unviewed_only=True,
+            user_visible_only=True,
+        )
+        cur.execute(
+            f'''SELECT COUNT(*) FROM cognitive_sticky_notes
+               WHERE {where_sql}''',
+            params,
+        )
+        row = cur.fetchone()
+        return int((row[0] if row else 0) or 0)
+    finally:
+        cur.close()
+        if owns_connection:
+            database.close()
+
+
+def mark_sticky_notes_viewed(user_id, character_id=None, *, source=None,
+                             conn=None):
+    """Mark matching notes as read. Never changes status/completed_at."""
+    database = conn
+    owns_connection = database is None
+    if database is None:
+        from db import get_conn
+        database = get_conn()
+    cur = database.cursor()
+    try:
+        where_sql, params = _sticky_where(
+            user_id, character_id,
+            include_inactive=False,
+            source=source,
+            include_hidden=False,
+            exclude_expired=True,
+            unviewed_only=True,
+            user_visible_only=True,
+        )
+        cur.execute(
+            f'''UPDATE cognitive_sticky_notes
+               SET viewed = TRUE,
+                   viewed_at = COALESCE(viewed_at, CURRENT_TIMESTAMP)
+               WHERE {where_sql}''',
+            params,
+        )
+        n = cur.rowcount
+        database.commit()
+        return int(n or 0)
+    except Exception:
+        database.rollback()
+        raise
+    finally:
+        cur.close()
+        if owns_connection:
+            database.close()
+
+
+def hide_sticky_note(user_id, note_id, *, character_id=None, conn=None):
+    """User tear-off. Hides from UI without completing cognitive lifecycle."""
+    database = conn
+    owns_connection = database is None
+    if database is None:
+        from db import get_conn
+        database = get_conn()
+    cur = database.cursor()
+    try:
+        clauses = ['id = %s', 'user_id = %s', 'user_hidden_at IS NULL']
+        params = [note_id, user_id]
+        if character_id:
+            clauses.append('character_id = %s')
+            params.append(character_id)
+        cur.execute(
+            f'''UPDATE cognitive_sticky_notes
+               SET user_hidden_at = CURRENT_TIMESTAMP
+               WHERE {' AND '.join(clauses)}
+               RETURNING id, status''',
+            params,
+        )
+        row = cur.fetchone()
+        database.commit()
+        return bool(row)
+    except Exception:
+        database.rollback()
+        raise
     finally:
         cur.close()
         if owns_connection:
@@ -424,6 +601,7 @@ def list_sticky_notes(user_id, character_id, *, include_inactive=False,
 
 
 def complete_sticky_note(user_id, character_id, note_id, *, conn=None):
+    """Semantic lifecycle complete. Not the user-facing 撕掉/viewed action."""
     database = conn
     owns_connection = database is None
     if database is None:

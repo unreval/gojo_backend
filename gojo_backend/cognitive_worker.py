@@ -151,17 +151,22 @@ Reflection note rules:
 Optional sticky_note_updates schema:
 [{
   "note_key": "stable.lowercase.key",
-  "content": "short visible note for the character to remember soon",
+  "content": "short first-person Chinese working note the character would pin",
   "status": "active|completed|expired|archived",
   "expires_in_seconds": 259200,
   "evidence_refs": [123]
 }]
 
-Sticky notes are lightweight short-term, visible/callable reminders. They are
-not long-term memory, relationship state, or proof of affection. Use them for
-near-future reminders, unresolved conversational threads, and small role-local
-to-dos. Mark a note completed/expired only when current evidence supports that
-lifecycle change. Every note must cite source events.
+Sticky notes are the user-facing presentation of Slow Loop working state
+(便利贴). They are short first-person notes the character would pin for
+themselves, grounded only in cited current-cycle events. They are not a
+second per-turn roleplay pass, not hidden-emotion classification, not
+relationship proof, and not system-operator instructions such as
+"下次回复前记得...". Do not invent an emotion field. reflection_note
+remains internal for the next generator prompt and is not shown on 便利贴.
+Use stickies for unresolved threads, near-future concerns, and short-lived
+working thoughts. Mark a note completed/expired only when current evidence
+supports that lifecycle change. Every note must cite source events.
 
 Optional diary_entries schema:
 [{
