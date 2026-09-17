@@ -291,6 +291,172 @@ class RollingSummaryAndPinTests(unittest.TestCase):
         self.assertIn('context_pack=pack', voice)
         self.assertIn('context_pack=None', prompt)
         self.assertIn('pinned_prompt_text', prompt)
+        self.assertIn('exclude_event_ids', prompt)
+        self.assertIn('current_event_id', chat)
+        self.assertIn('append_current_user_turn', chat)
+        self.assertIn('current_event_id', image)
+        self.assertIn('append_current_user_turn', image)
+        self.assertIn('current_event_id', voice)
+        self.assertIn('append_current_user_turn', voice)
+        self.assertIn("profile='voice'", voice)
+
+
+class CurrentTurnAndCollapseTests(unittest.TestCase):
+    def setUp(self):
+        context_layer.use_memory_store(True)
+
+    def tearDown(self):
+        context_layer.use_memory_store(False)
+
+    def _count_user_text(self, messages, text):
+        count = 0
+        for message in messages or []:
+            if message.get('role') != 'user':
+                continue
+            content = message.get('content')
+            if content == text:
+                count += 1
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get('text') == text:
+                        count += 1
+                    elif block == text:
+                        count += 1
+        return count
+
+    def test_current_user_turn_appears_once_when_already_in_hot(self):
+        current = '本轮用户消息只应出现一次'
+        events = [
+            _event(1, text='昨天说过的', minutes_ago=12),
+            {
+                'event_id': 'cur-turn',
+                'role': 'user',
+                'content': current,
+                'timestamp': NOW,
+                'metadata': {},
+                'kind': 'text',
+            },
+        ]
+        pack = context_layer.assemble_from_events(
+            events, user_id='u', character_id='gojo',
+            now=NOW, include_recall=False, current_event_id='cur-turn')
+        messages = context_layer.append_current_user_turn(pack.messages, current)
+        self.assertEqual(self._count_user_text(messages, current), 1)
+        self.assertNotIn('cur-turn', pack.recent_event_ids)
+
+    def test_current_turn_dedup_covers_route_kinds(self):
+        chat = Path(BACKEND, 'route_chat.py').read_text(encoding='utf-8')
+        image = Path(BACKEND, 'route_image.py').read_text(encoding='utf-8')
+        voice = Path(BACKEND, 'route_voice_stream.py').read_text(encoding='utf-8')
+        self.assertGreaterEqual(chat.count('_history_plus_current'), 5)
+        self.assertIn("profile='text'", chat)
+        self.assertIn("profile='story'", chat)
+        self.assertIn("profile='voice'", chat)
+        self.assertIn("profile='proactive'", chat)
+        self.assertIn('append_current_user_turn', image)
+        self.assertIn('append_current_user_turn', voice)
+        self.assertIn('current_event_id=source_event_id', voice)
+
+    def test_recall_source_exclusion_drops_fully_covered_facts(self):
+        from recall_candidates import drop_recent_covered
+        rows = [
+            {'id': 1, 'content': '热窗口事实', 'source_event_ids': ['hot-1']},
+            {'id': 2, 'content': '部分重叠', 'source_event_ids': ['hot-1', 'old-9']},
+            {'id': 3, 'content': '更早的独立事实', 'source_event_ids': ['old-9']},
+            {'id': 4, 'content': '无来源遗留', 'source_event_ids': []},
+        ]
+        kept = drop_recent_covered(rows, ['hot-1'])
+        contents = [row['content'] for row in kept]
+        self.assertNotIn('热窗口事实', contents)
+        self.assertIn('部分重叠', contents)
+        self.assertIn('更早的独立事实', contents)
+        self.assertIn('无来源遗留', contents)
+        partial = next(row for row in kept if row['content'] == '部分重叠')
+        self.assertGreater(partial['recent_overlap_ratio'], 0)
+        self.assertLess(partial['recent_overlap_ratio'], 1)
+        src = Path(BACKEND, 'smart_recall.py').read_text(encoding='utf-8')
+        self.assertIn('drop_recent_covered(pinned, recent_exclude)', src)
+        self.assertIn('drop_recent_covered(pool, recent_exclude)', src)
+        self.assertIn('drop_recent_covered(loose_bonds, recent_exclude)', src)
+        self.assertIn('drop_recent_covered(tolds, recent_exclude)', src)
+
+    def test_provenance_collapse_keeps_diary_subjective(self):
+        from recall_candidates import RecallCandidate, collapse_candidates
+        src_ids = ('e100', 'e101')
+        fact = RecallCandidate(
+            candidate_id='fact:1', candidate_type='fact',
+            text='用户明天考试', source_event_ids=src_ids, priority=70)
+        bond = RecallCandidate(
+            candidate_id='bond:2', candidate_type='bond',
+            text='用户明天考试', source_event_ids=src_ids, priority=45)
+        diary = RecallCandidate(
+            candidate_id='diary:3', candidate_type='diary',
+            text='角色担心用户最近太累了', source_event_ids=src_ids, priority=20)
+        kept = collapse_candidates([fact, bond, diary])
+        exam = [row for row in kept if '明天考试' in row.text]
+        self.assertEqual(len(exam), 1)
+        self.assertEqual(exam[0].candidate_type, 'fact')
+        subjective = [row for row in kept if row.subjective]
+        self.assertEqual(len(subjective), 1)
+        self.assertIn('太累', subjective[0].text)
+
+    def test_legacy_missing_does_not_outrank_linked(self):
+        from recall_candidates import RecallCandidate, collapse_candidates
+        linked = RecallCandidate(
+            candidate_id='fact:l', candidate_type='fact',
+            text='她住在京都', source_event_ids=('e1',),
+            provenance_quality='linked', relevance_score=0.2)
+        legacy = RecallCandidate(
+            candidate_id='fact:g', candidate_type='fact',
+            text='她住在京都', source_event_ids=(),
+            provenance_quality='legacy_missing', relevance_score=0.9)
+        kept = collapse_candidates([legacy, linked])
+        # no shared source: both may remain; legacy must not be preferred
+        linked_kept = [row for row in kept if row.candidate_id == 'fact:l']
+        self.assertTrue(linked_kept)
+        if len(kept) == 1:
+            self.assertEqual(kept[0].provenance_quality, 'linked')
+
+    def test_dynamic_channels_are_budgeted(self):
+        items = []
+        kinds = [
+            ('hot_raw', 'hot'),
+            ('pinned', 'pin'),
+            ('rolling_summary', 'sum'),
+            ('recalled_memory', 'rec'),
+            ('relationship_state', 'rel'),
+            ('cognitive_state', 'cog'),
+            ('diary', 'dia'),
+            ('temporal', 'tmp'),
+            ('schedule', 'sch'),
+            ('character_lore', 'lor'),
+            ('anti_repeat', 'anti'),
+        ]
+        blob = '动态上下文块' * 40
+        for kind, prefix in kinds:
+            for index in range(12):
+                items.append(context_budget.ContextItem(
+                    item_id=f'{prefix}{index}',
+                    item_type=kind,
+                    text=blob,
+                    priority=50,
+                    source_event_ids=(f'{prefix}-src-{index}',),
+                    role='user' if kind == 'hot_raw' else '',
+                ))
+        cfg = context_budget.BudgetConfig(total_token_budget=900)
+        manager = context_budget.ContextBudgetManager(cfg)
+        kept = manager.allocate(items)
+        used = sum(item.token_cost for item in kept)
+        self.assertLessEqual(used, cfg.total_token_budget + max(
+            item.token_cost for item in kept))
+        self.assertLess(len(kept), len(items))
+        grouped = context_budget.group_by_channel(items)
+        for name in ('hot', 'pinned', 'summary', 'recall',
+                     'relationship', 'cognitive', 'diary', 'aux'):
+            self.assertIn(name, grouped)
+            self.assertTrue(grouped[name])
+        for item in kept:
+            self.assertIn(item.item_type, context_budget.ITEM_TYPE_CHANNEL)
 
 
 if __name__ == '__main__':

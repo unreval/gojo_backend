@@ -61,7 +61,8 @@ def _prompt_messages(user_id, character_id, short_memories, limit=24):
     return messages
 
 
-def _turn_context(user_id, character_id, user_message='', limit=24):
+def _turn_context(user_id, character_id, user_message='', limit=24,
+                  current_event_id=None):
     pack = None
     try:
         from context_layer import build_chat_context
@@ -70,6 +71,7 @@ def _turn_context(user_id, character_id, user_message='', limit=24):
             user_message=user_message or '',
             profile='image',
             include_recall=True,
+            current_event_id=current_event_id,
         )
         if getattr(pack, 'failed_closed', False):
             return pack, []
@@ -393,9 +395,10 @@ async def chat_image(data: dict):
         print(f'[{user_id}] image schedule check skipped:{e}')
 
     # ── free / immediate reply：一次 Vision 同时产出回复 + visual_summary ──
-    pack, messages = _turn_context(user_id, character_id, user_text)
-    messages = list(messages)
-    messages.append({'role': 'user', 'content': user_content})
+    pack, messages = _turn_context(
+        user_id, character_id, user_text, current_event_id=source_event_id)
+    from context_layer import append_current_user_turn
+    messages = append_current_user_turn(messages, user_content)
 
     save_user_short_memory_once(
         user_id, display_text, character_id, source_event_id=source_event_id,

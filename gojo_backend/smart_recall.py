@@ -142,7 +142,8 @@ def _cosine_sim(a, b):
 # ══════════════════════════════════════════════
 
 def two_level_recall(user_id, character_id, user_message,
-                     shared_id='shared', query_embedding=None):
+                     shared_id='shared', query_embedding=None,
+                     exclude_event_ids=None):
     """两级智能召回。返回结构化结果，供 prompt.py 组装。
 
     返回 dict:
@@ -178,7 +179,8 @@ def two_level_recall(user_id, character_id, user_message,
                       last_mentioned,
                       COALESCE(pinned, FALSE) as pinned,
                       COALESCE(lifecycle_kind, 'legacy') as lifecycle_kind,
-                      COALESCE(recall_weight, 1.0) as recall_weight
+                      COALESCE(recall_weight, 1.0) as recall_weight,
+                      source_event_refs
                FROM long_memory
                WHERE user_id = %s AND character_id IN (%s, %s)
                  AND COALESCE(recall_status, 'active') = 'active'
@@ -208,8 +210,22 @@ def two_level_recall(user_id, character_id, user_message,
         pool = []
         now_utc = datetime.utcnow()
 
+        recent_exclude = {
+            str(item).strip() for item in (exclude_event_ids or []) if str(item).strip()
+        }
+        from recall_candidates import (
+            attach_row_provenance, drop_recent_covered, load_memory_source_map,
+            parse_source_ids,
+        )
+
         for row in all_facts:
-            fid, content, ts, category, mention_count, last_mentioned, is_pinned, lifecycle_kind, recall_weight = row
+            if len(row) >= 10:
+                (fid, content, ts, category, mention_count, last_mentioned,
+                 is_pinned, lifecycle_kind, recall_weight, source_refs) = row[:10]
+            else:
+                (fid, content, ts, category, mention_count, last_mentioned,
+                 is_pinned, lifecycle_kind, recall_weight) = row[:9]
+                source_refs = []
             category = category or '其他'
 
             # 状态类过期检查
@@ -225,12 +241,25 @@ def two_level_recall(user_id, character_id, user_message,
                 'last_mentioned': last_mentioned,
                 'lifecycle_kind': lifecycle_kind,
                 'recall_weight': recall_weight,
+                'source_event_refs': source_refs,
+                'source_event_ids': parse_source_ids(source_refs),
             }
 
             if is_pinned:
                 pinned.append(entry)
             else:
                 pool.append(entry)
+
+        try:
+            fact_source_map = load_memory_source_map(
+                cur, 'long_memory', [e['id'] for e in pinned + pool if e.get('id') is not None])
+        except Exception as _src_e:
+            print(f'[recall] long_memory provenance lookup skipped:{_src_e}')
+            fact_source_map = {}
+        for entry in pinned + pool:
+            attach_row_provenance(entry, fact_source_map)
+        pinned = drop_recent_covered(pinned, recent_exclude)
+        pool = drop_recent_covered(pool, recent_exclude)
 
         # ── 3. 给普通记忆打分 ──
         for entry in pool:
@@ -277,9 +306,22 @@ def two_level_recall(user_id, character_id, user_message,
                         'id': bid, 'content': bcontent, 'timestamp': bts
                     })
 
+        try:
+            bond_ids = [
+                b['id'] for bonds in linked_bonds.values() for b in bonds
+            ]
+            bond_source_map = load_memory_source_map(cur, 'bond_memory', bond_ids)
+        except Exception as _bsrc:
+            print(f'[recall] bond provenance lookup skipped:{_bsrc}')
+            bond_source_map = {}
+        for bonds in linked_bonds.values():
+            for bond in bonds:
+                attach_row_provenance(bond, bond_source_map)
+
         # 给每条事实挂上它的 bonds
         for fact in selected_facts:
-            fact['bonds'] = linked_bonds.get(fact['id'], [])
+            fact['bonds'] = drop_recent_covered(
+                linked_bonds.get(fact['id'], []), recent_exclude)
             fact.setdefault('score', 0)
 
         # ── 5. 兜底池：没有 linked_fact_id 的独立 bond ──
@@ -308,6 +350,15 @@ def two_level_recall(user_id, character_id, user_message,
                 'score': kw_score
             })
 
+        try:
+            loose_map = load_memory_source_map(
+                cur, 'bond_memory', [b['id'] for b in loose_bonds])
+        except Exception:
+            loose_map = {}
+        for bond in loose_bonds:
+            attach_row_provenance(bond, loose_map)
+        loose_bonds = drop_recent_covered(loose_bonds, recent_exclude)
+
         # 有关键词命中的排前面，没命中的按时间排
         loose_bonds.sort(key=lambda x: (x['score'] > 0, x['score'], x['timestamp'] or datetime.min),
                          reverse=True)
@@ -321,6 +372,14 @@ def two_level_recall(user_id, character_id, user_message,
             (user_id, character_id, TOLD_TOP_K)
         )
         tolds = [{'id': r[0], 'content': r[1], 'timestamp': r[2]} for r in cur.fetchall()]
+        try:
+            told_map = load_memory_source_map(
+                cur, 'bond_memory', [t['id'] for t in tolds])
+        except Exception:
+            told_map = {}
+        for told in tolds:
+            attach_row_provenance(told, told_map)
+        tolds = drop_recent_covered(tolds, recent_exclude)
 
         cur.close()
         conn.close()
@@ -336,6 +395,9 @@ def two_level_recall(user_id, character_id, user_message,
             lifecycle_memories = []
             sticky_notes = []
 
+        lifecycle_memories = drop_recent_covered(lifecycle_memories, recent_exclude)
+        sticky_notes = drop_recent_covered(sticky_notes, recent_exclude)
+
         try:
             from memory_lifecycle import recall_diary_memories
             diary_memories = recall_diary_memories(
@@ -344,6 +406,8 @@ def two_level_recall(user_id, character_id, user_message,
         except Exception as diary_error:
             print(f'[recall] 日记召回跳过：{diary_error}')
             diary_memories = []
+
+        diary_memories = drop_recent_covered(diary_memories, recent_exclude)
 
         elapsed = (_time.time() - t0) * 1000
         total_injected = (
@@ -369,6 +433,10 @@ def two_level_recall(user_id, character_id, user_message,
             'lifecycle_memories': lifecycle_memories,
             'sticky_notes': sticky_notes,
             'diary_memories': diary_memories,
+            'exclude_event_ids': [
+                str(item).strip() for item in (exclude_event_ids or [])
+                if str(item).strip()
+            ],
         }
 
     except Exception as e:

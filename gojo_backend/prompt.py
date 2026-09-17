@@ -370,12 +370,21 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     else:
         core_prompt = char['core_prompt']
 
+    use_support = (
+        context_pack is not None
+        and getattr(context_pack, 'support_ready', False)
+        and not getattr(context_pack, 'failed_closed', False)
+    )
+
     # ── 2. 角色背景记忆 ──
-    recalls = retrieve_character_memory(character_id, user_message, limit=4)
     recall_text = ''
-    if recalls:
-        recall_lines = '\n'.join(f'- {r}' for r in recalls)
-        recall_text = f'''
+    if use_support:
+        recall_text = getattr(context_pack, 'lore_text', '') or ''
+    else:
+        recalls = retrieve_character_memory(character_id, user_message, limit=4)
+        if recalls:
+            recall_lines = '\n'.join(f'- {r}' for r in recalls)
+            recall_text = f'''
 
 【你此刻自然想起的、关于你自己的一些事】
 （这些都是你真实的经历、喜好和设定。聊到相关话题时可以像突然想起一样自然带出，但绝对不要生硬罗列、也不要刻意全部用到，不相关就不提。）
@@ -388,6 +397,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     bond_text = ''
     told_text = ''
     _recall_result = None   # 保存召回结果，后面算 bond_count / fact_count 要用
+    recent_event_ids = list(getattr(context_pack, 'recent_event_ids', None) or [])
 
     if context_pack is not None and getattr(context_pack, 'recall_ready', False):
         memory_text = getattr(context_pack, 'memory_text', '') or ''
@@ -397,6 +407,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     else:
         try:
             from smart_recall import two_level_recall, format_recall_for_prompt
+            from context_layer import exclude_recall_covered_by_recent
 
             # 如果 RAG 开着，算一下 query embedding
             _query_emb = None
@@ -405,8 +416,12 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 
             _recall_result = two_level_recall(
                 user_id, character_id, user_message,
-                shared_id='shared', query_embedding=_query_emb
+                shared_id='shared', query_embedding=_query_emb,
+                exclude_event_ids=recent_event_ids,
             )
+            if _recall_result is not None and recent_event_ids:
+                _recall_result = exclude_recall_covered_by_recent(
+                    _recall_result, recent_event_ids)
             if _recall_result is not None:
                 memory_text, bond_text, told_text = format_recall_for_prompt(_recall_result)
         except Exception as _e:
@@ -462,45 +477,49 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
             told_text = f'\n\n【她告诉过你的事——关于你自己或你的世界】\n{chr(10).join(told_lines)}'
 
     # ── ★ 3.6 相处史 + 关系规则 ──
-    #   规则本体(A~G 段)已经抽到 shared_relation_prompt.py,chat + diary 共享
     first_days = get_first_interaction_days(user_id, character_id)
-    # 从召回结果或旧变量算 bond_count / fact_count
     if _recall_result is not None:
         bond_count = len(_recall_result.get('loose_bonds', [])) + sum(len(f.get('bonds', [])) for f in _recall_result.get('facts', [])) + len(_recall_result.get('tolds', []))
         fact_count = len(_recall_result.get('facts', []))
     else:
         bond_count = len(bonds or []) + len(tolds or [])
         fact_count = len(long_memories) if 'long_memories' in dir() else 0
-    stage_text = build_relation_rules(first_days, bond_count, fact_count,
-                                      user_id=user_id, character_id=character_id)
-
-
-    # ── ★ 3.65 持久时间意识：上次真实互动距今多久 ──
-    temporal_text = ''
-    try:
-        from temporal_awareness import build_prompt_context
-        temporal_text = build_prompt_context(
-            user_id, character_id, snapshot=temporal_snapshot)
-    except Exception as _e:
-        print(f'[prompt] 时间意识注入跳过：{_e}')
-
-
-    # ── ★ 3.7 生理周期贴心情报（只在临近/经期时注入）──
-    try:
-        period_text = get_period_context(user_id)
-    except Exception:
-        period_text = ''
-
-    # ── 4. 避免重复 ──
-    recent_openings = get_recent_openings(user_id, n=5, character_id=character_id)
-    avoid_text = ''
-    if recent_openings:
-        avoid_text = f'\n\n【别每句都一个开头】\n最近5次回复的开头：{", ".join(recent_openings)}\n这次换个说法起头（口头禅偶尔用没问题，但别条条一个模子）。\n注意：这只是提醒你别开头雷同，不是让你少说话——该展开的时候照样展开。'
-
-    last_reply = get_last_assistant_reply(user_id, character_id)
-    no_repeat_text = ''
-    if last_reply:
-        no_repeat_text = f'''
+    if use_support:
+        from shared_relation_prompt import _EXPRESSION_ONLY_RULES
+        stage_text = (
+            (getattr(context_pack, 'relationship_prompt_text', '') or '')
+            + (getattr(context_pack, 'cognitive_prompt_text', '') or '')
+            + '\n' + (getattr(context_pack, 'expression_rules', '') or _EXPRESSION_ONLY_RULES)
+        )
+        temporal_text = getattr(context_pack, 'temporal_text', '') or ''
+        period_text = getattr(context_pack, 'period_text', '') or ''
+        avoid_text = getattr(context_pack, 'anti_repeat_text', '') or ''
+        no_repeat_text = ''
+        schedule_text = getattr(context_pack, 'schedule_text', '') or ''
+        diary_hint_block = getattr(context_pack, 'diary_hint_text', '') or ''
+        accounts_text = getattr(context_pack, 'accounts_text', '') or _accounts_block(user_id)
+    else:
+        stage_text = build_relation_rules(first_days, bond_count, fact_count,
+                                          user_id=user_id, character_id=character_id)
+        temporal_text = ''
+        try:
+            from temporal_awareness import build_prompt_context
+            temporal_text = build_prompt_context(
+                user_id, character_id, snapshot=temporal_snapshot)
+        except Exception as _e:
+            print(f'[prompt] 时间意识注入跳过：{_e}')
+        try:
+            period_text = get_period_context(user_id)
+        except Exception:
+            period_text = ''
+        recent_openings = get_recent_openings(user_id, n=5, character_id=character_id)
+        avoid_text = ''
+        if recent_openings:
+            avoid_text = f'\n\n【别每句都一个开头】\n最近5次回复的开头：{", ".join(recent_openings)}\n这次换个说法起头（口头禅偶尔用没问题，但别条条一个模子）。\n注意：这只是提醒你别开头雷同，不是让你少说话——该展开的时候照样展开。'
+        last_reply = get_last_assistant_reply(user_id, character_id)
+        no_repeat_text = ''
+        if last_reply:
+            no_repeat_text = f'''
 
 【别复读上一条，但要接得上】
 上一条你说的是：「{last_reply[:200]}」
@@ -508,19 +527,16 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 2. 但你们是在【连着聊天】，不是各说各的：她的话是接着你这句来的，你也可以自然承接刚才的语境
    （她赌气你就接住那个气、她撒娇你就接住那份撒娇），只要说的是新的内容。
 3. 第一句要回应她【这次】说的话，别答非所问。'''
-
-# ── ★ 3.8 你此刻在做什么（来自角色自己的日程表）──
-    #   不注入的话，问他"在干嘛"他只能瞎编，和日程页显示的对不上。
-    schedule_text = ''
-    try:
-        import db_schedule as _dbs
-        _act = _dbs.get_current_activity(character_id, user_id, datetime.now(CN_TZ))
-        if _act:
-            _where = f'（在{_act["location"]}）' if _act.get('location') else ''
-            _note = f'\n你当时的想法：{_act["note"]}' if _act.get('note') else ''
-            _busy = '' if _act['can_reply'] else (
-                '\n★ 这段时间你其实走不开，语气可以带点分心、简短一些。')
-            schedule_text = f'''
+        schedule_text = ''
+        try:
+            import db_schedule as _dbs
+            _act = _dbs.get_current_activity(character_id, user_id, datetime.now(CN_TZ))
+            if _act:
+                _where = f'（在{_act["location"]}）' if _act.get('location') else ''
+                _note = f'\n你当时的想法：{_act["note"]}' if _act.get('note') else ''
+                _busy = '' if _act['can_reply'] else (
+                    '\n★ 这段时间你其实走不开，语气可以带点分心、简短一些。')
+                schedule_text = f'''
 
 【你此刻正在做的事——这是你自己安排的，不是设定，是真的在做】
 {_act["start_time"]}~{_act["end_time"]} {_act["title"]}{_where}{_note}{_busy}
@@ -530,21 +546,16 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 - 不用每句话都提，但语气要和这件事对得上
   （在开会就带点不耐烦，在吃甜品就轻松些）。
 - 这是【你的】日程，不是她的。别搞混。'''
-    except Exception as _e:
-        print(f'[prompt] 日程注入跳过：{_e}')
-
-    # ── ★ 日记线索：他发现你留言 / 他偷看你日记后的反应 ──
-    #   放进动态尾（每次可能不同，且取出即标记已处理，不能进缓存段）
-    diary_hint = ''
-    try:
-        import diary_engine
-        diary_hint = diary_engine.build_diary_hint(character_id, user_id)
-    except Exception as _e:
+        except Exception as _e:
+            print(f'[prompt] 日程注入跳过：{_e}')
         diary_hint = ''
-    diary_hint_block = ('\n\n' + diary_hint) if diary_hint else ''
-
-    # ── ★ 账户列表（记账用,可能每次不同,放动态尾）──
-    accounts_text = _accounts_block(user_id)
+        try:
+            import diary_engine
+            diary_hint = diary_engine.build_diary_hint(character_id, user_id)
+        except Exception:
+            diary_hint = ''
+        diary_hint_block = ('\n\n' + diary_hint) if diary_hint else ''
+        accounts_text = _accounts_block(user_id)
 
     pinned_block = ''
     summary_block = ''

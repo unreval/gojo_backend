@@ -119,6 +119,7 @@ async def chat_voice_stream(data: dict):
             user_message=user_text,
             profile='voice',
             include_recall=True,
+            current_event_id=source_event_id,
         )
         if getattr(pack, 'failed_closed', False):
             failed_closed = True
@@ -130,12 +131,8 @@ async def chat_voice_stream(data: dict):
     if not messages and not failed_closed:
         short_memories = get_short_memory(user_id, 6, character_id)
         messages = [{'role': r, 'content': c} for r, c in short_memories]
-    if user_text and not (
-        messages
-        and messages[-1].get('role') == 'user'
-        and messages[-1].get('content') == user_text
-    ):
-        messages.append({'role': 'user', 'content': user_text})
+    from context_layer import append_current_user_turn
+    messages = append_current_user_turn(messages, user_text)
 
     system_blocks = build_system_blocks(
         user_id, character_id, user_text, extra_suffix=VOICE_STREAM_SCENE,

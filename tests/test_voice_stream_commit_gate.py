@@ -125,6 +125,15 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
                     told_text='',
                     recall_result=None,
                 )),
+                append_current_user_turn=lambda messages, content: (
+                    list(messages or [])
+                    if not content or (
+                        messages
+                        and messages[-1].get('role') == 'user'
+                        and messages[-1].get('content') == content
+                    )
+                    else list(messages or []) + [{'role': 'user', 'content': content}]
+                ),
             ),
             'memory_jobs': stub('memory_jobs', enqueue_private_extraction=self.jobs),
             'characters': stub(

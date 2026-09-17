@@ -313,6 +313,79 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
     return '\n'.join(lines)
 
 
+def iter_active_cognitive_items(user_id, character_id, *, conn=None):
+    """Active working-set only: questions, open hypotheses, sticky, recent errors.
+
+    Does not dump the full belief ledger into the chat prompt.
+    """
+    state = fetch_cognitive_reader_state(user_id, character_id, conn=conn)
+    items = []
+    for question in state.get('questions') or []:
+        if question.get('status') != 'active':
+            continue
+        text = _safe_text(question.get('question_text'), 420)
+        if text:
+            items.append({
+                'kind': 'cognitive_question',
+                'text': f'未解决问题：{text}',
+                'source_event_ids': (),
+                'subjective': True,
+            })
+    for hypothesis in state.get('hypotheses') or []:
+        if hypothesis.get('status') not in ('open', 'supported'):
+            continue
+        text = _safe_text(hypothesis.get('statement'), 420)
+        if text:
+            items.append({
+                'kind': 'cognitive_hypothesis',
+                'text': f'进行中的假设（主观，待验证）：{text}',
+                'source_event_ids': (),
+                'subjective': True,
+            })
+    for note in state.get('sticky_notes') or []:
+        text = _safe_text(note.get('content'), 300)
+        if text:
+            items.append({
+                'kind': 'cognitive_sticky',
+                'text': f'近期备忘：{text}',
+                'source_event_ids': parse_source_ids(note) if False else (),
+                'subjective': True,
+            })
+    try:
+        database = conn
+        owns = database is None
+        if database is None:
+            from db import get_conn
+            database = get_conn()
+        cur = database.cursor()
+        try:
+            cur.execute(
+                '''SELECT prediction_key, metadata, settled_at
+                   FROM cognitive_predictions
+                   WHERE user_id=%s AND character_id=%s AND status='violated'
+                   ORDER BY settled_at DESC NULLS LAST, id DESC
+                   LIMIT 2''',
+                (user_id, character_id),
+            )
+            for key, metadata, settled in cur.fetchall() or []:
+                meta = _json_value(metadata, {})
+                statement = _safe_text(meta.get('statement') or key, 280)
+                if statement:
+                    items.append({
+                        'kind': 'cognitive_prediction_error',
+                        'text': f'最近一次预测落空：{statement}',
+                        'source_event_ids': (),
+                        'subjective': True,
+                    })
+        finally:
+            cur.close()
+            if owns:
+                database.close()
+    except Exception:
+        pass
+    return items
+
+
 def list_sticky_notes(user_id, character_id, *, include_inactive=False,
                       limit=50, conn=None):
     database = conn
