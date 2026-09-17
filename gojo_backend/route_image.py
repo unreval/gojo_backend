@@ -56,17 +56,25 @@ def _safe_reply_to(data):
 
 
 def _prompt_messages(user_id, character_id, short_memories, limit=24):
-    """角色经历层走 short_memory；chat_log 只服务 UI，不替代记忆。"""
+    """Recent context for the model. Deleted Raw Events are excluded.
+
+    Source validity unknown != active: never fall back to unverified cache.
+    """
     try:
-        history = get_short_memory_for_prompt(
-            user_id, n=limit, character_id=character_id)
-        if history:
-            return history
+        return list(get_short_memory_for_prompt(
+            user_id, n=limit, character_id=character_id) or [])
     except Exception as e:
-        print(f'[{user_id}][{character_id}] image short_memory prompt fallback:{e}')
-    if short_memories and isinstance(short_memories[0], dict):
-        return list(short_memories)
-    return [{'role': r, 'content': c} for r, c in (short_memories or [])]
+        try:
+            from raw_events import SourceValidityError
+            if isinstance(e, SourceValidityError):
+                print(
+                    f'[{user_id}][{character_id}] image prompt history skipped: '
+                    f'source validity unknown:{e}')
+                return []
+        except Exception:
+            pass
+        print(f'[{user_id}][{character_id}] image short_memory prompt skipped:{e}')
+        return []
 
 
 def _build_visual_summary(result, display_text, is_video, image_count):
@@ -461,6 +469,7 @@ async def chat_image(data: dict):
 
     full_jp = ' '.join(m['jp'] for m in msgs)
 
+    # Frontend owns chat_log segments. short_memory is compatibility cache only.
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id,
@@ -473,6 +482,7 @@ async def chat_image(data: dict):
         enqueue_private_extraction(
             user_id, user_text, full_jp, character_id,
             temporal_context=temporal_snapshot,
+            source_event_id=source_event_id,
         )
 
     voice_id = char.get('voice_id')

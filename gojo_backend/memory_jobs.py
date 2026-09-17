@@ -38,6 +38,12 @@ def init_memory_jobs_table():
     cur.execute('''UPDATE memory_jobs
                    SET status = 'pending', updated_at = CURRENT_TIMESTAMP
                    WHERE status = 'running' ''')
+    cur.execute("ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS source_event_id TEXT")
+    cur.execute("ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS assistant_event_id TEXT")
+    cur.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_jobs_inflight
+                   ON memory_jobs (kind, user_id, (COALESCE(character_id, '')), source_event_id)
+                   WHERE status IN ('pending', 'running')
+                     AND source_event_id IS NOT NULL AND source_event_id <> '' ''')
     conn.commit()
     cur.close()
     conn.close()
@@ -45,18 +51,25 @@ def init_memory_jobs_table():
 
 
 def enqueue_private_extraction(user_id, user_text, assistant_text, character_id,
-                               temporal_context=None):
-    extra = None
+                               temporal_context=None, source_event_id=None,
+                               assistant_event_id=None):
+    extra = {}
     if temporal_context:
         try:
             from temporal_awareness import serialize_snapshot
-            extra = json.dumps(
-                {'temporal_context': serialize_snapshot(temporal_context)},
-                ensure_ascii=False,
-            )
+            extra['temporal_context'] = serialize_snapshot(temporal_context)
         except Exception:
-            extra = None
-    return _enqueue('private', user_id, character_id, user_text, assistant_text, extra)
+            pass
+    if source_event_id:
+        extra['source_event_id'] = str(source_event_id).strip()
+    if assistant_event_id:
+        extra['assistant_event_id'] = str(assistant_event_id).strip()
+    extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
+    return _enqueue(
+        'private', user_id, character_id, user_text, assistant_text, extra_json,
+        source_event_id=source_event_id,
+        assistant_event_id=assistant_event_id,
+    )
 
 
 def enqueue_group_extraction(user_id, user_text, round_transcript, members):
@@ -67,17 +80,67 @@ def enqueue_group_extraction(user_id, user_text, round_transcript, members):
     return _enqueue('group', user_id, None, user_text, None, extra)
 
 
-def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json):
+def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
+             source_event_id=None, assistant_event_id=None):
+    source_event_id = (str(source_event_id).strip() if source_event_id else '') or None
+    assistant_event_id = (str(assistant_event_id).strip() if assistant_event_id else '') or None
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        '''INSERT INTO memory_jobs
-           (kind, user_id, character_id, user_text, assistant_text, extra_json, status)
-           VALUES (%s, %s, %s, %s, %s, %s, 'pending') RETURNING id''',
-        (kind, user_id, character_id, user_text, assistant_text, extra_json)
-    )
-    job_id = cur.fetchone()[0]
-    conn.commit()
+    job_id = None
+    try:
+        if source_event_id:
+            cur.execute(
+                '''SELECT id FROM memory_jobs
+                   WHERE kind=%s AND user_id=%s
+                     AND COALESCE(character_id, '') = COALESCE(%s, '')
+                     AND source_event_id=%s
+                     AND status IN ('pending', 'running')
+                   ORDER BY id DESC LIMIT 1''',
+                (kind, user_id, character_id, source_event_id))
+            existing = cur.fetchone()
+            if existing:
+                conn.commit()
+                job_id = existing[0]
+            else:
+                cur.execute(
+                    '''INSERT INTO memory_jobs
+                       (kind, user_id, character_id, user_text, assistant_text, extra_json,
+                        status, source_event_id, assistant_event_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s) RETURNING id''',
+                    (kind, user_id, character_id, user_text, assistant_text, extra_json,
+                     source_event_id, assistant_event_id)
+                )
+                job_id = cur.fetchone()[0]
+                conn.commit()
+        else:
+            cur.execute(
+                '''INSERT INTO memory_jobs
+                   (kind, user_id, character_id, user_text, assistant_text, extra_json,
+                    status, source_event_id, assistant_event_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s) RETURNING id''',
+                (kind, user_id, character_id, user_text, assistant_text, extra_json,
+                 source_event_id, assistant_event_id)
+            )
+            job_id = cur.fetchone()[0]
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        pgcode = getattr(e, 'pgcode', None)
+        if source_event_id and pgcode == '23505':
+            cur.execute(
+                '''SELECT id FROM memory_jobs
+                   WHERE kind=%s AND user_id=%s
+                     AND COALESCE(character_id, '') = COALESCE(%s, '')
+                     AND source_event_id=%s
+                   ORDER BY id DESC LIMIT 1''',
+                (kind, user_id, character_id, source_event_id))
+            row = cur.fetchone()
+            conn.commit()
+            job_id = row[0] if row else None
+        else:
+            cur.close()
+            conn.close()
+            raise
     cur.close()
     conn.close()
     _WAKE.set()
@@ -105,7 +168,7 @@ def _claim_one():
     try:
         cur.execute(
             '''SELECT id, kind, user_id, character_id, user_text, assistant_text,
-                      extra_json, attempts
+                      extra_json, attempts, source_event_id, assistant_event_id
                FROM memory_jobs
                WHERE status = 'pending' AND attempts < %s
                ORDER BY id ASC
@@ -131,7 +194,7 @@ def _claim_one():
         conn.commit()
         cur.execute(
             '''SELECT id, kind, user_id, character_id, user_text, assistant_text,
-                      extra_json, attempts
+                      extra_json, attempts, source_event_id, assistant_event_id
                FROM memory_jobs WHERE id = %s''',
             (job_id,)
         )
@@ -148,11 +211,25 @@ def _claim_one():
 
 
 def _run_job(row):
-    job_id, kind, user_id, character_id, user_text, assistant_text, extra_json, attempts = row
+    job_id = row[0]
+    kind = row[1]
+    user_id = row[2]
+    character_id = row[3]
+    user_text = row[4]
+    assistant_text = row[5]
+    extra_json = row[6]
+    attempts = row[7]
+    source_event_id = row[8] if len(row) > 8 else None
+    assistant_event_id = row[9] if len(row) > 9 else None
     try:
         ok = False
+        extra = json.loads(extra_json or '{}') if extra_json else {}
+        source_event_id = source_event_id or extra.get('source_event_id')
+        assistant_event_id = assistant_event_id or extra.get('assistant_event_id')
+        source_ids = [
+            item for item in (source_event_id, assistant_event_id) if item
+        ]
         if kind == 'group':
-            extra = json.loads(extra_json or '{}')
             from user_memory import extract_and_save_group_memory
             ok = extract_and_save_group_memory(
                 user_id,
@@ -161,7 +238,6 @@ def _run_job(row):
                 extra.get('members') or [],
             )
         else:
-            extra = json.loads(extra_json or '{}') if extra_json else {}
             from user_memory import extract_and_save_memory
             ok = extract_and_save_memory(
                 user_id,
@@ -169,7 +245,8 @@ def _run_job(row):
                 assistant_text or '',
                 character_id,
                 temporal_context=extra.get('temporal_context'),
-                source_event_id=job_id,
+                source_event_id=source_event_id,
+                source_event_ids=source_ids or None,
             )
         if ok:
             _set_status(job_id, 'done')

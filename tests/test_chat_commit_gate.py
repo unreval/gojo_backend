@@ -204,6 +204,19 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertIn(f'generation_failed after {attempts} attempts; commit skipped',
                       ' '.join(str(c) for c in self.log.call_args_list))
 
+    def test_prompt_messages_do_not_fallback_on_source_validity_error(self):
+        import raw_events
+        secret = 'fallback也不能喂给模型'
+
+        def boom(*_args, **_kwargs):
+            raise raw_events.SourceValidityError('deleted-event db down')
+
+        with patch('user_memory.get_short_memory_for_prompt', create=True, side_effect=boom):
+            out = self.route._prompt_messages(
+                'u', 'gojo', [{'role': 'user', 'content': secret}])
+        self.assertEqual(out, [])
+        self.assertNotIn(secret, json.dumps(out, ensure_ascii=False))
+
     def test_valid_short_reply_commits_memory_rel_and_tts(self):
         response, body = self.send([chat_reply('そうだね', '是啊')])
         self.assertEqual(response.status_code, 200)
@@ -415,8 +428,8 @@ class FrontendCommitGateGuardTests(unittest.TestCase):
         self.assertIn('localOnly', self.src)
         self.assertIn('generationFailure', self.src)
         self.assertIn('isEphemeralUiMessage', self.src)
-        self.assertIn("if ((m as any).localOnly) return false;", self.src)
-        self.assertIn("if ((m as any).generationFailure) return false;", self.src)
+        self.assertIn('m?.localOnly', self.src)
+        self.assertIn('m?.generationFailure', self.src)
         self.assertIn('回复生成失败，点击重试', self.src)
         self.assertNotRegex(self.src, r"role:\s*'gojo'[^\n]*generationFailure")
 
@@ -443,6 +456,18 @@ class FrontendCommitGateGuardTests(unittest.TestCase):
         self.assertIn('taskState.reminded = true', self.src)
         self.assertIn('taskState.askedOverdue = true', self.src)
 
+    def test_proactive_reuses_backend_canonical_event_id(self):
+        self.assertNotIn('proactive_${Date.now()}_${i}', self.src)
+        self.assertNotIn('proactive_${p.id}', self.src)
+        self.assertIn('res.data?.event_id || res.data?.assistant_turn_id', self.src)
+        self.assertIn('p.event_id || p.assistant_turn_id', self.src)
+        self.assertIn('assistant_turn_id: turnId', self.src)
+        self.assertIn('segment_index: i', self.src)
+        self.assertIn('extra.assistant_turn_id = m.eventMeta.assistant_turn_id', self.src)
+        self.assertIn('client_request_id: clientRequestId', self.src)
+        self.assertIn('proactive:chat:task:', self.src)
+        self.assertIn('sendProactive(task.title, mode, task.id, dueDateStr)', self.src)
+
 
 class VoiceCallModalGateTests(unittest.TestCase):
     def setUp(self):
@@ -452,6 +477,158 @@ class VoiceCallModalGateTests(unittest.TestCase):
         self.assertIn('sendToGojo(text, userMsg.id)', self.src)
         self.assertIn('source_event_id: sourceEventId', self.src)
         self.assertIn("evt.type === 'generation_failed'", self.src)
+
+    def test_voice_proactive_sends_client_request_id(self):
+        self.assertIn('client_request_id: requestId', self.src)
+        self.assertIn('newVoiceRequestId', self.src)
+        self.assertNotIn('idle_${Date.now()}', self.src)
+        self.assertNotIn('greet_${Date.now()}_${i}', self.src)
+
+
+class VoiceProactiveIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.client = Mock()
+        router = Mock()
+        router.post.side_effect = lambda *_args, **_kwargs: lambda function: function
+        self.short_rows = []
+
+        def _save_user_once(user_id, content, character_id='gojo', source_event_id=None):
+            return True
+
+        def _save_short(user_id, role, content, character_id='gojo', source_event_id=None):
+            self.short_rows.append({
+                'role': role, 'content': content,
+                'character_id': character_id, 'source_event_id': source_event_id,
+            })
+
+        self.memory = stub(
+            'user_memory',
+            save_short_memory=_save_short,
+            save_user_short_memory_once=_save_user_once,
+            get_short_memory=Mock(return_value=[]),
+            update_chat_days=Mock(return_value=3),
+            SHORT_MEMORY_MAX=20,
+        )
+        modules = {
+            'anthropic': stub('anthropic', Anthropic=Mock(return_value=self.client)),
+            'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
+            'fastapi.responses': stub(
+                'fastapi.responses',
+                JSONResponse=lambda content, status_code=200: types.SimpleNamespace(
+                    body=json.dumps(content, ensure_ascii=False).encode(),
+                    status_code=status_code,
+                ),
+            ),
+            'config': stub(
+                'config',
+                ANTHROPIC_KEY='',
+                EMOTIONS=['平静', '调皮', '疑惑'],
+                TTS_PROVIDER='fish',
+                DEFAULT_CHARACTER_ID='gojo',
+                MODEL_MAIN='claude-test',
+                MODEL_JP_AUX='claude-haiku-test',
+            ),
+            'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
+            'ai_client': stub('ai_client', extract_text=lambda response, sep='': ''),
+            'tts': stub('tts', tts_to_b64=Mock(return_value='audio'), transcribe_audio_b64=Mock()),
+            'prompt': stub(
+                'prompt',
+                build_system_blocks=Mock(return_value=[{'type': 'text', 'text': '角色设定'}]),
+                log_cache_usage=Mock(),
+            ),
+            'user_memory': self.memory,
+            'memory_jobs': stub('memory_jobs', enqueue_private_extraction=Mock()),
+            'temporal_awareness': stub(
+                'temporal_awareness',
+                get_temporal_snapshot=Mock(return_value={'now_utc': None}),
+                find_reply_calendar_conflict=Mock(return_value=None),
+                record_turn=Mock(),
+                record_user_message=Mock(),
+                record_assistant_message=Mock(),
+            ),
+            'characters': stub(
+                'characters',
+                get_character=Mock(return_value={'voice_id': 'v1', 'core_prompt': 'core'}),
+            ),
+            'tasks': stub(
+                'tasks',
+                find_duplicate_task=Mock(return_value=None),
+                find_and_delete_tasks_by_keyword=Mock(return_value=[]),
+                delete_latest_task=Mock(return_value=[]),
+            ),
+            'task_dedup': stub('task_dedup', find_similar_task=Mock(return_value=None)),
+            'relationship_state': stub(
+                'relationship_state', save_offline_character_state=Mock()),
+            'diary_engine': stub('diary_engine', maybe_write_diary_on_event=Mock()),
+            'promise_detector': stub('promise_detector', detect_and_save=Mock()),
+            'grumble_engine': stub('grumble_engine', maybe_write_grumble=Mock()),
+            'db_schedule': stub(
+                'db_schedule',
+                get_current_activity=Mock(return_value=None),
+                get_next_free_time=Mock(return_value=None),
+            ),
+            'db_promise': stub('db_promise', add_promise=Mock()),
+        }
+        module_patch = patch.dict(sys.modules, modules)
+        module_patch.start()
+        self.addCleanup(module_patch.stop)
+        self.route = load_source('route_chat', modules)
+        log_patch = patch('builtins.print')
+        log_patch.start()
+        self.addCleanup(log_patch.stop)
+
+    def test_resolve_voice_proactive_event_id_is_stable(self):
+        src = Path(ROUTE_CHAT).read_text(encoding='utf-8')
+        self.assertNotIn('%Y%m%d%H%M', src)
+        a = self.route.resolve_voice_proactive_event_id(
+            {'client_request_id': 'req-a', 'mode': 'idle'})
+        b = self.route.resolve_voice_proactive_event_id(
+            {'client_request_id': 'req-b', 'mode': 'idle'})
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, 'req-a')
+        retry = self.route.resolve_voice_proactive_event_id(
+            {'client_request_id': 'req-a', 'mode': 'idle'})
+        self.assertEqual(retry, 'req-a')
+        reused = self.route.resolve_voice_proactive_event_id(
+            {'event_id': 'voice_proactive:already'})
+        self.assertEqual(reused, 'voice_proactive:already')
+        generated = self.route.resolve_voice_proactive_event_id({'mode': 'idle'})
+        generated_again = self.route.resolve_voice_proactive_event_id({'mode': 'idle'})
+        self.assertTrue(generated.startswith('voice_proactive:'))
+        self.assertNotEqual(generated, generated_again)
+
+    def test_resolve_chat_proactive_event_id_is_stable_operation_identity(self):
+        src = Path(ROUTE_CHAT).read_text(encoding='utf-8')
+        self.assertNotIn("proactive:chat:{digest}:{day}", src)
+        self.assertNotIn('hashlib.sha1', src)
+        self.assertNotRegex(src, r"proactive:chat:\{digest\}")
+        same_content = {'task_title': '喝水', 'mode': 'remind'}
+        first = self.route.resolve_chat_proactive_event_id({
+            **same_content,
+            'client_request_id': 'proactive:chat:task:1:2026-09-17:remind',
+        })
+        retry = self.route.resolve_chat_proactive_event_id({
+            **same_content,
+            'client_request_id': 'proactive:chat:task:1:2026-09-17:remind',
+        })
+        other = self.route.resolve_chat_proactive_event_id({
+            **same_content,
+            'client_request_id': 'proactive:chat:task:2:2026-09-17:remind',
+        })
+        self.assertEqual(first, retry)
+        self.assertNotEqual(first, other)
+        occ = self.route.resolve_chat_proactive_event_id({
+            **same_content,
+            'task_id': 't9',
+            'due_date': '2026-01-02',
+            'mode': 'overdue',
+        })
+        self.assertEqual(occ, 'proactive:chat:task:t9:2026-01-02:overdue')
+        generated = self.route.resolve_chat_proactive_event_id(same_content)
+        generated_again = self.route.resolve_chat_proactive_event_id(same_content)
+        self.assertTrue(generated.startswith('proactive:chat:'))
+        self.assertNotEqual(generated, generated_again)
+        self.assertNotRegex(generated, r':\d{8}$')
 
 
 if __name__ == '__main__':

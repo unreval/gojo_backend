@@ -12,10 +12,162 @@
   4. boundary_hits         —— 每个雷区被触碰的历史
   5. repair_log            —— 每次修复尝试及结果
   6. interaction_stats     —— 消息级别的轻量统计（Tone/Reciprocity/Pursue-Withdraw 用）
+  7. rel_event_applications —— 关系 apply 的 exactly-once 身份
+     (event_id, processor_type, processor_version)
 
 命名前缀：所有表都以 `rel_` 开头，方便和现有 bond_memory / short_memory 等区分。
 """
+import json
+import threading
+from contextlib import contextmanager
+
 from db import get_conn
+
+_tls = threading.local()
+
+
+class _TxnConn:
+    """psycopg2 connection proxy.
+
+    Inside relationship_txn(), commit/close/rollback are no-ops so apply_* /
+    provenance / boundary / repair writers join the same uncommitted unit.
+    Outside a txn this is a normal connection.
+    """
+
+    def __init__(self, conn, owned):
+        object.__setattr__(self, '_conn', conn)
+        object.__setattr__(self, '_owned', owned)
+
+    def commit(self):
+        if self._owned:
+            self._conn.commit()
+
+    def rollback(self):
+        if self._owned:
+            self._conn.rollback()
+
+    def close(self):
+        if self._owned:
+            self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def work_get_conn():
+    """Use this instead of db.get_conn() in relationship ledger writers."""
+    shared = getattr(_tls, 'conn', None)
+    if shared is not None:
+        return _TxnConn(shared, owned=False)
+    return _TxnConn(get_conn(), owned=True)
+
+
+@contextmanager
+def relationship_txn():
+    """One DB transaction for relationship mutation + application row + finish."""
+    if getattr(_tls, 'conn', None) is not None:
+        yield _tls.conn
+        return
+    conn = get_conn()
+    _tls.conn = conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        _tls.conn = None
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def try_begin_application(event_id, processor_type, processor_version,
+                          user_id=None, character_id=None, payload=None):
+    """Insert unique application identity. True = this caller may mutate the ledger."""
+    event_id = str(event_id or '').strip()
+    processor_type = str(processor_type or '').strip()
+    processor_version = str(processor_version or '').strip()
+    if not event_id or not processor_type or not processor_version:
+        return True
+    conn, owned = (getattr(_tls, 'conn', None), False)
+    if conn is None:
+        conn = get_conn()
+        owned = True
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''INSERT INTO rel_event_applications
+                   (event_id, processor_type, processor_version,
+                    user_id, character_id, result_json)
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+               ON CONFLICT (event_id, processor_type, processor_version)
+               DO NOTHING
+               RETURNING event_id''',
+            (event_id, processor_type, processor_version,
+             user_id, character_id,
+             json.dumps(payload if isinstance(payload, dict) else {},
+                        ensure_ascii=False)),
+        )
+        won = bool(cur.fetchone())
+        if owned:
+            conn.commit()
+        return won
+    except Exception:
+        if owned:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        cur.close()
+        if owned:
+            conn.close()
+
+
+def get_application_payload(event_id, processor_type, processor_version):
+    event_id = str(event_id or '').strip()
+    if not event_id:
+        return None
+    conn, owned = (getattr(_tls, 'conn', None), False)
+    if conn is None:
+        conn = get_conn()
+        owned = True
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT result_json FROM rel_event_applications
+               WHERE event_id=%s AND processor_type=%s AND processor_version=%s''',
+            (event_id, processor_type, processor_version))
+        row = cur.fetchone()
+        if owned:
+            conn.commit()
+        if not row or row[0] is None:
+            return None
+        payload = row[0]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                return None
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        if owned:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return None
+    finally:
+        cur.close()
+        if owned:
+            conn.close()
 
 
 def init_relationship_tables():
@@ -127,6 +279,19 @@ def init_relationship_tables():
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_rel_interaction_user_char
                    ON rel_interaction_stats (user_id, character_id, timestamp DESC)''')
 
+    # ── 7. Exactly-once relationship application identity ─────
+    # Ledger mutation is keyed by (event_id, processor_type, processor_version).
+    # Retry of the same Raw Event must not apply another delta.
+    cur.execute('''CREATE TABLE IF NOT EXISTS rel_event_applications (
+        event_id TEXT NOT NULL,
+        processor_type TEXT NOT NULL,
+        processor_version TEXT NOT NULL,
+        user_id TEXT,
+        character_id TEXT,
+        result_json JSONB DEFAULT '{}'::jsonb,
+        applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (event_id, processor_type, processor_version))''')
+
     cur.execute('''CREATE TABLE IF NOT EXISTS rel_offline_character_state (
         user_id TEXT NOT NULL,
         character_id TEXT NOT NULL,
@@ -140,14 +305,14 @@ def init_relationship_tables():
     print('[init] 感情判断系统 v4 数据表已就绪：'
           'rel_state / rel_provenance_log / rel_declared_stance / '
           'rel_boundary_hits / rel_repair_log / rel_interaction_stats / '
-          'rel_offline_character_state')
+          'rel_event_applications / rel_offline_character_state')
 
 
 def ensure_state_row(user_id: str, character_id: str, banter_baseline: str = 'reserved'):
     """确保 (user_id, character_id) 在 rel_state 里有一行；没有就用默认值创建。
     调用方（engine / reader）在任何读写前先调这个函数，避免"读到空行"分歧。
     """
-    conn = get_conn()
+    conn = work_get_conn()
     cur = conn.cursor()
     cur.execute('''INSERT INTO rel_state (user_id, character_id, banter_baseline)
                    VALUES (%s, %s, %s)

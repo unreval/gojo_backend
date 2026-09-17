@@ -38,7 +38,13 @@ def init_proactive_table():
     print('[proactive] 主动消息表已就绪')
 
 
-def add_proactive_msg(character_id, user_id, kind, jp, zh='', emotion='平静', audio_b64='', created_at=None):
+def canonical_event_id(kind, msg_id):
+    """Stable Raw Event id for a user-visible proactive chat bubble."""
+    return f'proactive:{kind}:{msg_id}'
+
+
+def add_proactive_msg(character_id, user_id, kind, jp, zh='', emotion='平静',
+                      audio_b64='', created_at=None):
     conn = get_conn()
     cur = conn.cursor()
     if created_at is not None:
@@ -86,6 +92,9 @@ def get_pending(user_id, character_id=None):
     return [{
         'id': r[0], 'character_id': r[1], 'kind': r[2], 'jp': r[3], 'zh': r[4],
         'emotion': r[5], 'audio_b64': r[6], 'created_at': str(r[7]) if r[7] else None,
+        'event_id': canonical_event_id(r[2], r[0]),
+        'assistant_turn_id': canonical_event_id(r[2], r[0]),
+        'segment_index': 0,
     } for r in rows]
 
 

@@ -70,18 +70,28 @@ class ChatlogStore:
         return 1
 
     def insert_row(self, user_id, chat_id, client_msg_id, role, text,
-                   subtitle, emotion, kind, extra, has_audio, created_at=None):
+                   subtitle, emotion, kind, extra, has_audio, created_at=None,
+                   event_id=None):
         if client_msg_id:
             for row in self.rows:
                 if (row['user_id'] == user_id
                         and row['chat_id'] == chat_id
                         and row['client_msg_id'] == client_msg_id):
                     return 0
+        event_id = event_id or client_msg_id
+        if event_id:
+            for row in self.rows:
+                if (row['user_id'] == user_id
+                        and row['chat_id'] == chat_id
+                        and row.get('event_id') == event_id
+                        and row.get('status', 'active') == 'active'):
+                    return 0
         row = {
             'id': self.next_id,
             'user_id': user_id,
             'chat_id': chat_id,
             'client_msg_id': client_msg_id,
+            'event_id': event_id,
             'role': role,
             'text': text,
             'subtitle': subtitle,
@@ -90,6 +100,9 @@ class ChatlogStore:
             'extra': extra,
             'has_audio': bool(has_audio),
             'created_at': created_at or datetime.now(timezone.utc),
+            'status': 'active',
+            'deleted_at': None,
+            'reply_to_event_id': '',
         }
         self.next_id += 1
         self.rows.append(row)
@@ -116,7 +129,8 @@ class FakeCursor:
         self._many = []
 
         if compact.startswith('CREATE TABLE') or compact.startswith('CREATE INDEX') \
-                or compact.startswith('CREATE UNIQUE INDEX'):
+                or compact.startswith('CREATE UNIQUE INDEX') \
+                or compact.startswith('ALTER TABLE'):
             return
         if 'information_schema.columns' in compact:
             self._one = ('timestamp with time zone',)
@@ -127,6 +141,15 @@ class FakeCursor:
                 self._one = (1,)
             return
         if compact.startswith('INSERT INTO chat_log_tombstone'):
+            if 'SELECT' in compact:
+                user_id, chat_id = params
+                for row in self.store.rows:
+                    cid = row.get('client_msg_id') or ''
+                    if (row['user_id'] == user_id
+                            and row['chat_id'] == chat_id
+                            and cid and not cid.startswith('srv_')):
+                        self.store.insert_tombstone(user_id, chat_id, cid)
+                return
             user_id, chat_id, client_msg_id = params
             self.rowcount = self.store.insert_tombstone(
                 user_id, chat_id, client_msg_id)
@@ -134,9 +157,15 @@ class FakeCursor:
         if compact.startswith('INSERT INTO chat_log'):
             user_id, chat_id, client_msg_id, role, text, subtitle, emotion, kind, extra, has_audio = params[:10]
             created_at = datetime.now(timezone.utc)
+            event_id = client_msg_id
+            if 'created_at' in compact.lower() and len(params) >= 12:
+                created_at = params[10] or created_at
+                event_id = params[11] or client_msg_id
+            elif len(params) >= 11:
+                event_id = params[10] or client_msg_id
             self.rowcount = self.store.insert_row(
                 user_id, chat_id, client_msg_id, role, text, subtitle,
-                emotion, kind, extra, has_audio, created_at)
+                emotion, kind, extra, has_audio, created_at, event_id)
             return
         if compact.startswith('SELECT client_msg_id FROM chat_log'):
             server_id, user_id, chat_id = params
@@ -155,12 +184,14 @@ class FakeCursor:
                     if row['user_id'] == user_id
                     and row['chat_id'] == chat_id
                     and row['id'] < before_id
+                    and row.get('status', 'active') == 'active'
                 ]
             else:
                 user_id, chat_id, limit = params
                 matched = [
                     row for row in self.store.rows
                     if row['user_id'] == user_id and row['chat_id'] == chat_id
+                    and row.get('status', 'active') == 'active'
                 ]
             matched.sort(key=lambda r: r['id'], reverse=True)
             matched = matched[:limit]
@@ -176,6 +207,7 @@ class FakeCursor:
             matched = [
                 row for row in self.store.rows
                 if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('status', 'active') == 'active'
             ]
             matched.sort(key=lambda r: r['id'], reverse=True)
             matched = matched[:limit]
@@ -215,11 +247,42 @@ class FakeCursor:
             ]
             self.rowcount = before - len(self.store.rows)
             return
+        if compact.startswith('UPDATE chat_log') and "status='deleted'" in compact.replace(' ', ''):
+            n = 0
+            if 'WHERE id=%s' in compact:
+                server_id, user_id, chat_id = params
+                for row in self.store.rows:
+                    if (row['id'] == server_id
+                            and row['user_id'] == user_id
+                            and row['chat_id'] == chat_id
+                            and row.get('status', 'active') == 'active'):
+                        row['status'] = 'deleted'
+                        n += 1
+            elif 'AND client_msg_id=%s' in compact:
+                user_id, chat_id, client_msg_id = params
+                for row in self.store.rows:
+                    if (row['user_id'] == user_id
+                            and row['chat_id'] == chat_id
+                            and row['client_msg_id'] == client_msg_id
+                            and row.get('status', 'active') == 'active'):
+                        row['status'] = 'deleted'
+                        n += 1
+            else:
+                user_id, chat_id = params
+                for row in self.store.rows:
+                    if (row['user_id'] == user_id
+                            and row['chat_id'] == chat_id
+                            and row.get('status', 'active') == 'active'):
+                        row['status'] = 'deleted'
+                        n += 1
+            self.rowcount = n
+            return
         if compact.startswith('SELECT COUNT(*) FROM chat_log'):
             user_id, chat_id = params
             n = sum(
                 1 for row in self.store.rows
                 if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('status', 'active') == 'active'
             )
             self._one = (n,)
             return

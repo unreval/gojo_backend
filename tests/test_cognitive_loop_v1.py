@@ -266,7 +266,8 @@ class TriggerIngressTests(unittest.TestCase):
 
     def test_duplicate_source_event_skips_all_side_effects(self):
         connection = TransactionConnection()
-        with patch.object(cognitive_events, 'record_source_event', return_value=None), \
+        with patch('raw_events.sources_are_active', return_value=True), \
+             patch.object(cognitive_events, 'record_source_event', return_value=None), \
              patch.object(cognitive_events, '_embed_v4_evidence') as embed, \
              patch.object(cognitive_events, 'settle_pending_predictions') as settle, \
              patch.object(cognitive_events, 'reactivate_dormant_questions') as reactivate, \
@@ -284,7 +285,8 @@ class TriggerIngressTests(unittest.TestCase):
     def test_fast_maintenance_completes_before_slow_limit_result(self):
         connection = TransactionConnection()
         call_order = []
-        with patch.object(cognitive_events, 'record_source_event', return_value=7), \
+        with patch('raw_events.sources_are_active', return_value=True), \
+             patch.object(cognitive_events, 'record_source_event', return_value=7), \
              patch.object(cognitive_events, 'high_weight_trigger_specs', return_value=[]), \
              patch.object(cognitive_events, 'settle_pending_predictions',
                           side_effect=lambda *a, **k: call_order.append('settle') or []), \
@@ -304,7 +306,8 @@ class TriggerIngressTests(unittest.TestCase):
     def test_cooldown_also_runs_after_fast_maintenance(self):
         connection = TransactionConnection()
         call_order = []
-        with patch.object(cognitive_events, 'record_source_event', return_value=8), \
+        with patch('raw_events.sources_are_active', return_value=True), \
+             patch.object(cognitive_events, 'record_source_event', return_value=8), \
              patch.object(cognitive_events, 'high_weight_trigger_specs', return_value=[]), \
              patch.object(cognitive_events, 'settle_pending_predictions',
                           side_effect=lambda *a, **k: call_order.append('settle') or []), \

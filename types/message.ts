@@ -16,6 +16,7 @@ export interface Message {
   replyToSourceEventId?: string;
   visualSummary?: string;
   eventMeta?: Record<string, any>;
+  localOnly?: boolean;
   senderId?: string;
   senderName?: string;
   readAt?: number;

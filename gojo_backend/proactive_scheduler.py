@@ -11,7 +11,7 @@ import anthropic
 
 from characters import get_character
 from ai_client import extract_text
-from user_memory import get_bond_memories, save_short_memory, get_short_memory
+from user_memory import get_bond_memories, get_short_memory, commit_visible_assistant_message
 from character_relations import get_relations_text
 from temporal_awareness import (
     build_prompt_context, get_temporal_snapshot, record_assistant_message,
@@ -155,7 +155,19 @@ def generate_from_promise(promise, now):
                 print(f'[promise] phone_check resolve skipped: {e}')
 
         try:
-            save_short_memory(user_id, 'assistant', jp, character_id)
+            event_id = proactive_msg.canonical_event_id('promise', mid)
+            commit_visible_assistant_message(
+                user_id, jp, character_id,
+                event_id=event_id,
+                kind='proactive',
+                subtitle=zh,
+                emotion=emotion,
+                metadata={
+                    'proactive_kind': 'promise',
+                    'proactive_id': mid,
+                    'promise_id': promise['id'],
+                },
+            )
             record_assistant_message(
                 user_id, character_id, source=f'promise:{kind}',
                 prior_snapshot=temporal_snapshot,

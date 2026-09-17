@@ -137,7 +137,7 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
     from config import ANTHROPIC_KEY
     from ai_client import extract_text
     from characters import get_character
-    from user_memory import get_short_memory, get_bond_memories, save_short_memory, save_bond_memory
+    from user_memory import get_short_memory, get_bond_memories, save_bond_memory
     from character_relations import get_relations_text
     import proactive_msg
     import db_promise
@@ -254,7 +254,22 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
 
         # 塞短记忆
         try:
-            save_short_memory(TARGET_USER, 'assistant', jp, character_id)
+            from user_memory import commit_visible_assistant_message
+            import proactive_msg as _pm
+            event_id = _pm.canonical_event_id('diary_react', mid)
+            commit_visible_assistant_message(
+                TARGET_USER, jp, character_id,
+                event_id=event_id,
+                kind='proactive',
+                subtitle=zh,
+                emotion=emotion,
+                metadata={
+                    'proactive_kind': 'diary_react',
+                    'proactive_id': mid,
+                    'comment_id': comment_id,
+                    'revisit_count': revisit_count,
+                },
+            )
         except Exception:
             pass
 

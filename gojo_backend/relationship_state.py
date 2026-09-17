@@ -12,8 +12,7 @@
 import json
 from typing import Dict, List
 
-from db import get_conn
-from relationship_db import ensure_state_row
+from relationship_db import ensure_state_row, work_get_conn as get_conn
 from relationship_config import (
     STATE_MIN, STATE_MAX,
     ATTACHMENT_MIN, ATTACHMENT_MAX,

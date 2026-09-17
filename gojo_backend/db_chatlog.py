@@ -8,8 +8,8 @@
   short_memory 那张表是给 LLM 用的(24 小时 / 40 条上限),不是完整历史。
 
 和 short_memory 的分工:
-  short_memory —— 给 LLM 看的上下文,会过期、有上限、只存文本
-  chat_log     —— 给人看的完整记录,永久保存、带气泡渲染需要的全部字段
+  short_memory —— LLM 近窗 compatibility cache，会过期、有上限，不是事实源
+  chat_log     —— Canonical Raw Event / 完整记录，永久保存、带气泡渲染字段
 
 设计:
   · client_msg_id 做幂等键 —— 前端重发/重试不会写重复
@@ -53,6 +53,20 @@ def init_chatlog_table():
         deleted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, chat_id, client_msg_id)
     )''')
+    # L0 ledger columns. Idempotent; chat_log remains the only source of truth.
+    for ddl in (
+        "ALTER TABLE chat_log ADD COLUMN IF NOT EXISTS event_id TEXT",
+        "ALTER TABLE chat_log ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'",
+        "ALTER TABLE chat_log ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+        "ALTER TABLE chat_log ADD COLUMN IF NOT EXISTS reply_to_event_id TEXT",
+    ):
+        cur.execute(ddl)
+    cur.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_chatlog_event_id
+                   ON chat_log (user_id, chat_id, event_id)
+                   WHERE event_id IS NOT NULL AND event_id <> '' ''')
+    cur.execute('''CREATE INDEX IF NOT EXISTS idx_chatlog_active_time
+                   ON chat_log (user_id, chat_id, created_at DESC)
+                   WHERE COALESCE(status, 'active') = 'active' ''')
     # ★ 时区修复(幂等,已经是 timestamptz 就跳过)
     #   原来 timestamp without time zone 存不住时区:
     #   前端 toISOString() 传来的是 UTC,Z 被丢掉;读出来没有偏移量,
@@ -104,12 +118,29 @@ def append_messages(user_id, chat_id, msgs):
             # ★ 前端传了真实时间就用它,没传才用当前时间。
             #   补传历史消息时这个很关键,不然全挤在同一时刻。
             ts = (m.get('ts') or '').strip()
+            event_id = (m.get('event_id') or client_msg_id or '')[:120]
+            reply_to_event_id = (m.get('reply_to_event_id') or '')[:120]
+            extra = (m.get('extra') or '')[:6000]
+            try:
+                import raw_events
+                parsed = {}
+                if extra:
+                    loaded = json.loads(extra)
+                    if isinstance(loaded, dict):
+                        parsed = loaded
+                stamped = raw_events.infer_assistant_identity(
+                    role, event_id or client_msg_id, parsed)
+                if stamped:
+                    extra = json.dumps(stamped, ensure_ascii=False)[:6000]
+            except Exception:
+                pass
             if ts:
                 cur.execute(
                     '''INSERT INTO chat_log
                          (user_id, chat_id, client_msg_id, role, text, subtitle,
-                          emotion, kind, extra, has_audio, created_at)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                          emotion, kind, extra, has_audio, created_at,
+                          event_id, status, reply_to_event_id)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
                        ON CONFLICT DO NOTHING''',
                     (user_id, chat_id,
                      client_msg_id, role,
@@ -117,15 +148,16 @@ def append_messages(user_id, chat_id, msgs):
                      (m.get('subtitle') or '')[:4000],
                      (m.get('emotion') or '')[:20],
                      (m.get('kind') or 'text')[:20],
-                     (m.get('extra') or '')[:6000],
-                     bool(m.get('has_audio')), ts)
+                     extra,
+                     bool(m.get('has_audio')), ts, event_id, reply_to_event_id)
                 )
             else:
                 cur.execute(
                     '''INSERT INTO chat_log
                          (user_id, chat_id, client_msg_id, role, text, subtitle,
-                          emotion, kind, extra, has_audio)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                          emotion, kind, extra, has_audio,
+                          event_id, status, reply_to_event_id)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
                        ON CONFLICT DO NOTHING''',
                     (user_id, chat_id,
                      client_msg_id, role,
@@ -133,8 +165,8 @@ def append_messages(user_id, chat_id, msgs):
                      (m.get('subtitle') or '')[:4000],
                      (m.get('emotion') or '')[:20],
                      (m.get('kind') or 'text')[:20],
-                     (m.get('extra') or '')[:6000],
-                     bool(m.get('has_audio')))
+                     extra,
+                     bool(m.get('has_audio')), event_id, reply_to_event_id)
                 )
             written += cur.rowcount
         conn.commit()
@@ -155,6 +187,7 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
                           kind, extra, has_audio, created_at
                    FROM chat_log
                    WHERE user_id=%s AND chat_id=%s AND id < %s
+                     AND COALESCE(status, 'active') = 'active'
                    ORDER BY id DESC LIMIT %s''',
                 (user_id, chat_id, before_id, limit + 1))
         else:
@@ -163,6 +196,7 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
                           kind, extra, has_audio, created_at
                    FROM chat_log
                    WHERE user_id=%s AND chat_id=%s
+                     AND COALESCE(status, 'active') = 'active'
                    ORDER BY id DESC LIMIT %s''',
                 (user_id, chat_id, limit + 1))
         rows = cur.fetchall()
@@ -236,6 +270,7 @@ def get_prompt_history(user_id, chat_id, limit=24):
             '''SELECT role, text, subtitle, kind, extra
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s
+                 AND COALESCE(status, 'active') = 'active'
                ORDER BY id DESC LIMIT %s''',
             (user_id, chat_id, limit))
         rows = cur.fetchall()
@@ -264,11 +299,11 @@ def _tombstone_client_msg_id(client_msg_id):
 
 
 def delete_message(user_id, chat_id, client_msg_id='', server_id=None):
-    """删除单条聊天记录。
+    """软删除一条 canonical Raw Event。
 
-    只动 chat_log / chat_log_tombstone,不删 short/long/bond/character
-    memory,也不改 relationship ledger / provenance / cognitive evidence。
-    先写墓碑再 DELETE,避免 append 晚到把气泡复活。
+    只动 chat_log / chat_log_tombstone：status=deleted + 墓碑。
+    不物理删除行，也不在这里改 relationship scoring / cognitive trigger。
+    派生记忆失效由 raw_events.invalidate_memories_for_deleted_event 处理。
     """
     client_msg_id = (client_msg_id or '')[:120]
     conn = get_conn()
@@ -295,17 +330,21 @@ def delete_message(user_id, chat_id, client_msg_id='', server_id=None):
                 (user_id, chat_id, tombstone_id))
         if server_id is not None:
             cur.execute(
-                '''DELETE FROM chat_log
+                '''UPDATE chat_log
+                   SET status='deleted', deleted_at=CURRENT_TIMESTAMP
                    WHERE id=%s
                      AND user_id=%s
-                     AND chat_id=%s''',
+                     AND chat_id=%s
+                     AND COALESCE(status, 'active') = 'active' ''',
                 (server_id, user_id, chat_id))
         else:
             cur.execute(
-                '''DELETE FROM chat_log
+                '''UPDATE chat_log
+                   SET status='deleted', deleted_at=CURRENT_TIMESTAMP
                    WHERE user_id=%s
                      AND chat_id=%s
-                     AND client_msg_id=%s''',
+                     AND client_msg_id=%s
+                     AND COALESCE(status, 'active') = 'active' ''',
                 (user_id, chat_id, client_msg_id))
         n = cur.rowcount
         conn.commit()
@@ -316,11 +355,24 @@ def delete_message(user_id, chat_id, client_msg_id='', server_id=None):
 
 
 def clear_chat(user_id, chat_id):
-    """清空某个聊天的记录(对应聊天页的「清空」按钮)。"""
+    """清空某个聊天：软删除全部 active 行，并给已有 client_msg_id 打墓碑。"""
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('DELETE FROM chat_log WHERE user_id=%s AND chat_id=%s',
-                (user_id, chat_id))
+    cur.execute(
+        '''INSERT INTO chat_log_tombstone (user_id, chat_id, client_msg_id)
+           SELECT user_id, chat_id, client_msg_id
+           FROM chat_log
+           WHERE user_id=%s AND chat_id=%s
+             AND client_msg_id IS NOT NULL AND client_msg_id <> ''
+             AND client_msg_id NOT LIKE 'srv_%%'
+           ON CONFLICT DO NOTHING''',
+        (user_id, chat_id))
+    cur.execute(
+        '''UPDATE chat_log
+           SET status='deleted', deleted_at=CURRENT_TIMESTAMP
+           WHERE user_id=%s AND chat_id=%s
+             AND COALESCE(status, 'active') = 'active' ''',
+        (user_id, chat_id))
     n = cur.rowcount
     conn.commit()
     cur.close()
@@ -332,7 +384,10 @@ def clear_chat(user_id, chat_id):
 def count_messages(user_id, chat_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT COUNT(*) FROM chat_log WHERE user_id=%s AND chat_id=%s',
+    cur.execute(
+        '''SELECT COUNT(*) FROM chat_log
+           WHERE user_id=%s AND chat_id=%s
+             AND COALESCE(status, 'active') = 'active' ''',
                 (user_id, chat_id))
     n = cur.fetchone()[0]
     cur.close()

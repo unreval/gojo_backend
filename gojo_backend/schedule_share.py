@@ -98,7 +98,7 @@ def _sent_today(character_id, user_id):
 
 def _generate_share(character_id, user_id, activity):
     from characters import get_character
-    from user_memory import get_short_memory, get_bond_memories, save_short_memory
+    from user_memory import get_short_memory, get_bond_memories
     from utils import extract_json
     from ai_client import extract_text
 
@@ -209,7 +209,21 @@ def _generate_share(character_id, user_id, activity):
         print(f'[life_share] ✅ {char_name}（{activity["title"]}）→ #{mid}：{jp[:40]}')
 
         try:
-            save_short_memory(user_id, 'assistant', jp, character_id)
+            from user_memory import commit_visible_assistant_message
+            event_id = proactive_msg.canonical_event_id('life_share', mid)
+            commit_visible_assistant_message(
+                user_id, jp, character_id,
+                event_id=event_id,
+                kind='proactive',
+                subtitle=zh,
+                emotion=emotion,
+                metadata={
+                    'proactive_kind': 'life_share',
+                    'proactive_id': mid,
+                    'activity_title': activity.get('title'),
+                    'activity_start': activity.get('start_time'),
+                },
+            )
             record_assistant_message(
                 user_id, character_id, source='life_share',
                 prior_snapshot=temporal_snapshot,

@@ -25,6 +25,7 @@ def init_bond_table():
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_bond_memory_uid_cid
                    ON bond_memory (user_id, character_id, kind)''')
+    cur.execute("ALTER TABLE bond_memory ADD COLUMN IF NOT EXISTS recall_status TEXT DEFAULT 'active'")
     conn.commit()
     cur.close()
     conn.close()

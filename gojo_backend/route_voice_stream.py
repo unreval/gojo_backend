@@ -222,8 +222,14 @@ async def chat_voice_stream(data: dict):
             'type': 'done', 'emotion': emotion, 'segments': seq,
         }) + '\n').encode()
         full_jp = ' '.join(all_jps)
+        assistant_event_id = (
+            f'{source_event_id}:reply' if source_event_id else None
+        )
         try:
-            save_short_memory(user_id, 'assistant', full_jp, character_id)
+            save_short_memory(
+                user_id, 'assistant', full_jp, character_id,
+                source_event_id=assistant_event_id,
+            )
             record_turn(
                 user_id, character_id, source='chat_voice_stream',
                 prior_snapshot=temporal_snapshot,
@@ -233,6 +239,8 @@ async def chat_voice_stream(data: dict):
         enqueue_private_extraction(
             user_id, user_text, full_jp, character_id,
             temporal_context=temporal_snapshot,
+            source_event_id=source_event_id,
+            assistant_event_id=assistant_event_id,
         )
         print(f'[voice_stream] ✅ {character_id} 流式回复完成,共 {seq} 段')
 

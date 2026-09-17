@@ -70,6 +70,12 @@ async def delete_chatlog_message(user_id: str, chat_id: str,
             user_id, chat_id,
             client_msg_id=client_msg_id,
             server_id=server_id)
+        try:
+            import raw_events
+            raw_events.invalidate_memories_for_deleted_event(
+                client_msg_id, user_id, chat_id)
+        except Exception as inv_err:
+            print(f'[chatlog] derived invalidate skipped:{inv_err}')
     except Exception as e:
         print(f'[chatlog] 单条删除失败:{e}')
         return JSONResponse({'ok': False, 'error': str(e)}, status_code=500)

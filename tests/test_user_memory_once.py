@@ -87,6 +87,10 @@ class SaveUserShortMemoryOnceSqlTests(unittest.TestCase):
             ),
             'db': stub('db', get_conn=self.get_conn),
             'character_relations': stub('character_relations', get_relations_text=Mock(return_value='')),
+            'raw_events': stub(
+                'raw_events',
+                append_raw_event=Mock(return_value={'inserted': True, 'event_id': 'evt'}),
+            ),
         }
         module_patch = patch.dict(sys.modules, modules)
         module_patch.start()
@@ -104,6 +108,13 @@ class SaveUserShortMemoryOnceSqlTests(unittest.TestCase):
         self.assertIn('DO NOTHING', sql)
         self.assertIn('RETURNING id', sql)
         self.assertNotIn('SELECT id FROM short_memory', sql)
+
+    def test_assistant_short_memory_sql_is_keyed_idempotent(self):
+        sql = self.memory.INSERT_SHORT_EVENT_ONCE_SQL
+        self.assertIn('INSERT INTO short_memory', sql)
+        self.assertIn('ON CONFLICT (user_id, character_id, role, source_event_id)', sql)
+        self.assertIn('WHERE source_event_id IS NOT NULL', sql)
+        self.assertIn('DO NOTHING', sql)
 
     def test_returning_id_means_inserted(self):
         self.cursor.returning = (42,)

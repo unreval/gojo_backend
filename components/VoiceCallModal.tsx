@@ -48,6 +48,17 @@ interface CallMsg {
   jp?: string;
   zh: string;
   time: string;
+  sourceEventId?: string;
+  eventMeta?: Record<string, any>;
+  localOnly?: boolean;
+}
+
+function newVoiceRequestId() {
+  try {
+    const c = (globalThis as any).crypto;
+    if (c?.randomUUID) return c.randomUUID();
+  } catch {}
+  return `vp_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 type Phase =
@@ -85,6 +96,8 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
 
   const lastActiveTimeRef   = useRef<number>(Date.now());
   const proactiveCountRef   = useRef(0);
+  const greetingRequestIdRef = useRef<string | null>(null);
+  const idleRequestIdRef    = useRef<string | null>(null);
 
   const setPhaseSync = (p: Phase) => {
     phaseRef.current = p;
@@ -159,25 +172,35 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
     if (!activeRef.current) return;
     try {
       setPhaseSync('responding');
+      if (!greetingRequestIdRef.current) {
+        greetingRequestIdRef.current = newVoiceRequestId();
+      }
+      const requestId = greetingRequestIdRef.current;
       const res = await axios.post(`${SERVER_URL}/chat/voice/proactive`, {
         user_id: userId,
         mode: 'greeting',
         silence_seconds: 0,
+        client_request_id: requestId,
+        event_id: requestId,
       });
       if (!activeRef.current) return;
 
       const segments = res.data?.messages || [];
+      const eventId = String(res.data?.event_id || res.data?.assistant_turn_id || requestId);
+      const jp = segments.map((s: any) => s.jp).filter(Boolean).join(' ');
+      const zh = segments.map((s: any) => s.zh).filter(Boolean).join(' ');
+      const gojoMsg: CallMsg = {
+        id: eventId, role: 'gojo',
+        jp, zh, time: nowTime(),
+        sourceEventId: eventId,
+        eventMeta: { assistant_turn_id: eventId, segment_index: 0, kind: 'voice_proactive' },
+      };
+      setCallMsgs(prev => [...prev, gojoMsg]);
       for (let i = 0; i < segments.length; i++) {
         if (!activeRef.current) break;
         const seg = segments[i];
-        const gojoMsg: CallMsg = {
-          id: `greet_${Date.now()}_${i}`, role: 'gojo',
-          jp: seg.jp, zh: seg.zh, time: nowTime(),
-        };
-        setCallMsgs(prev => [...prev, gojoMsg]);
         setSubtitle(seg.zh || seg.jp || '');
         scrollRef.current?.scrollToEnd({ animated: true });
-
         if (seg.audio_b64 && seg.audio_b64.length > 100) {
           await playAudio(seg.audio_b64);
         }
@@ -246,21 +269,33 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
 
       setPhaseSync('responding');
 
+      if (!idleRequestIdRef.current) {
+        idleRequestIdRef.current = newVoiceRequestId();
+      }
+      const requestId = idleRequestIdRef.current;
       const res = await axios.post(`${SERVER_URL}/chat/voice/proactive`, {
         user_id: userId,
         mode,
         silence_seconds: silenceSeconds,
+        client_request_id: requestId,
+        event_id: requestId,
       });
       if (!activeRef.current) return;
 
       const segments = res.data?.messages || [];
+      const eventId = String(res.data?.event_id || res.data?.assistant_turn_id || requestId);
+      idleRequestIdRef.current = null;
+      const jp = segments.map((s: any) => s.jp).filter(Boolean).join(' ');
+      const zh = segments.map((s: any) => s.zh).filter(Boolean).join(' ');
+      const gojoMsg: CallMsg = {
+        id: eventId, role: 'gojo',
+        jp, zh, time: nowTime(),
+        sourceEventId: eventId,
+        eventMeta: { assistant_turn_id: eventId, segment_index: 0, kind: 'voice_proactive' },
+      };
+      setCallMsgs(prev => [...prev, gojoMsg]);
       for (const seg of segments) {
         if (!activeRef.current) break;
-        const gojoMsg: CallMsg = {
-          id: `idle_${Date.now()}`, role: 'gojo',
-          jp: seg.jp, zh: seg.zh, time: nowTime(),
-        };
-        setCallMsgs(prev => [...prev, gojoMsg]);
         setSubtitle(seg.zh || seg.jp || '');
         scrollRef.current?.scrollToEnd({ animated: true });
 
@@ -763,6 +798,9 @@ export default function VoiceCallModal({ userId, onClose, onAddMessages }: Props
         text: m.role === 'gojo' ? (m.jp || m.zh) : m.zh,
         subtitle: m.role === 'gojo' ? m.zh : undefined,
         time: m.time,
+        sourceEventId: m.sourceEventId || (m.role === 'gojo' ? m.id : undefined),
+        eventMeta: m.eventMeta,
+        localOnly: m.localOnly,
       }));
       onAddMessages([divider, ...chatMsgs]);
     }

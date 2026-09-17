@@ -14,7 +14,7 @@
 雷区 topic_id 由 canon_lock 里定义，本模块不管定义、只管累积和结算。
 """
 from typing import Dict, Optional
-from db import get_conn
+from relationship_db import work_get_conn as get_conn
 from relationship_config import (
     BASE_DELTA, BOUNDARY_INTENT_WEIGHTS,
     BOUNDARY_RESPECTED_TRUST_BONUS,

@@ -115,6 +115,14 @@ MEMORY_LIFECYCLE_DDL = (
        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ''',
     '''CREATE INDEX IF NOT EXISTS idx_long_memory_recall_status
        ON long_memory (user_id, character_id, recall_status, timestamp DESC)''',
+    '''ALTER TABLE memory_lifecycle_items
+       ADD COLUMN IF NOT EXISTS last_recalled_at TIMESTAMPTZ''',
+    '''ALTER TABLE memory_lifecycle_items
+       ADD COLUMN IF NOT EXISTS salience REAL DEFAULT 0.5''',
+    '''ALTER TABLE memory_lifecycle_items
+       ADD COLUMN IF NOT EXISTS strength REAL DEFAULT 0.5''',
+    '''ALTER TABLE memory_lifecycle_items
+       ADD COLUMN IF NOT EXISTS decay_state TEXT DEFAULT 'active' ''',
 )
 
 
@@ -328,7 +336,10 @@ def build_source_ref(source_type, source_id, *, user_id=None, character_id=None)
 
 def make_source_id(user_id, character_id, user_text, content, source_event_id=None):
     if source_event_id:
-        return f'memory_job:{source_event_id}'
+        sid = str(source_event_id).strip()
+        if sid.startswith('raw_event:') or sid.startswith('memory_job:'):
+            return sid
+        return f'raw_event:{sid}'
     digest = hashlib.sha1(
         f'{user_id}\n{character_id}\n{user_text or ""}\n{content or ""}'.encode('utf-8')
     ).hexdigest()[:16]
@@ -589,7 +600,7 @@ def apply_user_fact_lifecycle(user_id, character_id, user_text, content, categor
     source_id = make_source_id(
         user_id, character_id, user_text, content, source_event_id=source_event_id)
     source_ref = build_source_ref(
-        'memory_job' if source_event_id else 'chat',
+        'raw_event' if source_event_id else 'chat',
         source_event_id or source_id,
         user_id=user_id,
         character_id=character_id,
@@ -627,7 +638,7 @@ def apply_user_fact_lifecycle(user_id, character_id, user_text, content, categor
         if classification.get('should_record_lifecycle'):
             result['recorded_lifecycle_id'] = _record_lifecycle_item(
                 cur, user_id, character_id, classification, content,
-                source_ref, 'memory_job' if source_event_id else 'chat', source_id,
+                source_ref, 'raw_event' if source_event_id else 'chat', source_id,
             )
         if classification.get('should_write_sticky'):
             result['sticky_note_id'] = _upsert_sticky_note(
@@ -638,13 +649,20 @@ def apply_user_fact_lifecycle(user_id, character_id, user_text, content, categor
                 has_recurrence=classification.get('has_recurrence', False),
             )
         conn.commit()
-        return result
     except Exception:
         conn.rollback()
         raise
     finally:
         cur.close()
         conn.close()
+    if result.get('recorded_lifecycle_id') and source_event_id:
+        try:
+            import raw_events
+            raw_events.link_memory_sources(
+                'lifecycle', result['recorded_lifecycle_id'], [source_event_id])
+        except Exception:
+            pass
+    return result
 
 
 def _parse_refs(raw):

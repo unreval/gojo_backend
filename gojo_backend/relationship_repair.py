@@ -13,7 +13,7 @@
 三信号本身由 Observer LLM #1 提取，本模块只做纯代码结算。
 """
 from typing import Dict, Optional
-from db import get_conn
+from relationship_db import work_get_conn as get_conn
 from relationship_config import (
     REPAIR_SIGNAL_WEIGHTS,
     REPAIR_QUALITY_HIGH_MIN, REPAIR_QUALITY_MEDIUM_MIN,

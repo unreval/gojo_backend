@@ -97,6 +97,32 @@ def ingest_v4_signals(
         database = get_conn()
     event_time = _utc_now(occurred_at)
     try:
+        if source_event_id:
+            import raw_events
+            try:
+                if not raw_events.sources_are_active(
+                        [source_event_id], user_id, character_id, conn=database):
+                    if owns_connection:
+                        database.rollback()
+                    return {
+                        'status': 'skipped_deleted',
+                        'event_id': None,
+                        'trigger_ids': [],
+                        'settled_predictions': [],
+                        'reactivated_questions': [],
+                        'cycle': None,
+                    }
+            except raw_events.SourceValidityError:
+                if owns_connection:
+                    database.rollback()
+                return {
+                    'status': 'failed_source_validity',
+                    'event_id': None,
+                    'trigger_ids': [],
+                    'settled_predictions': [],
+                    'reactivated_questions': [],
+                    'cycle': None,
+                }
         event_id = record_source_event(
             database,
             user_id=user_id,

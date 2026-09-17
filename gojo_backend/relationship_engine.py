@@ -15,8 +15,13 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import uuid
 
-from db import get_conn
-
+from relationship_db import (
+    ensure_state_row,
+    get_application_payload,
+    relationship_txn,
+    try_begin_application,
+    work_get_conn as get_conn,
+)
 from relationship_config import (
     BASE_DELTA, CONFIDENCE_MULTIPLIER, INTIMACY_LAYER_MULTIPLIER,
     STAGE_STRANGER_I_MAX, STAGE_ACQUAINTANCE_I_MAX,
@@ -34,7 +39,6 @@ from relationship_state import (
     push_hypothesis_evidence, promote_hypothesis, cleanup_hypotheses,
     declare_stance,
 )
-from relationship_db import ensure_state_row
 
 from relationship_signals import extract_signals
 from relationship_flirt import (
@@ -50,6 +54,52 @@ from relationship_repair import handle_repair_attempt
 # ══════════════════════════════════════════════════════════════
 # 顶层入口
 # ══════════════════════════════════════════════════════════════
+def _empty_turn_result(**overrides):
+    result = {
+        'signals_extracted': 0,
+        'signals_applied': 0,
+        'skipped': None,
+        'observer_error': None,
+        'cognitive_ingress': None,
+        'cognitive_ingress_error': None,
+        'applied': [],
+    }
+    result.update(overrides)
+    return result
+
+
+def _ingest_v4(user_id, character_id, source_event_id, signals):
+    from cognitive_events import ingest_v4_signals
+    return ingest_v4_signals(
+        user_id=user_id,
+        character_id=character_id,
+        source_event_id=source_event_id or f'relationship-turn:{uuid.uuid4()}',
+        signals=signals or [],
+    )
+
+
+def _apply_extracted_signals(user_id, character_id, signals, session_id,
+                             temporal_context):
+    applied = []
+    _log_interaction_stats(user_id, character_id, signals, session_id)
+    _log_temporal_observation(user_id, character_id, temporal_context)
+    for sig in signals:
+        try:
+            result = _route_signal(user_id, character_id, sig, session_id)
+            applied.append({'signal': sig, 'result': result})
+        except Exception as e:
+            applied.append({'signal': sig, 'error': str(e)})
+    try:
+        cleanup_hypotheses(user_id, character_id, HYPOTHESIS_MAX_AGE_DAYS)
+    except Exception:
+        pass
+    try:
+        check_retreat_boundary_superseded(user_id, character_id)
+    except Exception:
+        pass
+    return applied
+
+
 def process_turn(
     user_id: str,
     character_id: str,
@@ -64,13 +114,70 @@ def process_turn(
 ) -> Dict:
     """处理一轮对话，更新关系状态。异步调用（不要挂在主聊天请求路径上）。
 
-    典型接入：用户发完消息、角色回复也生成完之后，异步 enqueue 到 scheduler
-    或 threading.Thread(target=process_turn, ...).start()
+    Relationship ledger mutation for a Raw Event is exactly-once:
+    unique (event_id, processor_type, processor_version) in rel_event_applications
+    is committed in the same transaction as apply_* / provenance / finish_processor.
     """
-    # 保证有行
     ensure_state_row(user_id, character_id)
 
-    # 1. Observer：只看对话
+    rel_processor = None
+    rel_processor_version = None
+    processor_claimed = False
+    if source_event_id:
+        try:
+            import raw_events
+            rel_processor = raw_events.PROCESSOR_RELATIONSHIP
+            rel_processor_version = raw_events.PROCESSOR_RELATIONSHIP_VERSION
+            try:
+                if not raw_events.sources_are_active(
+                        [source_event_id], user_id, character_id):
+                    return _empty_turn_result(skipped='deleted_source')
+            except raw_events.SourceValidityError:
+                raw_events.finish_processor(
+                    source_event_id, rel_processor, rel_processor_version,
+                    'failed', last_error='source_validity_unknown')
+                return _empty_turn_result(skipped='source_validity_unknown')
+            state = raw_events.claim_processor(
+                source_event_id, rel_processor, rel_processor_version)
+            if state == 'already_succeeded':
+                cognitive_ingress = None
+                cognitive_ingress_error = None
+                try:
+                    payload = get_application_payload(
+                        source_event_id, rel_processor, rel_processor_version)
+                    signals = (payload or {}).get('signals') or []
+                    cognitive_ingress = _ingest_v4(
+                        user_id, character_id, source_event_id, signals)
+                except Exception as exc:
+                    cognitive_ingress_error = str(exc)
+                return _empty_turn_result(
+                    skipped='already_processed',
+                    cognitive_ingress=cognitive_ingress,
+                    cognitive_ingress_error=cognitive_ingress_error,
+                )
+            if state != 'claimed':
+                raw_events.finish_processor(
+                    source_event_id, rel_processor, rel_processor_version,
+                    'failed', last_error='claim_failed')
+                return _empty_turn_result(skipped='claim_failed')
+            processor_claimed = True
+        except Exception as e:
+            try:
+                import raw_events as _raw_events
+                if isinstance(e, _raw_events.SourceValidityError):
+                    _raw_events.finish_processor(
+                        source_event_id, rel_processor, rel_processor_version,
+                        'failed', last_error='source_validity_unknown')
+                    return _empty_turn_result(skipped='source_validity_unknown')
+                if rel_processor:
+                    _raw_events.finish_processor(
+                        source_event_id, rel_processor, rel_processor_version,
+                        'failed', last_error='claim_failed')
+            except Exception:
+                pass
+            print(f'[rel_update] claim/validity guard:{e}')
+            return _empty_turn_result(skipped='claim_failed')
+
     extraction = extract_signals(
         user_message=user_message,
         character_reply=character_reply,
@@ -81,55 +188,123 @@ def process_turn(
     )
     signals = extraction.get('signals', [])
     if extraction.get('error'):
-        # A failed observation is not a new evidence event or a successful turn.
-        return {
-            'signals_extracted': 0,
-            'signals_applied': 0,
-            'observer_error': extraction['error'],
-            'cognitive_ingress': None,
-            'cognitive_ingress_error': None,
-            'applied': [],
-        }
+        return _empty_turn_result(observer_error=extraction['error'])
 
-    # 2. 记录交互统计（Tone / Reciprocity 用）
-    _log_interaction_stats(user_id, character_id, signals, session_id)
-    _log_temporal_observation(user_id, character_id, temporal_context)
-
-    # 3. 路由每个 signal 到具体处理
-    applied = []
-    for sig in signals:
+    if source_event_id:
         try:
-            result = _route_signal(user_id, character_id, sig, session_id)
-            applied.append({'signal': sig, 'result': result})
+            import raw_events
+            try:
+                if not raw_events.sources_are_active(
+                        [source_event_id], user_id, character_id):
+                    raw_events.finish_processor(
+                        source_event_id, rel_processor, rel_processor_version,
+                        'skipped', last_error='deleted_source')
+                    return _empty_turn_result(
+                        signals_extracted=len(signals),
+                        skipped='deleted_source',
+                    )
+            except raw_events.SourceValidityError:
+                raw_events.finish_processor(
+                    source_event_id, rel_processor, rel_processor_version,
+                    'failed', last_error='source_validity_unknown')
+                return _empty_turn_result(
+                    signals_extracted=len(signals),
+                    skipped='source_validity_unknown',
+                )
         except Exception as e:
-            applied.append({'signal': sig, 'error': str(e)})
+            try:
+                import raw_events as _raw_events
+                if isinstance(e, _raw_events.SourceValidityError):
+                    _raw_events.finish_processor(
+                        source_event_id, rel_processor, rel_processor_version,
+                        'failed', last_error='source_validity_unknown')
+                    return _empty_turn_result(
+                        signals_extracted=len(signals),
+                        skipped='source_validity_unknown',
+                    )
+            except Exception:
+                pass
+            print(f'[rel_update] post-extract source check failed:{e}')
+            return _empty_turn_result(
+                signals_extracted=len(signals),
+                skipped='source_validity_unknown',
+            )
 
-    # 4. 清理过期 hypothesis
-    try:
-        cleanup_hypotheses(user_id, character_id, HYPOTHESIS_MAX_AGE_DAYS)
-    except Exception:
-        pass
+    applied = []
+    payload_signals = signals
+    if source_event_id:
+        if not (processor_claimed and rel_processor):
+            return _empty_turn_result(
+                signals_extracted=len(signals),
+                skipped='claim_failed',
+            )
+        import raw_events
+        try:
+            with relationship_txn() as conn:
+                try:
+                    if not raw_events.sources_are_active(
+                            [source_event_id], user_id, character_id, conn=conn):
+                        raw_events.finish_processor(
+                            source_event_id, rel_processor, rel_processor_version,
+                            'skipped', last_error='deleted_source', conn=conn)
+                        return _empty_turn_result(
+                            signals_extracted=len(signals),
+                            skipped='deleted_source',
+                        )
+                except raw_events.SourceValidityError:
+                    raw_events.finish_processor(
+                        source_event_id, rel_processor, rel_processor_version,
+                        'failed', last_error='source_validity_unknown', conn=conn)
+                    return _empty_turn_result(
+                        signals_extracted=len(signals),
+                        skipped='source_validity_unknown',
+                    )
+                won = try_begin_application(
+                    source_event_id, rel_processor, rel_processor_version,
+                    user_id, character_id,
+                    payload={'signals': signals},
+                )
+                if won:
+                    # Signal routing stays in process_turn via _route_signal.
+                    applied = _apply_extracted_signals(
+                        user_id, character_id, signals, session_id,
+                        temporal_context)
+                else:
+                    cached = get_application_payload(
+                        source_event_id, rel_processor, rel_processor_version)
+                    if cached and isinstance(cached.get('signals'), list):
+                        payload_signals = cached['signals']
+                raw_events.finish_processor(
+                    source_event_id, rel_processor, rel_processor_version,
+                    'succeeded', conn=conn)
+        except Exception as exc:
+            print(f'[rel_update] apply txn failed: {exc}')
+            try:
+                import raw_events as _raw_events
+                if isinstance(exc, _raw_events.SourceValidityError):
+                    _raw_events.finish_processor(
+                        source_event_id, rel_processor, rel_processor_version,
+                        'failed', last_error='source_validity_unknown')
+                    return _empty_turn_result(
+                        signals_extracted=len(signals),
+                        skipped='source_validity_unknown',
+                    )
+            except Exception:
+                pass
+            return _empty_turn_result(
+                signals_extracted=len(signals),
+                observer_error=None,
+                skipped='apply_txn_failed',
+            )
+    else:
+        applied = _apply_extracted_signals(
+            user_id, character_id, signals, session_id, temporal_context)
 
-    # 5. ★ 检查 retreat_boundary 是否该被关系深化推翻
-    try:
-        check_retreat_boundary_superseded(user_id, character_id)
-    except Exception:
-        pass
-
-    # 6. Cognitive Loop deterministic ingress reuses the v4 signal objects.
-    # It records facts and scheduling state only; it never writes rel_state.
     cognitive_ingress = None
     cognitive_ingress_error = None
     try:
-        from cognitive_events import ingest_v4_signals
-        cognitive_ingress = ingest_v4_signals(
-            user_id=user_id,
-            character_id=character_id,
-            source_event_id=(
-                source_event_id or f'relationship-turn:{uuid.uuid4()}'
-            ),
-            signals=signals,
-        )
+        cognitive_ingress = _ingest_v4(
+            user_id, character_id, source_event_id, payload_signals)
     except Exception as exc:
         cognitive_ingress_error = str(exc)
 

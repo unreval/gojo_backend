@@ -23,9 +23,11 @@
   - 参数通过 threading args= 传入，避免闭包读被 handler return 后的变量。
   - 修复原实现里 `except Exception:` 后 `print({e})` 但 e 未定义的 bug。
 """
+from datetime import datetime
 import threading
 import json
 import re
+import uuid
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -81,6 +83,78 @@ _has_visible_text = has_visible_text
 _msg_has_json_debris = msg_has_json_debris
 _valid_msg = valid_reply_msg
 _commit_ready = commit_ready_msgs
+
+
+def _append_visible_assistant_raw(user_id, character_id, content, event_id,
+                                  metadata=None):
+    """Canonical chat_log write for a user-visible assistant bubble. Retry-safe."""
+    if not event_id:
+        return
+    try:
+        import raw_events
+        extra = dict(metadata or {})
+        extra.setdefault('assistant_turn_id', event_id)
+        extra.setdefault('segment_index', 0)
+        raw_events.append_raw_event(
+            user_id, character_id,
+            event_id=event_id,
+            role='assistant',
+            content=content,
+            metadata=extra,
+        )
+    except Exception:
+        pass
+
+
+def resolve_voice_proactive_event_id(data):
+    """Stable identity for /chat/voice/proactive. Never uses wall-clock minutes."""
+    payload = data or {}
+    req = str(payload.get('client_request_id') or '').strip()[:120]
+    if req:
+        return req
+    explicit = str(
+        payload.get('event_id')
+        or payload.get('assistant_event_id')
+        or payload.get('source_event_id')
+        or ''
+    ).strip()[:120]
+    if explicit:
+        return explicit
+    return f'voice_proactive:{uuid.uuid4()}'
+
+
+def resolve_chat_proactive_event_id(data):
+    """Stable identity for /chat/proactive. Never uses content digest + calendar day."""
+    payload = data or {}
+    req = str(payload.get('client_request_id') or '').strip()[:120]
+    if req:
+        return req
+    occurrence = str(
+        payload.get('occurrence_id')
+        or payload.get('task_occurrence_id')
+        or payload.get('schedule_occurrence_id')
+        or ''
+    ).strip()[:120]
+    if occurrence:
+        return occurrence
+    explicit = str(
+        payload.get('event_id')
+        or payload.get('assistant_event_id')
+        or payload.get('source_event_id')
+        or ''
+    ).strip()[:120]
+    if explicit:
+        return explicit
+    task_id = str(payload.get('task_id') or '').strip()
+    due = str(
+        payload.get('due_date')
+        or payload.get('due_date_str')
+        or ''
+    ).strip()
+    mode = str(payload.get('mode') or '').strip()
+    if task_id and due and mode:
+        return f'proactive:chat:task:{task_id}:{due}:{mode}'[:120]
+    return f'proactive:chat:{uuid.uuid4()}'
 
 
 def _generation_failed_response(user_id: str, character_id: str, total_days=None, attempts=3):
@@ -214,21 +288,28 @@ def _user_prompt_with_reply(user_text, reply_to):
 
 
 def _prompt_messages(user_id, character_id, short_memories, limit=24):
-    """角色经历层优先走 short_memory，不把 chat_log 当记忆 source of truth。
+    """Recent context for the model. Deleted Raw Events are excluded.
 
-    chat_log 删除气泡后，短时记忆里真实发生过的事仍应进入下一轮 prompt。
+    short_memory is a compatibility view over the chat_log ledger, not a
+    second source of truth. Source validity unknown != active: never fall
+    back to unverified cache rows.
     """
     try:
         from user_memory import get_short_memory_for_prompt
-        history = get_short_memory_for_prompt(
-            user_id, n=limit, character_id=character_id)
-        if history:
-            return history
+        return list(get_short_memory_for_prompt(
+            user_id, n=limit, character_id=character_id) or [])
     except Exception as e:
-        print(f'[{user_id}][{character_id}] short_memory prompt fallback:{e}')
-    if short_memories and isinstance(short_memories[0], dict):
-        return list(short_memories)
-    return [{'role': r, 'content': c} for r, c in (short_memories or [])]
+        try:
+            from raw_events import SourceValidityError
+            if isinstance(e, SourceValidityError):
+                print(
+                    f'[{user_id}][{character_id}] prompt history skipped: '
+                    f'source validity unknown:{e}')
+                return []
+        except Exception:
+            pass
+        print(f'[{user_id}][{character_id}] short_memory prompt skipped:{e}')
+        return []
 
 
 def _salvage_japanese(raw: str):
@@ -508,6 +589,7 @@ async def chat_text(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
+    # Frontend owns chat_log segments (`{source}:reply:{i}`). This is cache only.
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id, source='chat_text',
@@ -516,6 +598,7 @@ async def chat_text(data: dict):
     enqueue_private_extraction(
         user_id, user_text, full_jp, character_id,
         temporal_context=temporal_snapshot,
+        source_event_id=source_event_id,
     )
     # ★ 事件驱动日记：聊到大事时，他会因为"这事值得记"而写一篇（后台，不阻塞回复）
     try:
@@ -739,6 +822,7 @@ async def chat_story(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
+    # Frontend owns chat_log segments (`{source}:reply:{i}`). This is cache only.
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id, source='chat_story',
@@ -747,6 +831,7 @@ async def chat_story(data: dict):
     enqueue_private_extraction(
         user_id, user_text, full_jp, character_id,
         temporal_context=temporal_snapshot,
+        source_event_id=source_event_id,
     )
 
     voice_id = char.get('voice_id')
@@ -807,7 +892,15 @@ async def chat_proactive(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    save_short_memory(user_id, 'assistant', full_jp, character_id)
+    event_id = resolve_chat_proactive_event_id(data)
+    save_short_memory(
+        user_id, 'assistant', full_jp, character_id,
+        source_event_id=event_id,
+    )
+    _append_visible_assistant_raw(
+        user_id, character_id, full_jp, event_id,
+        metadata={'proactive_kind': f'chat_{mode}', 'task_title': task_title},
+    )
     record_assistant_message(
         user_id, character_id, source=f'chat_proactive:{mode}',
         prior_snapshot=temporal_snapshot,
@@ -818,7 +911,12 @@ async def chat_proactive(data: dict):
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
 
     print(f'[proactive] {character_id} mode={mode} task={task_title}')
-    return JSONResponse({'emotion': emotion, 'messages': msgs})
+    return JSONResponse({
+        'emotion': emotion,
+        'messages': msgs,
+        'assistant_turn_id': event_id,
+        'event_id': event_id,
+    })
 
 
 # ─────────────────── 语音通话专用（Haiku 极速版） ───────────────────
@@ -874,6 +972,7 @@ async def chat_voice_text(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
+    # Frontend owns chat_log segments (`{source}:reply:{i}`). This is cache only.
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id, source='chat_voice_text',
@@ -882,6 +981,7 @@ async def chat_voice_text(data: dict):
     enqueue_private_extraction(
         user_id, user_text, full_jp, character_id,
         temporal_context=temporal_snapshot,
+        source_event_id=source_event_id,
     )
 
     voice_id = char.get('voice_id')
@@ -948,6 +1048,7 @@ async def chat_voice_story(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
+    # Frontend owns chat_log segments (`{source}:reply:{i}`). This is cache only.
     save_short_memory(user_id, 'assistant', full_jp, character_id)
     record_turn(
         user_id, character_id, source='chat_voice_story',
@@ -956,6 +1057,7 @@ async def chat_voice_story(data: dict):
     enqueue_private_extraction(
         user_id, user_text, full_jp, character_id,
         temporal_context=temporal_snapshot,
+        source_event_id=source_event_id,
     )
 
     voice_id = char.get('voice_id')
@@ -1056,7 +1158,18 @@ async def chat_voice_proactive(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    save_short_memory(user_id, 'assistant', full_jp, character_id)
+    event_id = resolve_voice_proactive_event_id(data)
+    save_short_memory(
+        user_id, 'assistant', full_jp, character_id,
+        source_event_id=event_id,
+    )
+    _append_visible_assistant_raw(
+        user_id, character_id, full_jp, event_id,
+        metadata={
+            'proactive_kind': f'voice_{mode}',
+            'silence_seconds': silence_seconds,
+        },
+    )
     record_assistant_message(
         user_id, character_id, source=f'chat_voice_proactive:{mode}',
         prior_snapshot=temporal_snapshot,
@@ -1067,7 +1180,12 @@ async def chat_voice_proactive(data: dict):
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
 
     print(f'[voice_proactive] {character_id} mode={mode} silence={silence_seconds}s')
-    return JSONResponse({'emotion': emotion, 'messages': msgs})
+    return JSONResponse({
+        'emotion': emotion,
+        'messages': msgs,
+        'assistant_turn_id': event_id,
+        'event_id': event_id,
+    })
 
 
 # ─────────────────── Whisper 转录 ───────────────────

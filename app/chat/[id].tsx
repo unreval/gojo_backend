@@ -77,6 +77,8 @@ function toServerMsg(m: any) {
   if (m.replyToSourceEventId) extra.reply_to_source_event_id = m.replyToSourceEventId;
   if (m.visualSummary) extra.visual_summary = m.visualSummary;
   if (m.eventMeta) extra.event_meta = m.eventMeta;
+  if (m.eventMeta?.assistant_turn_id) extra.assistant_turn_id = m.eventMeta.assistant_turn_id;
+  if (m.eventMeta && m.eventMeta.segment_index != null) extra.segment_index = m.eventMeta.segment_index;
   return {
     client_msg_id: String(m.id || ''),
     // ★ 带上消息真实时间。之前没传,补传的 200 条 ts 全是同一刻,
@@ -590,7 +592,7 @@ export default function ChatRoom() {
           mode = 'overdue';
         }
         if (mode) {
-          const ok = await sendProactive(task.title, mode);
+          const ok = await sendProactive(task.title, mode, task.id, dueDateStr);
           if (ok) {
             if (mode === 'remind') taskState.reminded = true;
             else taskState.askedOverdue = true;
@@ -604,23 +606,50 @@ export default function ChatRoom() {
     finally { checkingProactiveRef.current = false; }
   };
 
-  const sendProactive = async (taskTitle: string, mode: 'remind' | 'overdue') => {
+  const sendProactive = async (
+    taskTitle: string,
+    mode: 'remind' | 'overdue',
+    taskId: string | number,
+    dueDateStr: string,
+  ) => {
+    const clientRequestId = `proactive:chat:task:${taskId}:${dueDateStr}:${mode}`;
     try {
       const res = await axios.post(`${SERVER_URL}/chat/proactive`, {
         user_id: FIXED_USER_ID, task_title: taskTitle, mode,
+        character_id: chatId,
+        client_request_id: clientRequestId,
+        task_id: taskId,
+        due_date: dueDateStr,
+        occurrence_id: clientRequestId,
       });
       if (isGenerationFailedPayload(res.data)) return false;
       const segments: Segment[] = res.data?.messages || [];
       if (segments.length === 0) return false;
+      const turnId = String(res.data?.event_id || res.data?.assistant_turn_id || '').trim();
+      if (!turnId) return false;
       for (let i = 0; i < segments.length; i++) {
         const seg = segments[i];
-        const msgId = `proactive_${Date.now()}_${i}`;
+        const msgId = i === 0 ? turnId : `${turnId}:seg:${i}`;
         let audioUri: string | null = null;
         if (seg.audio_b64 && seg.audio_b64.length > 100) {
           audioUri = await saveAudioFile(msgId, seg.audio_b64);
           if (audioUri) audioCacheRef.current[msgId] = audioUri;
         }
-        const msg: Message = { id: msgId, role: 'gojo', text: seg.jp, subtitle: seg.zh, time: nowTime(), timestamp: Date.now() };
+        const msg: Message = {
+          id: msgId,
+          role: 'gojo',
+          text: seg.jp,
+          subtitle: seg.zh,
+          time: nowTime(),
+          timestamp: Date.now(),
+          sourceEventId: turnId,
+          eventMeta: {
+            assistant_turn_id: turnId,
+            segment_index: i,
+            kind: 'proactive',
+          },
+          ...(i > 0 ? { localOnly: true } : {}),
+        };
         setMessages(prev => [...prev, msg]);
         scrollRef.current?.scrollToEnd({ animated: true });
         if (audioUri) await playAudioAndWait(audioUri);
@@ -894,7 +923,9 @@ export default function ChatRoom() {
       const readIds: number[] = [];
       const newMsgs: Message[] = [];
       for (const p of proactives) {
-        const msgId = `proactive_${p.id}`;
+        const eventId = String(p.event_id || p.assistant_turn_id || '').trim();
+        if (!eventId) continue;
+        const msgId = eventId;
         // 保存语音文件,前端能点击重播
         if (p.audio_b64 && p.audio_b64.length > 100) {
           const audioUri = await saveAudioFile(msgId, p.audio_b64);
@@ -912,6 +943,13 @@ export default function ChatRoom() {
           subtitle: p.zh || undefined,
           time: `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`,
           timestamp: ts,
+          sourceEventId: eventId,
+          eventMeta: {
+            assistant_turn_id: p.assistant_turn_id || eventId,
+            segment_index: p.segment_index ?? 0,
+            kind: 'proactive',
+            proactive_id: p.id,
+          },
         });
         readIds.push(p.id);
       }

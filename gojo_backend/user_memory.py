@@ -25,6 +25,10 @@
   3. 她告诉我的事  bond_memory (kind='told')             —— 她告诉某角色的、关于角色本人/其世界的信息
   4. 角色背景      character_memory                      —— 原作设定，只手动管理，聊天不写入
 
+short_memory 只是近窗 compatibility cache / LLM recent view，不是 canonical evidence。
+新的 conversational 事实以 chat_log event_id 为准，经 append_raw_event 写入。
+get_short_memory(n) 保留兼容读取（优先 ledger，再合并 cache）。
+
 提取只用一次 Haiku 调用，同时产出 1/2/3 三类，成本和原来一样。
 """
 import anthropic
@@ -86,19 +90,121 @@ def _prune_short_memory(cur, user_id, character_id):
         (user_id, character_id, user_id, character_id))
 
 
+INSERT_SHORT_EVENT_ONCE_SQL = '''
+INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
+VALUES (%s, %s, %s, %s, %s)
+ON CONFLICT (user_id, character_id, role, source_event_id)
+WHERE source_event_id IS NOT NULL
+DO NOTHING
+RETURNING id
+'''.strip()
+
+
 def save_short_memory(user_id, role, content, character_id=DEFAULT_CHARACTER_ID,
-                      source_event_id=None):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id)
-           VALUES (%s, %s, %s, %s, %s)''',
-        (user_id, character_id, role, content, _normalize_event_id(source_event_id))
+                      source_event_id=None, metadata=None, subtitle='',
+                      emotion=''):
+    """Write the short_memory compatibility cache.
+
+    Canonical conversational facts must go through append_raw_event / chat_log.
+    Do not treat short_memory.content as evidence or a second source of truth.
+    When event_id is present, the ledger is written first; keyed cache insert is
+    idempotent on (user_id, character_id, role, source_event_id).
+    Legacy rows with source_event_id IS NULL are not deduped.
+    """
+    event_id = _normalize_event_id(source_event_id)
+    extra = dict(metadata or {}) if isinstance(metadata, dict) else {}
+    if event_id:
+        _mirror_raw_event(
+            user_id, character_id, role=role, content=content, event_id=event_id,
+            metadata=extra, subtitle=subtitle, emotion=emotion)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        if event_id:
+            cur.execute(
+                INSERT_SHORT_EVENT_ONCE_SQL,
+                (user_id, character_id, role, content, event_id),
+            )
+            if not cur.fetchone():
+                conn.commit()
+                return
+        else:
+            cur.execute(
+                '''INSERT INTO short_memory
+                       (user_id, character_id, role, content, source_event_id)
+                   VALUES (%s, %s, %s, %s, %s)''',
+                (user_id, character_id, role, content, None),
+            )
+        _prune_short_memory(cur, user_id, character_id)
+        conn.commit()
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        if event_id and getattr(e, 'pgcode', None) == '23505':
+            print(f'[memory] skip duplicate short_memory {role} {event_id}')
+            return
+        raise
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def commit_visible_assistant_message(
+    user_id, content, character_id=DEFAULT_CHARACTER_ID, *,
+    event_id, kind='proactive', subtitle='', emotion='', metadata=None,
+):
+    """User-visible assistant bubble: canonical Raw Event + short_memory cache.
+
+    Internal diary/state that is never shown as a chat bubble must not use this.
+    Retry with the same event_id does not create a second chat_log row.
+    """
+    event_id = _normalize_event_id(event_id)
+    extra = dict(metadata or {})
+    extra.setdefault('kind', kind)
+    extra.setdefault('assistant_turn_id', event_id)
+    extra.setdefault('segment_index', 0)
+    save_short_memory(
+        user_id, 'assistant', content, character_id,
+        source_event_id=event_id,
+        metadata=extra,
+        subtitle=subtitle,
+        emotion=emotion,
     )
-    _prune_short_memory(cur, user_id, character_id)
-    conn.commit()
-    cur.close()
-    conn.close()
+    return event_id
+
+
+def _mirror_raw_event(user_id, character_id, *, role, content, event_id,
+                      content_type='text', metadata=None, reply_to_event_id=None,
+                      subtitle='', emotion=''):
+    """Best-effort write-through to the canonical chat_log ledger."""
+    try:
+        import raw_events
+        raw_events.append_raw_event(
+            user_id, character_id,
+            event_id=event_id,
+            role=role,
+            content=content,
+            content_type=content_type,
+            metadata=metadata,
+            reply_to_event_id=reply_to_event_id,
+            subtitle=subtitle,
+            emotion=emotion,
+        )
+    except Exception as e:
+        print(f'[raw_events] mirror skipped:{e}')
 
 
 def _normalize_event_id(source_event_id):
@@ -164,6 +270,7 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
     """保存真实发生的用户发言。同一 source_event_id 用原子 INSERT ON CONFLICT 去重。
 
     content 只存用户原文/媒体占位；visual_summary 放 event_meta，prompt 读取时再拼。
+    short_memory 是 compatibility cache，canonical Raw Event 在 chat_log。
     有 event id：INSERT ... ON CONFLICT DO NOTHING RETURNING id
       - RETURNING 有行 = 本次新插入，返回 True
       - RETURNING 空 = 已存在，返回 False
@@ -171,6 +278,7 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
     """
     event_id = _normalize_event_id(source_event_id)
     meta_text = _event_meta_json(event_meta)
+    inserted = False
     conn = None
     cur = None
     try:
@@ -185,18 +293,21 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
             if not row:
                 conn.commit()
                 print(f'[memory] skip duplicate user event {event_id}')
-                return False
+                inserted = False
+            else:
+                _prune_short_memory(cur, user_id, character_id)
+                conn.commit()
+                inserted = True
+        else:
+            cur.execute(
+                '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id, event_meta)
+                   VALUES (%s, %s, %s, %s, %s, %s)''',
+                (user_id, character_id, 'user', content, None, meta_text)
+            )
             _prune_short_memory(cur, user_id, character_id)
             conn.commit()
-            return True
-        cur.execute(
-            '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id, event_meta)
-               VALUES (%s, %s, %s, %s, %s, %s)''',
-            (user_id, character_id, 'user', content, None, meta_text)
-        )
-        _prune_short_memory(cur, user_id, character_id)
-        conn.commit()
-        return True
+            inserted = True
+        return inserted
     except Exception as e:
         if conn is not None:
             try:
@@ -219,6 +330,18 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
                 conn.close()
             except Exception:
                 pass
+        if event_id:
+            meta = event_meta if isinstance(event_meta, dict) else parse_event_meta(event_meta)
+            kind = (meta or {}).get('kind') if isinstance(meta, dict) else ''
+            content_type = kind if kind in ('image', 'video', 'voice') else 'text'
+            _mirror_raw_event(
+                user_id, character_id,
+                role='user',
+                content=content,
+                event_id=event_id,
+                content_type=content_type,
+                metadata=meta if isinstance(meta, dict) else None,
+            )
 
 
 def attach_short_memory_event_meta(user_id, character_id, source_event_id, event_meta):
@@ -229,6 +352,7 @@ def attach_short_memory_event_meta(user_id, character_id, source_event_id, event
         return False
     conn = get_conn()
     cur = conn.cursor()
+    updated = False
     try:
         cur.execute(
             '''UPDATE short_memory
@@ -237,10 +361,29 @@ def attach_short_memory_event_meta(user_id, character_id, source_event_id, event
                  AND source_event_id=%s''',
             (meta_text, user_id, character_id, event_id))
         conn.commit()
-        return cur.rowcount > 0
+        updated = cur.rowcount > 0
     finally:
         cur.close()
         conn.close()
+    _attach_vision_annotation(event_id, event_meta)
+    return updated
+
+
+def _attach_vision_annotation(source_event_id, event_meta):
+    summary, extra = _visual_summary_from_meta(event_meta)
+    if not summary:
+        return
+    try:
+        import raw_events
+        raw_events.attach_event_annotation(
+            source_event_id, 'vision_summary', summary,
+            processor_version=raw_events.PROCESSOR_VISION_VERSION,
+        )
+        extra = extra or {}
+        extra['visual_summary'] = summary
+        # extra on chat_log is updated inside attach_event_annotation
+    except Exception as e:
+        print(f'[raw_events] vision annotation skipped:{e}')
 
 
 def _short_limit(n):
@@ -251,109 +394,173 @@ def _short_limit(n):
         return SHORT_MEMORY_MAX
 
 
-def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
-    """★ v3.1：给历史消息加时间标记，防止把昨晚的话当成刚刚发生。
-    规则：2小时内的消息不加标记（保持自然）；更早的加【今天HH:MM】【昨天HH:MM】【M月D日 HH:MM】。
-    标记只在读取时拼接，不改数据库内容。"""
-    limit = _short_limit(n)
+def _time_marker(ts, now=None, today=None):
+    if ts is None:
+        return ''
+    now = now or datetime.now(CN_TZ)
+    today = today if today is not None else now.date()
+    ts_cn = ts.replace(tzinfo=timezone.utc).astimezone(CN_TZ) if ts.tzinfo is None else ts.astimezone(CN_TZ)
+    gap_seconds = (now - ts_cn).total_seconds()
+    if gap_seconds < 600:
+        return ''
+    d = ts_cn.date()
+    if d == today:
+        day_label = '今天'
+    elif (today - d).days == 1:
+        day_label = '昨天'
+    else:
+        day_label = f'{d.month}月{d.day}日'
+    return f'【{day_label}{ts_cn.strftime("%H:%M")}的消息】'
+
+
+def _prompt_role(role):
+    return 'user' if (role or '') == 'user' else 'assistant'
+
+
+def _fetch_short_memory_cache(user_id, character_id, hours, limit):
+    """Legacy short_memory rows only. Not canonical evidence; ledger is preferred."""
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        '''SELECT role, content, timestamp FROM short_memory
-           WHERE user_id = %s AND character_id = %s
-             AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
-           ORDER BY timestamp DESC
-           LIMIT %s''',
-        (user_id, character_id, SHORT_MEMORY_HOURS, limit)
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    try:
+        cur.execute(
+            '''SELECT role, content, timestamp, source_event_id, event_meta
+               FROM short_memory
+               WHERE user_id = %s AND character_id = %s
+                 AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
+               ORDER BY timestamp DESC
+               LIMIT %s''',
+            (user_id, character_id, hours, limit)
+        )
+        return list(cur.fetchall())
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                '''SELECT role, content, timestamp FROM short_memory
+                   WHERE user_id = %s AND character_id = %s
+                     AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
+                   ORDER BY timestamp DESC
+                   LIMIT %s''',
+                (user_id, character_id, hours, limit)
+            )
+            return [(*row, None, '') for row in cur.fetchall()]
+        except Exception:
+            return []
+    finally:
+        cur.close()
+        conn.close()
 
+
+def _merge_recent_context(user_id, character_id, n, hours):
+    """Ledger is canonical. short_memory is a cache, not a second fact DB.
+
+    Exact (role, content) matches are collapsed at read time only.
+    Different event_ids with similar wording stay distinct.
+    Source validity unknown != active: skip the whole batch rather than
+    feeding unverified cache/ledger rows to the model.
+    """
+    limit = _short_limit(n)
+    try:
+        import raw_events
+        deleted = raw_events.deleted_event_ids(user_id, character_id)
+        ledger = raw_events.get_recent_events(
+            user_id, character_id, n=SHORT_MEMORY_MAX, hours=hours)
+    except Exception:
+        return []
+
+    cache = _fetch_short_memory_cache(
+        user_id, character_id, hours, SHORT_MEMORY_MAX)
+
+    merged = []
+    seen_ids = set()
+    seen_pairs = set()
+
+    def _add(role, content, ts, event_id, event_meta):
+        prompt_role = _prompt_role(role)
+        eid = _normalize_event_id(event_id)
+        if eid and eid in deleted:
+            return
+        if eid and eid in seen_ids:
+            return
+        pair = (prompt_role, content or '')
+        # Unkeyed cache rows that copy an already-present ledger fact are
+        # the same compatibility write, not a second occurrence.
+        if not eid and pair in seen_pairs:
+            return
+        if eid:
+            seen_ids.add(eid)
+        seen_pairs.add(pair)
+        merged.append({
+            'role': prompt_role,
+            'content': content or '',
+            'timestamp': ts,
+            'event_id': eid,
+            'event_meta': event_meta,
+        })
+
+    for event in ledger:
+        _add(
+            event.get('role'),
+            event.get('content'),
+            event.get('timestamp'),
+            event.get('event_id'),
+            event.get('metadata') or {},
+        )
+
+    for row in reversed(cache):
+        role, content, ts = row[0], row[1] or '', row[2]
+        eid = row[3] if len(row) > 3 else None
+        event_meta = row[4] if len(row) > 4 else ''
+        _add(role, content, ts, eid, event_meta)
+
+    def _ts_key(ts):
+        if ts is None:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        if getattr(ts, 'tzinfo', None) is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts
+
+    merged.sort(key=lambda item: _ts_key(item['timestamp']))
+    return merged[-limit:]
+
+
+def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
+    """Compatibility API: recent context for prompts.
+
+    Prefers canonical chat_log Raw Events; short_memory is only a fallback cache.
+    Deleted Raw Events never enter the result. n still caps the window.
+    """
+    rows = _merge_recent_context(user_id, character_id, n, SHORT_MEMORY_HOURS)
     now = datetime.now(CN_TZ)
     today = now.date()
     result = []
-    for role, content, ts in reversed(rows):
-        marker = ''
-        if ts is not None:
-            # 数据库存的是 UTC，换算到北京时间再判断
-            ts_cn = ts.replace(tzinfo=timezone.utc).astimezone(CN_TZ)
-            gap_seconds = (now - ts_cn).total_seconds()
-            # ★ 修时间判断 bug: 阈值从 2h 降到 10 分钟
-            #   老代码只在 ≥2h 时标时间戳,导致 13 分钟前说的晚安、
-            #   现在再打招呼,LLM 完全看不到时间差,可能误以为已经隔了一觉。
-            if gap_seconds >= 600:
-                d = ts_cn.date()
-                if d == today:
-                    day_label = '今天'
-                elif (today - d).days == 1:
-                    day_label = '昨天'
-                else:
-                    day_label = f'{d.month}月{d.day}日'
-                marker = f'【{day_label}{ts_cn.strftime("%H:%M")}的消息】'
-        result.append((role, marker + content if marker else content))
+    for item in rows:
+        marker = _time_marker(item['timestamp'], now, today)
+        content = item['content']
+        result.append((item['role'], marker + content if marker else content))
     return result
 
 
 def get_short_memory_for_prompt(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
     """角色经历层 → Anthropic messages。
 
-    short_memory.content 是用户原文/媒体占位；
+    short_memory.content / chat_log.text 是用户原文/媒体占位；
     【图片摘要】只在这里按 event_meta.visual_summary 动态拼出。
+    已删除事件不会进入 prompt。
     """
-    limit = _short_limit(n)
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            '''SELECT role, content, timestamp, event_meta FROM short_memory
-               WHERE user_id = %s AND character_id = %s
-                 AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
-               ORDER BY timestamp DESC
-               LIMIT %s''',
-            (user_id, character_id, SHORT_MEMORY_HOURS, limit)
-        )
-        rows = cur.fetchall()
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        cur.execute(
-            '''SELECT role, content, timestamp FROM short_memory
-               WHERE user_id = %s AND character_id = %s
-                 AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
-               ORDER BY timestamp DESC
-               LIMIT %s''',
-            (user_id, character_id, SHORT_MEMORY_HOURS, limit)
-        )
-        rows = [(*r, '') for r in cur.fetchall()]
-    finally:
-        cur.close()
-        conn.close()
-
+    rows = _merge_recent_context(user_id, character_id, n, SHORT_MEMORY_HOURS)
     now = datetime.now(CN_TZ)
     today = now.date()
     out = []
-    for row in reversed(rows):
-        role, content, ts = row[0], row[1] or '', row[2]
-        event_meta = row[3] if len(row) > 3 else ''
-        marker = ''
-        if ts is not None:
-            ts_cn = ts.replace(tzinfo=timezone.utc).astimezone(CN_TZ)
-            gap_seconds = (now - ts_cn).total_seconds()
-            if gap_seconds >= 600:
-                d = ts_cn.date()
-                if d == today:
-                    day_label = '今天'
-                elif (today - d).days == 1:
-                    day_label = '昨天'
-                else:
-                    day_label = f'{d.month}月{d.day}日'
-                marker = f'【{day_label}{ts_cn.strftime("%H:%M")}的消息】'
-        text = assemble_prompt_content(marker + content if marker else content, event_meta)
+    for item in rows:
+        marker = _time_marker(item['timestamp'], now, today)
+        body = marker + item['content'] if marker else item['content']
+        text = assemble_prompt_content(body, item.get('event_meta'))
         if text:
-            out.append({'role': role, 'content': text})
+            out.append({'role': item['role'], 'content': text})
     return out
 
 
@@ -379,6 +586,7 @@ def format_media_short_memory(display_text, visual_summary='', event_meta=None):
 
 
 def get_recent_openings(user_id, n=5, character_id=DEFAULT_CHARACTER_ID):
+    """Legacy cache read of recent assistant openings. Not canonical evidence."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -441,6 +649,12 @@ def notify_memory_changed(table, row_id=None, content=None, deleted=False):
 def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARACTER_ID,
                      lifecycle_kind='long_fact', recall_weight=1.0,
                      source_event_refs=None, expires_at=None):
+    src_ids = _source_ids_from_refs(source_event_refs)
+    if src_ids:
+        import raw_events
+        if not raw_events.sources_are_active(src_ids, user_id, character_id):
+            print(f'[{user_id}] skip long_memory: required source deleted')
+            return False
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -476,6 +690,12 @@ def save_long_memory(user_id, content, category=None, character_id=DEFAULT_CHARA
     cur.close()
     conn.close()
     _bg_embed('long_memory', new_id, content)   # ★ RAG 启用时后台补向量
+    try:
+        import raw_events
+        raw_events.link_memory_sources(
+            'long_memory', new_id, _source_ids_from_refs(source_event_refs))
+    except Exception:
+        pass
     return True
 
 
@@ -548,6 +768,30 @@ def _loosely_matches(a: str, b: str) -> bool:
     return len(ga & gb) / min(len(ga), len(gb)) >= 0.2
 
 
+def _source_ids_from_refs(refs):
+    out = []
+    if isinstance(refs, str):
+        try:
+            refs = json.loads(refs)
+        except Exception:
+            refs = []
+    for item in refs or []:
+        sid = ''
+        if isinstance(item, dict):
+            sid = str(
+                item.get('source_id')
+                or item.get('event_id')
+                or item.get('source_event_id')
+                or ''
+            )
+        elif item:
+            sid = str(item)
+        sid = sid.replace('memory_job:', '').replace('raw_event:', '').strip()
+        if sid and sid not in out:
+            out.append(sid)
+    return out
+
+
 def _too_similar(a: str, b: str) -> bool:
     """判断两条记忆是不是【几乎一模一样】。
 
@@ -605,12 +849,19 @@ def _bigrams(s: str) -> set:
     return {s[i:i + 2] for i in range(len(s) - 1)}
 
 
-def save_bond_memory(user_id, character_id, kind, content):
+def save_bond_memory(user_id, character_id, kind, content, source_event_ids=None):
     """kind='between'（我们之间）或 'told'（她告诉我的）。带去重。"""
+    if source_event_ids:
+        import raw_events
+        if not raw_events.sources_are_active(source_event_ids, user_id, character_id):
+            print(f'[{user_id}] skip bond_memory: required source deleted')
+            return False
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        'SELECT content FROM bond_memory WHERE user_id = %s AND character_id = %s AND kind = %s',
+        '''SELECT content FROM bond_memory
+           WHERE user_id = %s AND character_id = %s AND kind = %s
+             AND COALESCE(recall_status, 'active') = 'active' ''',
         (user_id, character_id, kind)
     )
     existing = cur.fetchall()
@@ -640,6 +891,11 @@ def save_bond_memory(user_id, character_id, kind, content):
     cur.close()
     conn.close()
     _bg_embed('bond_memory', new_id, content)   # ★ RAG 启用时后台补向量
+    try:
+        import raw_events
+        raw_events.link_memory_sources('bond_memory', new_id, source_event_ids or [])
+    except Exception:
+        pass
     return True
 
 
@@ -747,6 +1003,7 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
         cur.execute(
             '''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
+                 AND COALESCE(recall_status, 'active') = 'active'
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, kind, limit)
         )
@@ -754,6 +1011,7 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
         cur.execute(
             '''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s
+                 AND COALESCE(recall_status, 'active') = 'active'
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, limit)
         )
@@ -1154,22 +1412,80 @@ def _norm_category(cat: str) -> str:
 
 def extract_and_save_memory(user_id, user_text, assistant_text,
                             character_id=DEFAULT_CHARACTER_ID,
-                            temporal_context=None, source_event_id=None):
+                            temporal_context=None, source_event_id=None,
+                            source_event_ids=None):
     """一次 Haiku 调用同时提取三类记忆和一类 self-claim 证据：
     A user_fact —— 她透露的关于她自己的新事实 → long_memory(shared)
     B bond      —— 她和这个角色之间发生的事/约定/共同经历 → bond_memory(between)
     C told      —— 她告诉这个角色的、关于角色本人或其世界的信息（含剧透）→ bond_memory(told)
     """
-    try:
-        try:
-            from memory_lifecycle import reactivate_lifecycle_memories
-            reactivated = reactivate_lifecycle_memories(
-                user_id, character_id, user_text)
-            if reactivated:
-                print(f'[{user_id}] 🔁 重新激活 {reactivated} 条生命周期记忆')
-        except Exception as _e:
-            print(f'[{user_id}] 生命周期记忆激活跳过:{_e}')
+    source_ids = []
+    for item in list(source_event_ids or []):
+        val = str(item).strip() if item else ''
+        if val and val not in source_ids:
+            source_ids.append(val)
+    if source_event_id:
+        val = str(source_event_id).strip()
+        if val and val not in source_ids:
+            source_ids.insert(0, val)
+    primary_event_id = source_ids[0] if source_ids else None
 
+    processor = None
+    processor_version = None
+    source_key = None
+    proc_id = None
+
+    def _finish_extract(status, error=None):
+        if not proc_id or not processor:
+            return
+        try:
+            import raw_events
+            raw_events.finish_processor(
+                proc_id, processor, processor_version, status, last_error=error)
+            if status == 'succeeded' and source_key:
+                raw_events.record_derived(
+                    processor, processor_version, source_key,
+                    'memory_extractor', None)
+        except Exception:
+            pass
+
+    try:
+        import raw_events
+        processor = raw_events.PROCESSOR_MEMORY_EXTRACTOR
+        processor_version = raw_events.PROCESSOR_MEMORY_EXTRACTOR_VERSION
+        source_key = raw_events.derivation_source_key(source_ids)
+        proc_id = source_key or primary_event_id
+        if source_ids:
+            try:
+                if not raw_events.sources_are_active(source_ids, user_id, character_id):
+                    print(f'[{user_id}] skip extract: source event deleted')
+                    _finish_extract('skipped', 'deleted_source')
+                    return True
+            except raw_events.SourceValidityError as e:
+                print(f'[{user_id}] skip extract: source validity unknown:{e}')
+                _finish_extract('failed', 'source_validity_unknown')
+                return False
+        if source_key and raw_events.already_derived(
+                processor, processor_version, source_key):
+            print(f'[{user_id}] skip extract: already derived {source_key}')
+            return True
+        if proc_id:
+            state = raw_events.claim_processor(
+                proc_id, processor, processor_version)
+            if state == 'already_succeeded':
+                return True
+    except Exception as e:
+        try:
+            import raw_events as _raw_events
+            if isinstance(e, _raw_events.SourceValidityError):
+                print(f'[{user_id}] skip extract: source validity unknown:{e}')
+                _finish_extract('failed', 'source_validity_unknown')
+                return False
+        except Exception:
+            pass
+        print(f'[{user_id}] extract provenance guard skipped:{e}')
+
+    try:
         pending_corrections = plan_memory_corrections(user_id, user_text, character_id)
         correction_hint = ''
         if pending_corrections:
@@ -1446,7 +1762,20 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
 
         if not parsed:
             print(f'[{user_id}] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢（纠错删除已取消，旧记忆保留）: {raw[:200]}')
+            _finish_extract('failed', 'unparsed')
             return False
+
+        if source_ids:
+            try:
+                import raw_events
+                if not raw_events.sources_are_active(source_ids, user_id, character_id):
+                    print(f'[{user_id}] skip extract commit: source deleted after claim')
+                    _finish_extract('skipped', 'deleted_source')
+                    return True
+            except Exception as e:
+                print(f'[{user_id}] extract pre-commit source check failed:{e}')
+                _finish_extract('failed', 'source_validity_unknown')
+                return False
 
         # 提取 JSON 成功后再删旧记忆，避免先删后存失败导致两边都空
         if pending_corrections:
@@ -1469,6 +1798,9 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                         temporal_context=temporal_context,
                     )
                 except Exception as _e:
+                    import raw_events as _raw_events
+                    if isinstance(_e, _raw_events.SourceValidityError):
+                        raise
                     print(f'[{user_id}] ⚠️ 记忆生命周期处理失败,按旧逻辑保留:{_e}')
                     lifecycle = {
                         'should_save_long_memory': True,
@@ -1530,7 +1862,10 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                 )
                 print(f'[{user_id}] 🧠 bond 改道自我陈述证据（{character_id}）：{content} -> {result}')
             elif _valid_bond(user_id, content, char_name):
-                if save_bond_memory(user_id, character_id, 'between', content):
+                if save_bond_memory(
+                    user_id, character_id, 'between', content,
+                    source_event_ids=source_ids,
+                ):
                     print(f'[{user_id}] ✅ 羁绊记忆（{character_id}）：{content}')
 
         # C. 她告诉我的事 → bond_memory(told)
@@ -1538,7 +1873,10 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         if isinstance(td, dict):
             content = _clean_content(td.get('content'))
             if _valid_told(user_id, content):
-                if save_bond_memory(user_id, character_id, 'told', content):
+                if save_bond_memory(
+                    user_id, character_id, 'told', content,
+                    source_event_ids=source_ids,
+                ):
                     print(f'[{user_id}] ✅ 告知记忆（{character_id}）：{content}')
 
         # ★ 两级召回：强化被提起的记忆（mention_count + 1）
@@ -1548,10 +1886,21 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         except Exception:
             pass
 
+        try:
+            from memory_lifecycle import reactivate_lifecycle_memories
+            reactivated = reactivate_lifecycle_memories(
+                user_id, character_id, user_text)
+            if reactivated:
+                print(f'[{user_id}] 🔁 重新激活 {reactivated} 条生命周期记忆')
+        except Exception as _e:
+            print(f'[{user_id}] 生命周期记忆激活跳过:{_e}')
+
+        _finish_extract('succeeded')
         return True
 
     except Exception as e:
         print(f'记忆提取失败：{e}')
+        _finish_extract('failed', str(e))
         return False
 
 
