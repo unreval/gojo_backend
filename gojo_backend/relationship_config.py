@@ -101,11 +101,12 @@ DECAY_PER_DAY = {
 }
 
 # ══════════════════════════════════════════════════════════════
-# Reciprocity 滑动窗口
+# Flirt response 滑动窗口
 # ══════════════════════════════════════════════════════════════
-RECIPROCITY_WINDOW_SIZE = 15   # 最近 N 轮消息用于计算互惠度
-RECIPROCITY_POSITIVE_THRESHOLD = 0.3    # 比例 > N 判定为"正向氛围"
-RECIPROCITY_NEGATIVE_THRESHOLD = -0.3
+# 先取最近 N 条已记录 interaction stats（relationship_engine 写入的 text-turn），
+# 再在这 N 条里统计 flirt_response。不是「最近 N 次暧昧事件」，
+# 也不是全渠道所有互动（voice/group 当前不走 process_turn）。
+FLIRT_RESPONSE_WINDOW_SIZE = 15
 
 # ══════════════════════════════════════════════════════════════
 # Pursue-Withdraw 追逃诊断

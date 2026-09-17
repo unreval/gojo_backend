@@ -79,9 +79,12 @@ def _ingest_v4(user_id, character_id, source_event_id, signals):
 
 
 def _apply_extracted_signals(user_id, character_id, signals, session_id,
-                             temporal_context):
+                             temporal_context, source_event_id=None):
     applied = []
-    _log_interaction_stats(user_id, character_id, signals, session_id)
+    _log_interaction_stats(
+        user_id, character_id, signals, session_id,
+        source_event_id=source_event_id,
+    )
     _log_temporal_observation(user_id, character_id, temporal_context)
     for sig in signals:
         try:
@@ -113,6 +116,9 @@ def process_turn(
     source_event_id: Optional[str] = None,
 ) -> Dict:
     """处理一轮对话，更新关系状态。异步调用（不要挂在主聊天请求路径上）。
+
+    当前由 /chat/text 触发。/chat/voice_stream 与 route_group 不走 process_turn，
+    因此 flirt_response 窗口只覆盖已记录的 text-turn，不是全渠道所有互动。
 
     Relationship ledger mutation for a Raw Event is exactly-once:
     unique (event_id, processor_type, processor_version) in rel_event_applications
@@ -268,7 +274,7 @@ def process_turn(
                     # Signal routing stays in process_turn via _route_signal.
                     applied = _apply_extracted_signals(
                         user_id, character_id, signals, session_id,
-                        temporal_context)
+                        temporal_context, source_event_id=source_event_id)
                 else:
                     cached = get_application_payload(
                         source_event_id, rel_processor, rel_processor_version)
@@ -298,7 +304,8 @@ def process_turn(
             )
     else:
         applied = _apply_extracted_signals(
-            user_id, character_id, signals, session_id, temporal_context)
+            user_id, character_id, signals, session_id, temporal_context,
+            source_event_id=source_event_id)
 
     cognitive_ingress = None
     cognitive_ingress_error = None
@@ -889,29 +896,85 @@ def _get_stage(state: Dict) -> str:
 
 
 # ══════════════════════════════════════════════════════════════
-# 交互统计写入（Tone/Reciprocity 用）
+# 交互统计写入（Tone / flirt_response；is_reciprocal 为 legacy）
 # ══════════════════════════════════════════════════════════════
-def _log_interaction_stats(user_id, character_id, signals, session_id):
-    """从 signals 抽出 tone/reciprocal 标签，写 rel_interaction_stats"""
+_FLIRT_RESPONSE_BY_SIGNAL = {
+    'positive_reciprocal': 'accepted',
+    'ambiguous_response': 'held',
+    'explicit_rejection': 'rejected',
+}
+
+
+def aggregate_user_flirt_response(signals):
+    """Deterministic user-only flirt response for one turn.
+
+    accepted / held / rejected if exactly one of those user signals is present.
+    mixed if two or more distinct classes appear (order independent).
+    None if there is no user flirt-response evidence.
+    offensive_content never maps here.
+    """
+    classes = []
+    seen = set()
+    for signal in signals or []:
+        if not isinstance(signal, dict):
+            continue
+        if signal.get('actor') != 'user':
+            continue
+        mapped = _FLIRT_RESPONSE_BY_SIGNAL.get(signal.get('signal_type'))
+        if not mapped or mapped in seen:
+            continue
+        seen.add(mapped)
+        classes.append(mapped)
+    if not classes:
+        return None
+    if len(classes) == 1:
+        return classes[0]
+    return 'mixed'
+
+
+def _log_interaction_stats(user_id, character_id, signals, session_id,
+                           source_event_id=None):
+    """Write one stats row per process_turn.
+
+    flirt_response is aggregated, not last-write-wins.
+    is_reciprocal is legacy and is no longer populated.
+    source_event_id is the provenance key; retries with the same id must not
+    insert a second row (partial unique index + ON CONFLICT).
+    Apply-once already skips this function on retry when the v4 application
+    row exists; the unique index is the stats-table guarantee.
+    """
     tone_category = None
-    is_reciprocal = None
-    for s in signals:
-        stype = s.get('signal_type', '')
-        if stype in ('small_care', 'genuine_care'):
+    for signal in signals or []:
+        if not isinstance(signal, dict):
+            continue
+        if signal.get('signal_type') in ('small_care', 'genuine_care'):
             tone_category = 'support'
-        elif stype in ('positive_reciprocal',):
-            is_reciprocal = True
-        elif stype in ('explicit_rejection', 'offensive_content'):
-            is_reciprocal = False
+    flirt_response = aggregate_user_flirt_response(signals)
+    event_id = (str(source_event_id).strip() if source_event_id else '') or None
 
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('''INSERT INTO rel_interaction_stats
-                   (user_id, character_id, direction, tone_category,
-                    is_reciprocal, is_initiator, session_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)''',
-                (user_id, character_id, 'user', tone_category,
-                 is_reciprocal, False, session_id))
+    values = (
+        user_id, character_id, 'user', tone_category,
+        None, False, session_id, event_id, flirt_response,
+    )
+    if event_id:
+        cur.execute('''INSERT INTO rel_interaction_stats
+                       (user_id, character_id, direction, tone_category,
+                        is_reciprocal, is_initiator, session_id,
+                        source_event_id, flirt_response)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (user_id, character_id, source_event_id)
+                       WHERE source_event_id IS NOT NULL
+                       DO NOTHING''',
+                    values)
+    else:
+        cur.execute('''INSERT INTO rel_interaction_stats
+                       (user_id, character_id, direction, tone_category,
+                        is_reciprocal, is_initiator, session_id,
+                        source_event_id, flirt_response)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)''',
+                    values)
     conn.commit()
     cur.close()
     conn.close()

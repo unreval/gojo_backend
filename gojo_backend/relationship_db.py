@@ -11,7 +11,8 @@
   3. declared_stance       —— 已确认表态清单（防"反悔bug"）
   4. boundary_hits         —— 每个雷区被触碰的历史
   5. repair_log            —— 每次修复尝试及结果
-  6. interaction_stats     —— 消息级别的轻量统计（Tone/Reciprocity/Pursue-Withdraw 用）
+  6. interaction_stats     —— 消息级别的轻量统计（Tone / flirt_response / Pursue-Withdraw）
+     is_reciprocal 是 legacy 布尔，新 reader 不读。
   7. rel_event_applications —— 关系 apply 的 exactly-once 身份
      (event_id, processor_type, processor_version)
 
@@ -264,8 +265,12 @@ def init_relationship_tables():
                    ON rel_repair_log (user_id, character_id, timestamp DESC)''')
 
     # ── 6. Interaction Stats（轻量消息级统计）─────────────
-    # 用于 Tone / Reciprocity / Pursue-Withdraw 的滑动窗口计算
-    # 每条用户消息 + 角色消息各写一行
+    # Tone / flirt_response / Pursue-Withdraw。
+    # 一行对应一次 relationship_engine.process_turn（当前主要是 /chat/text）。
+    # voice/group 不走这条写入路径。
+    # is_reciprocal：legacy flirt 布尔（True=positive_reciprocal，
+    # False 曾含 explicit_rejection 与 offensive_content）。新写入不再填它，
+    # 新 reader 不读它，旧行不回填 flirt_response。
     cur.execute('''CREATE TABLE IF NOT EXISTS rel_interaction_stats (
         id SERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -275,9 +280,20 @@ def init_relationship_tables():
         is_reciprocal BOOLEAN,
         is_initiator BOOLEAN DEFAULT FALSE,
         session_id TEXT,
+        source_event_id TEXT,
+        flirt_response TEXT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_rel_interaction_user_char
                    ON rel_interaction_stats (user_id, character_id, timestamp DESC)''')
+    cur.execute('''ALTER TABLE rel_interaction_stats
+                   ADD COLUMN IF NOT EXISTS source_event_id TEXT''')
+    cur.execute('''ALTER TABLE rel_interaction_stats
+                   ADD COLUMN IF NOT EXISTS flirt_response TEXT''')
+    # Retry of the same Raw Event must not insert a second stats row.
+    # Applies only when source_event_id is present; NULL event ids stay one-row-per-call.
+    cur.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_interaction_source_event
+                   ON rel_interaction_stats (user_id, character_id, source_event_id)
+                   WHERE source_event_id IS NOT NULL''')
 
     # ── 7. Exactly-once relationship application identity ─────
     # Ledger mutation is keyed by (event_id, processor_type, processor_version).

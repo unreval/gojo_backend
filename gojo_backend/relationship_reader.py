@@ -19,8 +19,7 @@ from relationship_config import (
     STAGE_STRANGER_I_MAX, STAGE_ACQUAINTANCE_I_MAX,
     STAGE_FRIEND_C_MIN,
     NEGATIVE_RELATIONSHIP_F_TO_W_RATIO, NEGATIVE_RELATIONSHIP_W_ZERO,
-    RECIPROCITY_WINDOW_SIZE, RECIPROCITY_POSITIVE_THRESHOLD,
-    RECIPROCITY_NEGATIVE_THRESHOLD,
+    FLIRT_RESPONSE_WINDOW_SIZE,
     PURSUE_WITHDRAW_WINDOW_SIZE, PURSUE_WITHDRAW_IMBALANCE_THRESHOLD,
 )
 
@@ -35,7 +34,8 @@ def build_state_summary(user_id: str, character_id: str) -> str:
       1. 关系标签（读出，不是变量）
       2. 三根核心数值刻度（用形容词而不是数字，避免 Generator 被数字锚定）
       3. 复合状态提示（拧巴/矛盾/纠结这些不能被简化的情况）
-      4. Dynamics（Tone / Reciprocity / Pursue-Withdraw）
+      4. Dynamics（Tone / 关系推进回应计数 / Pursue-Withdraw）
+         表现层标题 ≠ 底层字段名；tone ≠ flirt response ≠ durable state
       5. ★ Declared Stance（必须遵守的角色历史表态）
       6. 表达指引（怎么说、不该说什么）
     """
@@ -43,7 +43,7 @@ def build_state_summary(user_id: str, character_id: str) -> str:
     label = derive_label(state)
     stances = list_active_stances(user_id, character_id)
     tone = compute_tone(user_id, character_id)
-    reciprocity = compute_reciprocity(user_id, character_id)
+    flirt = compute_flirt_response(user_id, character_id)
     pursue_withdraw = compute_pursue_withdraw(user_id, character_id)
     temporal_note = _temporal_note(user_id, character_id)
 
@@ -70,10 +70,11 @@ def build_state_summary(user_id: str, character_id: str) -> str:
         lines.append(f'- 摩擦（负面积累）：{_scale_word(total_f)}，主要来自：{", ".join(top_categories)}')
     lines.append('')
 
-    # Dynamics
+    # Dynamics：调性与关系推进回应都是近期 evidence，不是关系冷热结论
     lines.append('【最近的相处氛围】')
     lines.append(f'- 对话调性：{tone or "（数据不足）"}')
-    lines.append(f'- 互惠度：{reciprocity["desc"]}')
+    if flirt.get('flirt_sample_count', 0) > 0:
+        lines.append(f'- 关系推进回应：{flirt["desc"]}')
     if pursue_withdraw and pursue_withdraw.get('pattern'):
         lines.append(f'- 追逃模式：{pursue_withdraw["desc"]}（★ 不要把节奏差误读成关系变冷）')
     if temporal_note:
@@ -431,37 +432,61 @@ def compute_tone(user_id, character_id) -> Optional[str]:
     return '混合调性'
 
 
-def compute_reciprocity(user_id, character_id) -> Dict:
-    """最近若干轮 is_reciprocal 的正负比例。"""
+def compute_flirt_response(user_id, character_id) -> Dict:
+    """Count flirt_response inside the last N recorded interaction turns.
+
+    Window is last N rows, then count. Do not skip NULL and backfill from
+    older history. Legacy Boolean column is ignored. Does not cover voice/group
+    turns that never called process_turn.
+    """
+    window = FLIRT_RESPONSE_WINDOW_SIZE
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('''SELECT is_reciprocal, COUNT(*)
-                   FROM (SELECT is_reciprocal FROM rel_interaction_stats
-                         WHERE user_id = %s AND character_id = %s
-                           AND is_reciprocal IS NOT NULL
-                         ORDER BY timestamp DESC
-                         LIMIT %s) sub
-                   GROUP BY is_reciprocal''',
-                (user_id, character_id, RECIPROCITY_WINDOW_SIZE))
+    cur.execute('''SELECT flirt_response
+                   FROM (
+                       SELECT flirt_response
+                       FROM rel_interaction_stats
+                       WHERE user_id = %s AND character_id = %s
+                       ORDER BY timestamp DESC, id DESC
+                       LIMIT %s
+                   ) recent''',
+                (user_id, character_id, window))
     rows = cur.fetchall()
     cur.close()
     conn.close()
 
-    pos = neg = 0
-    for is_reciprocal, cnt in rows:
-        if is_reciprocal:
-            pos += cnt
-        else:
-            neg += cnt
-    total = pos + neg
-    if total == 0:
-        return {'score': 0.0, 'desc': '（数据不足）'}
-    score = (pos - neg) / total
-    if score >= RECIPROCITY_POSITIVE_THRESHOLD:
-        return {'score': score, 'desc': '氛围偏正向（她多在配合/延伸）'}
-    if score <= RECIPROCITY_NEGATIVE_THRESHOLD:
-        return {'score': score, 'desc': '氛围偏冷（她多在拒绝/回避）'}
-    return {'score': score, 'desc': '中性（有来有回但没明显倾向）'}
+    counts = {'accepted': 0, 'held': 0, 'rejected': 0, 'mixed': 0}
+    for (value,) in rows:
+        if value in counts:
+            counts[value] += 1
+    sample = sum(counts.values())
+    stats = {
+        'accepted': counts['accepted'],
+        'held': counts['held'],
+        'rejected': counts['rejected'],
+        'mixed': counts['mixed'],
+        'total_recent_turns': len(rows),
+        'flirt_sample_count': sample,
+        'window': window,
+        'desc': _format_flirt_response_desc(counts, sample, window),
+    }
+    return stats
+
+
+def _format_flirt_response_desc(counts, sample, window) -> str:
+    if sample <= 0:
+        return '最近没有足够的相关互动'
+    parts = [
+        f'接受 {counts["accepted"]}',
+        f'保留 {counts["held"]}',
+        f'拒绝 {counts["rejected"]}',
+    ]
+    if counts['mixed']:
+        parts.append(f'混合 {counts["mixed"]}')
+    return (
+        f'最近 {window} 轮已记录互动中有 {sample} 次相关回应'
+        f'（{" / ".join(parts)}）'
+    )
 
 
 def compute_pursue_withdraw(user_id, character_id) -> Dict:

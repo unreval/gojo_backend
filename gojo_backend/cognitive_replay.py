@@ -112,6 +112,7 @@ def load_historical_records(*, user_id=None, character_id=None, conn=None):
                 'source_event_type': 'interaction_timing',
                 'direction': row[3],
                 'tone_category': row[4],
+                # is_reciprocal is a legacy copy only; not a new metric source.
                 'is_reciprocal': row[5],
                 'is_initiator': row[6],
                 'occurred_at': row[7],
