@@ -26,6 +26,23 @@ import route_chatlog  # noqa: E402
 import route_image  # noqa: E402
 
 
+class _PassthroughHeartbeat:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        return self
+
+    def stop(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 PNG_B64 = (
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ'
     '/pLvAAAAAElFTkSuQmCC'
@@ -372,6 +389,25 @@ class ChatImagePersistRouteTests(unittest.TestCase):
             patch.object(route_image, '_turn_context', return_value=(None, [])),
             patch('reply_availability.check_reply_availability', return_value={'can_reply': True}),
             patch('context_layer.append_current_user_turn', side_effect=lambda msgs, content: list(msgs or []) + [{'role': 'user', 'content': content}]),
+            patch('db_generation_receipt.resolve_generation', side_effect=lambda user_id, character_id, source_event_id, endpoint, **k: {
+                'action': 'generate',
+                'claim_token': 'passthrough',
+                'source_event_id': source_event_id,
+            }),
+            patch('db_generation_receipt.fail_generation', return_value=True),
+            patch('db_generation_receipt.complete_generation', return_value=True),
+            patch('db_generation_receipt.ensure_completed_generation_effects', return_value=[]),
+            patch('db_generation_receipt.after_generation_commit', return_value=[]),
+            patch(
+                'db_generation_receipt.hydrate_completed_generation_response',
+                side_effect=lambda *_args, payload=None, **_kwargs: {
+                    key: val for key, val in dict(payload or {}).items()
+                    if not str(key).startswith('_')
+                },
+            ),
+            patch('db_generation_receipt.release_generation', return_value=True),
+            patch('db_generation_receipt.renew_generation_lease', return_value=True),
+            patch('db_generation_receipt.GenerationHeartbeat', new=_PassthroughHeartbeat),
             patch('builtins.print'),
         ]
         for item in self.patchers:

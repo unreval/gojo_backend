@@ -142,6 +142,23 @@ function isGenerationFailedPayload(data: any): boolean {
   return data.generation_failed === true || data.error === 'generation_failed';
 }
 
+function isGenerationInProgressPayload(data: any): boolean {
+  if (!data || typeof data !== 'object') return false;
+  return data.generation_in_progress === true;
+}
+
+function assistantSegmentId(
+  seg: { event_id?: string } | undefined,
+  assistantTurnId: string | undefined,
+  index: number,
+): string {
+  const eventId = String(seg?.event_id || '').trim();
+  if (eventId) return eventId;
+  const turnId = String(assistantTurnId || '').trim();
+  if (turnId) return `${turnId}:${index}`;
+  return `${Date.now()}_${index}`;
+}
+
 /** 服务器格式 → 本地 Message */
 function fromServerMsg(m: any): any {
   let extra: any = {};
@@ -216,6 +233,8 @@ interface Segment {
   jp: string;
   zh: string;
   audio_b64: string;
+  event_id?: string;
+  segment_index?: number;
 }
 interface GroupReply {
   msg_id?: number;
@@ -278,6 +297,7 @@ export default function ChatRoom() {
   const [inputText, setInputText] = useState('');
   const [loading, setLoading]     = useState(false);
   const [generationFailed, setGenerationFailed] = useState(false);
+  const [generationInProgress, setGenerationInProgress] = useState(false);
   const lastFailedSendRef = useRef<null | {
     kind: 'text';
     text: string;
@@ -953,7 +973,9 @@ export default function ChatRoom() {
       Alert.alert('提醒已取消', 'App 内的提醒已删除。如果之前设了系统闹钟，请到手机的时钟 App 里手动删除哦', [{ text: '知道了' }]);
     }
     if (data?.reminder?.date && data.reminder.time) {
-      if (data.reminder.duplicate) {
+      if (!data.reminder.task_id) {
+        console.warn('[reminder] skip local schedule: missing task_id');
+      } else if (data.reminder.duplicate) {
         console.log('🔁 重复提醒，跳过 schedule');
       } else {
         await scheduleReminder(data.reminder);
@@ -1159,11 +1181,12 @@ export default function ChatRoom() {
       replyTo?: Message['replyTo'];
       visualSummary?: string;
       eventMeta?: Record<string, any>;
+      assistantTurnId?: string;
     },
   ) => {
     for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
-      const msgId = `${baseId}_${i}`;
+      const seg = segments[i] as Segment & { event_id?: string; segment_index?: number };
+      const msgId = assistantSegmentId(seg, meta?.assistantTurnId, i);
       let audioUri: string | null = null;
       if (seg.audio_b64 && seg.audio_b64.length > 100) {
         audioUri = await saveAudioFile(msgId, seg.audio_b64);
@@ -1180,20 +1203,27 @@ export default function ChatRoom() {
         replyToSourceEventId: meta?.sourceEventId,
         replyTo: meta?.replyTo,
         visualSummary: meta?.visualSummary,
-        eventMeta: meta?.eventMeta,
+        eventMeta: {
+          ...(meta?.eventMeta || {}),
+          assistant_turn_id: meta?.assistantTurnId,
+          event_id: msgId,
+          segment_index: typeof seg.segment_index === 'number' ? seg.segment_index : i,
+        },
       };
+      const alreadyHas = (list: Message[]) => list.some(item => item.id === msgId);
       if (focusedRef.current) {
-        setMessages(prev => [...prev, msg]);
+        setMessages(prev => alreadyHas(prev) ? prev : [...prev, msg]);
         scrollRef.current?.scrollToEnd({ animated: true });
       } else {
-        // ★ 人已离开：静默写入本机存储 + 计未读，回来能看到、语音可点重播
-        messagesRef.current = [...messagesRef.current, msg];
-        AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messagesRef.current)).catch(() => {});
-        try {
-          const k = `char_unread_${chatId}`;
-          const v = parseInt((await AsyncStorage.getItem(k)) || '0', 10);
-          await AsyncStorage.setItem(k, String(v + 1));
-        } catch {}
+        if (!alreadyHas(messagesRef.current)) {
+          messagesRef.current = [...messagesRef.current, msg];
+          AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messagesRef.current)).catch(() => {});
+          try {
+            const k = `char_unread_${chatId}`;
+            const v = parseInt((await AsyncStorage.getItem(k)) || '0', 10);
+            await AsyncStorage.setItem(k, String(v + 1));
+          } catch {}
+        }
       }
       if (audioUri && focusedRef.current) await playAudioAndWait(audioUri);
       if (i < segments.length - 1 && focusedRef.current) await sleep(MSG_DELAY_MS);
@@ -1279,6 +1309,7 @@ export default function ChatRoom() {
 
   // ★ 基础设施失败（模型空回复 / 网络错误）用独立 UI 提示，绝不伪装成角色说话。
   const noteGenerationFailure = () => {
+    setGenerationInProgress(false);
     setGenerationFailed(true);
   };
 
@@ -1434,6 +1465,22 @@ export default function ChatRoom() {
           noteGenerationFailure();
           return;
         }
+        if (isGenerationInProgressPayload(res.data)) {
+          if (res.data?.media) {
+            setMessages(prev => prev.map(m => m.id === sourceEventId
+              ? applyMediaFields(m, res.data.media) : m));
+          }
+          setGenerationInProgress(true);
+          setGenerationFailed(false);
+          const keepId = sourceEventId;
+          setTimeout(() => {
+            if (lastFailedSendRef.current?.kind === 'image'
+                && lastFailedSendRef.current.sourceEventId === keepId) {
+              sendImage(base64, mediaType, localUri, caption, video, { retry: true });
+            }
+          }, 800);
+          return;
+        }
         await processResponseExtras(res.data);
         // ★ busy 时 seen 和 reply 分离:看到了但没空回才标已读;没看见保持未读。
         //   后台 Vision 摘要仍可先落在气泡上（系统看图 ≠ 角色 seen）。
@@ -1460,11 +1507,13 @@ export default function ChatRoom() {
         const segments: Segment[] = res.data?.messages || [];
         if (segments.length === 0) { noteGenerationFailure(); return; }
         setGenerationFailed(false);
-        await appendSegments(segments, `${Date.now()}`, {
+        setGenerationInProgress(false);
+        await appendSegments(segments, '', {
           sourceEventId,
           replyTo: imageReplyTo,
           visualSummary: res.data?.visual_summary,
           eventMeta: res.data?.event_meta,
+          assistantTurnId: res.data?.assistant_turn_id,
         });
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
@@ -1586,6 +1635,18 @@ export default function ChatRoom() {
           noteGenerationFailure();
           return;
         }
+        if (isGenerationInProgressPayload(res.data)) {
+          setGenerationInProgress(true);
+          setGenerationFailed(false);
+          const keepId = sourceEventId;
+          setTimeout(() => {
+            if (lastFailedSendRef.current?.kind === 'text'
+                && lastFailedSendRef.current.sourceEventId === keepId) {
+              sendText(text, { retry: true });
+            }
+          }, 800);
+          return;
+        }
         await processResponseExtras(res.data);
         // ★ busy 时 seen 和 reply 分离:看到了但没空回才标已读;没看见保持未读。
         if (res.data?.busy) {
@@ -1601,9 +1662,11 @@ export default function ChatRoom() {
         }
         if (segments.length === 0) { noteGenerationFailure(); return; }
         setGenerationFailed(false);
-        await appendSegments(segments, `${Date.now()}`, {
+        setGenerationInProgress(false);
+        await appendSegments(segments, '', {
           sourceEventId,
           replyTo: lastFailedSendRef.current?.kind === 'text' ? lastFailedSendRef.current.replyTo : undefined,
+          assistantTurnId: res.data?.assistant_turn_id,
         });
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
@@ -2119,9 +2182,11 @@ export default function ChatRoom() {
         </View>
       )}
 
-      {generationFailed && (
+      {(generationFailed || generationInProgress) && (
         <View style={s.failBanner}>
-          <Text style={s.failBannerText}>回复生成失败，点击重试</Text>
+          <Text style={s.failBannerText}>
+            {generationInProgress ? '仍在生成' : '回复生成失败，点击重试'}
+          </Text>
           <TouchableOpacity
             onPress={retryLastGeneration}
             disabled={loading}

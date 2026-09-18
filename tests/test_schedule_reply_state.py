@@ -14,6 +14,10 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 BACKEND = os.path.join(ROOT, 'gojo_backend')
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
+if os.path.dirname(__file__) not in sys.path:
+    sys.path.insert(0, os.path.dirname(__file__))
+
+from receipt_passthrough import passthrough_generation_receipt  # noqa: E402
 
 
 def stub(name, **attributes):
@@ -852,6 +856,7 @@ class BusyImageVisionTests(unittest.TestCase):
                 signed_get_url=Mock(return_value='https://r2.example/signed'),
                 MediaStorageError=RuntimeError,
             ),
+            'db_generation_receipt': passthrough_generation_receipt(),
         }
 
         availability = {

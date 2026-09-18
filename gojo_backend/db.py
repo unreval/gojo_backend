@@ -72,7 +72,19 @@ def init_db():
         notification_id VARCHAR(255) DEFAULT NULL,
         repeat_type TEXT DEFAULT 'none',
         last_completed_date TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        occurrence_key TEXT)''')
+    cur.execute('SAVEPOINT tasks_occurrence')
+    try:
+        cur.execute('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS occurrence_key TEXT')
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_occurrence_key "
+            "ON tasks (occurrence_key) "
+            "WHERE occurrence_key IS NOT NULL AND occurrence_key <> ''")
+        cur.execute('RELEASE SAVEPOINT tasks_occurrence')
+    except Exception as e:
+        print(f'[init] tasks occurrence_key skipped:{e}')
+        cur.execute('ROLLBACK TO SAVEPOINT tasks_occurrence')
 
     # ── ★ 记账·账户 ──
     cur.execute('''CREATE TABLE IF NOT EXISTS accounts (

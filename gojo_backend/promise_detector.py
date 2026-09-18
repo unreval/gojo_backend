@@ -39,7 +39,8 @@ _PROMISE_PATTERNS = [
 _NEGATION = ['不会', '才不', '谁要', '怎么可能', '别想', '你想多了', '做梦']
 
 
-def detect_and_save(character_id, user_id, user_text, reply_zh):
+def detect_and_save(character_id, user_id, user_text, reply_zh,
+                    occurrence_key=None):
     """检测角色回复里的承诺,有就写入 proactive_promise。
 
     Args:
@@ -89,7 +90,8 @@ def detect_and_save(character_id, user_id, user_text, reply_zh):
             context = f'角色答应每天{trigger_time}主动联系。原话:「{matched_text}」'
             return _save_promise(character_id, user_id, trigger_kind,
                                 trigger_time=trigger_time,
-                                context=context, origin=user_text)
+                                context=context, origin=user_text,
+                                occurrence_key=occurrence_key)
 
         elif matched_type == 'timed':
             # 有具体时间:提取时间,创建一次性承诺
@@ -112,7 +114,8 @@ def detect_and_save(character_id, user_id, user_text, reply_zh):
             context = f'角色答应在特定时间联系。原话:「{matched_text}」'
             return _save_promise(character_id, user_id, trigger_kind,
                                 trigger_at=trigger_at,
-                                context=context, origin=user_text)
+                                context=context, origin=user_text,
+                                occurrence_key=occurrence_key)
 
         elif matched_type in ('contact', 'remind', 'spam'):
             # 主动联系/提醒/连续发消息:创建一次性承诺,1-3 小时后触发
@@ -128,7 +131,8 @@ def detect_and_save(character_id, user_id, user_text, reply_zh):
             context = f'角色答应会{type_desc.get(matched_type, "主动联系")}。原话:「{matched_text}」'
             return _save_promise(character_id, user_id, trigger_kind,
                                 trigger_at=trigger_at,
-                                context=context, origin=user_text)
+                                context=context, origin=user_text,
+                                occurrence_key=occurrence_key)
 
         elif matched_type == 'freq_up':
             # ★ 频率调整:角色同意多发消息,调高每日上限
@@ -144,15 +148,15 @@ def detect_and_save(character_id, user_id, user_text, reply_zh):
 
 def _save_promise(character_id, user_id, trigger_kind,
                   trigger_at=None, trigger_time=None,
-                  context='', origin=''):
-    """写入 proactive_promise 表。检查重复:同一 context 不重复创建。"""
+                  context='', origin='', occurrence_key=None):
+    """写入 proactive_promise 表。occurrence_key 幂等；无 key 时仍用 context 前缀去重。"""
     try:
-        # 防重复:最近 24 小时内有类似的就不再建
-        existing = db_promise.get_active_promises(character_id, user_id)
-        for p in existing:
-            if p.get('context', '')[:20] == context[:20]:
-                print(f'[promise_detect] 跳过重复承诺: {context[:30]}')
-                return None
+        if not occurrence_key:
+            existing = db_promise.get_active_promises(character_id, user_id)
+            for p in existing:
+                if p.get('context', '')[:20] == context[:20]:
+                    print(f'[promise_detect] 跳过重复承诺: {context[:30]}')
+                    return None
 
         pid = db_promise.add_promise(
             character_id=character_id,
@@ -162,6 +166,7 @@ def _save_promise(character_id, user_id, trigger_kind,
             trigger_time=trigger_time,
             context=context,
             origin_text=(origin or '')[:200],
+            occurrence_key=occurrence_key,
         )
         print(f'[promise_detect] ✅ 检测到承诺并创建 #{pid}: {context[:40]}')
         return pid

@@ -10,7 +10,6 @@
 import base64
 import binascii
 import time
-import uuid
 
 import anthropic
 from fastapi import APIRouter
@@ -20,7 +19,6 @@ from db_chat_media import persist_image, public_media
 from media_storage import MediaStorageError
 
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
-from db import get_conn
 from utils import ingest_model_output, finalize_user_messages, valid_reply_msg, commit_ready_msgs
 from ai_client import extract_text, response_metadata
 from tts import tts_to_b64
@@ -33,12 +31,6 @@ from user_memory import (
 from memory_jobs import enqueue_private_extraction
 from temporal_awareness import get_temporal_snapshot, record_turn
 from characters import get_character
-from tasks import (
-    find_duplicate_task,
-    find_and_delete_tasks_by_keyword,
-    delete_latest_task,
-)
-from task_dedup import find_similar_task   # ★ 模糊去重：同时段+意思相近就算同一件事
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY, max_retries=0)
@@ -240,6 +232,81 @@ def _persist_failed_response(error):
     )
 
 
+def _image_effect_ctx(user_id, character_id, source_event_id, payload, extra=None):
+    extra = dict(extra or {})
+    char = extra.get('char') or get_character(character_id) or {}
+    short_memories = extra.get('short_memories')
+    if short_memories is None:
+        try:
+            short_memories = get_short_memory(user_id, 20, character_id)
+        except Exception:
+            short_memories = []
+    ctx = {
+        'user_text': extra.get('user_text') or (payload or {}).get('_user_text') or '',
+        'full_jp': extra.get('full_jp') or ' '.join(
+            str((m or {}).get('jp') or '') for m in (payload or {}).get('messages') or []),
+        'event_meta': extra.get('event_meta') or (payload or {}).get('event_meta'),
+        'is_video': extra.get('is_video', False),
+        'temporal_snapshot': extra.get('temporal_snapshot'),
+        'payload': payload,
+        'char': char,
+        'pack': extra.get('pack'),
+        'short_memories': short_memories,
+        'save_short_memory': save_short_memory,
+        'attach_short_memory_event_meta': attach_short_memory_event_meta,
+        'record_turn': record_turn,
+        'enqueue_private_extraction': enqueue_private_extraction,
+    }
+    ctx.update(extra)
+    return ctx
+
+
+def _gate_image_generation(user_id, character_id, source_event_id):
+    from db_generation_receipt import (
+        ENDPOINT_CHAT_IMAGE, hydrate_completed_generation_response,
+        in_progress_body, resolve_generation,
+    )
+    from generation_effects import (
+        client_coupled_effects, client_effects_pending_response,
+        pending_client_effects, repair_completed_generation,
+    )
+    gate = resolve_generation(
+        user_id, character_id, source_event_id, ENDPOINT_CHAT_IMAGE)
+    action = gate.get('action')
+    if action == 'in_progress':
+        return gate, JSONResponse(
+            in_progress_body(gate.get('source_event_id')), status_code=202)
+    if action == 'replay':
+        payload = gate.get('response') or {}
+        sid = gate.get('source_event_id')
+        effect_ctx = _image_effect_ctx(user_id, character_id, sid, payload)
+        repair_completed_generation(
+            user_id, character_id, sid, ENDPOINT_CHAT_IMAGE, payload,
+            extra_ctx=effect_ctx)
+        pending = pending_client_effects(
+            user_id, character_id, sid, ENDPOINT_CHAT_IMAGE,
+            client_coupled_effects(ENDPOINT_CHAT_IMAGE, payload, effect_ctx))
+        if pending:
+            return gate, JSONResponse(
+                client_effects_pending_response(sid, pending), status_code=202)
+        body = hydrate_completed_generation_response(
+            user_id, character_id, sid, ENDPOINT_CHAT_IMAGE, payload=payload)
+        return gate, JSONResponse(body)
+    return gate, None
+
+
+def _fail_image(user_id, character_id, source_event_id, claim_token, last_error):
+    if not claim_token:
+        return
+    try:
+        from db_generation_receipt import ENDPOINT_CHAT_IMAGE, fail_generation
+        fail_generation(
+            user_id, character_id, source_event_id, ENDPOINT_CHAT_IMAGE,
+            claim_token, last_error=last_error)
+    except Exception:
+        pass
+
+
 # ★ 记账透传辅助:只做基本形状校验,不写库(前端确认后 POST /accounting/records)
 def _extract_pending_tx(result: dict, user_id: str):
     pt = result.get('pending_transaction') if isinstance(result, dict) else None
@@ -285,7 +352,8 @@ async def chat_image(data: dict):
     media_type   = data.get('media_type', 'image/jpeg')
     user_text    = (data.get('text') or '').strip()
     is_video     = bool(data.get('is_video'))
-    source_event_id = str(data.get('source_event_id') or '').strip() or uuid.uuid4().hex
+    from db_generation_receipt import assign_source_event_id
+    source_event_id, _legacy = assign_source_event_id(data.get('source_event_id'))
     reply_to = _safe_reply_to(data)
 
     # 统一成图片列表：单图和多图（视频抽帧）走同一条路
@@ -317,6 +385,13 @@ async def chat_image(data: dict):
         if media_payload:
             missing['media'] = media_payload
         return JSONResponse(missing, status_code=404)
+
+    from db_generation_receipt import ENDPOINT_CHAT_IMAGE
+    gate, gated = _gate_image_generation(user_id, character_id, source_event_id)
+    if gated is not None:
+        return gated
+    claim_token = gate.get('claim_token')
+    source_event_id = gate.get('source_event_id') or source_event_id
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     total_days = update_chat_days(user_id)
@@ -434,6 +509,13 @@ async def chat_image(data: dict):
             }
             if media_payload:
                 busy_body['media'] = media_payload
+            try:
+                from db_generation_receipt import release_generation
+                release_generation(
+                    user_id, character_id, source_event_id,
+                    ENDPOINT_CHAT_IMAGE, claim_token)
+            except Exception:
+                pass
             return JSONResponse(busy_body)
     except Exception as e:
         print(f'[{user_id}] image schedule check skipped:{e}')
@@ -474,55 +556,60 @@ async def chat_image(data: dict):
     retryable = True
     max_tokens = 1600
     deadline = time.monotonic() + 45
-    for attempt in range(3):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        try:
-            response = claude_client.messages.create(
-                model=MODEL_MAIN,
-                max_tokens=max_tokens,
-                system=system_blocks,
-                messages=messages,
-                timeout=remaining,
-            )
-            log_cache_usage(f'image:{character_id}', response)
-            raw = extract_text(response).strip()
-            metadata = response_metadata(response)
-            stop = metadata['stop_reason']
-            print(f'[{user_id}][{character_id}] image attempt={attempt + 1} '
-                  f'model={MODEL_MAIN} images={len(images)} chars={len(raw)} '
-                  f'metadata={metadata}')
-            if stop in {'refusal', 'content_filter'}:
-                retryable = False
+    from db_generation_receipt import GenerationHeartbeat
+    with GenerationHeartbeat(
+            user_id, character_id, source_event_id, ENDPOINT_CHAT_IMAGE, claim_token):
+        for attempt in range(3):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            if stop == 'max_tokens':
-                max_tokens = min(max_tokens * 2, 6400)
-                continue
-            _visible, parsed, state = ingest_model_output(raw)
-            if parsed and isinstance(parsed.get('messages'), list) and parsed['messages']:
-                if all(valid_reply_msg(m) for m in parsed['messages']):
-                    result = parsed
-                    offline_state = state
+            try:
+                response = claude_client.messages.create(
+                    model=MODEL_MAIN,
+                    max_tokens=max_tokens,
+                    system=system_blocks,
+                    messages=messages,
+                    timeout=remaining,
+                )
+                log_cache_usage(f'image:{character_id}', response)
+                raw = extract_text(response).strip()
+                metadata = response_metadata(response)
+                stop = metadata['stop_reason']
+                print(f'[{user_id}][{character_id}] image attempt={attempt + 1} '
+                      f'model={MODEL_MAIN} images={len(images)} chars={len(raw)} '
+                      f'metadata={metadata}')
+                if stop in {'refusal', 'content_filter'}:
+                    retryable = False
                     break
-            # Keep the original images on every attempt, without adding empty assistant turns.
-            system_blocks = system_blocks + [{
-                'type': 'text',
-                'text': '上一候选没有有效回复正文。请根据已附图片重新输出完整 JSON，'
-                        'messages 中每条都必须有非空字符串 jp 和 zh，不要只输出思考。',
-            }]
-        except Exception as e:
-            status = getattr(e, 'status_code', None)
-            print(f'[{user_id}][{character_id}] image attempt={attempt + 1} '
-                  f'model={MODEL_MAIN} error_type={type(e).__name__} '
-                  f'status={status} request_id={getattr(e, "request_id", None)}')
-            if status in {400, 401, 403, 404, 413, 422, 429}:
-                retryable = status == 429
-                break
+                if stop == 'max_tokens':
+                    max_tokens = min(max_tokens * 2, 6400)
+                    continue
+                _visible, parsed, state = ingest_model_output(raw)
+                if parsed and isinstance(parsed.get('messages'), list) and parsed['messages']:
+                    if all(valid_reply_msg(m) for m in parsed['messages']):
+                        result = parsed
+                        offline_state = state
+                        break
+                system_blocks = system_blocks + [{
+                    'type': 'text',
+                    'text': '上一候选没有有效回复正文。请根据已附图片重新输出完整 JSON，'
+                            'messages 中每条都必须有非空字符串 jp 和 zh，不要只输出思考。',
+                }]
+            except Exception as e:
+                status = getattr(e, 'status_code', None)
+                print(f'[{user_id}][{character_id}] image attempt={attempt + 1} '
+                      f'model={MODEL_MAIN} error_type={type(e).__name__} '
+                      f'status={status} request_id={getattr(e, "request_id", None)}')
+                if status in {400, 401, 403, 404, 413, 422, 429}:
+                    retryable = status == 429
+                    break
 
     msgs = finalize_user_messages(result.get('messages', [])) if result else []
     if not commit_ready_msgs(msgs):
         print(f'[{user_id}][{character_id}] image generation_failed; commit skipped')
+        _fail_image(
+            user_id, character_id, source_event_id, claim_token,
+            'generation_failed')
         failed = {
             'error': 'generation_failed',
             'generation_failed': True,
@@ -546,132 +633,85 @@ async def chat_image(data: dict):
     if emotion not in EMOTIONS:
         emotion = '平静'
 
+    from db_generation_receipt import assistant_turn_id_for, stamp_assistant_messages
+    turn_id = assistant_turn_id_for(ENDPOINT_CHAT_IMAGE, source_event_id)
+    msgs = stamp_assistant_messages(msgs, turn_id)
     full_jp = ' '.join(m['jp'] for m in msgs)
 
-    # Frontend owns chat_log segments. short_memory is compatibility cache only.
-    save_short_memory(user_id, 'assistant', full_jp, character_id)
-    record_turn(
-        user_id, character_id,
-        source='chat_video' if is_video else 'chat_image',
-        prior_snapshot=temporal_snapshot,
-    )
-
-    # 如果用户附了文字，尝试提取用户事实
-    if user_text:
-        enqueue_private_extraction(
-            user_id, user_text, full_jp, character_id,
-            temporal_context=temporal_snapshot,
-            source_event_id=source_event_id,
-        )
-
-    voice_id = char.get('voice_id')
-    for m in msgs:
-        m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
-
-    kind = 'video' if is_video else 'image'
-    print(f'[TTS:{TTS_PROVIDER}] {character_id} {kind}({len(images)}帧) emotion={emotion} segs={len(msgs)}')
-
-    # ─── 处理取消提醒 ───
-    cancelled_tasks = []
-    if result.get('cancel_reminder'):
-        cancel = result['cancel_reminder']
-        keyword = (cancel.get('keyword') or '').strip()
-        latest = cancel.get('latest', False)
-        try:
-            if keyword:
-                deleted = find_and_delete_tasks_by_keyword(user_id, keyword, latest_only=True)
-            elif latest:
-                deleted = delete_latest_task(user_id)
-            else:
-                deleted = []
-            for task_id, notif_id in deleted:
-                cancelled_tasks.append({'task_id': task_id, 'notification_id': notif_id})
-                print(f'[{user_id}] 🗑️ 已取消任务 id={task_id}（来自图片对话）')
-        except Exception as e:
-            print(f'取消提醒失败：{e}')
-
-    # ─── 处理新增提醒 ───
-    reminder_data = None
+    reminder_spec = None
     if result.get('reminder'):
         rem = result['reminder']
-        reminder_data = {
+        reminder_spec = {
             'date': rem.get('date'),
             'time': rem.get('time'),
             'content': rem.get('content', ''),
             'notification': rem.get('notification', ''),
         }
-        try:
-            # ★ 先精确查，再模糊查（治"同一件事换个说法又建一条"）
-            existing = find_duplicate_task(
-                user_id,
-                reminder_data['content'],
-                reminder_data['date'],
-                reminder_data['time'],
-            )
-            similar = None
-            if not existing:
-                similar = find_similar_task(
-                    user_id,
-                    reminder_data['content'],
-                    reminder_data['date'],
-                    reminder_data['time'],
-                )
-            if existing or similar:
-                if existing:
-                    task_id, _ = existing
-                    same_title = reminder_data['content']
-                else:
-                    task_id, _notif, same_title = similar
-                    print(f'[{user_id}] 🔁 同时段已有相近提醒「{same_title}」，跳过新建：{reminder_data["content"]}')
-                reminder_data['task_id'] = task_id
-                reminder_data['duplicate'] = True
-            else:
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute(
-                    '''INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes)
-                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING id''',
-                    (user_id, reminder_data['content'], '个人',
-                     reminder_data['date'], reminder_data['time'], 0)
-                )
-                task_id = cur.fetchone()[0]
-                conn.commit()
-                cur.close()
-                conn.close()
-                reminder_data['task_id'] = task_id
-                reminder_data['duplicate'] = False
-                print(f'[{user_id}] ✅ 提醒已保存（来自图片对话）task_id={task_id}')
-        except Exception as e:
-            print(f'提醒保存失败：{e}')
 
-    # ★ 记账透传（只透传给前端,不写库；前端确认卡引导用户核对账户后 POST /accounting/records）
     pending_tx = _extract_pending_tx(result, user_id)
 
     visual_summary = _build_visual_summary(
         result, display_text, is_video, len(images)) or visual_summary
     event_meta = result.get('event_meta') if isinstance(result.get('event_meta'), dict) else {}
     event_meta = {**base_event_meta, **event_meta, 'visual_summary': visual_summary}
-    try:
-        attach_short_memory_event_meta(
-            user_id, character_id, source_event_id, event_meta)
-    except Exception as e:
-        print(f'[{user_id}] image short_memory event_meta attach skipped:{e}')
 
-    resp = {'emotion': emotion, 'messages': msgs, 'total_days': total_days}
-    resp['visual_summary'] = visual_summary
-    resp['event_meta'] = event_meta
-    resp['source_event_id'] = source_event_id
+    resp = {
+        'emotion': emotion,
+        'messages': msgs,
+        'total_days': total_days,
+        'assistant_turn_id': turn_id,
+        'visual_summary': visual_summary,
+        'event_meta': event_meta,
+        'source_event_id': source_event_id,
+        '_user_text': user_text,
+    }
     if media_payload:
         resp['media'] = media_payload
     if reply_to:
         resp['reply_to'] = reply_to
-    if reminder_data:
-        resp['reminder'] = reminder_data
-    if cancelled_tasks:
-        resp['cancelled_tasks'] = cancelled_tasks
+    if reminder_spec:
+        resp['reminder'] = reminder_spec
+    if result.get('cancel_reminder'):
+        resp['_cancel_reminder'] = result.get('cancel_reminder')
+    if result.get('proactive_promise'):
+        resp['_proactive_promise'] = result.get('proactive_promise')
     if pending_tx:
         resp['pending_transaction'] = pending_tx
-    return JSONResponse(resp)
+
+    from generation_effects import (
+        client_effects_pending_response, commit_and_run_effects,
+        pending_client_effects,
+    )
+    from db_generation_receipt import hydrate_completed_generation_response
+    effect_ctx = _image_effect_ctx(
+        user_id, character_id, source_event_id, resp,
+        extra={
+            'user_text': user_text,
+            'full_jp': full_jp,
+            'event_meta': event_meta,
+            'is_video': is_video,
+            'temporal_snapshot': temporal_snapshot,
+            'char': char,
+            'pack': pack,
+        },
+    )
+    effect_state = commit_and_run_effects(
+        user_id, character_id, source_event_id, ENDPOINT_CHAT_IMAGE,
+        claim_token, resp, ctx=effect_ctx)
+    pending = pending_client_effects(
+        user_id, character_id, source_event_id, ENDPOINT_CHAT_IMAGE,
+        effect_state.get('client_effects'))
+    if pending:
+        pending_body = client_effects_pending_response(source_event_id, pending)
+        if media_payload:
+            pending_body['media'] = media_payload
+        return JSONResponse(pending_body, status_code=202)
+
+    live = hydrate_completed_generation_response(
+        user_id, character_id, source_event_id, ENDPOINT_CHAT_IMAGE, payload=resp)
+    kind = 'video' if is_video else 'image'
+    print(f'[TTS:{TTS_PROVIDER}] {character_id} {kind}({len(images)}帧) emotion={emotion} segs={len(msgs)}')
+    return JSONResponse(live)
 
 
 @router.post('/chat/media/backfill')

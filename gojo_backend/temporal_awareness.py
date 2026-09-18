@@ -35,6 +35,13 @@ def init_temporal_awareness_table():
     )''')
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_temporal_awareness_lookup
                    ON temporal_awareness (user_id, character_id, updated_at DESC)''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS temporal_turn_once (
+        user_id TEXT NOT NULL,
+        character_id TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, character_id, source_event_id)
+    )''')
     conn.commit()
     cur.close()
     conn.close()
@@ -363,16 +370,43 @@ def _format_clock_delta(seconds: int) -> str:
     return ''.join(parts) or '不到1分钟'
 
 
+def _claim_turn_once(user_id: str, character_id: str, source_event_id: str) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''INSERT INTO temporal_turn_once (user_id, character_id, source_event_id)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (user_id, character_id, source_event_id) DO NOTHING
+               RETURNING source_event_id''',
+            (user_id, character_id, source_event_id))
+        row = cur.fetchone()
+        conn.commit()
+        return bool(row)
+    finally:
+        cur.close()
+        conn.close()
+
+
 def record_turn(user_id: str, character_id: str, source: str = 'chat',
                 occurred_at: Optional[datetime] = None,
                 has_user_message: bool = True,
                 has_assistant_message: bool = True,
-                prior_snapshot: Optional[Dict] = None) -> Optional[Dict]:
+                prior_snapshot: Optional[Dict] = None,
+                source_event_id: Optional[str] = None) -> Optional[Dict]:
     """记录一次真实互动结束。
 
     has_user_message/has_assistant_message 用来区分普通聊天、忙碌只已读、
     主动消息等不同入口。失败时只打日志，不阻断主流程。
     """
+    event_id = str(source_event_id or '').strip()
+    if event_id:
+        try:
+            if not _claim_turn_once(user_id, character_id, event_id):
+                return get_temporal_snapshot(user_id, character_id, occurred_at)
+        except Exception as e:
+            print(f'[temporal] turn-once gate skipped {user_id}/{character_id}: {e}')
+
     now = _as_utc_naive(occurred_at)
     last_initiator = _last_initiator(has_user_message, has_assistant_message)
 

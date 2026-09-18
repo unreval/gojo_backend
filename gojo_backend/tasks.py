@@ -132,6 +132,76 @@ def find_and_delete_tasks_by_keyword(user_id, keyword, latest_only=True):
     return deleted
 
 
+def find_open_tasks_by_keyword(user_id, keyword, latest_only=True):
+    """Read-only keyword match of open tasks. Does not delete."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if latest_only:
+            cur.execute(
+                '''SELECT id, notification_id FROM tasks
+                   WHERE user_id = %s AND title ILIKE %s
+                     AND completed = FALSE
+                   ORDER BY created_at DESC LIMIT 1''',
+                (user_id, f'%{keyword}%')
+            )
+        else:
+            cur.execute(
+                '''SELECT id, notification_id FROM tasks
+                   WHERE user_id = %s AND title ILIKE %s
+                     AND completed = FALSE
+                   ORDER BY created_at DESC''',
+                (user_id, f'%{keyword}%')
+            )
+        return list(cur.fetchall() or [])
+    finally:
+        cur.close()
+        conn.close()
+
+
+def find_latest_open_task(user_id):
+    """Read-only latest open task. Does not delete."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT id, notification_id FROM tasks
+               WHERE user_id = %s AND completed = FALSE
+               ORDER BY created_at DESC LIMIT 1''',
+            (user_id,)
+        )
+        row = cur.fetchone()
+        return [row] if row else []
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_tasks_by_ids(user_id, task_ids):
+    """Delete exact task ids. Missing ids are success/no-op."""
+    deleted = []
+    ids = [int(tid) for tid in (task_ids or []) if tid is not None]
+    if not ids:
+        return deleted
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        for task_id in ids:
+            cur.execute(
+                '''DELETE FROM tasks
+                   WHERE id = %s AND user_id = %s
+                   RETURNING id, notification_id''',
+                (task_id, user_id))
+            row = cur.fetchone()
+            if row:
+                deleted.append((row[0], row[1]))
+        conn.commit()
+        return deleted
+    finally:
+        cur.close()
+        conn.close()
+
+
 def delete_latest_task(user_id):
     """没指定关键词时，删最近创建的那条未完成任务。"""
     conn = get_conn()

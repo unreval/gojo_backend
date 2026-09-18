@@ -11,6 +11,10 @@ from unittest.mock import Mock, patch
 BACKEND = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'gojo_backend')
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
+if os.path.dirname(__file__) not in sys.path:
+    sys.path.insert(0, os.path.dirname(__file__))
+
+from receipt_passthrough import passthrough_generation_receipt  # noqa: E402
 
 
 def stub(name, **attributes):
@@ -127,6 +131,18 @@ class ImageFailureTests(unittest.TestCase):
                 is_configured=Mock(return_value=True),
                 signed_get_url=Mock(return_value='https://r2.example/signed'),
                 MediaStorageError=RuntimeError,
+            ),
+            'db_generation_receipt': passthrough_generation_receipt(),
+            'behavior_evidence': stub(
+                'behavior_evidence', record_reply_cycle=Mock()),
+            'context_layer': stub(
+                'context_layer',
+                build_chat_context=Mock(return_value=types.SimpleNamespace(
+                    messages=[], failed_closed=False, memory_text='')),
+                assemble_fallback_from_messages=Mock(return_value=types.SimpleNamespace(
+                    messages=[], failed_closed=False, memory_text='')),
+                append_current_user_turn=lambda msgs, content: list(msgs or []) + [
+                    {'role': 'user', 'content': content}],
             ),
         }
         module_patch = patch.dict(sys.modules, modules)

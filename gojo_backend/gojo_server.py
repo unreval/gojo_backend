@@ -54,6 +54,7 @@ from route_schedule import router as schedule_router            # ★ 角色自�
 from db_schedule import init_schedule_table
 from db_chatlog import init_chatlog_table
 from db_chat_media import init_chat_media_table
+from db_generation_receipt import init_generation_receipt_table
 from schedule_share import start_schedule_share 
 from route_courses import router as courses_router
 from db_course import init_course_tables                # ★ 日程驱动的主动分享
@@ -101,6 +102,15 @@ try:
     init_chat_media_table()
 except Exception as e:
     print(f'[init] chat_media table skipped:{e}')
+try:
+    init_generation_receipt_table()
+except Exception as e:
+    print(f'[init] generation receipt table skipped:{e}')
+try:
+    from generation_side_effect_worker import start_generation_side_effect_worker
+    start_generation_side_effect_worker()
+except Exception as e:
+    print(f'[init] generation side-effect worker skipped:{e}')
 from raw_events import init_raw_event_layer
 init_raw_event_layer()
 from context_layer import init_context_layer_tables

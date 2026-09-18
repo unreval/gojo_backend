@@ -35,10 +35,22 @@ def init_promise_table():
         is_fired BOOLEAN DEFAULT FALSE,         -- once 触发过 = true
         last_fired_at TIMESTAMP,                 -- 循环: 上次触发的时间
         is_active BOOLEAN DEFAULT TRUE,          -- 用户撤销 = false
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        occurrence_key TEXT
     )''')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_promise_user_active ON proactive_promise(user_id, character_id, is_active)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_promise_due ON proactive_promise(is_active, is_fired, trigger_at)')
+    try:
+        cur.execute('SAVEPOINT promise_occ')
+        cur.execute('ALTER TABLE proactive_promise ADD COLUMN IF NOT EXISTS occurrence_key TEXT')
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_promise_occurrence_key "
+            "ON proactive_promise (occurrence_key) "
+            "WHERE occurrence_key IS NOT NULL AND occurrence_key <> ''")
+        cur.execute('RELEASE SAVEPOINT promise_occ')
+    except Exception as e:
+        print(f'[promise] occurrence_key alter skipped:{e}')
+        cur.execute('ROLLBACK TO SAVEPOINT promise_occ')
     conn.commit()
     cur.close()
     conn.close()
@@ -46,25 +58,48 @@ def init_promise_table():
 
 
 def add_promise(character_id, user_id, trigger_kind, context,
-                trigger_at=None, trigger_time=None, origin_text=''):
+                trigger_at=None, trigger_time=None, origin_text='',
+                occurrence_key=None):
     """新增一条 promise。
     - once: 必须传 trigger_at(datetime),trigger_time 为 None
     - daily: 必须传 trigger_time('HH:MM' 字符串),trigger_at 为 None
+    occurrence_key 存在时按 unique occurrence 幂等，返回已有 id。
     """
     assert trigger_kind in ('once', 'daily'), f'不支持的 trigger_kind: {trigger_kind}'
     if trigger_kind == 'once' and not trigger_at:
         raise ValueError('once 类型必须传 trigger_at')
     if trigger_kind == 'daily' and not trigger_time:
         raise ValueError('daily 类型必须传 trigger_time (HH:MM)')
+    occurrence_key = (str(occurrence_key).strip() if occurrence_key else '') or None
 
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('''INSERT INTO proactive_promise
-        (character_id, user_id, trigger_kind, trigger_at, trigger_time, context, origin_text)
-        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
-        (character_id, user_id, trigger_kind, trigger_at, trigger_time, context, origin_text)
-    )
-    pid = cur.fetchone()[0]
+    if occurrence_key:
+        cur.execute(
+            '''INSERT INTO proactive_promise
+                (character_id, user_id, trigger_kind, trigger_at, trigger_time,
+                 context, origin_text, occurrence_key)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (occurrence_key)
+               WHERE occurrence_key IS NOT NULL AND occurrence_key <> ''
+               DO NOTHING
+               RETURNING id''',
+            (character_id, user_id, trigger_kind, trigger_at, trigger_time,
+             context, origin_text, occurrence_key))
+        row = cur.fetchone()
+        if not row:
+            cur.execute(
+                'SELECT id FROM proactive_promise WHERE occurrence_key=%s',
+                (occurrence_key,))
+            row = cur.fetchone()
+        pid = row[0]
+    else:
+        cur.execute('''INSERT INTO proactive_promise
+            (character_id, user_id, trigger_kind, trigger_at, trigger_time, context, origin_text)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+            (character_id, user_id, trigger_kind, trigger_at, trigger_time, context, origin_text)
+        )
+        pid = cur.fetchone()[0]
     conn.commit()
     cur.close()
     conn.close()

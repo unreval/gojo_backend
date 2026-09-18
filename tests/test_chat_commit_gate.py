@@ -16,6 +16,10 @@ FRONTEND_CHAT = os.path.join(ROOT, 'app', 'chat', '[id].tsx')
 ROUTE_CHAT = os.path.join(BACKEND, 'route_chat.py')
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
+if os.path.dirname(__file__) not in sys.path:
+    sys.path.insert(0, os.path.dirname(__file__))
+
+from receipt_passthrough import passthrough_generation_receipt  # noqa: E402
 
 
 def stub(name, **attributes):
@@ -148,6 +152,18 @@ class ChatCommitGateTests(unittest.TestCase):
                 get_next_free_time=Mock(return_value=None),
             ),
             'db_promise': stub('db_promise', add_promise=Mock()),
+            'behavior_evidence': stub(
+                'behavior_evidence', record_reply_cycle=Mock()),
+            'context_layer': stub(
+                'context_layer',
+                build_chat_context=Mock(return_value=types.SimpleNamespace(
+                    messages=[], failed_closed=False, memory_text='')),
+                assemble_fallback_from_messages=Mock(return_value=types.SimpleNamespace(
+                    messages=[], failed_closed=False, memory_text='')),
+                append_current_user_turn=lambda msgs, content: list(msgs or []) + [
+                    {'role': 'user', 'content': content}],
+            ),
+            'db_generation_receipt': passthrough_generation_receipt(),
         }
         module_patch = patch.dict(sys.modules, modules)
         module_patch.start()
@@ -155,6 +171,13 @@ class ChatCommitGateTests(unittest.TestCase):
         self.route = load_source('route_chat', modules)
         self.route._start_relationship_update = self.rel
         self.route._quick_translate = Mock(return_value='译文')
+        try:
+            import tts as _real_tts
+            tts_lock = patch.object(_real_tts, 'tts_to_b64', self.tts)
+            tts_lock.start()
+            self.addCleanup(tts_lock.stop)
+        except Exception:
+            pass
         log_patch = patch('builtins.print')
         self.log = log_patch.start()
         self.addCleanup(log_patch.stop)
@@ -444,10 +467,10 @@ class FrontendCommitGateGuardTests(unittest.TestCase):
         self.assertIn('extra.source_event_id = m.sourceEventId', self.src)
         self.assertIn('extra.visual_summary = m.visualSummary', self.src)
         self.assertIn('extra.event_meta = m.eventMeta', self.src)
-        self.assertIn('reply_to: imageReplyTo', self.src)
-        self.assertIn('reply_to:', self.src)
-        self.assertIn('visualSummary: res.data?.visual_summary', self.src)
-        self.assertIn('replyToSourceEventId: meta?.sourceEventId', self.src)
+        self.assertIn('assistantTurnId: res.data?.assistant_turn_id', self.src)
+        self.assertIn('generation_in_progress', self.src)
+        self.assertIn('仍在生成', self.src)
+        self.assertIn('function assistantSegmentId', self.src)
 
     def test_proactive_flags_commit_only_after_success(self):
         self.assertNotIn('mode = \'remind\'; taskState.reminded = true;', self.src)
@@ -569,6 +592,18 @@ class VoiceProactiveIdentityTests(unittest.TestCase):
                 get_next_free_time=Mock(return_value=None),
             ),
             'db_promise': stub('db_promise', add_promise=Mock()),
+            'behavior_evidence': stub(
+                'behavior_evidence', record_reply_cycle=Mock()),
+            'context_layer': stub(
+                'context_layer',
+                build_chat_context=Mock(return_value=types.SimpleNamespace(
+                    messages=[], failed_closed=False, memory_text='')),
+                assemble_fallback_from_messages=Mock(return_value=types.SimpleNamespace(
+                    messages=[], failed_closed=False, memory_text='')),
+                append_current_user_turn=lambda msgs, content: list(msgs or []) + [
+                    {'role': 'user', 'content': content}],
+            ),
+            'db_generation_receipt': passthrough_generation_receipt(),
         }
         module_patch = patch.dict(sys.modules, modules)
         module_patch.start()

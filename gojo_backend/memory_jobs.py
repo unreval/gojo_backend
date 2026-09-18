@@ -104,7 +104,7 @@ def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
                    WHERE kind=%s AND user_id=%s
                      AND COALESCE(character_id, '') = COALESCE(%s, '')
                      AND source_event_id=%s
-                     AND status IN ('pending', 'running')
+                     AND status IN ('pending', 'running', 'done')
                    ORDER BY id DESC LIMIT 1''',
                 (kind, user_id, character_id, source_event_id))
             existing = cur.fetchone()

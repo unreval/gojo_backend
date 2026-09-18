@@ -24,7 +24,6 @@
   - 修复原实现里 `except Exception:` 后 `print({e})` 但 e 未定义的 bug。
 """
 from datetime import datetime
-import threading
 import json
 import re
 import uuid
@@ -33,7 +32,6 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
-from db import get_conn
 from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
     finalize_user_messages,
@@ -52,12 +50,6 @@ from temporal_awareness import (
     record_turn, record_user_message,
 )
 from characters import get_character
-from tasks import (
-    find_duplicate_task,
-    find_and_delete_tasks_by_keyword,
-    delete_latest_task,
-)
-from task_dedup import find_similar_task   # ★ 模糊去重：同时段+意思相近就算同一件事
 
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -454,7 +446,7 @@ def _fire_relationship_update(user_id, character_id, user_text, full_jp,
 
     try:
         from relationship_engine import process_turn
-        _log(f'[rel_update] start {user_id}/{character_id}')
+        _log(f'[rel_update] start {user_id}/{character_id} source={source_event_id or "-"}')
         result = process_turn(
             user_id=user_id,
             character_id=character_id,
@@ -493,14 +485,82 @@ def _start_relationship_update(user_id, character_id, user_text, full_jp,
         ]
     else:
         recent_ctx = [{'role': r, 'content': c} for r, c in (short_memories or [])[-6:]]
-    threading.Thread(
-        target=_fire_relationship_update,
-        args=(
-            user_id, character_id, user_text, full_jp,
-            core_snippet, recent_ctx, temporal_snapshot, source_event_id,
-        ),
-        daemon=True,
-    ).start()
+    _fire_relationship_update(
+        user_id, character_id, user_text, full_jp,
+        core_snippet, recent_ctx, temporal_snapshot, source_event_id,
+    )
+
+
+def _text_effect_ctx(user_id, character_id, source_event_id, payload, extra=None):
+    extra = dict(extra or {})
+    char = extra.get('char') or get_character(character_id) or {}
+    user_text = extra.get('user_text') or (payload or {}).get('_user_text') or ''
+    full_jp = extra.get('full_jp') or ' '.join(
+        str((m or {}).get('jp') or '') for m in (payload or {}).get('messages') or [])
+    short_memories = extra.get('short_memories')
+    if short_memories is None:
+        short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
+    temporal_snapshot = extra.get('temporal_snapshot')
+    if temporal_snapshot is None:
+        temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    ctx = {
+        'user_text': user_text,
+        'full_jp': full_jp,
+        'msgs': extra.get('msgs') or (payload or {}).get('messages') or [],
+        'char': char,
+        'pack': extra.get('pack'),
+        'short_memories': short_memories,
+        'temporal_snapshot': temporal_snapshot,
+        'availability': extra.get('availability'),
+        'payload': payload,
+        'save_short_memory': save_short_memory,
+        'record_turn': record_turn,
+        'enqueue_private_extraction': enqueue_private_extraction,
+        'relationship_fn': lambda: _start_relationship_update(
+            user_id, character_id, user_text, full_jp, char, short_memories,
+            temporal_snapshot, source_event_id, pack=extra.get('pack')),
+    }
+    ctx.update(extra)
+    return ctx
+
+
+def _gate_chat_generation(user_id, character_id, source_event_id, endpoint):
+    from db_generation_receipt import (
+        hydrate_completed_generation_response, in_progress_body, resolve_generation,
+    )
+    from generation_effects import (
+        client_coupled_effects, client_effects_pending_response,
+        pending_client_effects, repair_completed_generation,
+    )
+    gate = resolve_generation(user_id, character_id, source_event_id, endpoint)
+    action = gate.get('action')
+    if action == 'in_progress':
+        return gate, JSONResponse(
+            in_progress_body(gate.get('source_event_id')), status_code=202)
+    if action == 'replay':
+        payload = gate.get('response') or {}
+        sid = gate.get('source_event_id')
+        effect_ctx = _text_effect_ctx(user_id, character_id, sid, payload)
+        repair_completed_generation(
+            user_id, character_id, sid, endpoint, payload,
+            extra_ctx=effect_ctx)
+        pending = pending_client_effects(
+            user_id, character_id, sid, endpoint,
+            client_coupled_effects(endpoint, payload, effect_ctx))
+        if pending:
+            return gate, JSONResponse(
+                client_effects_pending_response(sid, pending), status_code=202)
+        body = hydrate_completed_generation_response(
+            user_id, character_id, sid, endpoint, payload=payload)
+        return gate, JSONResponse(body)
+    return gate, None
+
+
+def _stamp_text_reply(msgs, source_event_id):
+    from db_generation_receipt import ENDPOINT_CHAT_TEXT
+    from db_generation_receipt import assistant_turn_id_for, stamp_assistant_messages
+    turn_id = assistant_turn_id_for(ENDPOINT_CHAT_TEXT, source_event_id)
+    return turn_id, stamp_assistant_messages(msgs, turn_id)
 
 
 @router.post('/chat/text')
@@ -520,7 +580,8 @@ async def chat_text(data: dict):
     user_text    = data.get('text', '')
     user_id      = data.get('user_id', 'default')
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
-    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    from db_generation_receipt import assign_source_event_id
+    source_event_id, _legacy = assign_source_event_id(data.get('source_event_id'))
     reply_to = _safe_reply_to(data)
 
     if not user_text:
@@ -594,6 +655,14 @@ async def chat_text(data: dict):
     _trace.mark('availability', (_time.perf_counter() - _tmark) * 1000.0)
     _tmark = _time.perf_counter()
 
+    from db_generation_receipt import ENDPOINT_CHAT_TEXT
+    gate, gated = _gate_chat_generation(
+        user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT)
+    if gated is not None:
+        _latency_emit()
+        return gated
+    claim_token = gate.get('claim_token')
+    source_event_id = gate.get('source_event_id') or source_event_id
 
     total_days = update_chat_days(user_id)
     # Compatibility cache for relationship observer only — not the prompt fact source.
@@ -649,199 +718,114 @@ async def chat_text(data: dict):
               f'{calendar_conflict}')
         return calendar_conflict
 
-    result, committed_state = _generate_or_none(
-        MODEL_MAIN, 1500, system_blocks, messages,
-        attempts=3,
-        log_tag=f'{user_id}][{character_id}',
-        cache_tag=f'chat:{character_id}',
-        salvage=True,
-        reject_fn=reject_calendar,
-    )
+    from db_generation_receipt import GenerationHeartbeat
+    with GenerationHeartbeat(
+            user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT, claim_token):
+        result, committed_state = _generate_or_none(
+            MODEL_MAIN, 1500, system_blocks, messages,
+            attempts=3,
+            log_tag=f'{user_id}][{character_id}',
+            cache_tag=f'chat:{character_id}',
+            salvage=True,
+            reject_fn=reject_calendar,
+        )
     llm_ms = (_time.perf_counter() - _tmark) * 1000.0
     _trace.mark('llm', llm_ms)
     _trace.mark('first_token', llm_ms)
 
     if not result:
+        try:
+            from db_generation_receipt import fail_generation
+            fail_generation(
+                user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
+                claim_token, last_error='generation_failed')
+        except Exception:
+            pass
         _latency_emit()
         return _generation_failed_response(user_id, character_id, total_days, attempts=3)
 
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
+        try:
+            from db_generation_receipt import fail_generation
+            fail_generation(
+                user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
+                claim_token, last_error='commit_not_ready')
+        except Exception:
+            pass
         _latency_emit()
         return _generation_failed_response(user_id, character_id, total_days, attempts=3)
 
     _commit_offline_state(user_id, character_id, committed_state)
 
+    turn_id, msgs = _stamp_text_reply(msgs, source_event_id)
     full_jp = ' '.join(m['jp'] for m in msgs)
-    # Frontend owns chat_log segments (`{source}:reply:{i}`). This is cache only.
-    save_short_memory(user_id, 'assistant', full_jp, character_id)
-    record_turn(
-        user_id, character_id, source='chat_text',
-        prior_snapshot=temporal_snapshot,
-    )
-    enqueue_private_extraction(
-        user_id, user_text, full_jp, character_id,
-        temporal_context=temporal_snapshot,
-        source_event_id=source_event_id,
-    )
-    try:
-        from behavior_evidence import record_reply_cycle
-        from datetime import datetime as _dt, timezone as _tz
-        record_reply_cycle(
-            user_id, character_id,
-            user_event_id=source_event_id,
-            user_at=(temporal_snapshot or {}).get('now_utc'),
-            seen_at=(availability or {}).get('seen_at'),
-            replied_at=_dt.now(_tz.utc),
-            message_length=len(full_jp or ''),
-            busy_state=(availability or {}).get('reply_state') or 'free',
-            interaction_mode='text',
-            phone_check_id=(availability or {}).get('opportunity_id'),
-        )
-    except Exception as _be:
-        print(f'[{user_id}] behavior observation skipped:{_be}')
-    # 重要反思只由 Slow Loop diary_entries 写入。这里不再做 per-turn diary judge。
 
-    # ★ 承诺检测:角色回复里如果有"答应/承诺/会主动找你"类的话,自动创建 proactive_promise
-    try:
-        import promise_detector
-        # full_jp 是日语回复,但 promise_detector 需要中文。从 result 里拿 zh
-        reply_zh_combined = ' '.join(m.get('zh', '') for m in msgs if m.get('zh'))
-        if reply_zh_combined:
-            threading.Thread(target=promise_detector.detect_and_save,
-                            args=(character_id, user_id, user_text, reply_zh_combined),
-                            daemon=True).start()
-    except Exception:
-        pass
-
-    # ★ v4 感情账本异步更新（传上下文 + stderr 可靠输出，见文件顶部说明）
-    _start_relationship_update(user_id, character_id, user_text, full_jp,
-                               char, short_memories, temporal_snapshot,
-                               source_event_id, pack=pack)
-
-    voice_id = char.get('voice_id')
-    for m in msgs:
-        m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
-
-    print(f'[TTS:{TTS_PROVIDER}] {character_id} emotion={emotion} segs={len(msgs)} days={total_days}')
-
-    cancelled_tasks = []
-    if result.get('cancel_reminder'):
-        cancel = result['cancel_reminder']
-        keyword = (cancel.get('keyword') or '').strip()
-        latest = cancel.get('latest', False)
-        try:
-            if keyword:
-                deleted = find_and_delete_tasks_by_keyword(user_id, keyword, latest_only=True)
-            elif latest:
-                deleted = delete_latest_task(user_id)
-            else:
-                deleted = []
-            for task_id, notif_id in deleted:
-                cancelled_tasks.append({'task_id': task_id, 'notification_id': notif_id})
-                print(f'[{user_id}] 🗑️ 已取消任务 id={task_id} keyword={keyword or "(latest)"}')
-        except Exception as e:
-            print(f'取消提醒失败：{e}')
-
-    reminder_data = None
+    reminder_spec = None
     if result.get('reminder'):
         rem = result['reminder']
-        reminder_data = {
+        reminder_spec = {
             'date': rem.get('date'),
             'time': rem.get('time'),
             'content': rem.get('content', ''),
             'notification': rem.get('notification', ''),
         }
-        try:
-            existing = find_duplicate_task(
-                user_id,
-                reminder_data['content'],
-                reminder_data['date'],
-                reminder_data['time'],
-            )
-            similar = None
-            if not existing:
-                similar = find_similar_task(
-                    user_id,
-                    reminder_data['content'],
-                    reminder_data['date'],
-                    reminder_data['time'],
-                )
-            if existing or similar:
-                if existing:
-                    task_id, _ = existing
-                    same_title = reminder_data['content']
-                else:
-                    task_id, _notif, same_title = similar
-                    print(f'[{user_id}] 🔁 同时段已有相近提醒「{same_title}」，跳过新建：{reminder_data["content"]}')
-                reminder_data['task_id'] = task_id
-                reminder_data['duplicate'] = True
-                print(f'[{user_id}] 🔁 提醒已存在 task_id={task_id}，跳过新建')
-            else:
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute(
-                    '''INSERT INTO tasks (user_id, title, category, due_date, due_time, reminder_minutes)
-                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING id''',
-                    (user_id, reminder_data['content'], '个人',
-                     reminder_data['date'], reminder_data['time'], 0)
-                )
-                task_id = cur.fetchone()[0]
-                conn.commit()
-                cur.close()
-                conn.close()
-                reminder_data['task_id'] = task_id
-                reminder_data['duplicate'] = False
-                print(f'[{user_id}] ✅ 提醒已保存 task_id={task_id}')
-        except Exception as e:
-            print(f'提醒保存失败：{e}')
 
-    # ★ 记账透传（只透传给前端,不写库；前端确认卡引导用户核对账户后 POST /accounting/records）
     pending_tx = _extract_pending_tx(result, user_id, tag='chat')
 
-    # ★ 承诺处理:LLM 决定"以后要主动开口"时,存到 proactive_promise 表,scheduler 到时候触发
-    saved_promise = None
-    if result.get('proactive_promise'):
-        try:
-            import db_promise
-            from datetime import datetime as _dt
-            pp = result['proactive_promise']
-            kind = pp.get('trigger_kind')
-            context_ = (pp.get('context') or '').strip()
-            if kind == 'once' and pp.get('trigger_at') and context_:
-                # 解析 YYYY-MM-DD HH:MM
-                trigger_at = _dt.strptime(pp['trigger_at'], '%Y-%m-%d %H:%M')
-                pid = db_promise.add_promise(
-                    character_id=character_id, user_id=user_id,
-                    trigger_kind='once', trigger_at=trigger_at,
-                    context=context_, origin_text=user_text[:200]
-                )
-                saved_promise = {'id': pid, 'kind': 'once', 'trigger_at': pp['trigger_at'], 'context': context_}
-                print(f'[{user_id}] 🤝 记下承诺 #{pid} once @ {pp["trigger_at"]}: {context_}')
-            elif kind == 'daily' and pp.get('trigger_time') and context_:
-                pid = db_promise.add_promise(
-                    character_id=character_id, user_id=user_id,
-                    trigger_kind='daily', trigger_time=pp['trigger_time'],
-                    context=context_, origin_text=user_text[:200]
-                )
-                saved_promise = {'id': pid, 'kind': 'daily', 'trigger_time': pp['trigger_time'], 'context': context_}
-                print(f'[{user_id}] 🤝 记下承诺 #{pid} daily @ {pp["trigger_time"]}: {context_}')
-            else:
-                print(f'[{user_id}] proactive_promise 字段不全,跳过:{pp}')
-        except Exception as e:
-            print(f'[{user_id}] proactive_promise 保存失败:{e}')
-
-    resp = {'emotion': emotion, 'messages': msgs, 'total_days': total_days}
-    if reminder_data:
-        resp['reminder'] = reminder_data
-    if cancelled_tasks:
-        resp['cancelled_tasks'] = cancelled_tasks
+    resp = {
+        'emotion': emotion,
+        'messages': msgs,
+        'total_days': total_days,
+        'assistant_turn_id': turn_id,
+        'source_event_id': source_event_id,
+        '_user_text': user_text,
+    }
+    if reminder_spec:
+        resp['reminder'] = reminder_spec
+    if result.get('cancel_reminder'):
+        resp['_cancel_reminder'] = result.get('cancel_reminder')
     if pending_tx:
         resp['pending_transaction'] = pending_tx
-    if saved_promise:
-        resp['saved_promise'] = saved_promise
+    if result.get('proactive_promise'):
+        resp['_proactive_promise'] = result.get('proactive_promise')
+
+    # 重要反思只由 Slow Loop diary_entries 写入。这里不再做 per-turn diary judge。
+    from generation_effects import (
+        client_effects_pending_response, commit_and_run_effects,
+        pending_client_effects,
+    )
+    from db_generation_receipt import hydrate_completed_generation_response
+    effect_ctx = _text_effect_ctx(
+        user_id, character_id, source_event_id, resp,
+        extra={
+            'user_text': user_text,
+            'full_jp': full_jp,
+            'msgs': msgs,
+            'char': char,
+            'pack': pack,
+            'short_memories': short_memories,
+            'temporal_snapshot': temporal_snapshot,
+            'availability': availability,
+        },
+    )
+    effect_state = commit_and_run_effects(
+        user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
+        claim_token, resp, ctx=effect_ctx)
+    pending = pending_client_effects(
+        user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
+        effect_state.get('client_effects'))
+    if pending:
+        _latency_emit()
+        return JSONResponse(
+            client_effects_pending_response(source_event_id, pending),
+            status_code=202)
+
+    live = hydrate_completed_generation_response(
+        user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT, payload=resp)
+    print(f'[TTS:{TTS_PROVIDER}] {character_id} emotion={emotion} segs={len(msgs)} days={total_days}')
     _latency_emit()
-    return JSONResponse(resp)
+    return JSONResponse(live)
 
 
 # ─────────────────── 长故事模式（文本）───────────────────
