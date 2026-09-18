@@ -12,8 +12,13 @@
 """
 from db import get_conn
 
+BOND_EXPIRES_AT_DDL = (
+    "ALTER TABLE bond_memory ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"
+)
+
 
 def init_bond_table():
+    """Generic schema only. No incident-specific data repairs."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('''CREATE TABLE IF NOT EXISTS bond_memory (
@@ -26,6 +31,7 @@ def init_bond_table():
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_bond_memory_uid_cid
                    ON bond_memory (user_id, character_id, kind)''')
     cur.execute("ALTER TABLE bond_memory ADD COLUMN IF NOT EXISTS recall_status TEXT DEFAULT 'active'")
+    cur.execute(BOND_EXPIRES_AT_DDL)
     conn.commit()
     cur.close()
     conn.close()

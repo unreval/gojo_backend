@@ -168,7 +168,7 @@ class DiaryRecallTests(unittest.TestCase):
         self.assertIn(REFLECTION_TEXT, text)
         self.assertLess(text.index(FACT_TEXT), text.index(REFLECTION_TEXT))
         for constraint in ('过去的主观反思，不是客观事实证据',
-                           '当前用户消息与当前直接证据 > 明确事实、consolidated/episodic memory',
+                           '当前用户消息 / 当前直接事件 > 较新的明确事实',
                            '与当前事实冲突时，以当前直接证据为准',
                            '日记只代表当时的主观理解，不得覆盖事实',
                            '禁止 self-proof'):

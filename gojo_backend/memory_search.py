@@ -326,7 +326,9 @@ def search_bond_memory(user_id, character_id, kind, query_text, top_k=6):
         cur = conn.cursor()
         cur.execute(
             '''SELECT id, content, timestamp FROM bond_memory
-               WHERE user_id = %s AND character_id = %s AND kind = %s''',
+               WHERE user_id = %s AND character_id = %s AND kind = %s
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
             (user_id, character_id, kind)
         )
         rows = cur.fetchall()

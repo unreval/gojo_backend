@@ -927,7 +927,10 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
     cur = conn.cursor()
     try:
         cur.execute(
-            'SELECT id, content FROM bond_memory WHERE user_id=%s AND character_id=%s AND kind=%s',
+            '''SELECT id, content FROM bond_memory
+               WHERE user_id=%s AND character_id=%s AND kind=%s
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
             (user_id, character_id, kind)
         )
         rows = cur.fetchall()
@@ -995,6 +998,84 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
     return True, deleted
 
 
+BOND_RESOLUTION_REASONS = frozenset({
+    'completed', 'cancelled', 'superseded', 'corrected',
+})
+
+
+def resolve_bond_memories(user_id, character_id, kind, replaces,
+                          new_content=None, reason='superseded'):
+    """Close resolved/cancelled/superseded bonds without DELETE.
+
+    bond_merge is additive (old event still true, more detail).
+    This is terminal: the old pending condition is no longer active recall.
+    """
+    if not isinstance(replaces, list) or not replaces:
+        return False, []
+    replaces = [item for item in replaces if isinstance(item, str) and item.strip()][:5]
+    if not replaces:
+        return False, []
+    reason = str(reason or 'superseded').strip().lower()
+    if reason not in BOND_RESOLUTION_REASONS:
+        reason = 'superseded'
+
+    conn = get_conn()
+    cur = conn.cursor()
+    targets = []
+    try:
+        cur.execute(
+            '''SELECT id, content FROM bond_memory
+               WHERE user_id=%s AND character_id=%s AND kind=%s
+                 AND COALESCE(recall_status, 'active') = 'active' ''',
+            (user_id, character_id, kind)
+        )
+        rows = cur.fetchall()
+        for want in replaces:
+            best = None
+            for mid, mcontent in rows:
+                if mid in [item[0] for item in targets]:
+                    continue
+                if _loosely_matches(want, mcontent):
+                    best = (mid, mcontent)
+                    break
+            if best:
+                targets.append(best)
+            else:
+                print(f'[{user_id}] 关闭:找不到要结束的旧记忆,跳过 →「{want[:30]}」')
+        if not targets:
+            return False, []
+        ids = [mid for mid, _content in targets]
+        cur.execute(
+            '''UPDATE bond_memory
+               SET recall_status = 'superseded'
+               WHERE id = ANY(%s)
+                 AND COALESCE(recall_status, 'active') = 'active' ''',
+            (ids,),
+        )
+        conn.commit()
+        for mid, old in targets:
+            print(
+                f'[{user_id}] bond #{mid} recall_status=superseded '
+                f'({reason}): {old[:40]}'
+            )
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+    summary = _clean_content(new_content) if new_content else ''
+    if summary and not any(_loosely_matches(summary, old) for _mid, old in targets):
+        if _valid_bond(user_id, summary):
+            save_bond_memory(user_id, character_id, kind, summary)
+        else:
+            print(f'[{user_id}] 关闭后的结果摘要不合规,只结束旧记录:{summary[:40]}')
+    elif summary:
+        print(f'[{user_id}] 跳过把已结束条件再写成 active bond:{summary[:40]}')
+    return True, targets
+
+
 def get_bond_memories(user_id, character_id, kind=None, limit=30):
     """返回 [(id, content, timestamp)]，新→旧。kind=None 时返回全部种类。"""
     conn = get_conn()
@@ -1004,6 +1085,7 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
             '''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
                  AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, kind, limit)
         )
@@ -1012,6 +1094,7 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
             '''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s
                  AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, limit)
         )
@@ -1725,11 +1808,33 @@ D. character_self_claim：{char_name}对"我是什么样的人/我为什么这�
     · 只是又提了一次同一件事,没有新信息 → null(交给去重就行)
     · 两件不同的事凑一起 → null
     · 记不清旧记忆原文 → null
+    · 【禁止】拿 bond_merge 处理"旧事件已经有结果"。
+      旧事件仍然成立、只是补了细节 → merge。
+      旧计划/条件/赌约已经完成、失败、取消、被新事实覆盖、条件没触发 → 必须用 bond_resolution。
+
+14. ★★【旧事件状态变化——禁止把已结束的条件继续写成 active】★★
+    如果本轮说明一个旧计划/条件/赌约/担忧已经：
+    完成 / 失败 / 取消 / 被新事实覆盖 / 条件没有触发 / 已经有结果
+    → 禁止用 bond_merge 把旧的"待发生条件"继续保留成 active。
+    → 必须输出 bond_resolution，把旧记录关掉。
+    旧行不要删，系统会把它标成 superseded，不再进入普通聊天召回。
+
+    典型例：
+    旧：「她抽不中就拍甜品照片」
+    新：「她已经抽到了」
+    → 旧条件结束。bond_resolution.replaces 填旧原文，reason 填 completed。
+    → 不得再输出「我和她约好……她抽不中拍甜品照片」作为新的 active bond。
+    → 结果如果 user_fact 已经写了「她抽到了两个系列」，bond_resolution.content 可以 null。
+
+    另一例：
+    旧：「如果明天没下雨就出去」
+    新：「已经下雨了」
+    → 未满足的分支不能继续当 future plan。reason 填 cancelled 或 superseded。
 
 【输出格式——严格 JSON，只输出一行】
-{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}},"character_self_claim":{{"content":"我说被人想念就直接回应是我的风格"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版"}}}}
+{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}},"character_self_claim":{{"content":"我说被人想念就直接回应是我的风格"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版"}},"bond_resolution":{{"replaces":["旧 bond 原文"],"content":null,"reason":"completed"}}}}
 没有的类填 null，例如全都没有：
-{{"user_fact":null,"bond":null,"told":null,"character_self_claim":null,"bond_merge":null}}
+{{"user_fact":null,"bond":null,"told":null,"character_self_claim":null,"bond_merge":null,"bond_resolution":null}}
 category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         raw, _usage = create_chat(
             model=MODEL_CN_AUX, max_tokens=2000,
@@ -1819,7 +1924,27 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                         print(f'[{user_id}] ✅ 状态候选已巩固：{lifecycle["consolidated"]["content"]}')
                     print(f'[{user_id}] 🧠 生命周期记忆 [{cls.get("memory_kind")}/{cls.get("reason")}]: {content}')
 
-        # ★ B0. 记忆合并:先处理,把碎片收成一条(放在新增之前,避免刚存的又被合掉)
+        resolved_texts = []
+        br = parsed.get('bond_resolution')
+        if br is None:
+            br = parsed.get('bond_update')
+        if isinstance(br, dict):
+            resolve_replaces = br.get('replaces')
+            resolve_reason = br.get('reason') or 'superseded'
+            resolve_content = _clean_content(br.get('content')) if br.get('content') else ''
+            if isinstance(resolve_replaces, list):
+                try:
+                    _ok, resolved_rows = resolve_bond_memories(
+                        user_id, character_id, 'between',
+                        resolve_replaces,
+                        new_content=resolve_content or None,
+                        reason=resolve_reason,
+                    )
+                    resolved_texts = [content for _mid, content in resolved_rows]
+                except Exception as _e:
+                    print(f'[{user_id}] ❌ 结束旧 bond 出错(不影响其他记忆):{_e}')
+
+        # ★ B0. 记忆合并:只允许"旧事件仍成立、补更多细节"。先处理,把碎片收成一条。
         bm = parsed.get('bond_merge')
         if isinstance(bm, dict):
             merge_content = _clean_content(bm.get('content'))
@@ -1862,7 +1987,9 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                 )
                 print(f'[{user_id}] 🧠 bond 改道自我陈述证据（{character_id}）：{content} -> {result}')
             elif _valid_bond(user_id, content, char_name):
-                if save_bond_memory(
+                if any(_loosely_matches(content, old) for old in resolved_texts):
+                    print(f'[{user_id}] 跳过把已结束条件再写成 active bond：{content}')
+                elif save_bond_memory(
                     user_id, character_id, 'between', content,
                     source_event_ids=source_ids,
                 ):
