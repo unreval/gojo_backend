@@ -68,10 +68,48 @@ const msgStorageKey = (id: string) => `chat_msgs_${id}`;
 //   现在写一份到服务器,本地保留当缓存(加载快、离线也能看)。
 const CHATLOG_SYNCED_KEY = (id: string) => `chatlog_synced_${id}`;
 
+function isLocalMediaUri(uri?: string): boolean {
+  if (!uri || typeof uri !== 'string') return false;
+  const value = uri.trim();
+  return value.startsWith('file://') || value.startsWith('content://');
+}
+
+function isDurableHttpUri(uri?: string): boolean {
+  if (!uri || typeof uri !== 'string') return false;
+  return /^https?:\/\//i.test(uri.trim());
+}
+
+function applyMediaFields(msg: any, media: any) {
+  if (!media || typeof media !== 'object') return msg;
+  return {
+    ...msg,
+    mediaId: media.id || msg.mediaId,
+    mediaUrl: media.url || msg.mediaUrl,
+    mediaKind: media.kind || msg.mediaKind,
+    mediaMimeType: media.mime_type || msg.mediaMimeType,
+  };
+}
+
+function messageImageSrc(msg: any): string | undefined {
+  return msg?.mediaUrl || msg?.imageUri;
+}
+
+function messageKind(m: any): string {
+  if (m.eventMeta?.kind === 'video' || m.mediaKind === 'video') return 'video';
+  if (m.eventMeta?.kind === 'image' || m.mediaKind === 'image' || m.mediaId || m.mediaUrl || m.imageUri) {
+    return 'image';
+  }
+  if (m.callLog) return 'call_log';
+  return 'text';
+}
+
 /** 本地 Message → 服务器格式 */
 function toServerMsg(m: any) {
   const extra: any = {};
-  if (m.imageUri) extra.imageUri = m.imageUri;
+  if (isDurableHttpUri(m.imageUri) && !isLocalMediaUri(m.imageUri)) {
+    extra.imageUri = m.imageUri;
+  }
+  if (m.mediaId) extra.media_id = m.mediaId;
   if (m.replyTo) extra.reply_to = m.replyTo;
   if (m.sourceEventId) extra.source_event_id = m.sourceEventId;
   if (m.replyToSourceEventId) extra.reply_to_source_event_id = m.replyToSourceEventId;
@@ -88,7 +126,7 @@ function toServerMsg(m: any) {
     text: m.text || '',
     subtitle: m.subtitle || '',
     emotion: m.emotion || '',
-    kind: m.eventMeta?.kind === 'video' ? 'video' : (m.imageUri ? 'image' : (m.callLog ? 'call_log' : 'text')),
+    kind: messageKind(m),
     extra: Object.keys(extra).length > 0 ? JSON.stringify(extra) : '',
     has_audio: !!m.audioB64 || !!m.hasAudio,
   };
@@ -111,6 +149,7 @@ function fromServerMsg(m: any): any {
   let tsStr = m.ts || '';
   if (tsStr && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(tsStr)) tsStr += 'Z';
   const d = tsStr ? new Date(tsStr) : new Date();
+  const media = m.media;
   return {
     id: m.client_msg_id || `srv_${m.id}`,
     // ★ 保留服务端原始数字 ID —— 分页用 before_id 时要用它,
@@ -121,6 +160,10 @@ function fromServerMsg(m: any): any {
     subtitle: m.subtitle || undefined,
     emotion: m.emotion || undefined,
     imageUri: extra.imageUri,
+    mediaId: media?.id || extra.media_id,
+    mediaUrl: media?.url,
+    mediaKind: media?.kind || extra.media_kind,
+    mediaMimeType: media?.mime_type,
     replyTo: extra.reply_to || extra.replyTo,
     sourceEventId: extra.source_event_id,
     replyToSourceEventId: extra.reply_to_source_event_id,
@@ -231,6 +274,7 @@ export default function ChatRoom() {
   const [messages, setMessages]   = useState<Message[]>([]);
   // ★ 已同步到服务器的消息 id,避免重复上传
   const syncedIdsRef = useRef<Set<string>>(new Set());
+  const legacyBackfillAttemptedRef = useRef<Set<string>>(new Set());
   const [inputText, setInputText] = useState('');
   const [loading, setLoading]     = useState(false);
   const [generationFailed, setGenerationFailed] = useState(false);
@@ -311,6 +355,46 @@ export default function ChatRoom() {
     } catch (e) { console.warn('loadAudioIndex', e); }
   };
 
+  const recoverLegacyImages = useCallback(async (msgs: Message[]) => {
+    if (isGroup) return;
+    for (const m of msgs || []) {
+      if ((m as any).eventMeta?.kind === 'video') continue;
+      if (m.mediaUrl || m.mediaId) continue;
+      if (!isLocalMediaUri(m.imageUri)) continue;
+      const sourceEventId = String(m.sourceEventId || m.id || '');
+      if (!sourceEventId) continue;
+      if (legacyBackfillAttemptedRef.current.has(sourceEventId)) continue;
+      legacyBackfillAttemptedRef.current.add(sourceEventId);
+      try {
+        const info = await FileSystem.getInfoAsync(m.imageUri as string);
+        if (!info.exists) {
+          console.warn(`[chat-media] legacy local file missing source_event_id=${sourceEventId}`);
+          continue;
+        }
+        const b64 = await FileSystem.readAsStringAsync(m.imageUri as string, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        const res = await axios.post(`${SERVER_URL}/chat/media/backfill`, {
+          user_id: FIXED_USER_ID,
+          chat_id: chatId,
+          source_event_id: sourceEventId,
+          image_base64: b64,
+          media_type: 'image/jpeg',
+        }, { timeout: 30000 });
+        if (res.data?.media) {
+          console.log(`[chat-media] recovered legacy image source_event_id=${sourceEventId}`);
+          setMessages(prev => prev.map(item => (
+            item.id === m.id || item.sourceEventId === sourceEventId
+              ? applyMediaFields(item, res.data.media)
+              : item
+          )));
+        }
+      } catch (e: any) {
+        console.warn(`[chat-media] backfill failed source_event_id=${sourceEventId}:`, e?.message);
+      }
+    }
+  }, [chatId, isGroup]);
+
   // ── 拉对话对象信息 + 历史消息 ──
   useEffect(() => {
     (async () => {
@@ -390,6 +474,7 @@ export default function ChatRoom() {
               setHasMore(!!logRes.data?.has_more);
               AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(withRead)).catch(() => {});
               loaded = true;
+              recoverLegacyImages(withRead);
             }
           } catch (e: any) {
             console.warn('[chatlog] 拉取失败,改用本地缓存:', e?.message);
@@ -402,6 +487,7 @@ export default function ChatRoom() {
               const localMsgs = JSON.parse(saved).map(sanitizeStoredMessage);
               const withRead = await applyReadStatusFromStorage(localMsgs);
               setMessages(withRead);
+              recoverLegacyImages(withRead);
               // ★ 本地有、服务器没有 → 补传上去(老用户首次升级的迁移)
               const syncedFlag = await AsyncStorage.getItem(CHATLOG_SYNCED_KEY(chatId));
               if (!syncedFlag && localMsgs.length > 0) {
@@ -737,6 +823,7 @@ export default function ChatRoom() {
         olderWithRead.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
         justLoadedEarlierRef.current = true;   // ★ 加载历史时禁止滚到底
         setMessages(prev => [...olderWithRead, ...prev]);
+        recoverLegacyImages(olderWithRead);
       }
       setHasMore(!!res.data?.has_more);
     } catch (e: any) {
@@ -1340,18 +1427,30 @@ export default function ChatRoom() {
         const res = await axios.post(`${SERVER_URL}/chat/image`, payload,
           { timeout: video ? 90000 : 60000 });
         if (isGenerationFailedPayload(res.data)) {
+          if (res.data?.media) {
+            setMessages(prev => prev.map(m => m.id === sourceEventId
+              ? applyMediaFields(m, res.data.media) : m));
+          }
           noteGenerationFailure();
           return;
         }
         await processResponseExtras(res.data);
         // ★ busy 时 seen 和 reply 分离:看到了但没空回才标已读;没看见保持未读。
         //   后台 Vision 摘要仍可先落在气泡上（系统看图 ≠ 角色 seen）。
-        if (res.data?.visual_summary || res.data?.event_meta) {
-          setMessages(prev => prev.map(m => m.id === sourceEventId ? {
-            ...m,
-            visualSummary: res.data.visual_summary,
-            eventMeta: res.data.event_meta,
-          } : m));
+        if (res.data?.visual_summary || res.data?.event_meta || res.data?.media) {
+          setMessages(prev => prev.map(m => {
+            if (m.id !== sourceEventId) return m;
+            let next: any = m;
+            if (res.data?.visual_summary || res.data?.event_meta) {
+              next = {
+                ...next,
+                visualSummary: res.data.visual_summary,
+                eventMeta: res.data.event_meta,
+              };
+            }
+            if (res.data?.media) next = applyMediaFields(next, res.data.media);
+            return next;
+          }));
         }
         if (res.data?.busy) {
           if (res.data?.seen) markPendingUserMessagesRead();
@@ -1373,8 +1472,14 @@ export default function ChatRoom() {
       pruneAudioFiles();
     } catch (e: any) {
       const data = e?.response?.data;
+      if (data?.media) {
+        setMessages(prev => prev.map(m => m.id === sourceEventId
+          ? applyMediaFields(m, data.media) : m));
+      }
       if (isGenerationFailedPayload(data)) {
         console.warn('[sendImage] generation_failed');
+      } else if (data?.error === 'media_persist_failed') {
+        console.warn('[sendImage] media_persist_failed');
       } else {
         console.warn('[sendImage] failed:', e?.message);
       }
@@ -1901,8 +2006,8 @@ export default function ChatRoom() {
                         </View>
                       </View>
                     )}
-                    {msg.imageUri && (
-                      <Image source={{ uri: msg.imageUri }} style={s.bubbleImage} resizeMode="cover" />
+                    {messageImageSrc(msg) && (
+                      <Image source={{ uri: messageImageSrc(msg) }} style={s.bubbleImage} resizeMode="cover" />
                     )}
                     {msg.text && msg.text !== '📷 [图片]' && (
                       <Text style={[s.bubbleText, msg.role === 'user' && s.bubbleTextUser]}>

@@ -82,6 +82,15 @@ class ImageFailureTests(unittest.TestCase):
         self.state = Mock()
         self.record_turn = Mock()
         self.ai = load_client()
+        self.persist_image = Mock(return_value={
+            'id': '11111111-1111-1111-1111-111111111111',
+            'media_kind': 'image',
+            'object_key': 'chat-media/u/gojo/evt/original.png',
+            'mime_type': 'image/png',
+            'size_bytes': 70,
+            'sha256': 'abc',
+            'source_event_id': 'evt',
+        })
         modules = {
             'anthropic': stub('anthropic', Anthropic=Mock(return_value=self.client)),
             'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
@@ -103,6 +112,22 @@ class ImageFailureTests(unittest.TestCase):
                           find_and_delete_tasks_by_keyword=Mock(), delete_latest_task=Mock()),
             'task_dedup': stub('task_dedup', find_similar_task=Mock()),
             'relationship_state': stub('relationship_state', save_offline_character_state=self.state),
+            'db_chat_media': stub(
+                'db_chat_media',
+                persist_image=self.persist_image,
+                public_media=lambda record: None if not record else {
+                    'id': record['id'],
+                    'kind': record.get('media_kind') or 'image',
+                    'url': 'https://r2.example/signed',
+                    'mime_type': record.get('mime_type') or 'image/png',
+                },
+            ),
+            'media_storage': stub(
+                'media_storage',
+                is_configured=Mock(return_value=True),
+                signed_get_url=Mock(return_value='https://r2.example/signed'),
+                MediaStorageError=RuntimeError,
+            ),
         }
         module_patch = patch.dict(sys.modules, modules)
         module_patch.start()

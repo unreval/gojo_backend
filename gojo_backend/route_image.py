@@ -10,10 +10,14 @@
 import base64
 import binascii
 import time
+import uuid
 
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+
+from db_chat_media import persist_image, public_media
+from media_storage import MediaStorageError
 
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
 from db import get_conn
@@ -217,6 +221,25 @@ def _normalize_image(value):
     return {'data': encoded, 'media_type': mime}
 
 
+def _persist_chat_image(user_id, chat_id, source_event_id, image):
+    """Durable image persist. Independent of character reply generation."""
+    raw = base64.b64decode(image['data'])
+    record = persist_image(
+        user_id, chat_id, source_event_id, raw,
+        mime_type=image.get('media_type') or 'image/jpeg',
+        media_kind='image',
+    )
+    return public_media(record)
+
+
+def _persist_failed_response(error):
+    print(f'[chat-media] persist failed:{error}')
+    return JSONResponse(
+        {'error': 'media_persist_failed', 'retryable': True},
+        status_code=503,
+    )
+
+
 # ★ 记账透传辅助:只做基本形状校验,不写库(前端确认后 POST /accounting/records)
 def _extract_pending_tx(result: dict, user_id: str):
     pt = result.get('pending_transaction') if isinstance(result, dict) else None
@@ -262,7 +285,7 @@ async def chat_image(data: dict):
     media_type   = data.get('media_type', 'image/jpeg')
     user_text    = (data.get('text') or '').strip()
     is_video     = bool(data.get('is_video'))
-    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    source_event_id = str(data.get('source_event_id') or '').strip() or uuid.uuid4().hex
     reply_to = _safe_reply_to(data)
 
     # 统一成图片列表：单图和多图（视频抽帧）走同一条路
@@ -279,9 +302,21 @@ async def chat_image(data: dict):
     if not images:
         return JSONResponse({'error': 'no image'}, status_code=400)
 
+    # IMAGE history only. Video currently uploads extracted frames, not the mp4.
+    media_payload = None
+    if not is_video:
+        try:
+            media_payload = _persist_chat_image(
+                user_id, character_id, source_event_id, images[0])
+        except (MediaStorageError, Exception) as error:
+            return _persist_failed_response(error)
+
     char = get_character(character_id)
     if not char:
-        return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
+        missing = {'error': f'character {character_id} not found'}
+        if media_payload:
+            missing['media'] = media_payload
+        return JSONResponse(missing, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     total_days = update_chat_days(user_id)
@@ -371,7 +406,7 @@ async def chat_image(data: dict):
                     )
                 except Exception:
                     pass
-            return JSONResponse({
+            busy_body = {
                 'busy': True,
                 'seen': bool(availability.get('seen')),
                 'can_reply': False,
@@ -395,7 +430,11 @@ async def chat_image(data: dict):
                 'visual_summary': visual_summary,
                 'event_meta': base_event_meta,
                 'total_days': total_days,
-            })
+                'source_event_id': source_event_id,
+            }
+            if media_payload:
+                busy_body['media'] = media_payload
+            return JSONResponse(busy_body)
     except Exception as e:
         print(f'[{user_id}] image schedule check skipped:{e}')
 
@@ -484,13 +523,17 @@ async def chat_image(data: dict):
     msgs = finalize_user_messages(result.get('messages', [])) if result else []
     if not commit_ready_msgs(msgs):
         print(f'[{user_id}][{character_id}] image generation_failed; commit skipped')
-        return JSONResponse({
+        failed = {
             'error': 'generation_failed',
             'generation_failed': True,
             'messages': [],
             'total_days': total_days,
             'retryable': retryable,
-        }, status_code=502)
+            'source_event_id': source_event_id,
+        }
+        if media_payload:
+            failed['media'] = media_payload
+        return JSONResponse(failed, status_code=502)
 
     if offline_state:
         try:
@@ -617,8 +660,9 @@ async def chat_image(data: dict):
     resp = {'emotion': emotion, 'messages': msgs, 'total_days': total_days}
     resp['visual_summary'] = visual_summary
     resp['event_meta'] = event_meta
-    if source_event_id:
-        resp['source_event_id'] = source_event_id
+    resp['source_event_id'] = source_event_id
+    if media_payload:
+        resp['media'] = media_payload
     if reply_to:
         resp['reply_to'] = reply_to
     if reminder_data:
@@ -628,3 +672,31 @@ async def chat_image(data: dict):
     if pending_tx:
         resp['pending_transaction'] = pending_tx
     return JSONResponse(resp)
+
+
+@router.post('/chat/media/backfill')
+async def chat_media_backfill(data: dict):
+    """Upload-only recover of a legacy local image. No LLM / memory / relationship."""
+    user_id = str((data or {}).get('user_id') or '').strip()
+    chat_id = str((data or {}).get('chat_id') or '').strip()
+    source_event_id = str((data or {}).get('source_event_id') or '').strip()
+    image_b64 = (data or {}).get('image_base64') or ''
+    media_type = (data or {}).get('media_type') or 'image/jpeg'
+    if not user_id or not chat_id or not source_event_id or not image_b64:
+        return JSONResponse(
+            {'error': 'need user_id, chat_id, source_event_id, image_base64'},
+            status_code=400)
+    try:
+        image = _normalize_image({'data': image_b64, 'media_type': media_type})
+    except ValueError as error:
+        return JSONResponse({'error': str(error)}, status_code=400)
+    try:
+        media_payload = _persist_chat_image(
+            user_id, chat_id, source_event_id, image)
+    except (MediaStorageError, Exception) as error:
+        return _persist_failed_response(error)
+    return JSONResponse({
+        'ok': True,
+        'media': media_payload,
+        'source_event_id': source_event_id,
+    })

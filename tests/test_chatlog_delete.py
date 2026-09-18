@@ -167,6 +167,26 @@ class FakeCursor:
                 user_id, chat_id, client_msg_id, role, text, subtitle,
                 emotion, kind, extra, has_audio, created_at, event_id)
             return
+        if compact.startswith('SELECT client_msg_id, event_id FROM chat_log'):
+            if 'WHERE id=%s' in compact:
+                server_id, user_id, chat_id = params
+                for row in self.store.rows:
+                    if (row['id'] == server_id
+                            and row['user_id'] == user_id
+                            and row['chat_id'] == chat_id):
+                        self._one = (row.get('client_msg_id') or '',
+                                     row.get('event_id') or '')
+                        return
+                return
+            user_id, chat_id, client_msg_id = params
+            for row in reversed(self.store.rows):
+                if (row['user_id'] == user_id
+                        and row['chat_id'] == chat_id
+                        and row['client_msg_id'] == client_msg_id):
+                    self._one = (row.get('client_msg_id') or '',
+                                 row.get('event_id') or '')
+                    return
+            return
         if compact.startswith('SELECT client_msg_id FROM chat_log'):
             server_id, user_id, chat_id = params
             for row in self.store.rows:
@@ -198,7 +218,7 @@ class FakeCursor:
             self._many = [
                 (r['id'], r['client_msg_id'], r['role'], r['text'],
                  r['subtitle'], r['emotion'], r['kind'], r['extra'],
-                 r['has_audio'], r['created_at'])
+                 r['has_audio'], r['created_at'], r.get('event_id') or '')
                 for r in matched
             ]
             return
@@ -341,9 +361,15 @@ class ChatlogDeleteTests(unittest.TestCase):
             side_effect=lambda: FakeConn(self.store),
         )
         self.patcher.start()
+        self.media_patcher = patch(
+            'db_chat_media.get_conn',
+            side_effect=RuntimeError('media db skipped in chatlog tests'),
+        )
+        self.media_patcher.start()
         db_chatlog.init_chatlog_table()
 
     def tearDown(self):
+        self.media_patcher.stop()
         self.patcher.stop()
 
     def ids(self, user_id, chat_id):
@@ -471,9 +497,15 @@ class ChatlogDeleteRouteTests(unittest.TestCase):
             side_effect=lambda: FakeConn(self.store),
         )
         self.patcher.start()
+        self.media_patcher = patch(
+            'db_chat_media.get_conn',
+            side_effect=RuntimeError('media db skipped in chatlog tests'),
+        )
+        self.media_patcher.start()
         db_chatlog.init_chatlog_table()
 
     def tearDown(self):
+        self.media_patcher.stop()
         self.patcher.stop()
 
     def _body(self, response):

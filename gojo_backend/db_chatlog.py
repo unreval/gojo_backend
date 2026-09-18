@@ -184,7 +184,7 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
         if before_id:
             cur.execute(
                 '''SELECT id, client_msg_id, role, text, subtitle, emotion,
-                          kind, extra, has_audio, created_at
+                          kind, extra, has_audio, created_at, event_id
                    FROM chat_log
                    WHERE user_id=%s AND chat_id=%s AND id < %s
                      AND COALESCE(status, 'active') = 'active'
@@ -193,7 +193,7 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
         else:
             cur.execute(
                 '''SELECT id, client_msg_id, role, text, subtitle, emotion,
-                          kind, extra, has_audio, created_at
+                          kind, extra, has_audio, created_at, event_id
                    FROM chat_log
                    WHERE user_id=%s AND chat_id=%s
                      AND COALESCE(status, 'active') = 'active'
@@ -217,9 +217,93 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
         'extra': r[7] or '',
         'has_audio': bool(r[8]),
         'ts': r[9].isoformat() if r[9] else None,
+        'event_id': (r[10] if len(r) > 10 else '') or '',
     } for r in rows]
     out.reverse()          # 旧→新,前端直接铺
+    _attach_chat_media(user_id, chat_id, out)
     return out, has_more
+
+
+def _attach_chat_media(user_id, chat_id, msgs):
+    """Hydrate user image bubbles from chat_media via source_event_id.
+
+    Signed URLs are generated at read time and never written back to extra.
+    """
+    event_ids = []
+    seen = set()
+    for msg in msgs or []:
+        if (msg.get('role') != 'user') or (msg.get('kind') != 'image'):
+            continue
+        for key in (msg.get('client_msg_id'), msg.get('event_id')):
+            value = str(key or '').strip()
+            if value and value not in seen:
+                seen.add(value)
+                event_ids.append(value)
+    if not event_ids:
+        return
+    try:
+        import db_chat_media
+        records = db_chat_media.get_media_by_source_events(
+            user_id, chat_id, event_ids, media_kind='image')
+    except Exception as e:
+        print(f'[chat-media] hydrate lookup skipped:{e}')
+        return
+    if not records:
+        return
+    for msg in msgs:
+        if (msg.get('role') != 'user') or (msg.get('kind') != 'image'):
+            continue
+        rec = records.get(msg.get('event_id') or '') or records.get(
+            msg.get('client_msg_id') or '')
+        if not rec:
+            msg['media'] = None
+            continue
+        try:
+            msg['media'] = db_chat_media.public_media(rec)
+        except Exception as e:
+            print(f'[chat-media] signed url failed source_event_id='
+                  f'{rec.get("source_event_id")}:{e}')
+            msg['media'] = None
+
+
+def list_message_event_keys(user_id, chat_id, client_msg_id='', server_id=None):
+    """client_msg_id / event_id for one chat_log row (active or deleted)."""
+    keys = []
+    seen = set()
+
+    def _add(value):
+        text = str(value or '').strip()[:120]
+        if text and text not in seen:
+            seen.add(text)
+            keys.append(text)
+
+    _add(client_msg_id)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if server_id is not None:
+            cur.execute(
+                '''SELECT client_msg_id, event_id
+                   FROM chat_log
+                   WHERE id=%s AND user_id=%s AND chat_id=%s''',
+                (server_id, user_id, chat_id))
+        elif client_msg_id:
+            cur.execute(
+                '''SELECT client_msg_id, event_id
+                   FROM chat_log
+                   WHERE user_id=%s AND chat_id=%s AND client_msg_id=%s
+                   ORDER BY id DESC LIMIT 1''',
+                (user_id, chat_id, client_msg_id))
+        else:
+            return keys
+        row = cur.fetchone()
+        if row:
+            _add(row[0])
+            _add(row[1])
+    finally:
+        cur.close()
+        conn.close()
+    return keys
 
 
 def _parse_extra(extra):

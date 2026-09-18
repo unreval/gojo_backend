@@ -293,7 +293,7 @@ class FakeCursor:
             self._many = [
                 (r['id'], r['client_msg_id'], r['role'], r['text'],
                  r['subtitle'], r['emotion'], r['kind'], r['extra'],
-                 r['has_audio'], r['created_at'])
+                 r['has_audio'], r['created_at'], r.get('event_id') or '')
                 for r in matched
             ]
             return

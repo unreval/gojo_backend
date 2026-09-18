@@ -831,6 +831,27 @@ class BusyImageVisionTests(unittest.TestCase):
                     return_value='{"visual_summary":"蓝色马克杯，杯沿有裂纹"}'
                 )))),
             ),
+            'db_chat_media': stub(
+                'db_chat_media',
+                persist_image=Mock(return_value={
+                    'id': 'media-busy-1',
+                    'media_kind': 'image',
+                    'object_key': 'chat-media/u1/gojo/img-busy-1/original.png',
+                    'mime_type': 'image/png',
+                }),
+                public_media=lambda record: None if not record else {
+                    'id': record['id'],
+                    'kind': 'image',
+                    'url': 'https://r2.example/signed',
+                    'mime_type': record.get('mime_type') or 'image/png',
+                },
+            ),
+            'media_storage': stub(
+                'media_storage',
+                is_configured=Mock(return_value=True),
+                signed_get_url=Mock(return_value='https://r2.example/signed'),
+                MediaStorageError=RuntimeError,
+            ),
         }
 
         availability = {

@@ -53,6 +53,7 @@ from route_chatlog import router as chatlog_router              # ★ 聊天记�
 from route_schedule import router as schedule_router            # ★ 角色自己的日程
 from db_schedule import init_schedule_table
 from db_chatlog import init_chatlog_table
+from db_chat_media import init_chat_media_table
 from schedule_share import start_schedule_share 
 from route_courses import router as courses_router
 from db_course import init_course_tables                # ★ 日程驱动的主动分享
@@ -96,6 +97,10 @@ init_diary_tables()
 init_proactive_table()
 init_promise_table()   # ★ 承诺表（承诺驱动的主动消息）
 init_chatlog_table()   # ★ 聊天记录表（卸载重装/换手机都不丢）
+try:
+    init_chat_media_table()
+except Exception as e:
+    print(f'[init] chat_media table skipped:{e}')
 from raw_events import init_raw_event_layer
 init_raw_event_layer()
 from context_layer import init_context_layer_tables
@@ -159,6 +164,12 @@ if _HAS_EXPLORE:
 
 @app.get('/health')
 async def health():
+    media_storage_ready = False
+    try:
+        import media_storage
+        media_storage_ready = bool(media_storage.is_configured())
+    except Exception:
+        media_storage_ready = False
     return {
         'status': 'ok',
         'tts_provider': TTS_PROVIDER,
@@ -169,6 +180,7 @@ async def health():
         'grumble_engine': False,
         'explore': _HAS_EXPLORE,
         'cognitive_worker': cognitive_worker.is_cognitive_worker_running(),
+        'media_storage_ready': media_storage_ready,
     }
 
 

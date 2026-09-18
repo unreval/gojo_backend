@@ -21,6 +21,40 @@ import db_chatlog
 router = APIRouter()
 
 
+def _remove_r2_objects(records):
+    if not records:
+        return
+    try:
+        import media_storage
+    except Exception as e:
+        print(f'[chat-media] r2 import skipped:{e}')
+        return
+    for rec in records:
+        key = (rec or {}).get('object_key')
+        if not key:
+            continue
+        try:
+            media_storage.delete_object(key)
+        except Exception as e:
+            print(f'[chat-media] r2 delete failed object_key={key}:{e}')
+
+
+def _soft_delete_media_for_keys(user_id, chat_id, event_keys):
+    try:
+        import db_chat_media
+    except Exception as e:
+        print(f'[chat-media] delete import skipped:{e}')
+        return
+    for event_id in event_keys or []:
+        try:
+            records = db_chat_media.soft_delete_media_for_event(
+                user_id, chat_id, event_id)
+        except Exception as e:
+            print(f'[chat-media] soft-delete skipped source_event_id={event_id}:{e}')
+            continue
+        _remove_r2_objects(records)
+
+
 @router.get('/chatlog')
 async def get_chatlog(user_id: str, chat_id: str,
                       limit: int = 200, before_id: int = None):
@@ -66,10 +100,16 @@ async def delete_chatlog_message(user_id: str, chat_id: str,
         return JSONResponse(
             {'error': '需要 client_msg_id 或 server_id'}, status_code=400)
     try:
+        event_keys = db_chatlog.list_message_event_keys(
+            user_id, chat_id,
+            client_msg_id=client_msg_id,
+            server_id=server_id)
         deleted = db_chatlog.delete_message(
             user_id, chat_id,
             client_msg_id=client_msg_id,
             server_id=server_id)
+        if deleted:
+            _soft_delete_media_for_keys(user_id, chat_id, event_keys)
         try:
             import raw_events
             raw_events.invalidate_memories_for_deleted_event(
@@ -88,7 +128,22 @@ async def delete_chatlog_message(user_id: str, chat_id: str,
 
 @router.delete('/chatlog')
 async def clear_chatlog(user_id: str, chat_id: str):
+    user_id = (user_id or '').strip()
+    chat_id = (chat_id or '').strip()
+    records = []
+    try:
+        import db_chat_media
+        records = db_chat_media.list_active_media(user_id, chat_id)
+    except Exception as e:
+        print(f'[chat-media] list before clear skipped:{e}')
+        records = []
     n = db_chatlog.clear_chat(user_id, chat_id)
+    try:
+        import db_chat_media
+        db_chat_media.soft_delete_media_for_chat(user_id, chat_id)
+    except Exception as e:
+        print(f'[chat-media] chat soft-delete skipped:{e}')
+    _remove_r2_objects(records)
     return JSONResponse({'ok': True, 'deleted': n})
 
 
