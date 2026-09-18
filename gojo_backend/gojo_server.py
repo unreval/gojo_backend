@@ -23,6 +23,7 @@ import memory_search
 import group_bubbler
 import diary_scheduler
 import proactive_scheduler
+import delayed_reply
 import cognitive_worker
 
 
@@ -55,10 +56,9 @@ from db_chatlog import init_chatlog_table
 from schedule_share import start_schedule_share 
 from route_courses import router as courses_router
 from db_course import init_course_tables                # ★ 日程驱动的主动分享
-
-# ★ 新模块用 try/except 包住：缺文件不会搞崩整个后端
 from route_grumble import router as grumble_router
 
+# ★ 新模块用 try/except 包住：缺文件不会搞崩整个后端
 try:
     from route_game import router as game_router
     _HAS_GAME = True
@@ -100,6 +100,11 @@ from raw_events import init_raw_event_layer
 init_raw_event_layer()
 from context_layer import init_context_layer_tables
 init_context_layer_tables()
+from behavior_evidence import init_behavior_tables
+try:
+    init_behavior_tables()
+except Exception as e:
+    print(f'[init] behavior tables skipped:{e}')
 init_schedule_table()  # ★ 角色日程表（忙的时候只已读不回）
 init_course_tables()   # ★ 课程表（日程驱动的主动分享）
 init_push_table()
@@ -120,6 +125,7 @@ seed_gojo_character()
 group_bubbler.start_bubbler()
 diary_scheduler.start_diary_scheduler()
 proactive_scheduler.start_proactive_scheduler()
+delayed_reply.start_delayed_reply_worker()
 cognitive_worker.start_cognitive_worker()
 start_schedule_share()   # ★ 他在探店/翘班时,可能顺手发条消息（发不发由他按关系判断）
 

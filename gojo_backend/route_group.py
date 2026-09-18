@@ -365,7 +365,26 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
                   [{'sender_name','zh'}]——用来强制后发言者换角度,防止"复读机合唱"。
     """
     others = '、'.join(m['name'] for m in all_members if m['id'] != member['id'])
-    hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
+    hist_rows = history[-40:] if history else []
+    try:
+        from context_budget import BudgetConfig, ContextBudgetManager, ContextItem
+        cfg = BudgetConfig.for_profile('group_chat')
+        items = []
+        for index, row in enumerate(hist_rows):
+            text = row.get('zh') or row.get('jp') or row.get('text') or ''
+            if not str(text).strip():
+                continue
+            items.append(ContextItem(
+                item_id=f'g:{index}', item_type='hot_raw',
+                text=str(text)[:400], priority=100, role='user',
+            ))
+        kept = ContextBudgetManager(cfg).allocate(items)
+        if kept:
+            hist_txt = _history_text(hist_rows[-len(kept):])
+        else:
+            hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
+    except Exception:
+        hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
 
     # ★ 声纹隔离:防止多个角色输出趋同,像"一个AI套了几个名字"
     voice_lock = f'''
@@ -467,7 +486,20 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
         user_msg = '（群里安静了一会儿）现在你主动在群里说一句。'
 
     # ★ 缓存版：静态头/记忆段带 cache_control，group_scene 进动态尾
-    system_blocks = build_system_blocks(user_id, member['id'], user_text, extra_suffix=group_scene)
+    pack = None
+    try:
+        from context_layer import build_chat_context
+        pack = build_chat_context(
+            user_id, member['id'], user_message=user_text or '',
+            profile='group_chat', include_recall=True)
+        if getattr(pack, 'failed_closed', False):
+            pack = None
+    except Exception as exc:
+        print(f'[group] context pack skipped:{exc}')
+        pack = None
+    system_blocks = build_system_blocks(
+        user_id, member['id'], user_text, extra_suffix=group_scene,
+        context_pack=pack)
 
     # ★ 如果有图片(第一波),用多模态格式让角色"看到"图片
     if image_b64 and image_media_type and replying_to is None:

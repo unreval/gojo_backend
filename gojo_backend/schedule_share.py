@@ -113,9 +113,13 @@ def _generate_share(character_id, user_id, activity):
         user_id, character_id, snapshot=temporal_snapshot)
 
     try:
-        shorts = get_short_memory(user_id, 4, character_id)
-        recent = '\n'.join(f'{"她" if r=="user" else "角色"}：{c}' for r, c in shorts) \
-                 if shorts else '（最近没聊）'
+        from context_layer import load_profile_transcript
+        recent, _pack = load_profile_transcript(
+            user_id, character_id, 'proactive', limit=4)
+        if not recent:
+            shorts = get_short_memory(user_id, 4, character_id)
+            recent = '\n'.join(f'{"她" if r=="user" else "角色"}：{c}' for r, c in shorts) \
+                     if shorts else '（最近没聊）'
     except Exception:
         recent = ''
     try:

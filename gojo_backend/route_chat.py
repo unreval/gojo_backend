@@ -325,8 +325,12 @@ def _turn_context(user_id, character_id, user_message='', profile='default',
     try:
         from user_memory import get_short_memory_for_prompt
         from raw_events import SourceValidityError
-        return pack, list(get_short_memory_for_prompt(
+        from context_layer import assemble_fallback_from_messages
+        short_rows = list(get_short_memory_for_prompt(
             user_id, n=limit, character_id=character_id) or [])
+        fallback_pack = assemble_fallback_from_messages(
+            short_rows, user_id=user_id, character_id=character_id, profile=profile)
+        return (pack or fallback_pack), list(fallback_pack.messages)
     except Exception as e:
         try:
             from raw_events import SourceValidityError
@@ -478,11 +482,17 @@ def _fire_relationship_update(user_id, character_id, user_text, full_jp,
 
 def _start_relationship_update(user_id, character_id, user_text, full_jp,
                                char, short_memories, temporal_snapshot=None,
-                               source_event_id=None):
+                               source_event_id=None, pack=None):
     """快捷方法：从 handler 里一行调用起 v4 更新线程。
-    char + short_memories 由 handler 提供（handler 里已经拿到了）。"""
+    上下文优先来自 canonical pack，short_memory 只是兼容缓存。"""
     core_snippet = (char.get('core_prompt') or '')[:300]
-    recent_ctx = [{'role': r, 'content': c} for r, c in (short_memories or [])[-6:]]
+    if pack is not None and getattr(pack, 'messages', None):
+        recent_ctx = [
+            {'role': m.get('role'), 'content': m.get('content')}
+            for m in list(pack.messages)[-6:]
+        ]
+    else:
+        recent_ctx = [{'role': r, 'content': c} for r, c in (short_memories or [])[-6:]]
     threading.Thread(
         target=_fire_relationship_update,
         args=(
@@ -495,6 +505,18 @@ def _start_relationship_update(user_id, character_id, user_text, full_jp,
 
 @router.post('/chat/text')
 async def chat_text(data: dict):
+    from latency_telemetry import LatencyTrace, bind_trace, reset_trace
+    import time as _time
+    _trace = LatencyTrace('chat:text')
+    _tok = bind_trace(_trace)
+    _tmark = _time.perf_counter()
+
+    def _latency_emit():
+        try:
+            _trace.emit()
+        finally:
+            reset_trace(_tok)
+
     user_text    = data.get('text', '')
     user_id      = data.get('user_id', 'default')
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
@@ -502,17 +524,20 @@ async def chat_text(data: dict):
     reply_to = _safe_reply_to(data)
 
     if not user_text:
+        _latency_emit()
         return JSONResponse({'error': 'no input'}, status_code=400)
 
     char = get_character(character_id)
     if not char:
+        _latency_emit()
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
 
     # ★ 角色日程:free / soft_busy / hard_busy。
-    #   soft_busy 会把“看手机机会”持久化,同一段忙碌里连续发消息不会重复抽概率。
-    #   promise 只做兜底唤醒,真正 pending 状态在 char_phone_check。
+    #   inbound busy 只写入 char_phone_check inbox，本请求不生成。
+    #   到点/活动结束由 delayed_reply worker 走正常 chat pipeline。
+    availability = None
     try:
         from reply_availability import check_reply_availability
         availability = check_reply_availability(
@@ -539,6 +564,8 @@ async def chat_text(data: dict):
                   f'seen={availability.get("seen")} pending_phone_check_count='
                   f'{availability.get("pending_count")} '
                   f'phone_check_id={availability.get("opportunity_id")}')
+            _trace.mark('availability', (_time.perf_counter() - _tmark) * 1000.0)
+            _latency_emit()
             return JSONResponse({
                 'busy': True,
                 'seen': bool(availability.get('seen')),
@@ -564,6 +591,8 @@ async def chat_text(data: dict):
             })
     except Exception as _e:
         print(f'[{user_id}] 日程检查跳过(不影响聊天):{_e}')
+    _trace.mark('availability', (_time.perf_counter() - _tmark) * 1000.0)
+    _tmark = _time.perf_counter()
 
 
     total_days = update_chat_days(user_id)
@@ -574,6 +603,9 @@ async def chat_text(data: dict):
         current_event_id=source_event_id)
     messages = _history_plus_current(
         messages, _user_prompt_with_reply(user_text, reply_to))
+    if 'hot' not in _trace.marks:
+        _trace.mark('hot', (_time.perf_counter() - _tmark) * 1000.0)
+    _tmark = _time.perf_counter()
 
     recall_query = user_text
     if pack and pack.messages:
@@ -587,6 +619,8 @@ async def chat_text(data: dict):
     system_blocks = build_system_blocks(
         user_id, character_id, recall_query, temporal_snapshot=temporal_snapshot,
         context_pack=pack)
+    _trace.mark('prompt', (_time.perf_counter() - _tmark) * 1000.0)
+    _tmark = _time.perf_counter()
 
     save_user_short_memory_once(
         user_id, user_text, character_id, source_event_id=source_event_id)
@@ -623,12 +657,17 @@ async def chat_text(data: dict):
         salvage=True,
         reject_fn=reject_calendar,
     )
+    llm_ms = (_time.perf_counter() - _tmark) * 1000.0
+    _trace.mark('llm', llm_ms)
+    _trace.mark('first_token', llm_ms)
 
     if not result:
+        _latency_emit()
         return _generation_failed_response(user_id, character_id, total_days, attempts=3)
 
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
+        _latency_emit()
         return _generation_failed_response(user_id, character_id, total_days, attempts=3)
 
     _commit_offline_state(user_id, character_id, committed_state)
@@ -645,14 +684,23 @@ async def chat_text(data: dict):
         temporal_context=temporal_snapshot,
         source_event_id=source_event_id,
     )
-    # ★ 事件驱动日记：聊到大事时，他会因为"这事值得记"而写一篇（后台，不阻塞回复）
     try:
-        import diary_engine
-        threading.Thread(target=diary_engine.maybe_write_diary_on_event,
-                         args=(character_id, user_id, user_text, full_jp),
-                         daemon=True).start()
-    except Exception:
-        pass
+        from behavior_evidence import record_reply_cycle
+        from datetime import datetime as _dt, timezone as _tz
+        record_reply_cycle(
+            user_id, character_id,
+            user_event_id=source_event_id,
+            user_at=(temporal_snapshot or {}).get('now_utc'),
+            seen_at=(availability or {}).get('seen_at'),
+            replied_at=_dt.now(_tz.utc),
+            message_length=len(full_jp or ''),
+            busy_state=(availability or {}).get('reply_state') or 'free',
+            interaction_mode='text',
+            phone_check_id=(availability or {}).get('opportunity_id'),
+        )
+    except Exception as _be:
+        print(f'[{user_id}] behavior observation skipped:{_be}')
+    # 重要反思只由 Slow Loop diary_entries 写入。这里不再做 per-turn diary judge。
 
     # ★ 承诺检测:角色回复里如果有"答应/承诺/会主动找你"类的话,自动创建 proactive_promise
     try:
@@ -669,7 +717,7 @@ async def chat_text(data: dict):
     # ★ v4 感情账本异步更新（传上下文 + stderr 可靠输出，见文件顶部说明）
     _start_relationship_update(user_id, character_id, user_text, full_jp,
                                char, short_memories, temporal_snapshot,
-                               source_event_id)
+                               source_event_id, pack=pack)
 
     voice_id = char.get('voice_id')
     for m in msgs:
@@ -792,6 +840,7 @@ async def chat_text(data: dict):
         resp['pending_transaction'] = pending_tx
     if saved_promise:
         resp['saved_promise'] = saved_promise
+    _latency_emit()
     return JSONResponse(resp)
 
 

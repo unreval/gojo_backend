@@ -66,7 +66,7 @@ CONTEXT_LAYER_DDL = (
 )
 
 PIN_STATUSES = ('active', 'resolved', 'expired', 'superseded')
-SUMMARY_STATUSES = ('active', 'invalidated', 'superseded')
+SUMMARY_STATUSES = ('active', 'invalidated', 'superseded', 'stale')
 
 
 def init_context_layer_tables():
@@ -75,6 +75,11 @@ def init_context_layer_tables():
     try:
         for stmt in CONTEXT_LAYER_DDL:
             cur.execute(stmt)
+        cur.execute("ALTER TABLE rolling_summaries ADD COLUMN IF NOT EXISTS processor_version TEXT")
+        cur.execute("ALTER TABLE rolling_summaries ADD COLUMN IF NOT EXISTS summary_version INTEGER DEFAULT 1")
+        cur.execute("ALTER TABLE rolling_summaries ADD COLUMN IF NOT EXISTS superseded_by TEXT")
+        cur.execute("ALTER TABLE rolling_summaries ADD COLUMN IF NOT EXISTS rebuild_required BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE rolling_summaries ADD COLUMN IF NOT EXISTS is_placeholder BOOLEAN DEFAULT TRUE")
         conn.commit()
     finally:
         cur.close()
@@ -285,6 +290,7 @@ def draft_rolling_summary(events: Sequence[dict]) -> dict:
 
 
 def _row_summary(row) -> dict:
+    extra = row[11:] if len(row) > 11 else ()
     return {
         'summary_id': row[0],
         'user_id': row[1],
@@ -297,12 +303,19 @@ def _row_summary(row) -> dict:
         'token_cost': row[8],
         'created_at': row[9],
         'updated_at': row[10],
+        'processor_version': extra[0] if len(extra) > 0 else '',
+        'summary_version': extra[1] if len(extra) > 1 else 1,
+        'superseded_by': extra[2] if len(extra) > 2 else None,
+        'rebuild_required': bool(extra[3]) if len(extra) > 3 else False,
+        'is_placeholder': True if len(extra) <= 4 else bool(extra[4] if extra[4] is not None else True),
     }
 
 
 def save_rolling_summary(
     user_id, character_id, text, source_event_ids,
     *, range_start=None, range_end=None, summary_id=None, status='active',
+    processor_version='', summary_version=1, superseded_by=None,
+    rebuild_required=False, is_placeholder=True,
 ):
     sid = (summary_id or f'sum:{uuid.uuid4()}')[:120]
     payload = {
@@ -317,6 +330,11 @@ def save_rolling_summary(
         'token_cost': estimate_tokens(text or ''),
         'created_at': datetime.now(timezone.utc),
         'updated_at': datetime.now(timezone.utc),
+        'processor_version': processor_version or '',
+        'summary_version': int(summary_version or 1),
+        'superseded_by': superseded_by,
+        'rebuild_required': bool(rebuild_required),
+        'is_placeholder': bool(is_placeholder),
     }
     if _USE_MEMORY_STORE:
         with _memory_lock:
@@ -328,8 +346,10 @@ def save_rolling_summary(
         cur.execute(
             '''INSERT INTO rolling_summaries
                (summary_id, user_id, character_id, text, source_event_ids,
-                range_start, range_end, status, token_cost)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                range_start, range_end, status, token_cost,
+                processor_version, summary_version, superseded_by,
+                rebuild_required, is_placeholder)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (summary_id) DO UPDATE SET
                  text = EXCLUDED.text,
                  source_event_ids = EXCLUDED.source_event_ids,
@@ -337,10 +357,18 @@ def save_rolling_summary(
                  range_end = EXCLUDED.range_end,
                  status = EXCLUDED.status,
                  token_cost = EXCLUDED.token_cost,
+                 processor_version = EXCLUDED.processor_version,
+                 summary_version = EXCLUDED.summary_version,
+                 superseded_by = EXCLUDED.superseded_by,
+                 rebuild_required = EXCLUDED.rebuild_required,
+                 is_placeholder = EXCLUDED.is_placeholder,
                  updated_at = CURRENT_TIMESTAMP''',
             (sid, user_id, character_id, payload['text'],
              _dump_ids(payload['source_event_ids']),
-             range_start, range_end, payload['status'], payload['token_cost']))
+             range_start, range_end, payload['status'], payload['token_cost'],
+             payload['processor_version'], payload['summary_version'],
+             superseded_by, payload['rebuild_required'],
+             payload['is_placeholder']))
         conn.commit()
         return payload
     finally:
@@ -364,7 +392,9 @@ def list_rolling_summaries(user_id, character_id, *, status='active', limit=8):
     try:
         cur.execute(
             '''SELECT summary_id, user_id, character_id, text, source_event_ids,
-                      range_start, range_end, status, token_cost, created_at, updated_at
+                      range_start, range_end, status, token_cost, created_at, updated_at,
+                      processor_version, summary_version, superseded_by,
+                      rebuild_required, is_placeholder
                FROM rolling_summaries
                WHERE user_id=%s AND character_id=%s
                  AND (%s IS NULL OR status=%s)
@@ -377,22 +407,25 @@ def list_rolling_summaries(user_id, character_id, *, status='active', limit=8):
         conn.close()
 
 
-def invalidate_summary(summary_id, *, status='invalidated'):
+def invalidate_summary(summary_id, *, status='invalidated', superseded_by=None):
     if _USE_MEMORY_STORE:
         with _memory_lock:
             item = _SUMMARIES.get(summary_id)
             if item:
                 item['status'] = status
                 item['updated_at'] = datetime.now(timezone.utc)
+                if superseded_by:
+                    item['superseded_by'] = superseded_by
         return
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
             '''UPDATE rolling_summaries
-               SET status=%s, updated_at=CURRENT_TIMESTAMP
+               SET status=%s, superseded_by=COALESCE(%s, superseded_by),
+                   updated_at=CURRENT_TIMESTAMP
                WHERE summary_id=%s''',
-            (status, summary_id))
+            (status, superseded_by, summary_id))
         conn.commit()
     finally:
         cur.close()
@@ -561,35 +594,217 @@ def _verified_derived(rows, deleted: set, *, require_source=True):
     return out
 
 
-def maybe_store_spill_summary(user_id, character_id, spill, *, config: BudgetConfig):
+def maybe_store_spill_summary(user_id, character_id, spill, *, config: BudgetConfig, now=None):
     if len(spill or []) < config.min_summary_events:
         return None
     draft = draft_rolling_summary(spill)
     if not draft['text'] or not draft['source_event_ids']:
         return None
     existing = list_rolling_summaries(user_id, character_id, status='active', limit=4)
+    merge_from = None
+    saved = None
     for row in existing:
         old = set(row.get('source_event_ids') or ())
         new = set(draft['source_event_ids'])
         if old and (old <= new or new <= old or old & new):
-            return save_rolling_summary(
+            merge_from = row.get('summary_id')
+            # Keep a real summary if one already exists; only refresh placeholder.
+            if not row.get('is_placeholder', True):
+                saved = row
+                break
+            saved = save_rolling_summary(
                 user_id, character_id, draft['text'], draft['source_event_ids'],
                 range_start=draft['range_start'], range_end=draft['range_end'],
                 summary_id=row['summary_id'],
+                is_placeholder=True,
+                processor_version=getattr(config, 'summary_processor_version', '') or 'placeholder',
+                summary_version=int(row.get('summary_version') or 1),
             )
-    return save_rolling_summary(
-        user_id, character_id, draft['text'], draft['source_event_ids'],
-        range_start=draft['range_start'], range_end=draft['range_end'],
+            break
+    if saved is None:
+        saved = save_rolling_summary(
+            user_id, character_id, draft['text'], draft['source_event_ids'],
+            range_start=draft['range_start'], range_end=draft['range_end'],
+            is_placeholder=True,
+            processor_version='placeholder',
+        )
+    try:
+        from rolling_summary import enqueue_summary_job
+        enqueue_summary_job(
+            user_id, character_id, spill,
+            config=config, now=now, merge_from=merge_from,
+        )
+    except Exception as exc:
+        print(f'[context_layer] summary job enqueue skipped:{exc}')
+    return saved
+
+
+def reconcile_summaries_for_deleted(user_id, character_id, deleted_ids):
+    """Unique source gone → invalidate. Partial delete → stale/rebuild."""
+    deleted = {str(x) for x in (deleted_ids or ()) if str(x).strip()}
+    if not deleted:
+        return []
+    changed = []
+    rows = list_rolling_summaries(user_id, character_id, status='active', limit=20)
+    for row in rows:
+        ids = list(row.get('source_event_ids') or ())
+        if not ids:
+            continue
+        alive = [eid for eid in ids if eid not in deleted]
+        if not alive:
+            invalidate_summary(row['summary_id'], status='invalidated')
+            changed.append(('invalidated', row['summary_id']))
+            continue
+        if len(alive) < len(ids):
+            save_rolling_summary(
+                user_id, character_id, row.get('text') or '',
+                alive,
+                range_start=row.get('range_start'),
+                range_end=row.get('range_end'),
+                summary_id=row['summary_id'],
+                status='stale',
+                processor_version=row.get('processor_version') or '',
+                summary_version=row.get('summary_version') or 1,
+                rebuild_required=True,
+                is_placeholder=row.get('is_placeholder', True),
+            )
+            changed.append(('stale', row['summary_id']))
+    return changed
+
+
+def compact_transcript(pack, limit=8):
+    lines = []
+    messages = list(getattr(pack, 'messages', None) or [])[-max(1, int(limit or 8)):]
+    for item in messages:
+        role = item.get('role') if isinstance(item, dict) else None
+        content = item.get('content') if isinstance(item, dict) else ''
+        who = '她' if role == 'user' else '我'
+        text = re.sub(r'\s+', ' ', str(content or '')).strip()
+        if text:
+            lines.append(f'{who}：{text[:240]}')
+    return '\n'.join(lines) if lines else '（最近没怎么聊）'
+
+
+def assemble_fallback_from_messages(
+    messages, *, user_id='', character_id='', profile='default',
+):
+    """Compatibility view of short_memory, still budgeted. Not a fact source."""
+    cfg = BudgetConfig.for_profile(profile)
+    items = []
+    rows = list(messages or [])
+    for index, item in enumerate(rows):
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            role, content = item[0], item[1]
+        elif isinstance(item, dict):
+            role, content = item.get('role'), item.get('content')
+        else:
+            continue
+        text = content or ''
+        if not str(text).strip():
+            continue
+        items.append(ContextItem(
+            item_id=f'fb:{index}',
+            item_type='hot_raw',
+            text=text,
+            priority=100,
+            role=role or 'user',
+        ))
+    allocated = ContextBudgetManager(cfg).split(items)
+    hot = allocated.get('hot') or []
+    return ChatContextPack(
+        messages=[{'role': item.role or 'user', 'content': item.text} for item in hot],
+        items=list(hot),
+        support_ready=False,
+        allocation={
+            name: sum(item.token_cost for item in rows)
+            for name, rows in allocated.items()
+        },
     )
 
 
+def load_profile_transcript(user_id, character_id, profile, limit=6, include_recall=False):
+    """Background modules: canonical events through a Context Profile."""
+    try:
+        pack = build_chat_context(
+            user_id, character_id, profile=profile, include_recall=include_recall)
+        if pack and not getattr(pack, 'failed_closed', False):
+            return compact_transcript(pack, limit), pack
+    except Exception as exc:
+        print(f'[context_layer] profile {profile} skipped:{exc}')
+    return None, None
+
+
+def budget_prompt_aux(texts: dict, *, profile='default'):
+    """Trim legacy aux strings through ContextBudgetManager."""
+    cfg = BudgetConfig.for_profile(profile)
+    items = []
+    for index, (name, text) in enumerate((texts or {}).items()):
+        body = (text or '').strip()
+        if not body:
+            continue
+        items.append(ContextItem(
+            item_id=f'aux:{name}:{index}',
+            item_type=name if name in (
+                'temporal', 'schedule', 'character_lore', 'anti_repeat',
+                'period', 'accounts',
+            ) else 'schedule',
+            text=body,
+            priority=30,
+        ))
+    kept = ContextBudgetManager(cfg).allocate(items)
+    out = {name: '' for name in (texts or {})}
+    for item in kept:
+        key = (item.item_id.split(':')[1] if ':' in item.item_id else item.item_type)
+        if key in out:
+            out[key] = (out[key] + '\n' + item.text).strip() if out[key] else item.text
+        else:
+            out[key] = item.text
+    return out
+
+
+def _latency_span(name):
+    try:
+        from latency_telemetry import mark_span
+        return mark_span(name)
+    except Exception:
+        from contextlib import contextmanager
+        @contextmanager
+        def _noop():
+            yield None
+        return _noop()
+
+
+def _pick_prompt_summaries(rows, limit=2):
+    """Prefer real summaries; placeholders only as fallback. No infinite stack."""
+    real = [row for row in rows if not row.get('is_placeholder', True)]
+    placeholders = [row for row in rows if row.get('is_placeholder', True)]
+    chosen = (real or placeholders)[: max(1, int(limit or 2))]
+    return chosen
+
+
+def _event_id_set(current_event_id) -> set:
+    if current_event_id is None:
+        return set()
+    if isinstance(current_event_id, (str, int)):
+        values = (current_event_id,)
+    else:
+        try:
+            values = tuple(current_event_id)
+        except TypeError:
+            values = (current_event_id,)
+    return {str(item).strip() for item in values if str(item).strip()}
+
+
 def exclude_current_turn_events(events: Sequence[dict], current_event_id=None) -> List[dict]:
-    """Hot context stops before this request's user Raw Event."""
+    """Hot context stops before this request's user Raw Event(s)."""
     rows = [dict(event) for event in (events or []) if event]
-    cid = str(current_event_id or '').strip()
-    if not cid:
+    skip = _event_id_set(current_event_id)
+    if not skip:
         return rows
-    return [event for event in rows if str(event.get('event_id') or '').strip() != cid]
+    return [
+        event for event in rows
+        if str(event.get('event_id') or '').strip() not in skip
+    ]
 
 
 def append_current_user_turn(messages: Sequence[dict], content: str) -> List[dict]:
@@ -1003,13 +1218,30 @@ def assemble_from_events(
     manager = ContextBudgetManager(cfg)
     now = _now_utc(now)
     events = exclude_current_turn_events(events, current_event_id)
-    hot, spill = select_hot_window(events, config=cfg, now=now)
-    maybe_store_spill_summary(user_id, character_id, spill, config=cfg)
+    with _latency_span('hot'):
+        hot, spill = select_hot_window(events, config=cfg, now=now)
+    maybe_store_spill_summary(user_id, character_id, spill, config=cfg, now=now)
+    try:
+        from auto_pin import maybe_auto_pin
+        maybe_auto_pin(
+            user_id, character_id, user_message,
+            source_event_ids=tuple(_event_id_set(current_event_id)),
+            now=now,
+        )
+    except Exception as exc:
+        print(f'[context_layer] auto pin skipped:{exc}')
 
     deleted = set(deleted_ids or ())
-    summaries = _verified_derived(
-        list_rolling_summaries(user_id, character_id, status='active', limit=6),
-        deleted,
+    if deleted:
+        try:
+            reconcile_summaries_for_deleted(user_id, character_id, deleted)
+        except Exception as exc:
+            print(f'[context_layer] summary reconcile skipped:{exc}')
+    summaries = _pick_prompt_summaries(
+        _verified_derived(
+            list_rolling_summaries(user_id, character_id, status='active', limit=6),
+            deleted,
+        )
     )
     pins = _verified_derived(
         list_pins(user_id, character_id, status='active', limit=12, now=now),
@@ -1025,14 +1257,16 @@ def assemble_from_events(
             from recall_candidates import (
                 collapse_candidates, from_recall_result, to_recall_result,
             )
-            recall_result = two_level_recall(
-                user_id, character_id, user_message or '',
-                exclude_event_ids=recent_ids,
-            )
-            recall_result = exclude_recall_covered_by_recent(recall_result, recent_ids)
+            with _latency_span('recall'):
+                recall_result = two_level_recall(
+                    user_id, character_id, user_message or '',
+                    exclude_event_ids=recent_ids,
+                )
+                recall_result = exclude_recall_covered_by_recent(recall_result, recent_ids)
             if recall_result is not None:
-                collapsed = collapse_candidates(from_recall_result(recall_result))
-                recall_result = to_recall_result(collapsed, recall_result)
+                with _latency_span('collapse'):
+                    collapsed = collapse_candidates(from_recall_result(recall_result))
+                    recall_result = to_recall_result(collapsed, recall_result)
             items.extend(_items_from_recall(recall_result))
         except Exception as exc:
             print(f'[context_layer] recall wrap skipped:{exc}')
@@ -1053,7 +1287,8 @@ def assemble_from_events(
         except Exception as exc:
             print(f'[context_layer] support wrap skipped:{exc}')
 
-    allocated = manager.split(items)
+    with _latency_span('budget'):
+        allocated = manager.split(items)
     hot_kept = allocated.get('hot') or []
     pin_kept = allocated.get('pinned') or []
     sum_kept = allocated.get('summary') or []

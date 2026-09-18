@@ -243,6 +243,16 @@ class DiaryRecallTests(unittest.TestCase):
         self.assertEqual(memory_lifecycle.recall_diary_memories(
             'u1', 'gojo', 'exam'), [])
 
+    def test_overlapping_daily_diary_and_important_thought_are_collapsed(self):
+        shared = '考试那天我还以为她在强撑，这只是当时的猜测。'
+        self.database.diaries = [(3, shared, '担心', NOW)]
+        self.database.reflections = [(
+            7, 'exam.reflection', shared, 'event',
+            [{'source_type': 'cognitive_event', 'source_id': 27}], NOW,
+        )]
+        items = memory_lifecycle.recall_diary_memories('u1', 'gojo', '考试')
+        self.assertEqual(len(items), 1)
+
     def test_observer_prompt_excludes_recalled_diary_and_rejects_self_proof(self):
         client = types.ModuleType('ai_client')
         client.create_chat = Mock(return_value=('{"signals": []}', {}))

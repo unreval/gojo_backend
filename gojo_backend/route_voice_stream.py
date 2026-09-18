@@ -129,8 +129,17 @@ async def chat_voice_stream(data: dict):
     except Exception as exc:
         print(f'[{user_id}][{character_id}] voice context_layer skipped:{exc}')
     if not messages and not failed_closed:
-        short_memories = get_short_memory(user_id, 6, character_id)
-        messages = [{'role': r, 'content': c} for r, c in short_memories]
+        try:
+            from context_layer import assemble_fallback_from_messages
+            short_memories = get_short_memory(user_id, 6, character_id)
+            fallback_pack = assemble_fallback_from_messages(
+                short_memories, user_id=user_id, character_id=character_id, profile='voice')
+            pack = pack or fallback_pack
+            messages = list(fallback_pack.messages)
+        except Exception as exc:
+            print(f'[{user_id}][{character_id}] voice fallback budget skipped:{exc}')
+            short_memories = get_short_memory(user_id, 6, character_id)
+            messages = [{'role': r, 'content': c} for r, c in short_memories]
     from context_layer import append_current_user_turn
     messages = append_current_user_turn(messages, user_text)
 

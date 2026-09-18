@@ -90,8 +90,12 @@ def _turn_context(user_id, character_id, user_message='', limit=24,
         print(f'[{user_id}][{character_id}] image context_layer skipped:{e}')
     try:
         from raw_events import SourceValidityError
-        return pack, list(get_short_memory_for_prompt(
+        from context_layer import assemble_fallback_from_messages
+        short_rows = list(get_short_memory_for_prompt(
             user_id, n=limit, character_id=character_id) or [])
+        fallback_pack = assemble_fallback_from_messages(
+            short_rows, user_id=user_id, character_id=character_id, profile='image')
+        return (pack or fallback_pack), list(fallback_pack.messages)
     except Exception as e:
         try:
             from raw_events import SourceValidityError

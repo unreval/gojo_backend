@@ -630,6 +630,86 @@ def complete_sticky_note(user_id, character_id, note_id, *, conn=None):
             database.close()
 
 
+def list_day_cycle_notes(user_id, character_id, day_start, *, limit=8, conn=None):
+    """Succeeded Slow Loop notes for one local day. Not a diary body."""
+    from datetime import timedelta
+
+    if not user_id or not character_id or day_start is None:
+        return {'cycles': [], 'questions': [], 'settled_predictions': []}
+    day_end = day_start + timedelta(days=1)
+    database = conn
+    owns_connection = database is None
+    if database is None:
+        from db import get_conn
+        database = get_conn()
+    cur = database.cursor()
+    try:
+        cur.execute(
+            '''SELECT cycle_summary, completed_at
+               FROM cognitive_cycles
+               WHERE user_id = %s AND character_id = %s
+                 AND status = 'succeeded' AND cycle_summary IS NOT NULL
+                 AND completed_at >= %s AND completed_at < %s
+               ORDER BY completed_at ASC, id ASC
+               LIMIT %s''',
+            (user_id, character_id, day_start, day_end,
+             max(1, min(int(limit), 12))),
+        )
+        notes = []
+        for summary, completed_at in cur.fetchall():
+            data = _json_value(summary, {})
+            if not isinstance(data, dict):
+                data = {}
+            notes.append({
+                'summary': _safe_text(data.get('summary'), 400),
+                'salient_change': _safe_text(data.get('salient_change'), 240),
+                'uncertainty': _safe_text(data.get('uncertainty'), 240),
+                'completed_at': completed_at,
+            })
+        cur.execute(
+            '''SELECT question_text, status
+               FROM cognitive_questions
+               WHERE user_id = %s AND character_id = %s
+                 AND updated_at >= %s AND updated_at < %s
+               ORDER BY updated_at DESC
+               LIMIT 6''',
+            (user_id, character_id, day_start, day_end),
+        )
+        questions = [
+            {'question_text': _safe_text(row[0], 240), 'status': row[1]}
+            for row in cur.fetchall()
+        ]
+        cur.execute(
+            '''SELECT prediction_key, status, metadata
+               FROM cognitive_predictions
+               WHERE user_id = %s AND character_id = %s
+                 AND settled_at >= %s AND settled_at < %s
+               ORDER BY settled_at DESC
+               LIMIT 6''',
+            (user_id, character_id, day_start, day_end),
+        )
+        predictions = []
+        for key, status, metadata in cur.fetchall():
+            meta = _json_value(metadata, {})
+            predictions.append({
+                'prediction_key': key,
+                'status': status,
+                'statement': _safe_text(
+                    (meta or {}).get('statement') or key, 240),
+            })
+        return {
+            'cycles': notes,
+            'questions': questions,
+            'settled_predictions': predictions,
+        }
+    except Exception:
+        return {'cycles': [], 'questions': [], 'settled_predictions': []}
+    finally:
+        cur.close()
+        if owns_connection:
+            database.close()
+
+
 def list_diary_entries(user_id, character_id, *, limit=30, conn=None):
     database = conn
     owns_connection = database is None

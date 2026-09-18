@@ -125,6 +125,16 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
                     told_text='',
                     recall_result=None,
                 )),
+                assemble_fallback_from_messages=lambda rows, user_id='', character_id='', profile='voice': types.SimpleNamespace(
+                    messages=[
+                        {'role': item[0], 'content': item[1]}
+                        if isinstance(item, (tuple, list)) and len(item) >= 2
+                        else {'role': item.get('role'), 'content': item.get('content')}
+                        for item in (rows or [])
+                    ],
+                    failed_closed=False,
+                    support_ready=False,
+                ),
                 append_current_user_turn=lambda messages, content: (
                     list(messages or [])
                     if not content or (

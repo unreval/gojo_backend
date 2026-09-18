@@ -30,6 +30,10 @@ RECALLED_MEMORY_TOKEN_BUDGET = 1800
 AUX_TOKEN_BUDGET = 500
 
 MIN_SUMMARY_EVENTS = 8
+SUMMARY_MIN_TOKENS = 120
+SUMMARY_QUIET_PERIOD_SECONDS = 90
+SUMMARY_MAX_SOURCE_EVENTS = 80
+SUMMARY_PROCESSOR_VERSION = 'rolling_summary_v1'
 
 CHANNEL_SPECS = {
     'hot': {
@@ -76,6 +80,7 @@ ITEM_TYPE_CHANNEL = {
 
 PROFILES = {
     'default': {},
+    'chat': {},
     'text': {},
     'story': {},
     'image': {'total_token_budget': 7000},
@@ -87,6 +92,31 @@ PROFILES = {
     'proactive': {
         'total_token_budget': 2200,
         'hot_max_events': 60,
+        'hot_min_events': 4,
+    },
+    'group_chat': {
+        'total_token_budget': 3500,
+        'hot_max_events': 40,
+        'hot_min_events': 4,
+    },
+    'relationship_observer': {
+        'total_token_budget': 1800,
+        'hot_max_events': 12,
+        'hot_min_events': 2,
+    },
+    'memory_extractor': {
+        'total_token_budget': 1600,
+        'hot_max_events': 8,
+        'hot_min_events': 2,
+    },
+    'diary_writer': {
+        'total_token_budget': 2800,
+        'hot_max_events': 24,
+        'hot_min_events': 4,
+    },
+    'cognitive_worker': {
+        'total_token_budget': 2400,
+        'hot_max_events': 20,
         'hot_min_events': 4,
     },
 }
@@ -130,6 +160,9 @@ class BudgetConfig:
     recall_token_budget: int = RECALLED_MEMORY_TOKEN_BUDGET
     aux_token_budget: int = AUX_TOKEN_BUDGET
     min_summary_events: int = MIN_SUMMARY_EVENTS
+    summary_min_tokens: int = SUMMARY_MIN_TOKENS
+    summary_quiet_period_seconds: int = SUMMARY_QUIET_PERIOD_SECONDS
+    summary_max_source_events: int = SUMMARY_MAX_SOURCE_EVENTS
 
     @classmethod
     def for_profile(cls, profile: str = 'default') -> 'BudgetConfig':

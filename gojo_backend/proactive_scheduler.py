@@ -4,7 +4,6 @@
 """
 import threading
 import time
-import re
 from datetime import datetime
 from config import CN_TZ, ANTHROPIC_KEY, MODEL_MAIN
 import anthropic
@@ -45,6 +44,11 @@ def generate_from_promise(promise, now):
         kind = promise['trigger_kind']
         origin_text = promise.get('origin_text', '')
 
+        if 'phone_check_id=' in (context or ''):
+            print(f'[promise] #{promise["id"]} busy fallback 已退役，跳过生成')
+            db_promise.mark_fired(promise['id'], now)
+            return None
+
         char = get_character(character_id)
         if not char:
             print(f'[promise] 角色 {character_id} 不存在,跳过 #{promise["id"]}')
@@ -58,8 +62,14 @@ def generate_from_promise(promise, now):
             user_id, character_id, snapshot=temporal_snapshot)
 
         try:
-            shorts = get_short_memory(user_id, 4, character_id)
-            recent = '\n'.join(f'{"她" if r=="user" else "角色"}：{c}' for r, c in shorts) if shorts else '(最近没聊)'
+            from context_layer import load_profile_transcript
+            recent, _pack = load_profile_transcript(
+                user_id, character_id, 'proactive', limit=4)
+            if not recent:
+                shorts = get_short_memory(user_id, 4, character_id)
+                recent = '\n'.join(
+                    f'{"她" if r=="user" else "角色"}：{c}' for r, c in shorts
+                ) if shorts else '(最近没聊)'
         except Exception:
             recent = '(最近没聊)'
 
@@ -145,14 +155,6 @@ def generate_from_promise(promise, now):
             character_id, user_id, 'promise', jp, zh, emotion, audio_b64, created_at=now
         )
         print(f'[promise] ✅ #{promise["id"]} → msg #{mid}: {jp[:40]}')
-
-        phone_match = re.search(r'phone_check_id=(\d+)', context or '')
-        if phone_match:
-            try:
-                import db_schedule
-                db_schedule.resolve_phone_check(int(phone_match.group(1)))
-            except Exception as e:
-                print(f'[promise] phone_check resolve skipped: {e}')
 
         try:
             event_id = proactive_msg.canonical_event_id('promise', mid)

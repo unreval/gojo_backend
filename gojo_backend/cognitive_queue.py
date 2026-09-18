@@ -61,6 +61,29 @@ def _json_datetime(value):
     raise TypeError(f'Object of type {type(value).__name__} is not JSON serializable')
 
 
+def _read_behavior_anomalies(user_id, character_id, limit=6):
+    """Read-only. Recalling anomalies must not reinforce them."""
+    try:
+        from behavior_evidence import recall_anomalies_without_reinforcement
+        rows = recall_anomalies_without_reinforcement(
+            user_id, character_id, limit=limit) or []
+        out = []
+        for row in rows:
+            out.append({
+                'observation_type': row.get('observation_type'),
+                'direction': row.get('direction'),
+                'magnitude': row.get('magnitude'),
+                'confidence': row.get('confidence'),
+                'busy_state': row.get('busy_state'),
+                'interaction_mode': row.get('interaction_mode'),
+                'observation_id': row.get('observation_id'),
+                'note': 'measurable deviation only; not a relationship delta',
+            })
+        return out
+    except Exception:
+        return []
+
+
 def _context_evidence_ids(context):
     result = set()
 
@@ -931,6 +954,25 @@ def build_reasoning_context(cycle_id, *, conn=None):
             for row in cur.fetchall()
         ]
 
+        cur.execute(
+            '''SELECT diary_key, content, source_event_refs, occurred_at
+               FROM cognitive_diary_entries
+               WHERE user_id = %s AND character_id = %s
+               ORDER BY occurred_at DESC, id DESC
+               LIMIT 12''',
+            (user_id, character_id),
+        )
+        prior_diary_entries = [
+            {
+                'diary_key': row[0],
+                'content': row[1],
+                'source_event_refs': _json_value(row[2], []),
+                'occurred_at': row[3],
+                'note': 'already written; do not rewrite the same evidence/topic',
+            }
+            for row in cur.fetchall()
+        ]
+
         event_times = [item['occurred_at'] for item in events_by_id.values()]
         return {
             'cycle_id': cycle_id,
@@ -944,6 +986,7 @@ def build_reasoning_context(cycle_id, *, conn=None):
             'current_hypotheses': current_hypotheses,
             'pending_predictions': pending_predictions,
             'current_sticky_notes': current_sticky_notes,
+            'prior_diary_entries': prior_diary_entries,
             'temporal': {
                 'queued_at': queued_at,
                 'first_event_at': min(event_times) if event_times else None,
@@ -951,6 +994,7 @@ def build_reasoning_context(cycle_id, *, conn=None):
             },
             'pair': {'user_id': user_id, 'character_id': character_id},
             'primary_trigger_class': primary_class,
+            'behavior_anomalies': _read_behavior_anomalies(user_id, character_id),
         }
     finally:
         cur.close()

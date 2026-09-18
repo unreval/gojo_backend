@@ -566,6 +566,38 @@ class SlowLoopInspectionTests(unittest.TestCase):
         self.assertNotIn('reasoning_context', snapshot['cycles'][0])
         self.assertEqual(connection._cursor.executed[0][1], ('u', 'gojo', 5))
 
+    def test_duplicate_diary_entries_are_not_inserted_twice(self):
+        output = valid_output()
+        output['diary_entries'] = [{
+            'diary_key': 'exam.noticed',
+            'content': '她把考试说得很轻。',
+            'reflection_kind': 'event',
+            'evidence_refs': [27],
+        }]
+        cursor = StructuredCommitCursor()
+        cursor.existing_diary = [('exam.noticed', json.dumps([{'event_id': 27}]))]
+        original_execute = cursor.execute
+
+        def execute(sql, params=None):
+            compact = ' '.join(sql.split())
+            original_execute(sql, params)
+            if compact.startswith('SELECT diary_key'):
+                cursor.many = list(cursor.existing_diary)
+            elif compact.startswith('SELECT id, source_event_type'):
+                cursor.many = [(
+                    27, 'user_message', 'e27', 'chat',
+                    {'evidence_category': 'user_statement'},
+                )]
+            elif compact.startswith('INSERT INTO cognitive_diary_entries'):
+                cursor.inserted_diary = getattr(cursor, 'inserted_diary', [])
+                cursor.inserted_diary.append(params)
+
+        cursor.execute = execute
+        cognitive_output.persist_slow_loop_output(
+            cursor, cycle_id=7, user_id='u', character_id='gojo',
+            output=output, now=NOW)
+        self.assertEqual(getattr(cursor, 'inserted_diary', []), [])
+
 
 class MemoryContaminationGuardTests(unittest.TestCase):
     def test_character_self_claims_are_routed_away_from_bond_memory(self):

@@ -43,6 +43,9 @@ Your job is to consolidate evidence. Do not write dialogue, choose a next
 response, prescribe an emotion, modify relationship scores, or claim access to
 hidden mental states. Distinguish direct evidence from hypotheses. A user saying
 something about the character does not prove the character reciprocates it.
+Behavioral anomalies (faster/slower reply, defer counts) are measurable
+observations only. They are not motives, not liking/anger, and must not become
+relationship deltas. Recalling an anomaly is not new evidence.
 
 Return one JSON object and no markdown. It must contain these root keys:
 cycle_summary, question_updates, belief_updates, hypothesis_updates,
@@ -180,6 +183,9 @@ Diary entries are cognitive output and later memory input only. They must not
 modify relationship_model, rel_state, or relationship scores. They are not
 evidence for themselves; do not use prior diary wording to prove a new belief.
 Write only when cited events justify a reflective record.
+If prior_diary_entries already cover the same evidence set or topic,
+omit diary_entries (reuse the existing diary_key; do not emit a near-duplicate).
+reflection_note is internal working memory for the next generator, not a diary.
 
 Every referenced event_id must exist in the supplied context. Historical IDs
 may be reused only when they already appear in a prior belief, hypothesis, or

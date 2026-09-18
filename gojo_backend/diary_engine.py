@@ -17,6 +17,62 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 EMOTIONS_FOR_DIARY = ['平静', '温柔', '调皮', '认真', '开心', '疑惑', '悲伤', '自信']
 
 
+def _gather_daily_diary_material(character_id, user_id, now):
+    """Daily Diary source: day's raw events + Slow Loop notes, not last 8 shorts."""
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    events = []
+    cycle_notes = {'cycles': [], 'questions': [], 'settled_predictions': []}
+    try:
+        from raw_events import list_events_for_local_day
+        events = list_events_for_local_day(
+            user_id, character_id, today_start, limit=80) or []
+    except Exception as exc:
+        print(f'[diary] raw events for daily diary skipped:{exc}')
+    try:
+        from cognitive_reader import list_day_cycle_notes
+        cycle_notes = list_day_cycle_notes(
+            user_id, character_id, today_start) or cycle_notes
+    except Exception as exc:
+        print(f'[diary] cycle notes for daily diary skipped:{exc}')
+
+    event_lines = []
+    for item in events:
+        role = '她' if item.get('role') == 'user' else '我'
+        stamp = item.get('timestamp')
+        hhmm = ''
+        try:
+            if stamp is not None:
+                hhmm = stamp.strftime('%H:%M')
+        except Exception:
+            hhmm = ''
+        prefix = f'{hhmm} ' if hhmm else ''
+        content = (item.get('content') or '').replace('\n', ' ').strip()
+        if content:
+            event_lines.append(f'- {prefix}{role}：{content[:180]}')
+    event_text = '\n'.join(event_lines) if event_lines else '（今天几乎没有留下对话事件）'
+
+    cycle_lines = []
+    for note in cycle_notes.get('cycles') or []:
+        summary = note.get('summary') or ''
+        change = note.get('salient_change') or ''
+        if summary:
+            cycle_lines.append(f'- 复盘：{summary}')
+        if change:
+            cycle_lines.append(f'- 变化：{change}')
+    for question in cycle_notes.get('questions') or []:
+        text = question.get('question_text') or ''
+        if text:
+            cycle_lines.append(
+                f'- 问题[{question.get("status") or ""}]：{text}')
+    for prediction in cycle_notes.get('settled_predictions') or []:
+        status = prediction.get('status') or ''
+        statement = prediction.get('statement') or ''
+        if statement:
+            cycle_lines.append(f'- 预测{status}：{statement}')
+    cycle_text = '\n'.join(cycle_lines) if cycle_lines else '（今天没有额外的复盘记录）'
+    return event_text, cycle_text, len(events)
+
+
 # ══════════════════════════════════════════════════════════
 #  一、他写日记
 # ══════════════════════════════════════════════════════════
@@ -30,23 +86,55 @@ def generate_char_diary(character_id, user_id, topic=None):
         char = get_character(character_id)
         char_name = char['name'] if char else character_id
 
-        # 素材：最近对话 + 羁绊记忆 + 关于她的事实 + 相处天数
-        shorts = get_short_memory(user_id, 8, character_id)
-        recent_chat = '\n'.join(f'{"她" if r=="user" else "我"}：{c}' for r, c in shorts) if shorts else '（最近没怎么聊）'
+        today_start = datetime.now(CN_TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        if db_diary.count_char_diaries_since(character_id, user_id, today_start) >= 1:
+            print(f'[diary] {character_id} daily diary already exists today, skip')
+            return None
+
+        # Daily Diary 素材：当天 Raw Events + Slow Loop cycle notes。
+        # 不再把最近 8 条 short_memory 当成当天全部。
+        recent_chat = '（最近没怎么聊）'
+        facts_text = '（还不了解她的具体情况）'
+        pack = None
+        cycle_text = '（今天没有额外的复盘记录）'
+        try:
+            event_text, cycle_text, event_n = _gather_daily_diary_material(
+                character_id, user_id, datetime.now(CN_TZ))
+            if event_n:
+                recent_chat = event_text
+            from context_layer import build_chat_context
+            pack = build_chat_context(
+                user_id, character_id, profile='diary_writer', include_recall=True)
+            if pack and not getattr(pack, 'failed_closed', False):
+                facts_text = (pack.memory_text or '').strip() or facts_text
+                if event_n == 0:
+                    from context_layer import compact_transcript
+                    recent_chat = compact_transcript(pack, 16) or recent_chat
+        except Exception:
+            pack = None
+            shorts = get_short_memory(user_id, 16, character_id)
+            recent_chat = '\n'.join(
+                f'{"她" if r=="user" else "我"}：{c}' for r, c in shorts
+            ) if shorts else '（最近没怎么聊）'
         bonds = get_bond_memories(user_id, character_id, kind='between', limit=8)
         bond_text = '\n'.join(f'- {b[1]}' for b in bonds) if bonds else '（还没什么共同的事）'
         tolds = get_bond_memories(user_id, character_id, kind='told', limit=6)
         told_text = '\n'.join(f'- {t[1]}' for t in tolds) if tolds else '（她还没告诉过你什么）'
-        try:
-            long_mems = get_long_memory(user_id, character_id) or []
-        except Exception:
-            long_mems = []
-        fact_lines = []
-        for row in long_mems[:12]:
-            content = row[0] if isinstance(row, (tuple, list)) else row
-            if content:
-                fact_lines.append(f'- {content}')
-        facts_text = '\n'.join(fact_lines) if fact_lines else '（还不了解她的具体情况）'
+        if pack is not None and getattr(pack, 'memory_text', ''):
+            facts_text = pack.memory_text
+        else:
+            try:
+                long_mems = get_long_memory(user_id, character_id) or []
+            except Exception:
+                long_mems = []
+            fact_lines = []
+            for row in long_mems[:12]:
+                content = row[0] if isinstance(row, (tuple, list)) else row
+                if content:
+                    fact_lines.append(f'- {content}')
+            facts_text = '\n'.join(fact_lines) if fact_lines else '（还不了解她的具体情况）'
+        fact_lines = [ln for ln in (facts_text or '').split('\n') if ln.strip()]
         try:
             first_days = get_first_interaction_days(user_id, character_id)
         except Exception:
@@ -63,6 +151,12 @@ def generate_char_diary(character_id, user_id, topic=None):
         topic_hint = ''
         if topic:
             topic_hint = f'\n\n【今天有件事你想记下来】\n{topic}\n就着这件事写你此刻的真实心情（还是你自己的视角、你的语气）。'
+        else:
+            topic_hint = (
+                '\n\n【今天的复盘线索——只作背景，不要机械抄字段】\n'
+                f'{cycle_text}\n'
+                '把它们消化成一篇自然的第一人称私人日记，不要写成数据库摘要。'
+            )
 
         now = datetime.now(CN_TZ)
         today_str = now.strftime('%Y年%m月%d日')
@@ -317,62 +411,13 @@ def build_diary_hint(character_id, user_id):
 
 
 # ══════════════════════════════════════════════════════════
-#  事件驱动：聊到重大内容时，他会因为"这事值得记"而写日记
-#  （由对话后的流程调用，见 route_chat 里对 maybe_write_diary_on_event 的调用）
+#  事件驱动日记已退役：Important Thought 只由 Slow Loop diary_entries 产生
 # ══════════════════════════════════════════════════════════
-
-import db_diary as _dbd
-from datetime import datetime as _dt, timedelta as _td
 
 
 def maybe_write_diary_on_event(character_id, user_id, user_text, reply_text):
-    """每轮对话后调用（放后台线程，别阻塞回复）。
-    让 Haiku 判断这次对话有没有【值得写进日记的大事】；有就以它为主题写一篇。
-    有每日上限保护：事件驱动 + 定时驱动，一天加起来最多 2 篇，避免刷屏和烧钱。
-    返回 (diary_id, content, emotion) 或 None。"""
-    try:
-        # 每日上限：今天已经写了 >=2 篇就不再写（含定时那篇）
-        today_start = _dt.now(CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-        if _dbd.count_char_diaries_since(character_id, user_id, today_start) >= 2:
-            return None
+    """Retired. Important Thought is Slow Loop diary_entries only.
 
-        char = get_character(character_id)
-        char_name = char['name'] if char else character_id
-
-        judge_prompt = f'''下面是{char_name}和她刚刚的一轮对话。请判断：这轮对话里，有没有出现【值得他写进私人日记的大事】？
-
-大事的标准（满足任一）：
-- 关系有明显进展或变化（表白、确认、争吵、和好、疏远、重要约定）
-- 她说了很重要或很触动人的话（袒露脆弱、认真的心意、让他意外的事）
-- 发生了值得记住的特别事件（她告诉他一件大事、一个重要决定）
-不算大事：普通闲聊、日常问候、随口玩笑、重复的话题。
-
-她说：{user_text}
-他回：{reply_text}
-
-只输出严格 JSON 一行：
-- 如果算大事：{{"worth":true,"topic":"用一句话概括这件事（他的第一人称视角，如'她今天说要为我做某事'）"}}
-- 如果不算：{{"worth":false}}'''
-
-        from ai_client import create_chat
-        from config import MODEL_CN_AUX
-        raw, _usage = create_chat(
-            model=MODEL_CN_AUX, max_tokens=1200,
-            messages=[{'role': 'user', 'content': judge_prompt}],
-        )
-        raw = raw.strip()
-        from utils import extract_json
-        judged = extract_json(raw)
-        if not judged or not judged.get('worth'):
-            return None
-
-        topic = judged.get('topic', '').strip()
-        if not topic:
-            return None
-
-        print(f'[diary] 📌 事件驱动：判定为大事 → {topic[:40]}')
-        return generate_char_diary(character_id, user_id, topic=topic)
-
-    except Exception as e:
-        print(f'[diary] 事件驱动判断出错：{e}')
-        return None
+    Kept as a no-op so leftover callers cannot spawn a second diary judge.
+    """
+    return None

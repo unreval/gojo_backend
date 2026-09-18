@@ -805,6 +805,60 @@ def _diary_query_terms(user_message):
     return sorted(terms)
 
 
+def _diary_ref_ids(item):
+    ids = set()
+    for ref in item.get('source_event_refs') or []:
+        if isinstance(ref, dict):
+            value = ref.get('event_id')
+            if value is None:
+                value = ref.get('source_id')
+            text = str(value or '').strip()
+            if text:
+                ids.add(text)
+        else:
+            text = str(ref or '').strip()
+            if text:
+                ids.add(text)
+    return ids
+
+
+def _diary_text_tokens(content):
+    text = (content or '').lower()
+    chunks = set(re.findall(r'[\u4e00-\u9fff]{2,}', text))
+    chunks.update(re.findall(r'[a-z0-9]{3,}', text))
+    return chunks
+
+
+def _collapse_overlapping_diary_sources(items):
+    """One recall pass should not inject Daily Diary + Important Thought twins."""
+    kept = []
+    for item in items:
+        ids = _diary_ref_ids(item)
+        tokens = _diary_text_tokens(item.get('content'))
+        src = item.get('source_type') or ''
+        drop = False
+        for prev in kept:
+            prev_src = prev.get('source_type') or ''
+            if src and prev_src and src == prev_src:
+                continue
+            prev_ids = _diary_ref_ids(prev)
+            if ids and prev_ids:
+                overlap = len(ids & prev_ids) / float(min(len(ids), len(prev_ids)))
+                if overlap >= 0.5:
+                    drop = True
+                    break
+            prev_tokens = _diary_text_tokens(prev.get('content'))
+            if tokens and prev_tokens:
+                token_overlap = len(tokens & prev_tokens) / float(
+                    min(len(tokens), len(prev_tokens)))
+                if token_overlap >= 0.55:
+                    drop = True
+                    break
+        if not drop:
+            kept.append(item)
+    return kept
+
+
 def _select_diary_memories(items, terms, limit):
     topic_terms = set(GOAL_TERMS).union(*STATE_TOPIC_TERMS.values())
     selected = []
@@ -834,7 +888,7 @@ def _select_diary_memories(items, terms, limit):
     selected.sort(key=lambda item: (
         item['score'], item['timestamp'].timestamp() if item.get('timestamp') else 0,
     ), reverse=True)
-    return selected[:limit]
+    return _collapse_overlapping_diary_sources(selected[:limit])
 
 
 def recall_diary_memories(user_id, character_id, user_message='', limit=3):

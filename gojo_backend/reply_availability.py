@@ -7,11 +7,13 @@ This module turns that into the concrete per-message behavior:
     append pending inbox; consume check only when due; defer schedules the next one
   - hard_busy: persist pending context, no phone-check roll
 
-Promise rows are only a wake-up fallback. The durable source of truth for
-pending busy-period messages is char_phone_check (including event_meta /
-visual_summary for images).
+The durable source of truth for pending busy-period messages is
+char_phone_check (including event_meta / visual_summary for images).
+
+Busy fallback is a delayed normal chat reply. It must not create
+proactive_promise rows or use the proactive generator.
 """
-from datetime import timedelta
+import json
 
 
 def _activity_state(activity):
@@ -20,78 +22,82 @@ def _activity_state(activity):
     return activity.get('reply_state') or ('free' if activity.get('can_reply') else 'hard_busy')
 
 
-def _trigger_at_from_hhmm(now, hhmm):
-    if not hhmm:
-        return now + timedelta(minutes=10)
-    hh, mm = hhmm.split(':')
-    trigger_at = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-    if trigger_at <= now:
-        trigger_at += timedelta(days=1)
-    return trigger_at
+def parse_pending_event_meta(event_meta):
+    """event_meta is stored as newline-joined JSON objects."""
+    items = []
+    if isinstance(event_meta, list):
+        return [item for item in event_meta if isinstance(item, dict)]
+    if isinstance(event_meta, dict):
+        return [event_meta]
+    text = event_meta or ''
+    if not str(text).strip():
+        return items
+    for line in str(text).split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('{'):
+            try:
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    items.append(parsed)
+                    continue
+            except Exception:
+                pass
+        items.append({'raw': line[:500]})
+    return items
 
 
-def _fallback_context(activity, decision, user_text, event_meta=None):
-    state = decision.get('reply_state') or _activity_state(activity)
-    title = activity.get('title', '') if activity else ''
-    seen = '看到了' if decision.get('seen') else '没看到'
-    kind = (event_meta or {}).get('kind') if isinstance(event_meta, dict) else ''
-    visual = ''
-    if kind in ('image', 'video'):
-        visual = f'\n这条 pending 消息包含{kind}，元数据:{event_meta}'
+def format_pending_bundle_context(bundle):
+    """INTERNAL CONTEXT for the normal chat pipeline. Not a final reply."""
+    if not bundle:
+        return ''
+    title = bundle.get('activity_title') or bundle.get('title') or ''
+    state = bundle.get('reply_state') or 'soft_busy'
+    pending_text = (bundle.get('pending_text') or '').strip()
+    count = bundle.get('pending_count') or 0
+    metas = parse_pending_event_meta(bundle.get('event_meta'))
+    visual_lines = []
+    source_ids = []
+    for meta in metas:
+        sid = meta.get('source_event_id') or meta.get('event_id')
+        if sid:
+            source_ids.append(str(sid))
+        kind = meta.get('kind') or ''
+        visual = (meta.get('visual_summary') or '').strip()
+        caption = (meta.get('caption') or meta.get('display_text') or '').strip()
+        if kind in ('image', 'video') or visual:
+            visual_lines.append(
+                f'- kind={kind or "media"} caption={caption[:200]} '
+                f'visual_summary={visual[:400]} source_event_id={sid or ""}'
+            )
+    first_id = bundle.get('first_source_event_id') or ''
+    last_id = bundle.get('last_source_event_id') or ''
+    if first_id:
+        source_ids.insert(0, str(first_id))
+    if last_id:
+        source_ids.append(str(last_id))
+    # preserve order, drop empties
+    seen = set()
+    ordered_ids = []
+    for item in source_ids:
+        if item and item not in seen:
+            seen.add(item)
+            ordered_ids.append(item)
+    visual_block = '\n'.join(visual_lines)
     return (
-        f'刚才我在「{title}」({state})，当时手机状态是「{seen}但没及时回复」。'
-        f'\n她当时说/发来:「{(user_text or "")[:500]}」。'
-        f'{visual}'
-        f'\nphone_check_id={decision.get("opportunity_id") or ""}，'
-        f'source_event_id={decision.get("source_event_id") or ""}。'
-        '现在如果已经能回了，把忙碌期间积攒的话头合并成一段自然回复；'
-        '不要逐条复读，也不要假装当时已经秒回。'
+        '【内部上下文——忙碌期间积压的消息，不是用户此刻新发的一条】\n'
+        f'刚才角色在「{title}」({state})，当时没能及时回复。\n'
+        f'积压 {count} 条。phone_check_id={bundle.get("id") or bundle.get("opportunity_id") or ""}。\n'
+        f'source_event_ids={",".join(ordered_ids) or "(none)"}\n'
+        f'【积压原文】\n{pending_text or "（无文字）"}\n'
+        + (f'【积压图片/视频】\n{visual_block}\n' if visual_block else '')
+        + '现在已经能回了。把这段积压当作刚刚一起看到的内容，用正常聊天回复：\n'
+        '1. 这是延迟的正常回复，不是主动搭讪，不要当成 proactive。\n'
+        '2. 不要逐条复读，也不要假装当时已经秒回。\n'
+        '3. 输出格式仍是 1~3 个气泡的 messages[]，每条含 jp / zh。\n'
+        '4. 图片/视频以 visual_summary 为准，不要编造没写过的画面。'
     )
-
-
-def ensure_busy_fallback(character_id, user_id, now, activity, decision,
-                         user_text='', event_meta=None):
-    if decision.get('can_reply'):
-        return None
-    # Defer consumes the previous fallback; a new wake-up must be attached.
-    if decision.get('fallback_promise_id') and not decision.get('check_consumed'):
-        return decision.get('fallback_promise_id')
-    try:
-        import db_schedule
-        import db_promise
-
-        state = decision.get('reply_state') or _activity_state(activity)
-        next_check = decision.get('next_phone_check_at')
-        if state == 'soft_busy' and next_check:
-            trigger_at = next_check
-            if getattr(trigger_at, 'tzinfo', None) is None and getattr(now, 'tzinfo', None):
-                trigger_at = trigger_at.replace(tzinfo=now.tzinfo)
-            if trigger_at <= now:
-                trigger_at = now + timedelta(minutes=1)
-        else:
-            free_at = db_schedule.get_next_free_time(character_id, user_id, now) \
-                or activity.get('end_time')
-            trigger_at = _trigger_at_from_hhmm(now, free_at)
-        pid = db_promise.add_promise(
-            character_id=character_id,
-            user_id=user_id,
-            trigger_kind='once',
-            trigger_at=trigger_at,
-            context=_fallback_context(activity, decision, user_text, event_meta),
-            origin_text=(user_text or '')[:200],
-        )
-        try:
-            db_schedule.attach_fallback_promise(decision.get('opportunity_id'), pid)
-        except Exception:
-            pass
-        decision['fallback_promise_id'] = pid
-        if 'free_at' not in decision or not decision.get('free_at'):
-            decision['free_at'] = db_schedule.get_next_free_time(
-                character_id, user_id, now) or (activity or {}).get('end_time')
-        return pid
-    except Exception as exc:
-        print(f'[{user_id}] busy fallback promise skipped: {exc}')
-        return None
 
 
 def check_reply_availability(character_id, user_id, source_event_id='',
@@ -100,12 +106,11 @@ def check_reply_availability(character_id, user_id, source_event_id='',
 
     Callers should proceed with normal generation only when can_reply is true.
     When can_reply is false, this function has already persisted the pending
-    phone-check opportunity and attempted to attach one fallback promise.
+    phone-check opportunity. It does not create a proactive_promise.
 
     seen / can_reply are independent:
-      · phone check 到点 → 先写 seen_at，再决定 reply_now / defer
-      · defer 时 seen=True 但 can_reply=False（看过但没空回）
-      · check 未到点 → seen=False, can_reply=False
+      · inbound busy 消息只进 inbox，本请求不生成
+      · phone check 到点由 delayed_reply worker 认领后走正常 chat pipeline
     """
     from datetime import datetime, timezone
     import db_schedule
@@ -138,9 +143,4 @@ def check_reply_availability(character_id, user_id, source_event_id='',
     decision['source_event_id'] = source_event_id
     decision['free_at'] = db_schedule.get_next_free_time(character_id, user_id, now) \
         or activity.get('end_time')
-    if not decision.get('can_reply'):
-        ensure_busy_fallback(
-            character_id, user_id, now, activity, decision,
-            user_text=pending_text, event_meta=event_meta,
-        )
     return decision

@@ -561,6 +561,28 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
             diary_hint = ''
         diary_hint_block = ('\n\n' + diary_hint) if diary_hint else ''
         accounts_text = _accounts_block(user_id)
+        try:
+            from context_layer import budget_prompt_aux
+            trimmed = budget_prompt_aux({
+                'schedule': schedule_text,
+                'temporal': temporal_text,
+                'anti_repeat': (avoid_text or '') + (no_repeat_text or ''),
+                'period': period_text,
+                'accounts': accounts_text,
+                'character_lore': recall_text,
+            })
+            schedule_text = trimmed.get('schedule', schedule_text)
+            temporal_text = trimmed.get('temporal', temporal_text)
+            combined_anti = trimmed.get('anti_repeat', '') or ''
+            if combined_anti:
+                avoid_text = combined_anti
+                no_repeat_text = ''
+            period_text = trimmed.get('period', period_text)
+            accounts_text = trimmed.get('accounts', accounts_text)
+            if trimmed.get('character_lore'):
+                recall_text = trimmed.get('character_lore')
+        except Exception as _e:
+            print(f'[prompt] aux budget skipped:{_e}')
 
     pinned_block = ''
     summary_block = ''

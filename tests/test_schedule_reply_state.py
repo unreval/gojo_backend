@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import sys
+import threading
 import types
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -58,6 +59,7 @@ class PhoneCheckStore:
         self.rows = {}
         self.schedule_rows = []
         self.sql = []
+        self.lock = threading.Lock()
 
 
 class FakeCursor:
@@ -67,6 +69,12 @@ class FakeCursor:
         self._many = []
         self.rowcount = 0
 
+    def _find_by_id(self, oid):
+        for row in self.store.rows.values():
+            if row['id'] == oid:
+                return row
+        return None
+
     def execute(self, sql, params=None):
         compact = ' '.join(sql.split())
         self.store.sql.append((compact, tuple(params or ())))
@@ -74,6 +82,221 @@ class FakeCursor:
         self._many = []
         self.rowcount = 0
         params = tuple(params or ())
+
+        if 'phone_check:recover' in compact:
+            now = params[0] if params else None
+            n = 0
+            for row in self.store.rows.values():
+                if (row.get('check_state') == 'processing'
+                        and row.get('claim_expires_at')
+                        and now
+                        and row['claim_expires_at'] <= now
+                        and not row.get('resolved_at')):
+                    row['check_state'] = 'pending'
+                    row['claimed_at'] = None
+                    row['claim_token'] = None
+                    row['claim_owner'] = None
+                    row['claim_expires_at'] = None
+                    n += 1
+            self.rowcount = n
+            return
+
+        if 'phone_check:supersede' in compact:
+            n = 0
+            keep_key = None
+            hhmm = None
+            today = None
+            if len(params) >= 9:
+                _now, user_id, character_id, today, start, end, _t2, _t3, hhmm = params
+                keep_key = (user_id, character_id, today, start, end)
+            elif len(params) >= 6:
+                _now, user_id, character_id, today, _t2, hhmm = params
+            for key, row in list(self.store.rows.items()):
+                if keep_key and key == keep_key:
+                    continue
+                if row.get('check_state') in (
+                        'consumed', 'resolved', 'expired', 'superseded'):
+                    continue
+                if (row.get('pending_count') or 0) > 0:
+                    continue
+                ended = False
+                if today is not None and hhmm is not None:
+                    if row.get('sched_date') < today:
+                        ended = True
+                    elif row.get('sched_date') == today and row.get('end_time') <= hhmm:
+                        ended = True
+                else:
+                    ended = True
+                if not ended:
+                    continue
+                row['check_state'] = 'superseded'
+                row['resolved_at'] = row.get('resolved_at') or (
+                    params[0] if params else None)
+                row['claimed_at'] = None
+                row['claim_token'] = None
+                row['claim_owner'] = None
+                row['claim_expires_at'] = None
+                n += 1
+            self.rowcount = n
+            return
+
+        if 'phone_check:arm_ended' in compact:
+            n = 0
+            due_at = params[0] if params else None
+            keep_key = None
+            hhmm = None
+            today = None
+            if len(params) >= 10:
+                due_at, _due2, user_id, character_id, today, start, end, _t2, _t3, hhmm = params
+                keep_key = (user_id, character_id, today, start, end)
+            elif len(params) >= 7:
+                due_at, _due2, user_id, character_id, today, _t2, hhmm = params
+            for key, row in list(self.store.rows.items()):
+                if keep_key and key == keep_key:
+                    continue
+                if row.get('resolved_at'):
+                    continue
+                if (row.get('pending_count') or 0) <= 0:
+                    continue
+                if row.get('check_state') in (
+                        'consumed', 'resolved', 'expired', 'superseded'):
+                    continue
+                ended = False
+                if today is not None and hhmm is not None:
+                    if row.get('sched_date') < today:
+                        ended = True
+                    elif row.get('sched_date') == today and row.get('end_time') <= hhmm:
+                        ended = True
+                else:
+                    ended = True
+                if not ended:
+                    continue
+                existing = row.get('next_phone_check_at')
+                if existing is None or (due_at is not None and existing > due_at):
+                    row['next_phone_check_at'] = due_at
+                n += 1
+            self.rowcount = n
+            return
+
+        if 'phone_check:release' in compact:
+            oid, token = params
+            row = self._find_by_id(oid)
+            if (row and row.get('claim_token') == token
+                    and row.get('check_state') == 'processing'
+                    and not row.get('resolved_at')):
+                row['check_state'] = 'pending'
+                row['can_reply'] = False
+                row['claimed_at'] = None
+                row['claim_token'] = None
+                row['claim_owner'] = None
+                row['claim_expires_at'] = None
+                self.rowcount = 1
+            return
+
+        if 'phone_check:claim' in compact:
+            with self.store.lock:
+                (claimed_at, token, owner, expires, seen_at,
+                 oid, now_due, now_stale) = params
+                row = self._find_by_id(oid)
+                self.rowcount = 0
+                if not row or row.get('resolved_at'):
+                    return
+                next_at = row.get('next_phone_check_at')
+                if next_at is None or next_at > now_due:
+                    return
+                state = row.get('check_state') or 'pending'
+                stale = (
+                    state == 'processing'
+                    and row.get('claim_expires_at')
+                    and row['claim_expires_at'] <= now_stale
+                )
+                if state not in ('pending', 'deferred') and not stale:
+                    return
+                row['check_state'] = 'processing'
+                row['claimed_at'] = claimed_at
+                row['claim_token'] = token
+                row['claim_owner'] = owner
+                row['claim_expires_at'] = expires
+                row['seen'] = True
+                row['seen_at'] = seen_at
+                row['seen_watermark'] = row.get('pending_count') or 0
+                self.rowcount = 1
+                self._one = (
+                    row['id'], row['pending_count'], row.get('pending_text'),
+                    row.get('event_meta'), row.get('reply_state'),
+                    row.get('seen_watermark', 0), row.get('next_phone_check_at'),
+                    row.get('fallback_promise_id'),
+                    row.get('user_id'), row.get('character_id'),
+                    row.get('first_source_event_id'), row.get('last_source_event_id'),
+                    row.get('activity_title'), row.get('start_time'),
+                    row.get('end_time'), row.get('sched_date'),
+                )
+                return
+
+        if 'phone_check:finish_reply' in compact:
+            now, oid, token = params
+            row = self._find_by_id(oid)
+            if (row and row.get('claim_token') == token
+                    and row.get('check_state') == 'processing'):
+                row['check_state'] = 'consumed'
+                row['can_reply'] = True
+                row['next_phone_check_at'] = None
+                row['resolved_at'] = now
+                row['claimed_at'] = None
+                row['claim_token'] = None
+                row['claim_owner'] = None
+                row['claim_expires_at'] = None
+                self.rowcount = 1
+            return
+
+        if 'phone_check:finish_defer' in compact:
+            new_next, oid, token = params
+            row = self._find_by_id(oid)
+            if (row and row.get('claim_token') == token
+                    and row.get('check_state') == 'processing'):
+                row['check_state'] = 'pending'
+                row['can_reply'] = False
+                row['next_phone_check_at'] = new_next
+                row['fallback_promise_id'] = None
+                row['claimed_at'] = None
+                row['claim_token'] = None
+                row['claim_owner'] = None
+                row['claim_expires_at'] = None
+                self.rowcount = 1
+            return
+
+        if compact.startswith('SELECT id FROM char_phone_check'):
+            now_due = params[1] if len(params) > 1 else None
+            today = params[2] if len(params) > 2 else None
+            hhmm = params[4] if len(params) > 4 else None
+            ids = []
+            for row in self.store.rows.values():
+                if row.get('resolved_at'):
+                    continue
+                if (row.get('pending_count') or 0) <= 0:
+                    continue
+                state = row.get('check_state') or 'pending'
+                stale = (
+                    state == 'processing'
+                    and row.get('claim_expires_at')
+                    and now_due
+                    and row['claim_expires_at'] <= now_due
+                )
+                if state not in ('pending', 'deferred') and not stale:
+                    continue
+                due = False
+                next_at = row.get('next_phone_check_at')
+                if next_at is not None and now_due is not None and next_at <= now_due:
+                    due = True
+                if today is not None and hhmm is not None:
+                    if row.get('sched_date') < today:
+                        due = True
+                    elif row.get('sched_date') == today and row.get('end_time') <= hhmm:
+                        due = True
+                if due:
+                    ids.append((row['id'],))
+            self._many = ids[: int(params[-1] if params else 20)]
+            return
 
         if compact.startswith('SELECT id, seen, can_reply'):
             user_id, character_id, sched_date, start_time, end_time = params
@@ -86,6 +309,7 @@ class FakeCursor:
                     row['event_meta'], row.get('fallback_promise_id'),
                     row.get('next_phone_check_at'), row.get('seen_at'),
                     row.get('resolved_at'), row.get('seen_watermark', 0),
+                    row.get('check_state', 'pending'),
                 )
             return
 
@@ -94,7 +318,8 @@ class FakeCursor:
              end_time, activity_title, reply_state, seen, can_reply,
              pending_count, first_source_event_id, last_source_event_id,
              pending_text, event_meta, next_phone_check_at,
-             seen_watermark) = params
+             seen_watermark) = params[:17]
+            check_state = params[17] if len(params) > 17 else 'pending'
             row = {
                 'id': self.store.next_id,
                 'user_id': user_id,
@@ -117,6 +342,11 @@ class FakeCursor:
                 'seen_at': None,
                 'resolved_at': None,
                 'seen_watermark': seen_watermark or 0,
+                'check_state': check_state,
+                'claimed_at': None,
+                'claim_token': None,
+                'claim_owner': None,
+                'claim_expires_at': None,
             }
             self.store.next_id += 1
             self.store.rows[
@@ -126,78 +356,140 @@ class FakeCursor:
             self.rowcount = 1
             return
 
+        if 'SET pending_count = pending_count + 1' in compact:
+            if compact.count('%s') == 2:
+                last_source_event_id, oid = params
+                pending_text = None
+                event_meta = None
+            else:
+                last_source_event_id, pending_text, event_meta, oid = params
+            row = self._find_by_id(oid)
+            if row:
+                row['pending_count'] = (row.get('pending_count') or 0) + 1
+                row['last_source_event_id'] = last_source_event_id
+                if pending_text is not None:
+                    row['pending_text'] = pending_text
+                if event_meta is not None:
+                    row['event_meta'] = event_meta
+                self.rowcount = 1
+                self._one = (row['pending_count'],)
+            return
+
         if compact.startswith('UPDATE char_phone_check SET pending_count='):
             pending_count, last_source_event_id, pending_text, event_meta, oid = params
-            for row in self.store.rows.values():
-                if row['id'] == oid:
-                    row['pending_count'] = pending_count
-                    row['last_source_event_id'] = last_source_event_id
-                    row['pending_text'] = pending_text
-                    row['event_meta'] = event_meta
-                    self.rowcount = 1
-                    return
+            row = self._find_by_id(oid)
+            if row:
+                row['pending_count'] = pending_count
+                row['last_source_event_id'] = last_source_event_id
+                row['pending_text'] = pending_text
+                row['event_meta'] = event_meta
+                self.rowcount = 1
             return
 
         if compact.startswith('UPDATE char_phone_check SET seen=FALSE'):
             (first_source_event_id, last_source_event_id, pending_text,
              event_meta, next_phone_check_at, oid) = params
-            for row in self.store.rows.values():
-                if row['id'] == oid:
-                    row.update({
-                        'seen': False,
-                        'can_reply': False,
-                        'seen_at': None,
-                        'seen_watermark': 0,
-                        'resolved_at': None,
-                        'pending_count': 1,
-                        'first_source_event_id': first_source_event_id,
-                        'last_source_event_id': last_source_event_id,
-                        'pending_text': pending_text,
-                        'event_meta': event_meta,
-                        'fallback_promise_id': None,
-                        'next_phone_check_at': next_phone_check_at,
-                    })
+            row = self._find_by_id(oid)
+            if row:
+                row.update({
+                    'seen': False,
+                    'can_reply': False,
+                    'seen_at': None,
+                    'seen_watermark': 0,
+                    'resolved_at': None,
+                    'pending_count': 1,
+                    'first_source_event_id': first_source_event_id,
+                    'last_source_event_id': last_source_event_id,
+                    'pending_text': pending_text,
+                    'event_meta': event_meta,
+                    'fallback_promise_id': None,
+                    'next_phone_check_at': next_phone_check_at,
+                    'check_state': 'pending',
+                    'claimed_at': None,
+                    'claim_token': None,
+                    'claim_owner': None,
+                    'claim_expires_at': None,
+                })
+                self.rowcount = 1
+            return
+
+        if 'COALESCE(next_phone_check_at' in compact:
+            now, oid, today, _t2, hhmm = params
+            row = self._find_by_id(oid)
+            if row and not row.get('resolved_at') and row.get('next_phone_check_at') is None:
+                ended = False
+                if row.get('sched_date') < today:
+                    ended = True
+                elif row.get('sched_date') == today and row.get('end_time') <= hhmm:
+                    ended = True
+                if ended:
+                    row['next_phone_check_at'] = now
                     self.rowcount = 1
-                    return
             return
 
         if compact.startswith('UPDATE char_phone_check SET next_phone_check_at='):
             next_phone_check_at, oid = params
-            for row in self.store.rows.values():
-                if row['id'] == oid:
-                    row['next_phone_check_at'] = next_phone_check_at
-                    self.rowcount = 1
+            row = self._find_by_id(oid)
+            if row:
+                if ('check_state IN' in compact
+                        and row.get('check_state') not in ('pending', 'deferred')):
                     return
+                row['next_phone_check_at'] = next_phone_check_at
+                self.rowcount = 1
             return
 
         if compact.startswith('UPDATE char_phone_check SET seen=TRUE'):
             if 'resolved_at=%s' in compact:
                 seen_at, resolved_at, seen_watermark, oid = params
-                for row in self.store.rows.values():
-                    if row['id'] == oid:
-                        row['seen'] = True
-                        row['seen_at'] = seen_at
-                        row['can_reply'] = True
-                        row['next_phone_check_at'] = None
-                        row['resolved_at'] = resolved_at
-                        row['seen_watermark'] = seen_watermark
-                        self.rowcount = 1
-                        return
+                row = self._find_by_id(oid)
+                if row:
+                    row['seen'] = True
+                    row['seen_at'] = seen_at
+                    row['can_reply'] = True
+                    row['next_phone_check_at'] = None
+                    row['resolved_at'] = resolved_at
+                    row['seen_watermark'] = seen_watermark
+                    row['check_state'] = 'consumed'
+                    self.rowcount = 1
             else:
                 seen_at, next_phone_check_at, seen_watermark, oid = params
-                for row in self.store.rows.values():
-                    if row['id'] == oid:
-                        row['seen'] = True
-                        row['seen_at'] = seen_at
-                        row['can_reply'] = False
-                        row['next_phone_check_at'] = next_phone_check_at
-                        row['seen_watermark'] = seen_watermark
-                        row['fallback_promise_id'] = None
-                        self.rowcount = 1
-                        return
+                row = self._find_by_id(oid)
+                if row:
+                    row['seen'] = True
+                    row['seen_at'] = seen_at
+                    row['can_reply'] = False
+                    row['next_phone_check_at'] = next_phone_check_at
+                    row['seen_watermark'] = seen_watermark
+                    row['fallback_promise_id'] = None
+                    row['check_state'] = 'pending'
+                    self.rowcount = 1
             return
 
         if compact.startswith('UPDATE char_phone_check SET fallback_promise_id='):
+            return
+
+        if 'SET event_meta = LEFT' in compact or 'event_meta ||' in compact:
+            extra, _extra2, oid = params
+            row = self._find_by_id(oid)
+            if row:
+                existing = row.get('event_meta') or ''
+                row['event_meta'] = extra if not existing else (existing + '\n' + extra)
+                self.rowcount = 1
+            return
+
+        if compact.startswith('UPDATE char_phone_check SET resolved_at='):
+            oid = params[0]
+            row = self._find_by_id(oid)
+            if (row and not row.get('resolved_at')
+                    and row.get('check_state') not in (
+                        'expired', 'superseded')):
+                row['resolved_at'] = row.get('claimed_at') or True
+                row['check_state'] = 'resolved'
+                row['claimed_at'] = None
+                row['claim_token'] = None
+                row['claim_owner'] = None
+                row['claim_expires_at'] = None
+                self.rowcount = 1
             return
 
         if compact.startswith('SELECT id, start_time, end_time, title'):
@@ -238,6 +530,9 @@ class FakeConn:
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        pass
 
     def close(self):
         pass
@@ -320,6 +615,11 @@ class ScheduleReplyStateTests(unittest.TestCase):
             'reply_state': 'soft_busy',
             'can_reply': False,
         }
+        store.schedule_rows = [{
+            'id': 7, 'character_id': 'gojo', 'user_id': 'u1',
+            'sched_date': now.date(), 'start_time': '09:00', 'end_time': '10:30',
+            'title': '备课', 'can_reply': False, 'reply_state': 'soft_busy',
+        }]
         samples = [first_check, second_check]
 
         def _sample(now_arg, activity_arg, after=None):
@@ -338,13 +638,15 @@ class ScheduleReplyStateTests(unittest.TestCase):
             self.assertFalse(created['seen'])
             self.assertEqual(created['next_phone_check_at'], first_check)
 
-            deferred = db_schedule.decide_phone_check(
+            inbound_due = db_schedule.decide_phone_check(
                 'gojo', 'u1', first_check, activity,
                 source_event_id='evt-2', pending_text='还在吗')
-            self.assertTrue(deferred['seen'])
-            self.assertFalse(deferred['can_reply'])
-            self.assertTrue(deferred.get('check_consumed'))
-            self.assertEqual(deferred['seen_at'], first_check)
+            self.assertFalse(inbound_due['can_reply'])
+            self.assertFalse(inbound_due.get('check_consumed'))
+
+            deferred = db_schedule.evaluate_due_phone_check(
+                inbound_due['opportunity_id'], first_check)
+            self.assertEqual(deferred['action'], 'defer')
             self.assertEqual(deferred['next_phone_check_at'], second_check)
 
         row = next(iter(store.rows.values()))
@@ -367,6 +669,11 @@ class ScheduleReplyStateTests(unittest.TestCase):
             'reply_state': 'soft_busy',
             'can_reply': False,
         }
+        store.schedule_rows = [{
+            'id': 7, 'character_id': 'gojo', 'user_id': 'u1',
+            'sched_date': t0.date(), 'start_time': '09:00', 'end_time': '10:30',
+            'title': '备课', 'can_reply': False, 'reply_state': 'soft_busy',
+        }]
         samples = [first_check, second_check]
 
         def _sample(now_arg, activity_arg, after=None):
@@ -384,16 +691,20 @@ class ScheduleReplyStateTests(unittest.TestCase):
             db_schedule.decide_phone_check(
                 'gojo', 'u1', t0 + timedelta(minutes=4), activity,
                 source_event_id='B', pending_text='B')
-            seen_bundle = db_schedule.decide_phone_check(
+            due_inbound = db_schedule.decide_phone_check(
                 'gojo', 'u1', first_check, activity,
                 source_event_id='C', pending_text='C')
+            seen_bundle = db_schedule.evaluate_due_phone_check(
+                due_inbound['opportunity_id'], first_check)
             late = db_schedule.decide_phone_check(
                 'gojo', 'u1', first_check + timedelta(minutes=1), activity,
                 source_event_id='D', pending_text='D')
 
-        self.assertTrue(seen_bundle['seen'])
-        self.assertFalse(seen_bundle['can_reply'])
-        self.assertEqual(seen_bundle['seen_watermark'], 3)
+        self.assertEqual(seen_bundle['action'], 'defer')
+        row = next(iter(store.rows.values()))
+        self.assertTrue(row['seen'])
+        self.assertFalse(row['can_reply'])
+        self.assertEqual(row['seen_watermark'], 3)
         self.assertFalse(late['seen'])
         self.assertFalse(late['can_reply'])
         self.assertIsNone(late['seen_at'])
@@ -435,25 +746,23 @@ class ScheduleReplyStateTests(unittest.TestCase):
         self.assertTrue(decision.get('postponed_for_hard_busy'))
         self.assertEqual(decision['next_phone_check_at'], postponed)
 
-    def test_phone_check_fallback_context_includes_visual_summary(self):
-        decision = {
-            'seen': True,
-            'can_reply': False,
+    def test_phone_check_bundle_context_includes_visual_summary(self):
+        bundle = {
+            'id': 3,
+            'activity_title': '备课',
             'reply_state': 'soft_busy',
-            'opportunity_id': 3,
-            'source_event_id': 'img-1',
+            'pending_count': 1,
+            'pending_text': '📷 看这个',
+            'event_meta': json.dumps({
+                'kind': 'image',
+                'visual_summary': '蓝色马克杯，杯沿有裂纹',
+                'source_event_id': 'img-1',
+            }, ensure_ascii=False),
         }
-        activity = {'title': '备课'}
-        event_meta = {
-            'kind': 'image',
-            'visual_summary': '蓝色马克杯，杯沿有裂纹',
-            'source_event_id': 'img-1',
-        }
-        ctx = reply_availability._fallback_context(
-            activity, decision, '📷 看这个', event_meta=event_meta)
+        ctx = reply_availability.format_pending_bundle_context(bundle)
         self.assertIn('蓝色马克杯', ctx)
         self.assertIn('image', ctx)
-        self.assertIn('看到了', ctx)
+        self.assertIn('内部上下文', ctx)
 
 
 class BusyImageVisionTests(unittest.TestCase):
@@ -487,6 +796,8 @@ class BusyImageVisionTests(unittest.TestCase):
                 update_chat_days=Mock(return_value=1),
             ),
             'memory_jobs': stub('memory_jobs', enqueue_private_extraction=Mock()),
+            'db_schedule': stub(
+                'db_schedule', merge_phone_check_event_meta=Mock(return_value=True)),
             'temporal_awareness': stub(
                 'temporal_awareness',
                 get_temporal_snapshot=Mock(return_value={}),
@@ -727,14 +1038,22 @@ class ActivityPhoneProfileTests(unittest.TestCase):
             mid = db_schedule.decide_phone_check(
                 'gojo', 'u1', check_at, activity,
                 source_event_id='m2', pending_text='第二句')
-        self.assertTrue(mid['seen'])
-        self.assertTrue(mid['can_reply'])
-        self.assertTrue(mid.get('check_consumed'))
-        self.assertEqual(mid['opportunity_id'], oid)
+            self.assertFalse(mid['can_reply'])
+            self.assertFalse(mid.get('check_consumed'))
+            self.assertEqual(mid['opportunity_id'], oid)
+            store.schedule_rows = [{
+                'id': 3, 'character_id': 'gojo', 'user_id': 'u1',
+                'sched_date': start.date(), 'start_time': '14:00',
+                'end_time': '15:00', 'title': '开会',
+                'can_reply': False, 'reply_state': 'soft_busy',
+            }]
+            decision = db_schedule.evaluate_due_phone_check(oid, check_at)
+        self.assertEqual(decision.get('action'), 'reply')
         self.assertLess(check_at.hour * 60 + check_at.minute, 15 * 60)
         row = next(iter(store.rows.values()))
         self.assertTrue(row['seen'])
-        self.assertEqual(row['resolved_at'], check_at)
+        self.assertEqual(row['check_state'], 'processing')
+        self.assertIsNone(row.get('resolved_at'))
 
     def test_hard_busy_stays_unseen_until_activity_end(self):
         store = PhoneCheckStore()
@@ -789,31 +1108,11 @@ class ActivityPhoneProfileTests(unittest.TestCase):
         self.assertEqual(first['next_phone_check_at'], again['next_phone_check_at'])
         self.assertEqual(len(store.rows), 1)
 
-    def test_soft_busy_fallback_uses_next_check_not_activity_end(self):
-        now = datetime(2026, 9, 16, 14, 5, tzinfo=timezone.utc)
-        next_check = datetime(2026, 9, 16, 14, 12, tzinfo=timezone.utc)
-        captured = {}
-
-        def add_promise(**kwargs):
-            captured.update(kwargs)
-            return 77
-
-        fake_promise = types.SimpleNamespace(add_promise=add_promise)
-        decision = {
-            'can_reply': False,
-            'reply_state': 'soft_busy',
-            'opportunity_id': 4,
-            'next_phone_check_at': next_check,
-            'seen': False,
-        }
-        activity = {'title': '开会', 'end_time': '15:00'}
-        with patch.dict(sys.modules, {'db_promise': fake_promise}), \
-             patch.object(db_schedule, 'attach_fallback_promise'), \
-             patch.object(db_schedule, 'get_next_free_time', return_value='15:00'):
-            pid = reply_availability.ensure_busy_fallback(
-                'gojo', 'u1', now, activity, decision, user_text='在吗')
-        self.assertEqual(pid, 77)
-        self.assertEqual(captured['trigger_at'], next_check)
+    def test_busy_path_does_not_create_proactive_promise(self):
+        self.assertFalse(hasattr(reply_availability, 'ensure_busy_fallback'))
+        src = Path(BACKEND, 'reply_availability.py').read_text(encoding='utf-8')
+        self.assertNotIn('add_promise', src)
+        self.assertNotIn('ensure_busy_fallback', src)
 
     def test_schedule_ui_distinguishes_soft_and_hard_copy(self):
         src = Path(ROOT, 'app', 'schedule', 'index.tsx').read_text(encoding='utf-8')

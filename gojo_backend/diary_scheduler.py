@@ -148,10 +148,14 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
     char_name = char['name']
     voice_id = char.get('voice_id')
 
-    # 拉一点上下文让 LLM 判断关系状态
+    # 拉一点上下文让 LLM 判断关系状态（canonical profile，不是 short_memory SoT）
     try:
-        shorts = get_short_memory(TARGET_USER, 4, character_id)
-        recent = '\n'.join(f'{"她" if r=="user" else "我"}:{c}' for r, c in shorts) if shorts else '(最近没聊)'
+        from context_layer import load_profile_transcript
+        recent, _pack = load_profile_transcript(
+            TARGET_USER, character_id, 'proactive', limit=4)
+        if not recent:
+            shorts = get_short_memory(TARGET_USER, 4, character_id)
+            recent = '\n'.join(f'{"她" if r=="user" else "我"}:{c}' for r, c in shorts) if shorts else '(最近没聊)'
     except Exception:
         recent = ''
     try:

@@ -863,6 +863,66 @@ def _belief_commit_decision(update, source_refs, event_metadata, hypothesis_id,
     return {**base, 'action': 'committed', 'reason': 'commit_gate_passed'}
 
 
+def _event_id_set(refs):
+    ids = set()
+    for ref in refs or []:
+        if isinstance(ref, dict):
+            value = ref.get('event_id')
+            if value is None:
+                value = ref.get('source_id')
+            try:
+                ids.add(int(value))
+            except (TypeError, ValueError):
+                text = str(value or '').strip()
+                if text:
+                    ids.add(text)
+        else:
+            try:
+                ids.add(int(ref))
+            except (TypeError, ValueError):
+                text = str(ref or '').strip()
+                if text:
+                    ids.add(text)
+    return ids
+
+
+def _diary_entry_is_duplicate(cur, user_id, character_id, entry, source_refs):
+    """Same diary_key or highly overlapping evidence must not write twice."""
+    cur.execute(
+        '''SELECT diary_key, source_event_refs
+           FROM cognitive_diary_entries
+           WHERE user_id = %s AND character_id = %s
+           ORDER BY occurred_at DESC, id DESC
+           LIMIT 40''',
+        (user_id, character_id),
+    )
+    incoming_ids = _event_id_set(source_refs) or _event_id_set(entry.get('evidence_refs'))
+    incoming_key = (entry.get('diary_key') or '').strip()
+    for diary_key, refs in cur.fetchall():
+        if incoming_key and diary_key == incoming_key:
+            return True
+        existing_ids = _event_id_set(_json_refs(refs))
+        if not incoming_ids or not existing_ids:
+            continue
+        overlap = len(incoming_ids & existing_ids) / float(
+            min(len(incoming_ids), len(existing_ids)))
+        if overlap >= 0.6:
+            return True
+    return False
+
+
+def _json_refs(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
 def persist_slow_loop_output(
     cur, *, cycle_id, user_id, character_id, output, now,
 ):
@@ -1202,6 +1262,10 @@ def persist_slow_loop_output(
 
     for entry in output.get('diary_entries', []):
         source_refs = full_refs(entry['evidence_refs'])
+        if _diary_entry_is_duplicate(
+            cur, user_id, character_id, entry, source_refs,
+        ):
+            continue
         cur.execute(
             '''INSERT INTO cognitive_diary_entries (
                    user_id, character_id, diary_key, content, reflection_kind,

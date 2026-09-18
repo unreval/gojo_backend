@@ -430,6 +430,60 @@ def get_recent_events(user_id, character_id, n=40, hours=24):
     return out
 
 
+def list_events_for_local_day(user_id, character_id, day_start, *, limit=80):
+    """Active chat_log events for one local calendar day. Newest last."""
+    from datetime import timedelta
+
+    if not user_id or not character_id or day_start is None:
+        return []
+    limit = max(1, min(int(limit or 80), 120))
+    day_end = day_start + timedelta(days=1)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            '''SELECT COALESCE(event_id, client_msg_id), role, text, kind, extra,
+                      created_at, subtitle
+               FROM chat_log
+               WHERE user_id=%s AND chat_id=%s
+                 AND COALESCE(status, 'active') = 'active'
+                 AND created_at >= %s AND created_at < %s
+               ORDER BY created_at ASC, id ASC
+               LIMIT %s''',
+            (user_id, character_id, day_start, day_end, limit))
+        rows = cur.fetchall()
+    except Exception as e:
+        print(f'[raw_events] list_events_for_local_day failed:{e}')
+        return []
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
+    out = []
+    for event_id, role, text, kind, extra, ts, subtitle in rows:
+        meta = {}
+        if extra:
+            try:
+                parsed = json.loads(extra)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except Exception:
+                meta = {}
+        out.append({
+            'event_id': event_id or '',
+            'role': _prompt_role(role),
+            'content': (text or '')[:240],
+            'kind': kind or 'text',
+            'metadata': meta,
+            'timestamp': ts,
+            'subtitle': subtitle or '',
+        })
+    return out
+
+
 def get_hot_candidate_events(user_id, character_id, n=240, hours=72):
     """Bounded active-event fetch for adaptive hot context.
 
@@ -826,6 +880,12 @@ def invalidate_memories_for_deleted_event(event_id, user_id=None, character_id=N
                     (row_id,))
                 invalidated += cur.rowcount
         conn.commit()
+        try:
+            from context_layer import reconcile_summaries_for_deleted
+            if user_id and character_id:
+                reconcile_summaries_for_deleted(user_id, character_id, [event_id])
+        except Exception as hook_exc:
+            print(f'[raw_events] summary reconcile skipped:{hook_exc}')
     except Exception as e:
         conn.rollback()
         print(f'[raw_events] invalidate derived failed:{e}')

@@ -173,6 +173,35 @@ def deactivate(promise_id):
     cur.close()
     conn.close()
 
+
+def deactivate_legacy_busy_fallbacks(now=None):
+    """Retire old busy-wakeup promises. Match only explicit phone_check_id=.
+
+    Birthday / reminder / genuine promises are untouched.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''UPDATE proactive_promise
+               SET is_fired = TRUE,
+                   is_active = FALSE,
+                   last_fired_at = COALESCE(last_fired_at, %s)
+               WHERE is_active = TRUE
+                 AND position('phone_check_id=' in COALESCE(context, '')) > 0
+               RETURNING id''',
+            (now,),
+        )
+        ids = [row[0] for row in cur.fetchall()]
+        conn.commit()
+        return ids
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
 # db_promise.py 补丁 — 在文件末尾加这个函数
 
 def get_active_promises(character_id, user_id):

@@ -72,6 +72,16 @@ def enqueue_private_extraction(user_id, user_text, assistant_text, character_id,
     )
 
 
+def enqueue_kind(kind, user_id, character_id, source_event_id=None, extra=None,
+                 user_text=None, assistant_text=None):
+    """Generic idempotent enqueue used by rolling summary and similar jobs."""
+    extra_json = json.dumps(extra or {}, ensure_ascii=False) if extra is not None else None
+    return _enqueue(
+        kind, user_id, character_id, user_text, assistant_text, extra_json,
+        source_event_id=source_event_id,
+    )
+
+
 def enqueue_group_extraction(user_id, user_text, round_transcript, members):
     extra = json.dumps(
         {'round_transcript': round_transcript, 'members': members},
@@ -229,7 +239,11 @@ def _run_job(row):
         source_ids = [
             item for item in (source_event_id, assistant_event_id) if item
         ]
-        if kind == 'group':
+        if kind == 'rolling_summary':
+            from rolling_summary import process_summary_job
+            ok = process_summary_job(
+                user_id, character_id, extra, source_event_id=source_event_id)
+        elif kind == 'group':
             from user_memory import extract_and_save_group_memory
             ok = extract_and_save_group_memory(
                 user_id,
