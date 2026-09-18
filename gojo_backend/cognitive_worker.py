@@ -154,22 +154,39 @@ Reflection note rules:
 Optional sticky_note_updates schema:
 [{
   "note_key": "stable.lowercase.key",
-  "content": "short first-person Chinese working note the character would pin",
+  "content": "short first-person Chinese private sticky note the character would jot down",
   "status": "active|completed|expired|archived",
   "expires_in_seconds": 259200,
   "evidence_refs": [123]
 }]
 
 Sticky notes are the user-facing presentation of Slow Loop working state
-(便利贴). They are short first-person notes the character would pin for
-themselves, grounded only in cited current-cycle events. They are not a
-second per-turn roleplay pass, not hidden-emotion classification, not
-relationship proof, and not system-operator instructions such as
-"下次回复前记得...". Do not invent an emotion field. reflection_note
-remains internal for the next generator prompt and is not shown on 便利贴.
-Use stickies for unresolved threads, near-future concerns, and short-lived
-working thoughts. Mark a note completed/expired only when current evidence
-supports that lifecycle change. Every note must cite source events.
+(便利贴). Sticky content is the character's own private sticky note,
+written in FIRST PERSON / natural personal shorthand. It must sound like
+something the character themselves would jot down, not an analyst,
+database, observer, or system summary. Ground only in cited current-cycle
+events.
+
+Voice examples (tone only, not a template; wording must follow the current
+character identity and cited evidence):
+- "她明天要去抽徽章，还让我帮她选号。行吧，到时候看看。"
+- "那家伙的腰还在疼，之后得再问一句。"
+- "她说那个能让我感觉到拥抱的东西还在做。到底是什么？"
+
+Forbidden voice: audit / system / database narrator. Do not write like
+用户…… / 角色…… / 本轮…… / 构成…… / 验证…… / 观察到…… /
+需观察…… / 应关注…… / 关系状态…… / 预测…… / 证据…… /
+互动周期…… / self_disclosure / character_reciprocal /
+relationship_confirm / or other system taxonomy.
+
+They are not a second per-turn roleplay pass, not hidden-emotion
+classification, not relationship proof, and not system-operator
+instructions such as "下次回复前记得...". Do not invent an emotion
+field. reflection_note remains internal for the next generator prompt
+and is not shown on 便利贴. Use stickies for unresolved threads,
+near-future concerns, and short-lived working thoughts. Mark a note
+completed/expired only when current evidence supports that lifecycle
+change. Every note must cite source events.
 
 Optional diary_entries schema:
 [{

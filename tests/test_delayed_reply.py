@@ -539,6 +539,61 @@ class DelayedReplyTests(unittest.TestCase):
         kept = exclude_current_turn_events(events, ['e1', 'e2'])
         self.assertEqual([item['event_id'] for item in kept], ['old'])
 
+    def test_delayed_reply_proactive_event_id_matches_chat_log(self):
+        helpers = HelpersStub(bubbles=[
+            {'jp': 'a', 'zh': 'A'},
+            {'jp': 'b', 'zh': 'B'},
+            {'jp': 'c', 'zh': 'C'},
+        ])
+        bundle = {
+            'id': 8, 'user_id': 'u', 'character_id': 'gojo',
+            'pending_text': '一\n二\n三', 'pending_count': 3,
+            'event_meta': '', 'last_source_event_id': 'e3',
+            'reply_state': 'soft_busy',
+        }
+        commits = []
+        proactive_calls = []
+
+        def capture_commit(*_args, **kwargs):
+            commits.append(kwargs)
+
+        def capture_proactive(*_args, **kwargs):
+            proactive_calls.append(kwargs)
+            return (len(proactive_calls), NOW)
+
+        with patch('characters.get_character',
+                   return_value={'name': '五条', 'voice_id': 'v'}), \
+             patch('user_memory.save_user_short_memory_once', return_value=True), \
+             patch('user_memory.get_short_memory', return_value=[]), \
+             patch('user_memory.commit_visible_assistant_message',
+                   side_effect=capture_commit), \
+             patch('user_memory.update_chat_days', return_value=1), \
+             patch('memory_jobs.enqueue_private_extraction'), \
+             patch('temporal_awareness.get_temporal_snapshot', return_value={}), \
+             patch('temporal_awareness.record_turn'), \
+             patch('prompt.build_system_blocks', return_value=[]), \
+             patch('tts.tts_to_b64', return_value='audio'), \
+             patch('proactive_msg.add_proactive_msg',
+                   side_effect=capture_proactive):
+            result = delayed_reply.generate_delayed_chat_reply(
+                bundle, helpers=helpers)
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(commits), 3)
+        self.assertEqual(len(proactive_calls), 3)
+        for index in range(3):
+            expected = f'delayed_reply:8:{index}'
+            self.assertEqual(commits[index]['event_id'], expected)
+            self.assertEqual(proactive_calls[index]['event_id'], expected)
+            self.assertEqual(
+                proactive_calls[index]['assistant_turn_id'],
+                'delayed_reply:8:0',
+            )
+            self.assertEqual(proactive_calls[index]['segment_index'], index)
+            self.assertFalse(
+                str(proactive_calls[index]['event_id']).startswith(
+                    'proactive:delayed_reply')
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -9,6 +9,7 @@ FCM 凭证已在 Expo 后台配好，这里只管调 Expo 的推送接口。
   - push_to_user(user_id, title, body)：给某用户所有设备推一条通知
 """
 import json
+import urllib.error
 import urllib.request
 from db import get_conn
 
@@ -57,9 +58,81 @@ def get_tokens(user_id):
     return [r[0] for r in rows]
 
 
+def count_tokens(user_id):
+    """Diagnostic: how many Expo tokens this user currently has."""
+    return len(get_tokens(user_id))
+
+
+def token_tail(token):
+    text = str(token or '')
+    return text[-6:] if text else ''
+
+
+def delete_token(token):
+    """Remove one Expo token. Never delete every token for a user_id."""
+    token = str(token or '').strip()
+    if not token:
+        return 0
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('DELETE FROM push_token WHERE token=%s', (token,))
+        n = cur.rowcount or 0
+        conn.commit()
+        return n
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _parse_json_body(raw):
+    if not raw:
+        return {}
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode('utf-8')
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return {}
+
+
+def _expo_tickets(payload):
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get('data', payload)
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def is_device_not_registered(payload):
+    for ticket in _expo_tickets(payload):
+        details = ticket.get('details') if isinstance(ticket.get('details'), dict) else {}
+        err = details.get('error') or ticket.get('error')
+        if str(err or '') == 'DeviceNotRegistered':
+            return True
+    return False
+
+
+def _read_error_payload(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            return _parse_json_body(exc.read())
+        except Exception:
+            return {}
+    return {}
+
+
 def push_to_user(user_id, title, body, data=None):
     """给某用户的所有设备推一条通知。静默失败（推送不该拖垮主流程）。"""
     tokens = get_tokens(user_id)
+    print(f'[push] {user_id} token_count={len(tokens)}')
     if not tokens:
         print(f'[push] {user_id} 没有已注册的设备，跳过推送')
         return
@@ -80,7 +153,22 @@ def push_to_user(user_id, title, body, data=None):
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                _ = resp.read()
-            print(f'[push] ✅ 已推送给 {user_id}：{title} - {body[:20]}')
+                parsed = _parse_json_body(resp.read())
+            if is_device_not_registered(parsed):
+                delete_token(token)
+                print(
+                    '[push] stale DeviceNotRegistered removed '
+                    f'token=...{token_tail(token)}'
+                )
+            else:
+                print(f'[push] ok token=...{token_tail(token)}')
         except Exception as e:
-            print(f'[push] 推送失败（{token[:20]}...）：{e}')
+            parsed = _read_error_payload(e)
+            if is_device_not_registered(parsed):
+                delete_token(token)
+                print(
+                    '[push] stale DeviceNotRegistered removed '
+                    f'token=...{token_tail(token)}'
+                )
+            else:
+                print(f'[push] 推送失败（{token[:20]}...）：{e}')

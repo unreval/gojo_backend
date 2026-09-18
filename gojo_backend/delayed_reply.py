@@ -264,6 +264,9 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
             character_id, user_id, 'delayed_reply',
             msg.get('jp') or '', msg.get('zh') or '',
             emotion, msg.get('audio_b64') or '',
+            event_id=event_id,
+            assistant_turn_id=turn_id,
+            segment_index=index,
         )
     record_turn(
         user_id, character_id, source='chat_delayed',

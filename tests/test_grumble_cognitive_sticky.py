@@ -306,6 +306,22 @@ class PersistStickyProvenanceTests(unittest.TestCase):
         self.assertIn('user-facing presentation of Slow Loop working state', src)
         self.assertIn('not a second per-turn roleplay pass', src)
         self.assertIn('Do not invent an emotion field', src)
+        self.assertIn('FIRST PERSON / natural personal shorthand', src)
+        self.assertIn('not an analyst, database, observer, or system summary', src)
+
+    def test_audit_sticky_dropped_natural_sticky_kept(self):
+        import cognitive_output
+        self.assertFalse(cognitive_output.is_user_facing_sticky_content(
+            '用户明天要抽徽章，让我帮她选号码'))
+        self.assertTrue(cognitive_output.is_user_facing_sticky_content(
+            '她明天要抽徽章，还让我帮她选号。到时候看看。'))
+        persist_src = Path(BACKEND, 'cognitive_output.py').read_text(encoding='utf-8')
+        sticky_persist = persist_src.split(
+            "for note in output.get('sticky_note_updates'", 1)[1].split(
+                "for entry in output.get('diary_entries'", 1)[0]
+        self.assertNotIn('is_user_facing_sticky_content', sticky_persist)
+        self.assertNotIn('reflection_note', sticky_persist)
+        self.assertIn('dropped non-user-facing sticky', persist_src)
 
 
 class RouteGrumbleApiTests(unittest.TestCase):

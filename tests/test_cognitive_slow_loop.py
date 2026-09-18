@@ -291,7 +291,7 @@ class SlowLoopValidationTests(unittest.TestCase):
         output = valid_output()
         output['sticky_note_updates'] = [{
             'note_key': 'reply.pending.topic',
-            'content': '下次回复前记得接她刚才没讲完的签证话题。',
+            'content': '签证那件事她没讲完。之后得再问一句。',
             'status': 'active',
             'expires_in_seconds': 3600,
             'evidence_refs': [27],
@@ -309,6 +309,56 @@ class SlowLoopValidationTests(unittest.TestCase):
 
         self.assertEqual(result['sticky_note_updates'][0]['status'], 'active')
         self.assertEqual(result['diary_entries'][0]['reflection_kind'], 'event')
+
+    def test_audit_sticky_is_dropped_natural_sticky_kept(self):
+        self.assertFalse(cognitive_output.is_user_facing_sticky_content(
+            '用户明天要抽徽章，让我帮她选号码'))
+        self.assertTrue(cognitive_output.is_user_facing_sticky_content(
+            '她明天要抽徽章，还让我帮她选号。到时候看看。'))
+        output = valid_output()
+        output['sticky_note_updates'] = [
+            {
+                'note_key': 'user.gacha.audit',
+                'content': '用户明天要抽徽章，让我帮她选号码',
+                'status': 'active',
+                'expires_in_seconds': 3600,
+                'evidence_refs': [27],
+            },
+            {
+                'note_key': 'user.gacha.personal',
+                'content': '她明天要抽徽章，还让我帮她选号。到时候看看。',
+                'status': 'active',
+                'expires_in_seconds': 3600,
+                'evidence_refs': [27],
+            },
+        ]
+        result = cognitive_output.validate_slow_loop_output(
+            output, allowed_event_ids={27},
+        )
+        keys = [item['note_key'] for item in result['sticky_note_updates']]
+        self.assertEqual(keys, ['user.gacha.personal'])
+        self.assertEqual(
+            result['question_updates'][0]['question_key'],
+            'character.care.boundary.question',
+        )
+        self.assertEqual(len(result['hypothesis_updates']), 1)
+
+    def test_audit_sticky_does_not_fail_slow_loop(self):
+        output = valid_output()
+        output['sticky_note_updates'] = [{
+            'note_key': 'user.gacha.audit',
+            'content': '用户明天要抽徽章，让我帮她选号码',
+            'status': 'active',
+            'expires_in_seconds': 3600,
+            'evidence_refs': [27],
+        }]
+        result = cognitive_output.validate_slow_loop_output(
+            output, allowed_event_ids={27},
+        )
+        self.assertEqual(result['sticky_note_updates'], [])
+        self.assertTrue(result['question_updates'])
+        self.assertTrue(result['hypothesis_updates'])
+        self.assertEqual(result['diary_entries'], [])
 
     def test_self_claim_only_cannot_commit_belief(self):
         update = committable_output()['belief_updates'][0]
@@ -512,6 +562,9 @@ class SlowLoopWorkerTests(unittest.TestCase):
         self.assertIn('character_self_claim', prompt)
         self.assertIn('belief_updates are commit candidates', prompt)
         self.assertIn('reflection_note is a compact internal note', prompt)
+        self.assertIn('FIRST PERSON', prompt)
+        self.assertIn('private sticky note', prompt)
+        self.assertIn('self_disclosure', prompt)
         source = inspect.getsource(cognitive_worker)
         self.assertNotIn('UPDATE rel_state', source)
         self.assertNotIn('INSERT INTO rel_state', source)

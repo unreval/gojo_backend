@@ -32,6 +32,15 @@ def init_proactive_table():
         audio_b64 TEXT DEFAULT '',
         is_read BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    cur.execute(
+        'ALTER TABLE proactive_msg ADD COLUMN IF NOT EXISTS event_id TEXT')
+    cur.execute(
+        'ALTER TABLE proactive_msg ADD COLUMN IF NOT EXISTS assistant_turn_id TEXT')
+    cur.execute(
+        'ALTER TABLE proactive_msg ADD COLUMN IF NOT EXISTS segment_index INTEGER')
+    cur.execute(
+        '''CREATE INDEX IF NOT EXISTS idx_proactive_msg_event_id
+           ON proactive_msg (event_id)''')
     conn.commit()
     cur.close()
     conn.close()
@@ -44,20 +53,29 @@ def canonical_event_id(kind, msg_id):
 
 
 def add_proactive_msg(character_id, user_id, kind, jp, zh='', emotion='平静',
-                      audio_b64='', created_at=None):
+                      audio_b64='', created_at=None, event_id=None,
+                      assistant_turn_id=None, segment_index=None):
     conn = get_conn()
     cur = conn.cursor()
     if created_at is not None:
         cur.execute(
-            '''INSERT INTO proactive_msg (character_id, user_id, kind, jp, zh, emotion, audio_b64, created_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id, created_at''',
-            (character_id, user_id, kind, jp, zh, emotion, audio_b64, created_at)
+            '''INSERT INTO proactive_msg (
+                   character_id, user_id, kind, jp, zh, emotion, audio_b64,
+                   created_at, event_id, assistant_turn_id, segment_index)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               RETURNING id, created_at''',
+            (character_id, user_id, kind, jp, zh, emotion, audio_b64,
+             created_at, event_id, assistant_turn_id, segment_index)
         )
     else:
         cur.execute(
-            '''INSERT INTO proactive_msg (character_id, user_id, kind, jp, zh, emotion, audio_b64)
-               VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id, created_at''',
-            (character_id, user_id, kind, jp, zh, emotion, audio_b64)
+            '''INSERT INTO proactive_msg (
+                   character_id, user_id, kind, jp, zh, emotion, audio_b64,
+                   event_id, assistant_turn_id, segment_index)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               RETURNING id, created_at''',
+            (character_id, user_id, kind, jp, zh, emotion, audio_b64,
+             event_id, assistant_turn_id, segment_index)
         )
     new_id, ts = cur.fetchone()
     conn.commit()
@@ -72,7 +90,8 @@ def get_pending(user_id, character_id=None):
     cur = conn.cursor()
     if character_id:
         cur.execute(
-            '''SELECT id, character_id, kind, jp, zh, emotion, audio_b64, created_at
+            '''SELECT id, character_id, kind, jp, zh, emotion, audio_b64,
+                      created_at, event_id, assistant_turn_id, segment_index
                FROM proactive_msg
                WHERE user_id=%s AND character_id=%s AND is_read=FALSE
                ORDER BY created_at ASC''',
@@ -80,7 +99,8 @@ def get_pending(user_id, character_id=None):
         )
     else:
         cur.execute(
-            '''SELECT id, character_id, kind, jp, zh, emotion, audio_b64, created_at
+            '''SELECT id, character_id, kind, jp, zh, emotion, audio_b64,
+                      created_at, event_id, assistant_turn_id, segment_index
                FROM proactive_msg
                WHERE user_id=%s AND is_read=FALSE
                ORDER BY created_at ASC''',
@@ -89,13 +109,21 @@ def get_pending(user_id, character_id=None):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [{
-        'id': r[0], 'character_id': r[1], 'kind': r[2], 'jp': r[3], 'zh': r[4],
-        'emotion': r[5], 'audio_b64': r[6], 'created_at': str(r[7]) if r[7] else None,
-        'event_id': canonical_event_id(r[2], r[0]),
-        'assistant_turn_id': canonical_event_id(r[2], r[0]),
-        'segment_index': 0,
-    } for r in rows]
+    pending = []
+    for r in rows:
+        stored_event_id = str(r[8] or '').strip()
+        event_id = stored_event_id or canonical_event_id(r[2], r[0])
+        stored_turn_id = str(r[9] or '').strip()
+        pending.append({
+            'id': r[0], 'character_id': r[1], 'kind': r[2],
+            'jp': r[3], 'zh': r[4],
+            'emotion': r[5], 'audio_b64': r[6],
+            'created_at': str(r[7]) if r[7] else None,
+            'event_id': event_id,
+            'assistant_turn_id': stored_turn_id or event_id,
+            'segment_index': 0 if r[10] is None else int(r[10]),
+        })
+    return pending
 
 
 def mark_read(msg_ids):

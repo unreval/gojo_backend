@@ -70,10 +70,46 @@ MAX_OUTPUT_ITEMS = 20
 MAX_PREDICTIONS = 10
 MIN_PREDICTION_TTL_SECONDS = 300
 MAX_PREDICTION_TTL_SECONDS = 30 * 24 * 60 * 60
+_STICKY_AUDIT_MARKERS = (
+    '本轮',
+    '构成',
+    '验证',
+    '观察到',
+    '需观察',
+    '应关注',
+    '关系状态',
+    '预测',
+    '证据',
+    '互动周期',
+    '下次回复前记得',
+)
+_STICKY_TAXONOMY_RE = re.compile(
+    r'(?i)(?:self_disclosure|character_reciprocal|relationship_confirm)'
+    r'|(?:character|user|boundary|observe)\.[a-z][a-z0-9._-]*'
+)
+_STICKY_NARRATOR_RE = re.compile(r'(?:^|[，。；！？\n])(?:用户|角色)')
 
 
 class SlowLoopOutputError(ValueError):
     pass
+
+
+def is_user_facing_sticky_content(text):
+    """True when sticky content reads as the character's private note."""
+    content = str(text or '').strip()
+    if not content:
+        return False
+    if _STICKY_NARRATOR_RE.search(content):
+        return False
+    lowered = content.lower()
+    for marker in _STICKY_AUDIT_MARKERS:
+        needle = marker.lower() if marker.isascii() else marker
+        haystack = lowered if marker.isascii() else content
+        if needle in haystack:
+            return False
+    if _STICKY_TAXONOMY_RE.search(content):
+        return False
+    return True
 
 
 def parse_slow_loop_output(raw):
@@ -680,6 +716,20 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
     for sticky in sticky_note_updates:
         if looks_like_belief_revision_sticky(sticky['content']) and not revision_relations:
             raise SlowLoopOutputError('sticky_note_cannot_replace_revision')
+
+    visible_sticky_updates = []
+    for sticky in sticky_note_updates:
+        if (
+            sticky['status'] == 'active'
+            and not is_user_facing_sticky_content(sticky['content'])
+        ):
+            print(
+                '[cognitive] dropped non-user-facing sticky '
+                f"note_key={sticky['note_key']}"
+            )
+            continue
+        visible_sticky_updates.append(sticky)
+    sticky_note_updates = visible_sticky_updates
 
     return {
         'cycle_summary': normalized_summary,
