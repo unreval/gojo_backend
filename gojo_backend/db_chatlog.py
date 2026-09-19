@@ -18,7 +18,21 @@
 """
 import json
 
+from assistant_turn import (
+    collapse_assistant_logical_turns,
+    filter_hidden_aggregates,
+    hidden_aggregate_ids_from_rows,
+    turn_facts_from_rows,
+)
 from db import get_conn
+
+ASSISTANT_IDENTITY_SQL = (
+    '''SELECT event_id, client_msg_id, role, extra,
+              COALESCE(status, 'active')
+       FROM chat_log
+       WHERE user_id=%s AND chat_id=%s
+         AND role IN ('gojo', 'assistant')'''
+)
 
 
 def init_chatlog_table():
@@ -176,8 +190,23 @@ def append_messages(user_id, chat_id, msgs):
     return written
 
 
-def get_messages(user_id, chat_id, limit=200, before_id=None):
-    """取历史,新→旧翻页。返回 (消息列表[旧→新], 是否还有更早的)。"""
+def _row_to_message(row):
+    return {
+        'id': row[0],
+        'client_msg_id': row[1] or '',
+        'role': row[2],
+        'text': row[3] or '',
+        'subtitle': row[4] or '',
+        'emotion': row[5] or '',
+        'kind': row[6] or 'text',
+        'extra': row[7] or '',
+        'has_audio': bool(row[8]),
+        'ts': row[9].isoformat() if row[9] else None,
+        'event_id': (row[10] if len(row) > 10 else '') or '',
+    }
+
+
+def _fetch_message_page(user_id, chat_id, limit, before_id=None):
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -189,7 +218,7 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
                    WHERE user_id=%s AND chat_id=%s AND id < %s
                      AND COALESCE(status, 'active') = 'active'
                    ORDER BY id DESC LIMIT %s''',
-                (user_id, chat_id, before_id, limit + 1))
+                (user_id, chat_id, before_id, limit))
         else:
             cur.execute(
                 '''SELECT id, client_msg_id, role, text, subtitle, emotion,
@@ -198,28 +227,80 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
                    WHERE user_id=%s AND chat_id=%s
                      AND COALESCE(status, 'active') = 'active'
                    ORDER BY id DESC LIMIT %s''',
-                (user_id, chat_id, limit + 1))
-        rows = cur.fetchall()
+                (user_id, chat_id, limit))
+        return [_row_to_message(row) for row in cur.fetchall()]
     finally:
         cur.close()
         conn.close()
 
-    has_more = len(rows) > limit
-    rows = rows[:limit]
-    out = [{
-        'id': r[0],
-        'client_msg_id': r[1] or '',
-        'role': r[2],
-        'text': r[3] or '',
-        'subtitle': r[4] or '',
-        'emotion': r[5] or '',
-        'kind': r[6] or 'text',
-        'extra': r[7] or '',
-        'has_audio': bool(r[8]),
-        'ts': r[9].isoformat() if r[9] else None,
-        'event_id': (r[10] if len(r) > 10 else '') or '',
-    } for r in rows]
-    out.reverse()          # 旧→新,前端直接铺
+
+def assistant_identity_rows(user_id, chat_id):
+    """Assistant chat_log rows including deleted historical segments."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(ASSISTANT_IDENTITY_SQL, (user_id, chat_id))
+        rows = [{
+            'event_id': row[0] or '',
+            'client_msg_id': row[1] or '',
+            'role': row[2],
+            'extra': row[3] or '',
+            'status': (row[4] if len(row) > 4 else '') or 'active',
+        } for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+    for row in rows:
+        if not row['event_id']:
+            row['event_id'] = row['client_msg_id']
+    return rows
+
+
+def assistant_turn_facts(user_id, chat_id):
+    return turn_facts_from_rows(assistant_identity_rows(user_id, chat_id))
+
+
+def hidden_aggregate_event_ids(user_id, chat_id):
+    """Aggregates that must not appear as extra chat bubbles."""
+    return hidden_aggregate_ids_from_rows(assistant_identity_rows(user_id, chat_id))
+
+
+def filter_visible_messages(user_id, chat_id, msgs):
+    return filter_hidden_aggregates(
+        msgs, hidden_aggregate_event_ids(user_id, chat_id))
+
+
+def get_messages(user_id, chat_id, limit=200, before_id=None):
+    """取历史,新→旧翻页。返回 (消息列表[旧→新], 是否还有更早的)。
+
+    Aggregate + segments → only segments are user-visible.
+    Aggregate only remains as a durability fallback.
+    Sibling lookup is chat-wide so pagination cannot resurface an aggregate.
+    """
+    limit = max(1, int(limit or 200))
+    hidden = hidden_aggregate_event_ids(user_id, chat_id)
+    visible = []
+    cursor = before_id
+    while True:
+        batch = _fetch_message_page(
+            user_id, chat_id, limit + 1, before_id=cursor)
+        if not batch:
+            break
+        for msg in batch:
+            visible.extend(filter_hidden_aggregates([msg], hidden))
+            if len(visible) > limit:
+                break
+        if len(visible) > limit:
+            break
+        if len(batch) <= limit:
+            break
+        next_cursor = batch[-1]['id']
+        if next_cursor == cursor:
+            break
+        cursor = next_cursor
+    has_more = len(visible) > limit
+    out = visible[:limit]
+    out.reverse()
     _attach_chat_media(user_id, chat_id, out)
     return out, has_more
 
@@ -347,28 +428,52 @@ def get_prompt_history(user_id, chat_id, limit=24):
     for later turns without writing it into short_memory or relationship state.
     """
     limit = max(1, min(80, int(limit or 24)))
+    fetch_limit = max(1, min(80, limit * 3))
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
-            '''SELECT role, text, subtitle, kind, extra
+            '''SELECT role, text, subtitle, kind, extra,
+                      event_id, client_msg_id
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s
                  AND COALESCE(status, 'active') = 'active'
                ORDER BY id DESC LIMIT %s''',
-            (user_id, chat_id, limit))
+            (user_id, chat_id, fetch_limit))
         rows = cur.fetchall()
     finally:
         cur.close()
         conn.close()
 
     rows.reverse()
+    events = []
+    for row in rows:
+        role, text, subtitle, kind, extra = row[:5]
+        event_id = row[5] if len(row) > 5 else ''
+        client_msg_id = row[6] if len(row) > 6 else ''
+        events.append({
+            'role': role,
+            'text': text or '',
+            'subtitle': subtitle or '',
+            'kind': kind or 'text',
+            'extra': extra or '',
+            'event_id': event_id or client_msg_id or '',
+            'client_msg_id': client_msg_id or '',
+        })
+    events = collapse_assistant_logical_turns(
+        events, turn_facts=assistant_turn_facts(user_id, chat_id))[-limit:]
     out = []
-    for role, text, subtitle, kind, extra in rows:
+    for event in events:
+        role = event.get('role')
         prompt_role = 'user' if role == 'user' else 'assistant'
+        extra = event.get('extra')
+        if isinstance(extra, dict):
+            extra_data = extra
+        else:
+            extra_data = _parse_extra(extra or '')
         content = _history_content(
-            role, text or '', subtitle or '',
-            kind or 'text', _parse_extra(extra or ''))
+            role, event.get('text') or '', event.get('subtitle') or '',
+            event.get('kind') or 'text', extra_data)
         if content:
             out.append({'role': prompt_role, 'content': content})
     return out
@@ -476,4 +581,5 @@ def count_messages(user_id, chat_id):
     n = cur.fetchone()[0]
     cur.close()
     conn.close()
-    return n
+    hidden = hidden_aggregate_event_ids(user_id, chat_id)
+    return max(0, int(n or 0) - len(hidden))

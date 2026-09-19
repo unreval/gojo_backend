@@ -196,6 +196,39 @@ class FakeCursor:
                     self._one = (row['client_msg_id'],)
                     return
             return
+        if 'ILIKE' in compact and compact.startswith('SELECT id, client_msg_id'):
+            user_id, chat_id, pattern, _pattern2, limit = params
+            keyword = str(pattern).strip('%').lower()
+            matched = [
+                row for row in self.store.rows
+                if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('status', 'active') == 'active'
+                and (keyword in (row.get('text') or '').lower()
+                     or keyword in (row.get('subtitle') or '').lower())
+            ]
+            matched.sort(key=lambda r: r['id'], reverse=True)
+            matched = matched[:limit]
+            self._many = [
+                (r['id'], r['client_msg_id'], r['role'], r['text'],
+                 r['subtitle'], r['emotion'], r['kind'], r['extra'],
+                 r['has_audio'], r['created_at'], r.get('event_id') or '')
+                for r in matched
+            ]
+            return
+        if compact.startswith('SELECT event_id, client_msg_id, role, extra'):
+            user_id, chat_id = params
+            matched = [
+                row for row in self.store.rows
+                if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('role') in ('gojo', 'assistant')
+            ]
+            self._many = [
+                (row.get('event_id') or '', row.get('client_msg_id') or '',
+                 row['role'], row.get('extra') or '',
+                 row.get('status') or 'active')
+                for row in matched
+            ]
+            return
         if compact.startswith('SELECT id, client_msg_id'):
             if 'AND id <' in compact:
                 user_id, chat_id, before_id, limit = params
@@ -232,7 +265,8 @@ class FakeCursor:
             matched.sort(key=lambda r: r['id'], reverse=True)
             matched = matched[:limit]
             self._many = [
-                (r['role'], r['text'], r['subtitle'], r['kind'], r['extra'])
+                (r['role'], r['text'], r['subtitle'], r['kind'], r['extra'],
+                 r.get('event_id') or '', r.get('client_msg_id') or '')
                 for r in matched
             ]
             return

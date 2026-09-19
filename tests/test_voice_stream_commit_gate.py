@@ -65,10 +65,12 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
             })
             return True
 
-        def _save_short(user_id, role, content, character_id='gojo', source_event_id=None):
+        def _save_short(user_id, role, content, character_id='gojo',
+                        source_event_id=None, metadata=None, **_kwargs):
             self.short_rows.append({
                 'role': role, 'content': content,
                 'character_id': character_id, 'source_event_id': source_event_id,
+                'metadata': metadata,
             })
 
         def _get_short(user_id, n=6, character_id='gojo'):

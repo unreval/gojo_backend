@@ -189,6 +189,20 @@ class FakeCursor:
             self.store.chat_log.append(row)
             self.rowcount = 1
             return
+        if compact.startswith('SELECT event_id, client_msg_id, role, extra'):
+            user_id, chat_id = params
+            matched = [
+                row for row in self.store.chat_log
+                if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('role') in ('gojo', 'assistant')
+            ]
+            self._many = [
+                (row.get('event_id') or '', row.get('client_msg_id') or '',
+                 row['role'], row.get('extra') or '',
+                 row.get('status') or 'active')
+                for row in matched
+            ]
+            return
         if compact.startswith('SELECT id, client_msg_id'):
             user_id, chat_id = params[0], params[1]
             matched = [

@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import datetime, timezone
 
+from assistant_turn import collapse_assistant_logical_turns, infer_assistant_identity
 from db import get_conn
 
 PROCESSOR_MEMORY_EXTRACTOR = 'memory_extractor'
@@ -124,38 +124,6 @@ def _borrow_conn(conn=None):
 def _normalize_event_id(value):
     text = str(value).strip() if value else ''
     return text or None
-
-
-_ASSISTANT_REPLY_RE = re.compile(r'^(?P<turn>.+:reply)(?::(?P<idx>\d+))?$')
-
-
-def infer_assistant_identity(role, event_id, extra=None):
-    """Stamp assistant_turn_id + segment_index onto extra without new columns.
-
-    Frontend segment gate uses `{source}:reply:{i}`. Voice uses `{source}:reply`.
-    Segments of one response share assistant_turn_id; they are not independent turns.
-    """
-    data = dict(extra or {})
-    role_name = _chat_role(role)
-    if role_name != 'gojo':
-        return data
-    if str(data.get('assistant_turn_id') or '').strip():
-        if data.get('segment_index') is None:
-            data['segment_index'] = 0
-        try:
-            data['segment_index'] = int(data['segment_index'])
-        except (TypeError, ValueError):
-            data['segment_index'] = 0
-        return data
-    eid = _normalize_event_id(event_id) or ''
-    matched = _ASSISTANT_REPLY_RE.match(eid)
-    if matched:
-        data['assistant_turn_id'] = matched.group('turn')
-        data['segment_index'] = int(matched.group('idx') or 0)
-    elif eid:
-        data['assistant_turn_id'] = eid
-        data['segment_index'] = 0
-    return data
 
 
 def _chat_role(role):
@@ -427,7 +395,16 @@ def get_recent_events(user_id, character_id, n=40, hours=24):
             'timestamp': ts,
             'subtitle': subtitle or '',
         })
-    return out
+    return collapse_assistant_logical_turns(
+        out, turn_facts=_assistant_turn_facts(user_id, character_id))
+
+
+def _assistant_turn_facts(user_id, character_id):
+    try:
+        import db_chatlog
+        return db_chatlog.assistant_turn_facts(user_id, character_id)
+    except Exception:
+        return {}
 
 
 def list_events_for_local_day(user_id, character_id, day_start, *, limit=80):
@@ -481,7 +458,8 @@ def list_events_for_local_day(user_id, character_id, day_start, *, limit=80):
             'timestamp': ts,
             'subtitle': subtitle or '',
         })
-    return out
+    return collapse_assistant_logical_turns(
+        out, turn_facts=_assistant_turn_facts(user_id, character_id))
 
 
 def get_hot_candidate_events(user_id, character_id, n=240, hours=72):
@@ -543,7 +521,8 @@ def get_hot_candidate_events(user_id, character_id, n=240, hours=72):
             'subtitle': subtitle or '',
             'reply_to_event_id': reply_to or '',
         })
-    return out
+    return collapse_assistant_logical_turns(
+        out, turn_facts=_assistant_turn_facts(user_id, character_id))
 
 
 def list_events_for_assistant_turn(user_id, character_id, assistant_turn_id):

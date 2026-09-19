@@ -524,7 +524,24 @@ def _merge_recent_context(user_id, character_id, n, hours):
         return ts
 
     merged.sort(key=lambda item: _ts_key(item['timestamp']))
-    return merged[-limit:]
+    from assistant_turn import collapse_assistant_logical_turns
+    try:
+        import db_chatlog
+        turn_facts = db_chatlog.assistant_turn_facts(user_id, character_id)
+    except Exception:
+        turn_facts = {}
+    collapsed = collapse_assistant_logical_turns(merged, turn_facts=turn_facts)
+    out = []
+    for item in collapsed:
+        out.append({
+            'role': item.get('role'),
+            'content': item.get('content') or '',
+            'timestamp': item.get('timestamp'),
+            'event_id': item.get('event_id'),
+            'event_meta': item.get('event_meta') if item.get('event_meta') not in (None, '')
+            else item.get('metadata') or {},
+        })
+    return out[-limit:]
 
 
 def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):

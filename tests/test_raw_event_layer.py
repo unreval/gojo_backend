@@ -229,6 +229,62 @@ class FakeCursor:
             ]
             return
 
+        if compact.startswith('SELECT COUNT(*) FROM chat_log'):
+            user_id, chat_id = params
+            n = sum(
+                1 for row in self.store.chat_log
+                if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('status', 'active') == 'active'
+            )
+            self._one = (n,)
+            return
+        if compact.startswith('SELECT role, text, subtitle, kind, extra'):
+            user_id, chat_id, limit = params
+            matched = [
+                row for row in self.store.chat_log
+                if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('status', 'active') == 'active'
+            ]
+            matched.sort(key=lambda r: r['id'], reverse=True)
+            matched = matched[:limit]
+            self._many = [
+                (r['role'], r['text'], r['subtitle'], r['kind'], r.get('extra') or '',
+                 r.get('event_id') or '', r.get('client_msg_id') or '')
+                for r in matched
+            ]
+            return
+        if compact.startswith('SELECT event_id, client_msg_id, role, extra'):
+            user_id, chat_id = params
+            matched = [
+                row for row in self.store.chat_log
+                if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('role') in ('gojo', 'assistant')
+            ]
+            self._many = [
+                (row.get('event_id') or '', row.get('client_msg_id') or '',
+                 row['role'], row.get('extra') or '',
+                 row.get('status') or 'active')
+                for row in matched
+            ]
+            return
+
+        if compact.startswith('SELECT COALESCE(chat_log.event_id, chat_log.client_msg_id)'):
+            user_id, chat_id, hours, limit = params
+            matched = [
+                row for row in self.store.chat_log
+                if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('status', 'active') == 'active'
+            ]
+            matched.sort(key=lambda r: r['id'], reverse=True)
+            matched = matched[:limit]
+            self._many = [
+                (r.get('event_id') or r.get('client_msg_id'), r['role'], r['text'],
+                 r['kind'], r['extra'], r['created_at'], r.get('subtitle') or '',
+                 r.get('reply_to_event_id') or '')
+                for r in matched
+            ]
+            return
+
         if compact.startswith('SELECT COALESCE(event_id, client_msg_id)'):
             if len(params) == 2:
                 user_id, chat_id = params
@@ -237,6 +293,21 @@ class FakeCursor:
                     for row in self.store.chat_log
                     if row['user_id'] == user_id and row['chat_id'] == chat_id
                     and row.get('status') == 'deleted'
+                ]
+                return
+            if len(params) == 5:
+                user_id, chat_id, day_start, day_end, limit = params
+                matched = [
+                    row for row in self.store.chat_log
+                    if row['user_id'] == user_id and row['chat_id'] == chat_id
+                    and row.get('status', 'active') == 'active'
+                ]
+                matched.sort(key=lambda r: r['id'])
+                matched = matched[:limit]
+                self._many = [
+                    (r.get('event_id') or r.get('client_msg_id'), r['role'], r['text'],
+                     r['kind'], r['extra'], r['created_at'], r.get('subtitle') or '')
+                    for r in matched
                 ]
                 return
             user_id, chat_id, hours, limit = params

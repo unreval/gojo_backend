@@ -15,7 +15,25 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from db import get_conn
 
+import db_chatlog
+
 router = APIRouter()
+
+
+def _search_row(row):
+    return {
+        'id': row[0],
+        'client_msg_id': row[1] or '',
+        'role': row[2],
+        'text': row[3] or '',
+        'subtitle': row[4] or '',
+        'emotion': row[5] or '',
+        'kind': row[6] or 'text',
+        'extra': row[7] or '',
+        'has_audio': bool(row[8]),
+        'ts': row[9].isoformat() if row[9] else None,
+        'event_id': (row[10] if len(row) > 10 else '') or '',
+    }
 
 
 @router.get('/chatlog/search')
@@ -34,9 +52,10 @@ async def search_chatlog(user_id: str, chat_id: str,
         pattern = f'%{keyword}%'
         cur.execute(
             '''SELECT id, client_msg_id, role, text, subtitle, emotion,
-                      kind, extra, has_audio, created_at
+                      kind, extra, has_audio, created_at, event_id
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s
+                 AND COALESCE(status, 'active') = 'active'
                  AND (text ILIKE %s OR subtitle ILIKE %s)
                ORDER BY created_at DESC
                LIMIT %s''',
@@ -47,19 +66,8 @@ async def search_chatlog(user_id: str, chat_id: str,
         cur.close()
         conn.close()
 
-    results = [{
-        'id': r[0],
-        'client_msg_id': r[1] or '',
-        'role': r[2],
-        'text': r[3] or '',
-        'subtitle': r[4] or '',
-        'emotion': r[5] or '',
-        'kind': r[6] or 'text',
-        'extra': r[7] or '',
-        'has_audio': bool(r[8]),
-        'ts': r[9].isoformat() if r[9] else None,
-    } for r in rows]
-
+    results = db_chatlog.filter_visible_messages(
+        user_id, chat_id, [_search_row(r) for r in rows])
     return JSONResponse({'results': results, 'count': len(results)})
 
 
@@ -112,15 +120,17 @@ async def chatlog_by_date(user_id: str, chat_id: str,
         # 拿 anchor_id 前后各 around 条
         cur.execute(
             '''(SELECT id, client_msg_id, role, text, subtitle, emotion,
-                       kind, extra, has_audio, created_at
+                       kind, extra, has_audio, created_at, event_id
                 FROM chat_log
                 WHERE user_id=%s AND chat_id=%s AND id < %s
+                  AND COALESCE(status, 'active') = 'active'
                 ORDER BY id DESC LIMIT %s)
                UNION ALL
                (SELECT id, client_msg_id, role, text, subtitle, emotion,
-                       kind, extra, has_audio, created_at
+                       kind, extra, has_audio, created_at, event_id
                 FROM chat_log
                 WHERE user_id=%s AND chat_id=%s AND id >= %s
+                  AND COALESCE(status, 'active') = 'active'
                 ORDER BY id ASC LIMIT %s)
                ORDER BY id ASC''',
             (user_id, chat_id, anchor_id, around,
@@ -144,18 +154,8 @@ async def chatlog_by_date(user_id: str, chat_id: str,
         cur.close()
         conn.close()
 
-    msgs = [{
-        'id': r[0],
-        'client_msg_id': r[1] or '',
-        'role': r[2],
-        'text': r[3] or '',
-        'subtitle': r[4] or '',
-        'emotion': r[5] or '',
-        'kind': r[6] or 'text',
-        'extra': r[7] or '',
-        'has_audio': bool(r[8]),
-        'ts': r[9].isoformat() if r[9] else None,
-    } for r in rows]
+    msgs = db_chatlog.filter_visible_messages(
+        user_id, chat_id, [_search_row(r) for r in rows])
 
     return JSONResponse({
         'messages': msgs,

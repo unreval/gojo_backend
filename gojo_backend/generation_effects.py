@@ -265,7 +265,11 @@ def apply_assistant_short_memory(ctx):
     save_short_memory = _ctx_fn(ctx, 'save_short_memory', 'user_memory', 'save_short_memory')
     save_short_memory(
         user_id, 'assistant', full_jp, character_id,
-        source_event_id=turn_id)
+        source_event_id=turn_id,
+        metadata={
+            'turn_aggregate': True,
+            'assistant_turn_id': turn_id,
+        })
     event_meta = ctx.get('event_meta') or _payload(ctx).get('event_meta')
     if event_meta:
         try:

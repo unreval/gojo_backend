@@ -65,10 +65,12 @@ class ChatCommitGateTests(unittest.TestCase):
             })
             return True
 
-        def _save_short(user_id, role, content, character_id='gojo', source_event_id=None):
+        def _save_short(user_id, role, content, character_id='gojo',
+                        source_event_id=None, metadata=None, **_kwargs):
             self.short_rows.append({
                 'role': role, 'content': content,
                 'character_id': character_id, 'source_event_id': source_event_id,
+                'metadata': metadata,
             })
 
         self.save_user_once = Mock(side_effect=_save_user_once)
@@ -519,10 +521,12 @@ class VoiceProactiveIdentityTests(unittest.TestCase):
         def _save_user_once(user_id, content, character_id='gojo', source_event_id=None):
             return True
 
-        def _save_short(user_id, role, content, character_id='gojo', source_event_id=None):
+        def _save_short(user_id, role, content, character_id='gojo',
+                        source_event_id=None, metadata=None, **_kwargs):
             self.short_rows.append({
                 'role': role, 'content': content,
                 'character_id': character_id, 'source_event_id': source_event_id,
+                'metadata': metadata,
             })
 
         self.memory = stub(
