@@ -1067,6 +1067,175 @@ class ActivityPhoneProfileTests(unittest.TestCase):
         src = Path(BACKEND, 'activity_phone.py').read_text(encoding='utf-8')
         self.assertNotIn('if character ==', src)
         self.assertNotIn("character_id == 'gojo'", src)
+        self.assertNotIn('gojo', src.lower())
+
+    def test_profile_without_phone_behavior_is_unchanged(self):
+        import activity_phone
+        base = activity_phone.PROFILES['report_work']
+        fake_chars = types.SimpleNamespace(
+            get_character=lambda cid: {'id': cid})
+        with patch.dict(sys.modules, {'characters': fake_chars}):
+            scaled = activity_phone.apply_character_modifier(base, 'plain')
+        self.assertEqual(scaled, base)
+
+    def test_invalid_phone_behavior_falls_back_to_base_profile(self):
+        import activity_phone
+        base = activity_phone.PROFILES['meeting']
+        fake_chars = types.SimpleNamespace(get_character=lambda cid: {
+            'phone_behavior': {
+                'check_interval_scale': 'fast',
+                'quick_reply_bonus': object(),
+                'activity_overrides': {'meeting': 'bad'},
+            }
+        })
+        with patch.dict(sys.modules, {'characters': fake_chars}):
+            scaled = activity_phone.apply_character_modifier(base, 'invalid')
+        self.assertEqual(scaled, base)
+
+    def test_get_character_includes_data_package_phone_behavior(self):
+        import characters
+
+        class Cursor:
+            def execute(self, *args, **kwargs):
+                pass
+
+            def fetchone(self):
+                return (
+                    'gojo', '五条悟', 'Gojo Satoru', None,
+                    'voice', 'prompt', 'greeting')
+
+            def close(self):
+                pass
+
+        class Conn:
+            def cursor(self):
+                return Cursor()
+
+            def close(self):
+                pass
+
+        with patch.object(characters, 'get_conn', return_value=Conn()):
+            char = characters.get_character('gojo')
+        behavior = char.get('phone_behavior')
+        self.assertIsInstance(behavior, dict)
+        self.assertIn('activity_overrides', behavior)
+        self.assertIn('meeting', behavior['activity_overrides'])
+
+    def test_gojo_activity_overrides_and_global_soft_busy_fallback(self):
+        import activity_phone
+        from characters_data._loader import load_core
+
+        behavior = load_core('gojo')['phone_behavior']
+        fake_chars = types.SimpleNamespace(
+            get_character=lambda cid: {'phone_behavior': behavior})
+        with patch.dict(sys.modules, {'characters': fake_chars}):
+            meeting = activity_phone.profile_for_activity({
+                'title': '开会', 'reply_state': 'soft_busy'}, 'gojo')
+            report = activity_phone.profile_for_activity({
+                'title': '处理报告', 'reply_state': 'soft_busy'}, 'gojo')
+            prep = activity_phone.profile_for_activity({
+                'title': '备课', 'reply_state': 'soft_busy'}, 'gojo')
+            commute = activity_phone.profile_for_activity({
+                'title': '通勤', 'reply_state': 'soft_busy'}, 'gojo')
+        self.assertEqual(meeting.kind, 'meeting')
+        self.assertEqual((meeting.check_interval_min, meeting.check_interval_max), (3, 12))
+        self.assertAlmostEqual(meeting.quick_reply_probability, 0.62)
+        self.assertEqual((report.check_interval_min, report.check_interval_max), (9, 21))
+        self.assertAlmostEqual(report.quick_reply_probability, 0.58)
+        self.assertEqual((prep.check_interval_min, prep.check_interval_max), (10, 24))
+        self.assertAlmostEqual(prep.quick_reply_probability, 0.50)
+        self.assertEqual((commute.check_interval_min, commute.check_interval_max), (7, 19))
+        self.assertAlmostEqual(commute.quick_reply_probability, 0.46)
+
+    def test_soft_busy_rejects_hard_title_profiles_before_gojo_modifier(self):
+        import activity_phone
+        from characters_data._loader import load_core
+
+        behavior = load_core('gojo')['phone_behavior']
+        fake_chars = types.SimpleNamespace(
+            get_character=lambda cid: {'phone_behavior': behavior})
+        with patch.dict(sys.modules, {'characters': fake_chars}):
+            profiles = [
+                activity_phone.profile_for_activity({
+                    'title': title, 'reply_state': 'soft_busy'}, 'gojo')
+                for title in ('泡澡放空', '处理二级咒灵', '祓除二级咒灵')
+            ]
+        for profile in profiles:
+            self.assertEqual(profile.kind, 'soft_default')
+            self.assertEqual(profile.busy_state, 'soft_busy')
+            self.assertEqual(
+                (profile.check_interval_min, profile.check_interval_max),
+                (7, 24),
+            )
+            self.assertAlmostEqual(profile.quick_reply_probability, 0.44)
+
+    def test_hard_busy_and_free_ignore_character_modifier(self):
+        import activity_phone
+        fake_chars = types.SimpleNamespace(get_character=lambda cid: {
+            'phone_behavior': {
+                'check_interval_scale': 0.6,
+                'quick_reply_bonus': 0.8,
+                'activity_overrides': {
+                    'combat': {
+                        'check_interval_scale': 0.6,
+                        'quick_reply_bonus': 0.8,
+                    }
+                },
+            }
+        })
+        with patch.dict(sys.modules, {'characters': fake_chars}):
+            hard = activity_phone.profile_for_activity({
+                'title': '出任务', 'reply_state': 'hard_busy'}, 'anyone')
+            free = activity_phone.profile_for_activity({
+                'title': '开会后处理报告再出任务',
+                'reply_state': 'free'}, 'anyone')
+        self.assertEqual(hard, activity_phone.PROFILES['combat'])
+        self.assertEqual(free, activity_phone.PROFILES['free'])
+
+    def test_evaluate_due_phone_check_uses_modified_profile_once(self):
+        from characters_data._loader import load_core
+
+        behavior = load_core('gojo')['phone_behavior']
+        fake_chars = types.SimpleNamespace(
+            get_character=lambda cid: {'phone_behavior': behavior})
+        store = PhoneCheckStore()
+        now = datetime(2026, 9, 16, 14, 5, tzinfo=timezone.utc)
+        due = now + timedelta(minutes=9)
+        activity = {
+            'id': 7,
+            'start_time': '14:00',
+            'end_time': '15:00',
+            'title': '处理报告',
+            'reply_state': 'soft_busy',
+            'can_reply': False,
+            'character_id': 'gojo',
+        }
+        store.schedule_rows = [{
+            'id': 7, 'character_id': 'gojo', 'user_id': 'u1',
+            'sched_date': now.date(), 'start_time': '14:00',
+            'end_time': '15:00', 'title': '处理报告',
+            'can_reply': False, 'reply_state': 'soft_busy',
+        }]
+        draw = Mock(return_value=0.5)
+        with patch.dict(sys.modules, {'characters': fake_chars}), \
+             patch.object(db_schedule, 'get_conn',
+                          side_effect=lambda: FakeConn(store)), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (a[2], False)), \
+             patch.object(db_schedule.random, 'randint', return_value=9), \
+             patch.object(db_schedule.random, 'random', draw):
+            created = db_schedule.decide_phone_check(
+                'gojo', 'u1', now, activity,
+                source_event_id='evt-report', pending_text='在吗')
+            self.assertEqual(created['next_phone_check_at'], due)
+            decision = db_schedule.evaluate_due_phone_check(
+                created['opportunity_id'], due)
+        self.assertEqual(decision['action'], 'reply')
+        draw.assert_called_once()
+        src = Path(BACKEND, 'db_schedule.py').read_text(encoding='utf-8')
+        self.assertIn('profile_for_activity(activity, character_id)', src)
+        self.assertEqual(src.count('random.random() < reply_chance'), 1)
+        self.assertNotIn('quick_reply_bonus', src)
 
     def test_meeting_can_see_mid_activity_with_injected_rng(self):
         store = PhoneCheckStore()

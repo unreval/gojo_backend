@@ -164,15 +164,20 @@ def classify_activity_kind(title: str) -> str:
 
 def profile_for_title(title: str, reply_state: Optional[str] = None) -> ActivityPhoneProfile:
     kind = classify_activity_kind(title)
-    if kind and kind in PROFILES:
-        return PROFILES[kind]
     state = (reply_state or '').strip()
-    if state == 'hard_busy':
-        return PROFILES['combat']
-    if state == 'soft_busy':
-        return PROFILES['soft_default']
+    candidate = PROFILES.get(kind) if kind else None
     if state == 'free':
         return PROFILES['free']
+    if state == 'soft_busy':
+        if candidate and candidate.busy_state == 'soft_busy':
+            return candidate
+        return PROFILES['soft_default']
+    if state == 'hard_busy':
+        if candidate and candidate.busy_state == 'hard_busy':
+            return candidate
+        return PROFILES['combat']
+    if candidate:
+        return candidate
     return PROFILES['soft_default']
 
 
@@ -190,13 +195,20 @@ def apply_character_modifier(profile: ActivityPhoneProfile, character_id=None) -
                 extra = raw
     except Exception:
         extra = {}
+    settings = extra
+    overrides = extra.get('activity_overrides') if isinstance(extra, dict) else None
+    if isinstance(overrides, dict):
+        local = overrides.get(profile.kind)
+        if isinstance(local, dict):
+            settings = dict(extra)
+            settings.update(local)
     try:
-        scale = float(extra.get('check_interval_scale') or 1.0)
+        scale = float(settings.get('check_interval_scale') or 1.0)
     except (TypeError, ValueError):
         scale = 1.0
     scale = min(1.8, max(0.6, scale))
     try:
-        reply_bonus = float(extra.get('quick_reply_bonus') or 0.0)
+        reply_bonus = float(settings.get('quick_reply_bonus') or 0.0)
     except (TypeError, ValueError):
         reply_bonus = 0.0
     reply = min(0.85, max(0.15, profile.quick_reply_probability + reply_bonus))

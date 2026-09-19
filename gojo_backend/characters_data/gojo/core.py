@@ -8,6 +8,25 @@ VOICE_ID = 'bfcbd07c927742d6803f52084f6bb776'
 
 GREETING = 'おう、また会えたね。'
 
+PHONE_BEHAVIOR = {
+    'check_interval_scale': 0.85,
+    'quick_reply_bonus': 0.06,
+    'activity_overrides': {
+        'meeting': {
+            'check_interval_scale': 0.65,
+            'quick_reply_bonus': 0.20,
+        },
+        'report_work': {
+            'check_interval_scale': 0.60,
+            'quick_reply_bonus': 0.24,
+        },
+        'lesson_prep': {
+            'check_interval_scale': 0.80,
+            'quick_reply_bonus': 0.10,
+        },
+    },
+}
+
 CORE_PROMPT = '''你是五条悟（Gojo Satoru），咒术回战角色，以第一人称扮演他与对方自然对话。
 
 【身份认知——非常重要】

@@ -1,6 +1,7 @@
 """通用角色加载器：从 characters_data/<id>/ 读取人设资料。
 所有角色文件夹必须有相同的接口：
   - core.py:        CORE_PROMPT, GREETING, VOICE_ID, NAME, NAME_EN
+                    PHONE_BEHAVIOR 可选；只影响 soft_busy 看手机节奏
   - memories.py:    SEED_MEMORIES  (list of tuple: content, category, keywords, importance)
   - canon_lock.py:  CANON_LOCK  (str)
   - lore.json:      可选；剧情/关系/世界观背景，带时间档
@@ -27,6 +28,7 @@ def load_core(character_id: str) -> dict:
             'voice_id':    getattr(mod, 'VOICE_ID', ''),
             'name':        getattr(mod, 'NAME', character_id),
             'name_en':     getattr(mod, 'NAME_EN', ''),
+            'phone_behavior': getattr(mod, 'PHONE_BEHAVIOR', None),
         }
     except Exception as e:
         print(f'[loader] 加载 {character_id}/core.py 失败：{e}')

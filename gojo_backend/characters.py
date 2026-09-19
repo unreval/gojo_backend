@@ -80,9 +80,13 @@ def get_character(character_id: str):
     row = cur.fetchone()
     cur.close(); conn.close()
     if not row: return None
-    return {'id': row[0], 'name': row[1], 'name_en': row[2],
-            'avatar_url': row[3], 'voice_id': row[4],
-            'core_prompt': row[5], 'greeting': row[6]}
+    character = {'id': row[0], 'name': row[1], 'name_en': row[2],
+                 'avatar_url': row[3], 'voice_id': row[4],
+                 'core_prompt': row[5], 'greeting': row[6]}
+    core = load_core(character_id) if character_id in REGISTRY else None
+    if core and isinstance(core.get('phone_behavior'), dict):
+        character['phone_behavior'] = core['phone_behavior']
+    return character
 
 
 def list_characters():
