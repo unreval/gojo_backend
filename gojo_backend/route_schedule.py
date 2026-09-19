@@ -49,28 +49,39 @@ async def get_schedule(character_id: str = DEFAULT_CHARACTER_ID,
     })
 
 
+def schedule_now_payload(act, now):
+    """Runtime status for GET /schedule/now. Does not rewrite stored rows.
+
+    reply_state / busy use effective_reply_state. until stays the visual
+    schedule end_time so the block is not shortened to the busy window.
+    """
+    hhmm = now.strftime('%H:%M')
+    if not act:
+        return {
+            'busy': False,
+            'reply_state': 'free',
+            'activity': None,
+            'now': hhmm,
+        }
+    runtime = db_schedule.effective_reply_state(act, now)
+    return {
+        'busy': runtime != db_schedule.REPLY_FREE,
+        'reply_state': runtime,
+        'activity': act['title'],
+        'location': act.get('location', ''),
+        'note': act.get('note', ''),
+        'until': act['end_time'],
+        'now': hhmm,
+    }
+
+
 @router.get('/schedule/now')
 async def schedule_now(character_id: str = DEFAULT_CHARACTER_ID,
                        user_id: str = DEFAULT_USER):
     """他现在在干嘛、能不能回消息。前端可以拿来在聊天页顶部显示状态。"""
     now = datetime.now(CN_TZ)
     act = db_schedule.get_current_activity(character_id, user_id, now)
-    if not act:
-        return JSONResponse({
-            'busy': False,
-            'reply_state': 'free',
-            'activity': None,
-            'now': now.strftime('%H:%M'),
-        })
-    return JSONResponse({
-        'busy': act.get('reply_state') != 'free',
-        'reply_state': act.get('reply_state') or ('free' if act.get('can_reply') else 'hard_busy'),
-        'activity': act['title'],
-        'location': act.get('location', ''),
-        'note': act.get('note', ''),
-        'until': act['end_time'],
-        'now': now.strftime('%H:%M'),
-    })
+    return JSONResponse(schedule_now_payload(act, now))
 
 
 @router.post('/schedule/generate')

@@ -130,10 +130,21 @@ _TITLE_RULES = (
 )
 
 
-def busy_prompt_hint(activity) -> str:
-    """Prompt tone for the current activity. Soft and hard must not share copy."""
+def busy_prompt_hint(activity, now=None) -> str:
+    """Prompt tone for the current activity. Soft and hard must not share copy.
+
+    Pass `now` so runtime effective_reply_state is used. Stored reply_state
+    alone would keep injecting soft_busy copy after effective_busy_end.
+    Profiles are not consulted here.
+    """
     activity = activity or {}
     state = str(activity.get('reply_state') or '').strip()
+    if now is not None:
+        try:
+            from db_schedule import effective_reply_state
+            state = effective_reply_state(activity, now)
+        except Exception:
+            pass
     if state == 'hard_busy':
         return '\n★ 这段时间你没法看手机，暂时无法回复。'
     if state == 'soft_busy':

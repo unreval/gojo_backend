@@ -594,6 +594,52 @@ class DelayedReplyTests(unittest.TestCase):
                     'proactive:delayed_reply')
             )
 
+    def test_pending_bundle_replies_at_effective_busy_end(self):
+        store = PhoneCheckStore()
+        start = datetime(2026, 9, 19, 14, 5, tzinfo=timezone.utc)
+        due = datetime(2026, 9, 19, 14, 15, tzinfo=timezone.utc)
+        activity = {
+            **ACTIVITY,
+            'start_time': '14:00',
+            'end_time': '16:00',
+            'title': '处理报告',
+            'reply_state': 'soft_busy',
+            'effective_busy_minutes': 15,
+        }
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (a[2] if len(a) > 2 else due, False)), \
+             patch.object(db_schedule.random, 'randint', return_value=29):
+            created = db_schedule.decide_phone_check(
+                'gojo', 'u', start, activity,
+                source_event_id='e1', pending_text='在吗')
+        row = list(store.rows.values())[0]
+        self.assertLessEqual(created['next_phone_check_at'], due)
+        row['next_phone_check_at'] = created['next_phone_check_at']
+        row['check_state'] = 'pending'
+        row['resolved_at'] = None
+        store.schedule_rows = [{
+            'id': 7, 'character_id': 'gojo', 'user_id': 'u',
+            'sched_date': due.date(), 'start_time': '14:00', 'end_time': '16:00',
+            'title': '处理报告', 'can_reply': False, 'reply_state': 'soft_busy',
+            'effective_busy_minutes': 15,
+        }]
+        generate_calls = []
+
+        def generate_fn(bundle):
+            generate_calls.append(bundle)
+            return {'ok': True, 'messages': []}
+
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (a[2] if len(a) > 2 else due, False)), \
+             patch.object(db_schedule.random, 'random', return_value=0.99):
+            results = delayed_reply.process_due_phone_checks(
+                due, generate_fn=generate_fn)
+        self.assertEqual(results[0]['action'], 'replied')
+        self.assertEqual(len(generate_calls), 1)
+        self.assertEqual(row['check_state'], 'consumed')
+
 
 if __name__ == '__main__':
     unittest.main()

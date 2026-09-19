@@ -530,16 +530,20 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
         schedule_text = ''
         try:
             import db_schedule as _dbs
-            _act = _dbs.get_current_activity(character_id, user_id, datetime.now(CN_TZ))
+            _now = datetime.now(CN_TZ)
+            _act = _dbs.get_current_activity(character_id, user_id, _now)
             if _act:
                 _where = f'（在{_act["location"]}）' if _act.get('location') else ''
                 _note = f'\n你当时的想法：{_act["note"]}' if _act.get('note') else ''
                 _busy = ''
                 try:
                     from activity_phone import busy_prompt_hint
-                    _busy = busy_prompt_hint(_act)
+                    _busy = busy_prompt_hint(_act, _now)
                 except Exception:
-                    _busy = '' if _act.get('can_reply') else (
+                    _runtime = _dbs.effective_reply_state(_act, _now)
+                    _busy = '' if _runtime == 'free' else (
+                        '\n★ 这段时间你没法看手机，暂时无法回复。'
+                        if _runtime == 'hard_busy' else
                         '\n★ 这段时间你在忙，但偶尔能瞄一眼手机。语气可以简短一些。')
                 schedule_text = f'''
 

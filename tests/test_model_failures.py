@@ -331,6 +331,7 @@ class ImageFailureTests(unittest.TestCase):
         schedule = stub(
             'db_schedule',
             get_current_activity=Mock(return_value=activity),
+            effective_reply_state=Mock(return_value='hard_busy'),
             decide_phone_check=Mock(return_value={
                 'reply_state': 'hard_busy',
                 'seen': False,

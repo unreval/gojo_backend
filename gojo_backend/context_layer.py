@@ -1132,9 +1132,12 @@ def _support_items(user_id, character_id, user_message, hot_messages, temporal_s
             note = f'\n你当时的想法：{act["note"]}' if act.get('note') else ''
             try:
                 from activity_phone import busy_prompt_hint
-                busy = busy_prompt_hint(act)
+                busy = busy_prompt_hint(act, now)
             except Exception:
-                busy = '' if act.get('can_reply') else (
+                runtime = _dbs.effective_reply_state(act, now)
+                busy = '' if runtime == 'free' else (
+                    '\n★ 这段时间你没法看手机，暂时无法回复。'
+                    if runtime == 'hard_busy' else
                     '\n★ 这段时间你在忙，但偶尔能瞄一眼手机。语气可以简短一些。'
                 )
             schedule_text = (

@@ -497,17 +497,50 @@ class FakeCursor:
             return
 
         if compact.startswith('SELECT id, start_time, end_time, title'):
-            character_id, user_id, sched_date, hhmm, hhmm2 = params
+            def _item_tuple(r):
+                return (
+                    r['id'], r['start_time'], r['end_time'], r['title'],
+                    r.get('location', ''), r.get('note', ''),
+                    r.get('can_reply', False), r.get('reply_state', ''),
+                    r.get('effective_busy_minutes'),
+                )
+            if len(params) >= 5:
+                character_id, user_id, sched_date, hhmm, hhmm2 = params[:5]
+                matched = []
+                for r in self.store.schedule_rows:
+                    if (r['character_id'] == character_id and r['user_id'] == user_id
+                            and r['sched_date'] == sched_date
+                            and r['start_time'] <= hhmm < r['end_time']):
+                        matched.append(_item_tuple(r))
+                self._many = matched
+                self._one = matched[0] if matched else None
+                return
+            if len(params) == 3:
+                character_id, user_id, sched_date = params
+                matched = [
+                    _item_tuple(r) for r in self.store.schedule_rows
+                    if (r['character_id'] == character_id
+                        and r['user_id'] == user_id
+                        and r['sched_date'] == sched_date)
+                ]
+                matched.sort(key=lambda item: item[1])
+                self._many = matched
+                self._one = matched[0] if matched else None
+                return
+
+        if compact.startswith('SELECT start_time, end_time, can_reply'):
+            character_id, user_id, sched_date, hhmm = params
             matched = []
             for r in self.store.schedule_rows:
                 if (r['character_id'] == character_id and r['user_id'] == user_id
                         and r['sched_date'] == sched_date
-                        and r['start_time'] <= hhmm < r['end_time']):
+                        and r['end_time'] > hhmm):
                     matched.append((
-                        r['id'], r['start_time'], r['end_time'], r['title'],
-                        r.get('location', ''), r.get('note', ''),
+                        r['start_time'], r['end_time'],
                         r.get('can_reply', False), r.get('reply_state', ''),
+                        r.get('effective_busy_minutes'),
                     ))
+            matched.sort(key=lambda item: item[0])
             self._many = matched
             self._one = matched[0] if matched else None
             return
@@ -1147,6 +1180,418 @@ class ActivityPhoneProfileTests(unittest.TestCase):
         self.assertIn('当前无法使用手机', src)
         self.assertNotIn('完全走不开', src)
         self.assertNotRegex(src, r"soft_busy' \? '走不开")
+
+    def test_schedule_now_card_uses_runtime_api_not_item_math(self):
+        src = Path(ROOT, 'app', 'schedule', 'index.tsx').read_text(encoding='utf-8')
+        self.assertIn('/schedule/now', src)
+        self.assertIn('nowCardFromApi', src)
+        self.assertIn('nowCardFromItems', src)
+        self.assertIn('scheduleNowFailed', src)
+        self.assertIn('nowCard.replyState', src)
+        self.assertIn('replyState(it)', src)
+        self.assertNotRegex(src, r'start_time \+ .*effective_busy')
+        self.assertNotRegex(src, r'effective_busy_minutes\s*\+')
+        map_idx = src.find('items.map')
+        now_card_idx = src.find('nowCard.replyState')
+        self.assertGreater(map_idx, 0)
+        self.assertGreater(now_card_idx, 0)
+        self.assertLess(now_card_idx, map_idx)
+
+
+class EffectiveBusyWindowTests(unittest.TestCase):
+    ACTIVITY = {
+        'id': 11,
+        'start_time': '14:00',
+        'end_time': '16:00',
+        'title': '处理报告',
+        'location': '办公室',
+        'note': '15分钟解决',
+        'reply_state': 'soft_busy',
+        'can_reply': False,
+        'effective_busy_minutes': 15,
+        'character_id': 'gojo',
+    }
+
+    def _now(self, hour, minute):
+        return datetime(2026, 9, 19, hour, minute, tzinfo=timezone.utc)
+
+    def _schedule_row(self, **overrides):
+        row = {
+            'id': 11, 'character_id': 'gojo', 'user_id': 'u1',
+            'sched_date': self._now(14, 0).date(),
+            'start_time': '14:00', 'end_time': '16:00',
+            'title': '处理报告', 'location': '办公室',
+            'note': '15分钟解决', 'can_reply': False,
+            'reply_state': 'soft_busy', 'effective_busy_minutes': 15,
+        }
+        row.update(overrides)
+        return row
+
+    def test_case1_soft_busy_before_effective_end(self):
+        now = self._now(14, 5)
+        self.assertEqual(
+            db_schedule.effective_reply_state(self.ACTIVITY, now), 'soft_busy')
+        busy_end = db_schedule.effective_busy_end(self.ACTIVITY, now)
+        self.assertEqual(busy_end, self._now(14, 15))
+        with patch.object(db_schedule, 'get_current_activity',
+                          return_value=dict(self.ACTIVITY)), \
+             patch.object(db_schedule, 'get_next_free_time',
+                          return_value='14:15'), \
+             patch.object(db_schedule, 'decide_phone_check',
+                          return_value={
+                              'reply_state': 'soft_busy',
+                              'seen': False,
+                              'can_reply': False,
+                              'activity': dict(self.ACTIVITY),
+                              'opportunity_id': 1,
+                              'next_phone_check_at': self._now(14, 15),
+                              'seen_at': None,
+                          }) as decide:
+            decision = reply_availability.check_reply_availability(
+                'gojo', 'u1', now=now)
+        decide.assert_called_once()
+        self.assertEqual(decision['reply_state'], 'soft_busy')
+        self.assertFalse(decision['can_reply'])
+
+    def test_case2_effective_free_keeps_stored_schedule_row(self):
+        now = self._now(14, 15)
+        activity = dict(self.ACTIVITY)
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'free')
+        with patch.object(db_schedule, 'get_current_activity',
+                          return_value=activity), \
+             patch.object(db_schedule, 'decide_phone_check') as decide:
+            decision = reply_availability.check_reply_availability(
+                'gojo', 'u1', now=now)
+        decide.assert_not_called()
+        self.assertEqual(decision['reply_state'], 'free')
+        self.assertTrue(decision['can_reply'])
+        self.assertEqual(decision['activity']['start_time'], '14:00')
+        self.assertEqual(decision['activity']['end_time'], '16:00')
+        self.assertEqual(decision['activity']['reply_state'], 'soft_busy')
+        self.assertEqual(decision['activity']['effective_busy_minutes'], 15)
+
+    def test_case3_next_phone_check_clamped_to_effective_end(self):
+        now = self._now(14, 5)
+        cap = self._now(14, 15)
+        with patch.object(db_schedule.random, 'randint', return_value=29):
+            at = db_schedule.sample_next_phone_check_at(now, self.ACTIVITY)
+        self.assertLessEqual(at, cap)
+        self.assertEqual(at, cap)
+
+    def test_case4_evaluate_replies_at_effective_busy_end(self):
+        store = PhoneCheckStore()
+        start = self._now(14, 5)
+        due = self._now(14, 15)
+        activity = dict(self.ACTIVITY)
+        store.schedule_rows = [self._schedule_row()]
+        with patch.object(db_schedule, 'get_conn',
+                          side_effect=lambda: FakeConn(store)), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (a[2], False)), \
+             patch.object(db_schedule.random, 'randint', return_value=29), \
+             patch.object(db_schedule.random, 'random', return_value=0.99):
+            created = db_schedule.decide_phone_check(
+                'gojo', 'u1', start, activity,
+                source_event_id='evt-1', pending_text='在吗')
+            self.assertLessEqual(created['next_phone_check_at'], due)
+            decision = db_schedule.evaluate_due_phone_check(
+                created['opportunity_id'], due)
+        self.assertEqual(decision['action'], 'reply')
+
+    def test_case5_null_minutes_keeps_legacy_behavior(self):
+        now = self._now(14, 5)
+        activity = dict(self.ACTIVITY)
+        activity['effective_busy_minutes'] = None
+        activity['note'] = '15分钟解决'
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'soft_busy')
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, self._now(14, 15)),
+            'soft_busy')
+        self.assertEqual(
+            db_schedule.effective_busy_end(activity, now), self._now(16, 0))
+        with patch.object(db_schedule.random, 'randint', return_value=29):
+            at = db_schedule.sample_next_phone_check_at(now, activity)
+        self.assertEqual(at, self._now(14, 34))
+
+        store = PhoneCheckStore()
+        due = self._now(14, 15)
+        store.schedule_rows = [self._schedule_row(effective_busy_minutes=None)]
+        with patch.object(db_schedule, 'get_conn',
+                          side_effect=lambda: FakeConn(store)), \
+             patch.object(db_schedule, 'sample_next_phone_check_at',
+                          return_value=due), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (a[2], False)), \
+             patch.object(db_schedule.random, 'random', return_value=0.99):
+            created = db_schedule.decide_phone_check(
+                'gojo', 'u1', now, activity,
+                source_event_id='evt-null', pending_text='在吗')
+            decision = db_schedule.evaluate_due_phone_check(
+                created['opportunity_id'], due)
+        self.assertEqual(decision['action'], 'defer')
+
+    def test_case6_hard_busy_is_not_shortened(self):
+        now = self._now(14, 15)
+        activity = dict(self.ACTIVITY)
+        activity['reply_state'] = 'hard_busy'
+        activity['title'] = '出任务'
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'hard_busy')
+        self.assertEqual(
+            db_schedule.effective_busy_end(activity, now), self._now(16, 0))
+        with patch.object(db_schedule, 'get_current_activity',
+                          return_value=activity), \
+             patch.object(db_schedule, 'get_next_free_time',
+                          return_value='16:00'), \
+             patch.object(db_schedule, 'decide_phone_check',
+                          return_value={
+                              'reply_state': 'hard_busy',
+                              'seen': False,
+                              'can_reply': False,
+                              'activity': activity,
+                              'opportunity_id': 9,
+                              'next_phone_check_at': None,
+                              'seen_at': None,
+                          }) as decide:
+            decision = reply_availability.check_reply_availability(
+                'gojo', 'u1', now=now)
+        decide.assert_called_once()
+        self.assertEqual(decision['reply_state'], 'hard_busy')
+        self.assertFalse(decision['can_reply'])
+
+    def test_case7_free_unchanged(self):
+        now = self._now(14, 5)
+        activity = dict(self.ACTIVITY)
+        activity['reply_state'] = 'free'
+        activity['can_reply'] = True
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'free')
+        self.assertEqual(
+            db_schedule.effective_busy_end(activity, now), self._now(16, 0))
+        with patch.object(db_schedule, 'get_current_activity',
+                          return_value=activity), \
+             patch.object(db_schedule, 'decide_phone_check') as decide:
+            decision = reply_availability.check_reply_availability(
+                'gojo', 'u1', now=now)
+        decide.assert_not_called()
+        self.assertEqual(decision['reply_state'], 'free')
+        self.assertTrue(decision['can_reply'])
+
+    def test_case8_minutes_longer_than_block_clamps_to_end_time(self):
+        now = self._now(14, 5)
+        activity = dict(self.ACTIVITY)
+        activity['effective_busy_minutes'] = 180
+        self.assertEqual(
+            db_schedule.effective_busy_end(activity, now), self._now(16, 0))
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, self._now(14, 15)),
+            'soft_busy')
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, self._now(16, 0)),
+            'free')
+
+    def test_case9_invalid_minutes_fall_back_to_end_time(self):
+        now = self._now(14, 15)
+        for raw in (0, -5, 'abc', True, 1.5, '', '15分钟'):
+            activity = dict(self.ACTIVITY)
+            activity['effective_busy_minutes'] = raw
+            self.assertIsNone(db_schedule.parse_effective_busy_minutes(raw))
+            self.assertEqual(
+                db_schedule.effective_busy_end(activity, now), self._now(16, 0))
+            self.assertEqual(
+                db_schedule.effective_reply_state(activity, now), 'soft_busy')
+
+    def test_case10_visible_schedule_keeps_original_times(self):
+        store = PhoneCheckStore()
+        store.schedule_rows = [self._schedule_row()]
+        with patch.object(db_schedule, 'get_conn',
+                          side_effect=lambda: FakeConn(store)):
+            items = db_schedule.get_schedule(
+                'gojo', 'u1', self._now(14, 5).date())
+            current = db_schedule.get_current_activity(
+                'gojo', 'u1', self._now(14, 15))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['start_time'], '14:00')
+        self.assertEqual(items[0]['end_time'], '16:00')
+        self.assertEqual(items[0]['reply_state'], 'soft_busy')
+        self.assertEqual(items[0]['effective_busy_minutes'], 15)
+        self.assertEqual(current['start_time'], '14:00')
+        self.assertEqual(current['end_time'], '16:00')
+        self.assertEqual(current['reply_state'], 'soft_busy')
+        self.assertEqual(current['note'], '15分钟解决')
+
+    def test_sanitize_keeps_minutes_on_soft_busy_strips_hard_and_free(self):
+        schedule_engine = load_schedule_engine()
+        items = schedule_engine._sanitize([
+            {
+                'start_time': '14:00',
+                'end_time': '16:00',
+                'title': '处理报告',
+                'note': '15分钟解决',
+                'reply_state': 'soft_busy',
+                'effective_busy_minutes': 15,
+            },
+            {
+                'start_time': '16:00',
+                'end_time': '18:00',
+                'title': '出任务',
+                'reply_state': 'hard_busy',
+                'effective_busy_minutes': 15,
+            },
+            {
+                'start_time': '18:00',
+                'end_time': '19:00',
+                'title': '吃饭',
+                'reply_state': 'free',
+                'effective_busy_minutes': 10,
+            },
+        ])
+        by_title = {item['title']: item for item in items}
+        self.assertEqual(by_title['处理报告']['end_time'], '16:00')
+        self.assertEqual(by_title['处理报告']['effective_busy_minutes'], 15)
+        self.assertIsNone(by_title['出任务']['effective_busy_minutes'])
+        self.assertIsNone(by_title['吃饭']['effective_busy_minutes'])
+
+    def test_note_text_is_not_a_timing_source(self):
+        now = self._now(14, 15)
+        activity = dict(self.ACTIVITY)
+        activity['effective_busy_minutes'] = None
+        activity['note'] = '15分钟解决，很快就好'
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'soft_busy')
+        src = Path(BACKEND, 'db_schedule.py').read_text(encoding='utf-8')
+        self.assertNotIn('分钟解决', src)
+        self.assertIn(
+            'ADD COLUMN IF NOT EXISTS effective_busy_minutes', src)
+
+    def test_schedule_prompt_documents_optional_minutes(self):
+        src = Path(BACKEND, 'schedule_engine.py').read_text(encoding='utf-8')
+        self.assertIn('effective_busy_minutes', src)
+        self.assertIn('禁止给所有 soft_busy 都填一个很短的数字', src)
+
+    def test_1420_runtime_status_and_prompt_are_free(self):
+        import activity_phone
+        import route_schedule
+
+        now = self._now(14, 20)
+        activity = dict(self.ACTIVITY)
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'free')
+        with patch.object(db_schedule, 'get_current_activity',
+                          return_value=activity), \
+             patch.object(db_schedule, 'decide_phone_check') as decide:
+            decision = reply_availability.check_reply_availability(
+                'gojo', 'u1', now=now)
+        decide.assert_not_called()
+        self.assertTrue(decision['can_reply'])
+        self.assertEqual(decision['reply_state'], 'free')
+
+        hint = activity_phone.busy_prompt_hint(activity, now)
+        self.assertEqual(hint, '')
+        self.assertNotIn('在忙', hint)
+        self.assertNotIn('瞄一眼', hint)
+        self.assertNotIn('简短', hint)
+
+        payload = route_schedule.schedule_now_payload(activity, now)
+        self.assertFalse(payload['busy'])
+        self.assertEqual(payload['reply_state'], 'free')
+        self.assertEqual(payload['until'], '16:00')
+        self.assertEqual(payload['activity'], '处理报告')
+
+    def test_1420_timeline_row_keeps_stored_soft_busy(self):
+        store = PhoneCheckStore()
+        store.schedule_rows = [self._schedule_row()]
+        with patch.object(db_schedule, 'get_conn',
+                          side_effect=lambda: FakeConn(store)):
+            items = db_schedule.get_schedule(
+                'gojo', 'u1', self._now(14, 20).date())
+            current = db_schedule.get_current_activity(
+                'gojo', 'u1', self._now(14, 20))
+        self.assertEqual(items[0]['start_time'], '14:00')
+        self.assertEqual(items[0]['end_time'], '16:00')
+        self.assertEqual(items[0]['reply_state'], 'soft_busy')
+        self.assertEqual(items[0]['effective_busy_minutes'], 15)
+        self.assertEqual(current['reply_state'], 'soft_busy')
+        self.assertEqual(current['end_time'], '16:00')
+
+    def test_null_minutes_prompt_and_now_stay_soft_busy(self):
+        import activity_phone
+        import route_schedule
+
+        now = self._now(14, 20)
+        activity = dict(self.ACTIVITY)
+        activity['effective_busy_minutes'] = None
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'soft_busy')
+        hint = activity_phone.busy_prompt_hint(activity, now)
+        self.assertIn('偶尔能瞄一眼手机', hint)
+        payload = route_schedule.schedule_now_payload(activity, now)
+        self.assertTrue(payload['busy'])
+        self.assertEqual(payload['reply_state'], 'soft_busy')
+        self.assertEqual(payload['until'], '16:00')
+
+    def test_hard_busy_prompt_and_now_last_until_end_time(self):
+        import activity_phone
+        import route_schedule
+
+        now = self._now(14, 20)
+        activity = dict(self.ACTIVITY)
+        activity['reply_state'] = 'hard_busy'
+        activity['title'] = '出任务'
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'hard_busy')
+        hint = activity_phone.busy_prompt_hint(activity, now)
+        self.assertIn('没法看手机', hint)
+        self.assertNotIn('偶尔能瞄一眼手机', hint)
+        payload = route_schedule.schedule_now_payload(activity, now)
+        self.assertTrue(payload['busy'])
+        self.assertEqual(payload['reply_state'], 'hard_busy')
+        self.assertEqual(payload['until'], '16:00')
+
+    def test_busy_hint_call_sites_pass_now(self):
+        context_src = Path(BACKEND, 'context_layer.py').read_text(encoding='utf-8')
+        prompt_src = Path(BACKEND, 'prompt.py').read_text(encoding='utf-8')
+        route_src = Path(BACKEND, 'route_schedule.py').read_text(encoding='utf-8')
+        self.assertIn('busy_prompt_hint(act, now)', context_src)
+        self.assertIn('busy_prompt_hint(_act, _now)', prompt_src)
+        self.assertIn('effective_reply_state(act, now)', route_src)
+        self.assertNotRegex(
+            context_src, r'busy_prompt_hint\(act\)\s*$')
+
+    def test_effective_busy_end_is_stable_across_query_clock(self):
+        expected = self._now(14, 15)
+        for clock in (
+                self._now(14, 5),
+                self._now(14, 20),
+                datetime(2026, 9, 19, 14, 20, 45, 123456, tzinfo=timezone.utc)):
+            self.assertEqual(
+                db_schedule.effective_busy_end(self.ACTIVITY, clock), expected)
+
+    def test_overnight_effective_busy_end_does_not_clamp_to_same_day_end(self):
+        now = datetime(2026, 9, 19, 23, 5, tzinfo=timezone.utc)
+        activity = {
+            'start_time': '23:00',
+            'end_time': '01:00',
+            'reply_state': 'soft_busy',
+            'can_reply': False,
+            'effective_busy_minutes': 15,
+        }
+        busy_end = db_schedule.effective_busy_end(activity, now)
+        self.assertEqual(
+            busy_end, datetime(2026, 9, 19, 23, 15, tzinfo=timezone.utc))
+        self.assertEqual(
+            db_schedule.effective_reply_state(activity, now), 'soft_busy')
+        self.assertEqual(
+            db_schedule.effective_reply_state(
+                activity, datetime(2026, 9, 19, 23, 15, tzinfo=timezone.utc)),
+            'free')
+        too_long = dict(activity)
+        too_long['effective_busy_minutes'] = 180
+        self.assertEqual(
+            db_schedule.effective_busy_end(too_long, now),
+            datetime(2026, 9, 20, 1, 0, tzinfo=timezone.utc))
 
 
 if __name__ == '__main__':

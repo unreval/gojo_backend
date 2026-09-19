@@ -212,11 +212,21 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
    "hard_busy" = 真的不能看手机:上课、出任务、战斗、洗澡、驾驶
    开会/备课/写报告不是 hard_busy。hard_busy 一天最多 4 段,总共不超 4 小时。soft_busy 不算 hard_busy。
 
-10. 每天要不一样。
+10. effective_busy_minutes（可选，仅 soft_busy）:
+   日程块可以很长，但真正没法正常回复的时间可能很短。
+   只有当你判断「真正集中处理、不太能回消息」的阶段明显短于整段日程时，才填写正整数分钟。
+   例如 14:00-16:00 处理报告、预计15分钟写完 → "effective_busy_minutes": 15
+   不知道、或整段都会分心忙 → null / 不填。
+   禁止给所有 soft_busy 都填一个很短的数字。
+   禁止用这个字段缩短 hard_busy。free 不需要这个字段。
+   填写后不要改 start_time / end_time，视觉日程仍是原来的整段。
+
+11. 每天要不一样。
 
 【输出:严格 JSON 一行,不要解释】
 {{"schedule":[
-  {{"start_time":"07:00","end_time":"07:45","title":"5-15字","location":"具体地点","note":"碎碎念","reply_state":"free"}},
+  {{"start_time":"07:00","end_time":"07:45","title":"5-15字","location":"具体地点","note":"碎碎念","reply_state":"free","effective_busy_minutes":null}},
+  {{"start_time":"14:00","end_time":"16:00","title":"处理报告","location":"办公室","note":"15分钟解决","reply_state":"soft_busy","effective_busy_minutes":15}},
   ...
 ]}}'''
 
@@ -382,6 +392,13 @@ def _sanitize(raw_items, character_id=None):
         if id(it) not in keep_ids:
             it['reply_state'] = db_schedule.REPLY_SOFT_BUSY
             it['can_reply'] = False
+
+    for it in ok:
+        if it.get('reply_state') == db_schedule.REPLY_SOFT_BUSY:
+            it['effective_busy_minutes'] = db_schedule.parse_effective_busy_minutes(
+                it.get('effective_busy_minutes'))
+        else:
+            it['effective_busy_minutes'] = None
 
     return ok
 

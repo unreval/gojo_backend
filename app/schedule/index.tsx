@@ -17,6 +17,8 @@ import { C, SERVER_URL } from '../../constants/theme';
 
 const FIXED_USER_ID = 'user_mofpiyd7442ia7';
 
+type ReplyState = 'free' | 'soft_busy' | 'hard_busy';
+
 interface SchedItem {
   id: number;
   start_time: string;
@@ -25,7 +27,24 @@ interface SchedItem {
   location: string;
   note: string;
   can_reply: boolean;
-  reply_state?: 'free' | 'soft_busy' | 'hard_busy';
+  reply_state?: ReplyState;
+  effective_busy_minutes?: number | null;
+}
+
+interface ScheduleNowStatus {
+  busy?: boolean;
+  reply_state?: string;
+  activity?: string | null;
+  location?: string;
+  until?: string;
+  now?: string;
+}
+
+interface NowCard {
+  title: string;
+  location: string;
+  until: string;
+  replyState: ReplyState;
 }
 
 interface CharacterMeta { id: string; name: string; }
@@ -43,17 +62,45 @@ function isNow(item: SchedItem, nowMin: number): boolean {
   return s <= e ? (nowMin >= s && nowMin < e) : (nowMin >= s || nowMin < e);
 }
 
-function replyState(item: SchedItem): 'free' | 'soft_busy' | 'hard_busy' {
+function replyState(item: SchedItem): ReplyState {
   return item.reply_state || (item.can_reply ? 'free' : 'hard_busy');
 }
 
-function replyStateLabel(state: 'free' | 'soft_busy' | 'hard_busy'): string {
+function apiReplyState(status: ScheduleNowStatus): ReplyState {
+  const raw = status.reply_state;
+  if (raw === 'free' || raw === 'soft_busy' || raw === 'hard_busy') return raw;
+  return status.busy ? 'soft_busy' : 'free';
+}
+
+function nowCardFromApi(status: ScheduleNowStatus): NowCard | null {
+  const title = (status.activity || '').trim();
+  if (!title) return null;
+  return {
+    title,
+    location: status.location || '',
+    until: status.until || '',
+    replyState: apiReplyState(status),
+  };
+}
+
+function nowCardFromItems(items: SchedItem[], nowMin: number): NowCard | null {
+  const current = items.find(it => isNow(it, nowMin));
+  if (!current) return null;
+  return {
+    title: current.title,
+    location: current.location,
+    until: current.end_time,
+    replyState: replyState(current),
+  };
+}
+
+function replyStateLabel(state: ReplyState): string {
   if (state === 'free') return '有空搭理你';
   if (state === 'soft_busy') return '在忙，但可能会看手机';
   return '暂时无法查看消息';
 }
 
-function replyStateColor(state: 'free' | 'soft_busy' | 'hard_busy'): string {
+function replyStateColor(state: ReplyState): string {
   if (state === 'free') return C.income;
   if (state === 'soft_busy') return '#F59E0B';
   return '#EF4444';
@@ -66,6 +113,8 @@ export default function ScheduleScreen() {
   const [items, setItems] = useState<SchedItem[]>([]);
   const [serverNow, setServerNow] = useState<string>('');
   const [dateStr, setDateStr] = useState<string>('');
+  const [scheduleNow, setScheduleNow] = useState<ScheduleNowStatus | null>(null);
+  const [scheduleNowFailed, setScheduleNowFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -84,11 +133,11 @@ export default function ScheduleScreen() {
   };
 
   const loadSchedule = async (cid: string) => {
+    const params = { character_id: cid, user_id: FIXED_USER_ID };
+    // 先拉全天时间线（当天没有时后端会现场生成），再拉 runtime 当前状态。
     try {
-      // 后端在当天没数据时会现场生成,可能要几秒
       const res = await axios.get(`${SERVER_URL}/schedule`, {
-        params: { character_id: cid, user_id: FIXED_USER_ID },
-        timeout: 45000,
+        params, timeout: 45000,
       });
       setItems(res.data?.items || []);
       setServerNow(res.data?.now || '');
@@ -96,6 +145,17 @@ export default function ScheduleScreen() {
     } catch (e: any) {
       console.warn('[schedule] 拉日程失败', e?.message);
       setItems([]);
+    }
+    try {
+      const nowRes = await axios.get(`${SERVER_URL}/schedule/now`, {
+        params, timeout: 8000,
+      });
+      setScheduleNow(nowRes.data || null);
+      setScheduleNowFailed(false);
+    } catch (e: any) {
+      console.warn('[schedule] 拉当前状态失败', e?.message);
+      setScheduleNow(null);
+      setScheduleNowFailed(true);
     }
   };
 
@@ -137,8 +197,9 @@ export default function ScheduleScreen() {
   };
 
   const nowMin = serverNow ? toMin(serverNow) : -1;
-  const current = items.find(it => isNow(it, nowMin));
-  const currentReplyState = current ? replyState(current) : 'free';
+  const nowCard = scheduleNowFailed
+    ? nowCardFromItems(items, nowMin)
+    : (scheduleNow ? nowCardFromApi(scheduleNow) : nowCardFromItems(items, nowMin));
   const activeName = chars.find(c => c.id === activeId)?.name || activeId;
 
   return (
@@ -177,18 +238,18 @@ export default function ScheduleScreen() {
         </ScrollView>
       )}
 
-      {/* 此刻在做什么 */}
-      {current && (
+      {/* 此刻在做什么：状态以 /schedule/now runtime 为准；失败才回退 items */}
+      {nowCard && (
         <View style={s.nowCard}>
-          <View style={[s.nowDot, { backgroundColor: replyStateColor(currentReplyState) }]} />
+          <View style={[s.nowDot, { backgroundColor: replyStateColor(nowCard.replyState) }]} />
           <View style={{ flex: 1 }}>
             <Text style={s.nowLabel}>
-              此刻 · {replyStateLabel(currentReplyState)}
+              此刻 · {replyStateLabel(nowCard.replyState)}
             </Text>
-            <Text style={s.nowTitle} numberOfLines={1}>{current.title}</Text>
-            {!!current.location && <Text style={s.nowLoc}>{current.location}</Text>}
+            <Text style={s.nowTitle} numberOfLines={1}>{nowCard.title}</Text>
+            {!!nowCard.location && <Text style={s.nowLoc}>{nowCard.location}</Text>}
           </View>
-          <Text style={s.nowTime}>~{current.end_time}</Text>
+          {!!nowCard.until && <Text style={s.nowTime}>~{nowCard.until}</Text>}
         </View>
       )}
 

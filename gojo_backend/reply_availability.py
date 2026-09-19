@@ -6,6 +6,8 @@ This module turns that into the concrete per-message behavior:
   - soft_busy: shared next_phone_check_at per activity; new messages only
     append pending inbox; consume check only when due; defer schedules the next one
   - hard_busy: persist pending context, no phone-check roll
+  Runtime availability uses effective_busy_end / effective_reply_state:
+  a long soft_busy block may stop blocking replies before its visual end_time.
 
 The durable source of truth for pending busy-period messages is
 char_phone_check (including event_meta / visual_summary for images).
@@ -121,7 +123,7 @@ def check_reply_availability(character_id, user_id, source_event_id='',
 
     now = now or datetime.now(CN_TZ)
     activity = db_schedule.get_current_activity(character_id, user_id, now)
-    if not activity or _activity_state(activity) == 'free':
+    if not activity or db_schedule.effective_reply_state(activity, now) == 'free':
         return {
             'reply_state': 'free',
             'seen': True,

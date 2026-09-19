@@ -5,6 +5,8 @@
   上课/出任务/洗澡/驾驶是 hard_busy：没法看手机。
   开会/备课/处理报告是 soft_busy：可能瞄一眼。
   探店/逛街/吃饭/发呆是 free：能正常回。
+  soft_busy 可另存 effective_busy_minutes：只缩短回复系统的忙碌窗，
+  不改 UI 上的 start_time / end_time。NULL 表示整段都按 reply_state。
 
 和用户自己的 tasks 表完全无关:
   tasks        —— 【用户】的待办,用户自己排
@@ -15,6 +17,9 @@
     上课/出任务/洗澡/驾驶 → hard_busy(没法看手机)
     开会/备课/处理报告 → soft_busy(可能瞄一眼)
     探店/逛街/查账/吃饭/发呆 → free(能摸鱼回消息)
+  可选字段 effective_busy_minutes:
+    仅 soft_busy。真正无法正常回复的分钟数。NULL=整段 start–end 都忙。
+    不改 start_time / end_time，也不替代 note。
 """
 from datetime import datetime, date as _date, timedelta
 import json
@@ -69,6 +74,7 @@ def init_schedule_table():
         note TEXT DEFAULT '',            -- 角色口吻的一句碎碎念
         can_reply BOOLEAN DEFAULT TRUE,  -- 这段时间能不能回消息
         reply_state TEXT DEFAULT 'free', -- free / soft_busy / hard_busy
+        effective_busy_minutes INTEGER,  -- soft_busy 实际无法正常回复的分钟数；NULL=整段
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     cur.execute('''CREATE TABLE IF NOT EXISTS char_phone_check (
@@ -99,6 +105,7 @@ def init_schedule_table():
     )''')
     try:
         cur.execute('ALTER TABLE char_schedule ADD COLUMN IF NOT EXISTS reply_state TEXT DEFAULT \'free\'')
+        cur.execute('ALTER TABLE char_schedule ADD COLUMN IF NOT EXISTS effective_busy_minutes INTEGER')
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS event_meta TEXT DEFAULT \'\'')
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS fallback_promise_id INTEGER')
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS next_phone_check_at TIMESTAMPTZ')
@@ -139,9 +146,119 @@ def can_reply_from_state(reply_state):
     return normalize_reply_state(reply_state) == REPLY_FREE
 
 
+def parse_effective_busy_minutes(value):
+    """Return a positive minute count, or None for missing/invalid values.
+
+    Only a real duration is accepted. 0, negatives, bools, and non-numeric
+    strings fall back to NULL so old rows keep whole-block busy behavior.
+    """
+    if value is None or value == '':
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        if value <= 0 or not value.is_integer():
+            return None
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        number = int(text)
+    except (TypeError, ValueError):
+        try:
+            parsed = float(text)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0 or not parsed.is_integer():
+            return None
+        number = int(parsed)
+    return number if number > 0 else None
+
+
+def _activity_time_bounds(activity, now):
+    """Map HH:MM start/end onto now's calendar date and timezone.
+
+    `now` is only a date/tz context. Seconds on now are discarded.
+    Overnight blocks (end_time <= start_time) place end_at on the next day
+    so clamp cannot snap to an earlier same-day clock time.
+    """
+    start_at = _hhmm_to_dt(now, activity.get('start_time') or '')
+    end_at = _hhmm_to_dt(now, activity.get('end_time') or '')
+    if end_at <= start_at:
+        end_at = end_at + timedelta(days=1)
+    return start_at, end_at
+
+
+def effective_busy_end(activity, now):
+    """When this activity stops blocking replies.
+
+    Visual schedule end_time is unchanged. For soft_busy with a valid
+    effective_busy_minutes, the busy window is
+    min(start_time + minutes, end_time). Otherwise the original end_time.
+    hard_busy / free / NULL minutes never shorten.
+
+    `now` supplies calendar date and timezone only. The same activity on
+    the same day yields the same busy_end regardless of query clock time.
+    """
+    activity = activity or {}
+    if not activity.get('end_time') or now is None:
+        return None
+    try:
+        start_at, end_at = _activity_time_bounds(activity, now)
+    except Exception:
+        return None
+    state = normalize_reply_state(
+        activity.get('reply_state'), activity.get('can_reply', True))
+    minutes = parse_effective_busy_minutes(activity.get('effective_busy_minutes'))
+    if state != REPLY_SOFT_BUSY or minutes is None:
+        return end_at
+    try:
+        busy_end = start_at + timedelta(minutes=minutes)
+    except Exception:
+        return end_at
+    if busy_end > end_at:
+        return end_at
+    return busy_end
+
+
+def effective_reply_state(activity, now):
+    """Runtime availability state. Does not rewrite stored reply_state."""
+    if not activity:
+        return REPLY_FREE
+    stored = normalize_reply_state(
+        activity.get('reply_state'), activity.get('can_reply', True))
+    if stored != REPLY_SOFT_BUSY:
+        return stored
+    if parse_effective_busy_minutes(activity.get('effective_busy_minutes')) is None:
+        return stored
+    busy_end = effective_busy_end(activity, now)
+    if busy_end is not None and now >= busy_end:
+        return REPLY_FREE
+    return stored
+
+
+def _schedule_item_from_row(row):
+    reply_state = normalize_reply_state(row[7], row[6])
+    minutes = parse_effective_busy_minutes(row[8]) if len(row) > 8 else None
+    return {
+        'id': row[0],
+        'start_time': row[1],
+        'end_time': row[2],
+        'title': row[3],
+        'location': row[4] or '',
+        'note': row[5] or '',
+        'reply_state': reply_state,
+        'can_reply': can_reply_from_state(reply_state),
+        'effective_busy_minutes': minutes,
+    }
+
+
 def save_schedule(character_id, user_id, sched_date, items):
-    """写入一天的日程。items = [{start_time,end_time,title,location,note,can_reply}]
-    同一天重复调用会先清空再写,避免混杂。返回写入条数。"""
+    """写入一天的日程。items = [{start_time,end_time,title,location,note,can_reply,reply_state,effective_busy_minutes}]
+    同一天重复调用会先清空再写,避免混杂。返回写入条数。start_time/end_time 原样保存。"""
     if not items:
         return 0
     conn = get_conn()
@@ -159,17 +276,23 @@ def save_schedule(character_id, user_id, sched_date, items):
                 continue
             reply_state = normalize_reply_state(
                 it.get('reply_state'), it.get('can_reply', True))
+            busy_minutes = parse_effective_busy_minutes(
+                it.get('effective_busy_minutes'))
+            if reply_state != REPLY_SOFT_BUSY:
+                busy_minutes = None
             cur.execute(
                 '''INSERT INTO char_schedule
                      (character_id, user_id, sched_date, start_time, end_time,
-                      title, location, note, can_reply, reply_state)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                      title, location, note, can_reply, reply_state,
+                      effective_busy_minutes)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT DO NOTHING''',
                 (character_id, user_id, sched_date, st, et, title[:80],
                  (it.get('location') or '')[:40],
                  (it.get('note') or '')[:120],
                  can_reply_from_state(reply_state),
-                 reply_state)
+                 reply_state,
+                 busy_minutes)
             )
             n += cur.rowcount
         conn.commit()
@@ -186,7 +309,8 @@ def get_schedule(character_id, user_id, sched_date):
     cur = conn.cursor()
     cur.execute(
         '''SELECT id, start_time, end_time, title, location, note,
-                  can_reply, COALESCE(reply_state, '')
+                  can_reply, COALESCE(reply_state, ''),
+                  effective_busy_minutes
            FROM char_schedule
            WHERE character_id=%s AND user_id=%s AND sched_date=%s
            ORDER BY start_time ASC''',
@@ -194,12 +318,7 @@ def get_schedule(character_id, user_id, sched_date):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [{
-        'id': r[0], 'start_time': r[1], 'end_time': r[2],
-        'title': r[3], 'location': r[4] or '', 'note': r[5] or '',
-        'reply_state': normalize_reply_state(r[7], r[6]),
-        'can_reply': can_reply_from_state(normalize_reply_state(r[7], r[6])),
-    } for r in rows]
+    return [_schedule_item_from_row(r) for r in rows]
 
 
 def get_current_activity(character_id, user_id, now: datetime):
@@ -212,7 +331,8 @@ def get_current_activity(character_id, user_id, now: datetime):
     cur = conn.cursor()
     cur.execute(
         '''SELECT id, start_time, end_time, title, location, note,
-                  can_reply, COALESCE(reply_state, '')
+                  can_reply, COALESCE(reply_state, ''),
+                  effective_busy_minutes
            FROM char_schedule
            WHERE character_id=%s AND user_id=%s AND sched_date=%s
              AND start_time <= %s AND end_time > %s
@@ -233,12 +353,7 @@ def get_current_activity(character_id, user_id, now: datetime):
         return None
     cur.close()
     conn.close()
-    return {
-        'id': r[0], 'start_time': r[1], 'end_time': r[2],
-        'title': r[3], 'location': r[4] or '', 'note': r[5] or '',
-        'reply_state': normalize_reply_state(r[7], r[6]),
-        'can_reply': can_reply_from_state(normalize_reply_state(r[7], r[6])),
-    }
+    return _schedule_item_from_row(r)
 
 
 def get_next_free_time(character_id, user_id, now: datetime):
@@ -251,7 +366,8 @@ def get_next_free_time(character_id, user_id, now: datetime):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        '''SELECT start_time, end_time, can_reply, COALESCE(reply_state, '')
+        '''SELECT start_time, end_time, can_reply, COALESCE(reply_state, ''),
+                  effective_busy_minutes
            FROM char_schedule
            WHERE character_id=%s AND user_id=%s AND sched_date=%s
              AND end_time > %s
@@ -262,10 +378,23 @@ def get_next_free_time(character_id, user_id, now: datetime):
     conn.close()
     if not rows:
         return None
-    for st, et, can_reply, reply_state in rows:
-        if can_reply_from_state(normalize_reply_state(reply_state, can_reply)):
+    for st, et, can_reply, reply_state, minutes in rows:
+        item = {
+            'start_time': st,
+            'end_time': et,
+            'can_reply': can_reply,
+            'reply_state': reply_state,
+            'effective_busy_minutes': minutes,
+        }
+        if effective_reply_state(item, now) == REPLY_FREE:
             # 已经在这个时段里(理论上不该发生)就用现在,否则用它的开始时间
             return max(st, hhmm) if st <= hhmm else st
+        stored = normalize_reply_state(reply_state, can_reply)
+        if (stored == REPLY_SOFT_BUSY
+                and parse_effective_busy_minutes(minutes) is not None):
+            busy_end = effective_busy_end(item, now)
+            if busy_end is not None and busy_end > now:
+                return busy_end.strftime('%H:%M')
     # 后面全忙 → 最后一段结束时
     return rows[-1][1]
 
@@ -283,7 +412,8 @@ def _find_hard_busy_covering(character_id, user_id, when: datetime):
     try:
         cur.execute(
             '''SELECT id, start_time, end_time, title, location, note,
-                      can_reply, COALESCE(reply_state, '')
+                      can_reply, COALESCE(reply_state, ''),
+                      effective_busy_minutes
                FROM char_schedule
                WHERE character_id=%s AND user_id=%s AND sched_date=%s
                  AND start_time <= %s AND end_time > %s
@@ -294,13 +424,9 @@ def _find_hard_busy_covering(character_id, user_id, when: datetime):
         cur.close()
         conn.close()
     for r in rows:
-        state = normalize_reply_state(r[7], r[6])
-        if state == REPLY_HARD_BUSY:
-            return {
-                'id': r[0], 'start_time': r[1], 'end_time': r[2],
-                'title': r[3], 'location': r[4] or '', 'note': r[5] or '',
-                'reply_state': state, 'can_reply': False,
-            }
+        item = _schedule_item_from_row(r)
+        if item['reply_state'] == REPLY_HARD_BUSY:
+            return item
     return None
 
 
@@ -328,6 +454,27 @@ def sample_next_phone_check_at(now: datetime, activity, after=None):
     delay = random.randint(lo, hi)
     candidate = base + timedelta(minutes=delay)
     end_at = _hhmm_to_dt(now, activity['end_time'])
+    cap = end_at
+    shortened = False
+    try:
+        minutes = parse_effective_busy_minutes(
+            (activity or {}).get('effective_busy_minutes'))
+        state = normalize_reply_state(
+            (activity or {}).get('reply_state'),
+            (activity or {}).get('can_reply', True))
+        busy_end = effective_busy_end(activity, now)
+        if (state == REPLY_SOFT_BUSY and minutes is not None
+                and busy_end is not None):
+            cap = busy_end
+            shortened = True
+    except Exception:
+        cap = end_at
+        shortened = False
+    if shortened:
+        # soft_busy 实际忙碌窗：不允许排到 effective_busy_end 之后
+        if candidate > cap:
+            candidate = cap
+        return candidate
     if candidate >= end_at:
         # 抽到活动结束后：尽量落在结束前 1 分钟；若已经来不及就用 end_at
         candidate = max(base + timedelta(minutes=1), end_at - timedelta(minutes=1))
@@ -618,7 +765,8 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
             hhmm_now = now.strftime('%H:%M')
             cur.execute(
                 '''SELECT id, start_time, end_time, title, location, note,
-                          can_reply, COALESCE(reply_state, '')
+                          can_reply, COALESCE(reply_state, ''),
+                          effective_busy_minutes
                    FROM char_schedule
                    WHERE character_id=%s AND user_id=%s AND sched_date=%s
                      AND start_time <= %s AND end_time > %s
@@ -626,25 +774,23 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
                 (character_id, user_id, now.date(), hhmm_now, hhmm_now))
             current_row = cur.fetchone()
             if current_row:
-                current = {
-                    'id': current_row[0],
-                    'start_time': current_row[1],
-                    'end_time': current_row[2],
-                    'title': current_row[3],
-                    'reply_state': normalize_reply_state(
-                        current_row[7], current_row[6]),
-                    'can_reply': can_reply_from_state(
-                        normalize_reply_state(current_row[7], current_row[6])),
-                }
+                current = _schedule_item_from_row(current_row)
         except Exception:
             current = None
+        if (current
+                and current.get('start_time') == activity.get('start_time')
+                and current.get('end_time') == activity.get('end_time')):
+            activity['effective_busy_minutes'] = current.get(
+                'effective_busy_minutes')
+            activity['can_reply'] = current.get('can_reply', False)
         currently_free = (not current) or (
-            normalize_reply_state(
-                current.get('reply_state'), current.get('can_reply', True))
-            == REPLY_FREE)
+            effective_reply_state(current, now) == REPLY_FREE)
+        effective_busy_over = (
+            claimed.get('reply_state') == REPLY_SOFT_BUSY
+            and effective_reply_state(activity, now) == REPLY_FREE)
 
         reply_now = True
-        if (not window_ended and not currently_free
+        if (not window_ended and not currently_free and not effective_busy_over
                 and claimed.get('reply_state') == REPLY_SOFT_BUSY):
             reply_chance = SOFT_BUSY_REPLY_CHANCE
             try:
