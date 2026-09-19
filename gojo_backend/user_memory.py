@@ -544,14 +544,39 @@ def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
     return result
 
 
-def get_short_memory_for_prompt(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
+def get_short_memory_for_prompt(user_id, n=6, character_id=DEFAULT_CHARACTER_ID,
+                                exclude_event_ids=None, exclude_messages=None):
     """角色经历层 → Anthropic messages。
 
     short_memory.content / chat_log.text 是用户原文/媒体占位；
     【图片摘要】只在这里按 event_meta.visual_summary 动态拼出。
     已删除事件不会进入 prompt。
     """
-    rows = _merge_recent_context(user_id, character_id, n, SHORT_MEMORY_HOURS)
+    excluded = {
+        _normalize_event_id(item) for item in (exclude_event_ids or [])
+        if _normalize_event_id(item)
+    }
+    excluded_pairs = [
+        (_prompt_role(role), content or '')
+        for role, content in (exclude_messages or [])
+    ]
+    limit = _short_limit(n)
+    fetch_limit = _short_limit(
+        limit + len(excluded) + len(excluded_pairs))
+    rows = _merge_recent_context(
+        user_id, character_id, fetch_limit, SHORT_MEMORY_HOURS)
+    drop_indexes = set()
+    for role, content in excluded_pairs:
+        for index in range(len(rows) - 1, -1, -1):
+            item = rows[index]
+            if item['role'] == role and item['content'] == content:
+                drop_indexes.add(index)
+                break
+    rows = [
+        item for index, item in enumerate(rows)
+        if index not in drop_indexes and item.get('event_id') not in excluded
+    ]
+    rows = rows[-limit:]
     now = datetime.now(CN_TZ)
     today = now.date()
     out = []
@@ -1595,6 +1620,20 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
         existing_bond = get_bond_memories(user_id, character_id, limit=20)
         bond_text = '\n'.join(f'- {r[1]}' for r in existing_bond) if existing_bond else '（暂无）'
 
+        recent_messages = get_short_memory_for_prompt(
+            user_id, n=6, character_id=character_id,
+            exclude_event_ids=source_ids,
+            exclude_messages=[
+                ('user', user_text),
+                ('assistant', assistant_text),
+            ],
+        )
+        recent_lines = []
+        for message in recent_messages:
+            speaker = '她说' if message.get('role') == 'user' else f'{char_name}回复'
+            recent_lines.append(f'{speaker}：{message.get("content") or ""}')
+        recent_text = '\n'.join(recent_lines) if recent_lines else '（暂无）'
+
         # ★ 该角色世界里的重要人物 —— 让 Haiku 知道名字对应的身份,别把"杰"猜成学生
         relations_block = get_relations_text(character_id)
         relations_intro = (f'\n{relations_block}\n' if relations_block else '')
@@ -1620,10 +1659,22 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
 {temporal_intro}
 
 【已记录的她的事实】
+（查重区：只能用于查重、merge、resolution，不能用于解析当前 turn 的指代）
 {existing_text}
 
 【已记录的羁绊记忆】
+（查重区：只能用于查重、merge、resolution，不能用于解析当前 turn 的指代）
 {bond_text}
+
+【最近对话上下文】
+（仅包含当前 turn 之前最近约 3 轮对话）
+{recent_text}
+
+【上下文使用边界】
+1. 最近对话上下文可以用于解析当前 turn 的省略和指代，例如“这个”“那个”“明天拍给你看”“刚才那个”。
+2. 【已记录的她的事实】和【已记录的羁绊记忆】只能用于查重、merge、resolution，禁止拿它们猜当前 turn 没有明确说出的对象。
+3. 如果最近对话上下文也无法确定对象，只能泛化（例如“她答应明天拍照片给我看”）或填 null，绝不能从旧记忆补全对象。
+4. 禁止因为旧 bond 里有“谷子”就把当前未明确的对象脑补成谷子。
 
 【这次对话】
 她说：{user_text}

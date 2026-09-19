@@ -577,6 +577,55 @@ class RawEventLayerTests(unittest.TestCase):
             and row.get('status') == 'active'
         ]
 
+    def capture_extractor_prompt(self, prior_events, user_text, assistant_text,
+                                 existing_bond=''):
+        for event_id, role, content in prior_events:
+            self.raw_events.append_raw_event(
+                'u', 'gojo', event_id=event_id, role=role, content=content)
+        self.raw_events.append_raw_event(
+            'u', 'gojo', event_id='current-user', role='user', content=user_text)
+        self.raw_events.append_raw_event(
+            'u', 'gojo', event_id='current-assistant', role='assistant',
+            content=assistant_text)
+
+        payload = json.dumps({
+            'user_fact': None,
+            'bond': None,
+            'told': None,
+            'character_self_claim': None,
+            'bond_merge': None,
+            'bond_resolution': None,
+        }, ensure_ascii=False)
+        captured = {}
+
+        def fake_chat(*_args, **kwargs):
+            captured['prompt'] = kwargs['messages'][0]['content']
+            return payload, None
+
+        bonds = [
+            (1, existing_bond, datetime.now(timezone.utc))
+        ] if existing_bond else []
+        with patch.object(self.user_memory, 'plan_memory_corrections', return_value=[]), \
+             patch.object(self.user_memory, 'get_long_memory', return_value=[]), \
+             patch.object(self.user_memory, 'get_bond_memories', return_value=bonds), \
+             patch.object(self.user_memory, '_all_character_names', return_value=set()), \
+             patch.object(self.user_memory, 'get_relations_text', return_value=''), \
+             patch('ai_client.create_chat', side_effect=fake_chat), \
+             patch('characters.get_character', return_value={'name': '五条'}), \
+             patch('memory_lifecycle.reactivate_lifecycle_memories', return_value=0), \
+             patch('smart_recall.reinforce_mentioned_facts'):
+            ok = self.user_memory.extract_and_save_memory(
+                'u', user_text, assistant_text, 'gojo',
+                source_event_id='current-user',
+                source_event_ids=['current-user'],
+            )
+        self.assertTrue(ok)
+        return captured['prompt']
+
+    @staticmethod
+    def prompt_section(prompt, heading, next_heading):
+        return prompt.split(heading, 1)[1].split(next_heading, 1)[0]
+
     def test_text_writes_one_canonical_raw_event(self):
         inserted = self.user_memory.save_user_short_memory_once(
             'u', '你好', 'gojo', source_event_id='evt-text-1')
@@ -627,6 +676,64 @@ class RawEventLayerTests(unittest.TestCase):
         self.assertEqual(len(rendered), 1)
         self.assertIn('【图片摘要】图片里有一只猫', rendered[0]['content'])
         self.assertIn('📷 [图片]', rendered[0]['content'])
+
+    def test_extractor_recent_context_resolves_reference_without_old_bond(self):
+        old_bond = '她答应明天拍谷子照片给我看'
+        prompt = self.capture_extractor_prompt(
+            [
+                ('prior-user-1', 'user', '我今天买了甜点'),
+                ('prior-assistant-1', 'assistant', '买了什么？'),
+                ('prior-user-2', 'user', '这个蛋糕看起来很好吃'),
+                ('prior-assistant-2', 'assistant', '那给我看看。'),
+            ],
+            '只能明天拍照给您看了',
+            '写真で見せるだけ？',
+            existing_bond=old_bond,
+        )
+        bond_section = self.prompt_section(
+            prompt, '【已记录的羁绊记忆】', '【最近对话上下文】')
+        recent_section = self.prompt_section(
+            prompt, '【最近对话上下文】', '【上下文使用边界】')
+        self.assertIn('这个蛋糕看起来很好吃', recent_section)
+        self.assertIn(old_bond, bond_section)
+        self.assertNotIn(old_bond, recent_section)
+        self.assertIn('禁止拿它们猜当前 turn 没有明确说出的对象', prompt)
+
+    def test_extractor_forbids_old_bond_antecedent_without_prior_object(self):
+        prompt = self.capture_extractor_prompt(
+            [
+                ('prior-user-1', 'user', '今天有点忙'),
+                ('prior-assistant-1', 'assistant', '先忙你的。'),
+            ],
+            '明天拍照给你看',
+            '分かった。',
+            existing_bond='她以前答应拍谷子照片给我看',
+        )
+        recent_section = self.prompt_section(
+            prompt, '【最近对话上下文】', '【上下文使用边界】')
+        self.assertNotIn('谷子', recent_section)
+        self.assertIn('只能泛化（例如“她答应明天拍照片给我看”）或填 null', prompt)
+        self.assertIn('禁止因为旧 bond 里有“谷子”', prompt)
+
+    def test_extractor_current_turn_appears_only_in_current_section(self):
+        user_text = '明天拍照给你看'
+        assistant_text = '写真で見せるだけ？'
+        prompt = self.capture_extractor_prompt(
+            [
+                ('prior-user-1', 'user', '这个蛋糕颜色很漂亮'),
+                ('prior-assistant-1', 'assistant', '見せて。'),
+            ],
+            user_text,
+            assistant_text,
+        )
+        recent_section = self.prompt_section(
+            prompt, '【最近对话上下文】', '【上下文使用边界】')
+        current_section = self.prompt_section(
+            prompt, '【这次对话】', '【四类记忆/证据的定义')
+        self.assertNotIn(user_text, recent_section)
+        self.assertNotIn(assistant_text, recent_section)
+        self.assertEqual(current_section.count(user_text), 1)
+        self.assertEqual(current_section.count(assistant_text), 1)
 
     def test_worker_retry_does_not_duplicate_derived_memory(self):
         event_id = 'evt-worker'
