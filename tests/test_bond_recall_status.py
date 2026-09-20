@@ -355,6 +355,7 @@ class BondExtractorResolutionTests(unittest.TestCase):
                 'replaces': [OLD_GACHA_BOND],
                 'content': None,
                 'reason': 'completed',
+                'evidence_quote': '我抽到了两个系列',
             },
         }, ensure_ascii=False)
         with patch.object(user_memory, 'plan_memory_corrections', return_value=[]), \

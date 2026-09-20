@@ -35,7 +35,9 @@ import anthropic
 import hashlib
 import json
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
 from utils import extract_json
@@ -793,7 +795,8 @@ def _loosely_matches(a: str, b: str) -> bool:
 
     LLM 在 bond_merge.replaces 里复述旧记忆时经常有出入,
     严格匹配会让合并请求全部落空。这里放宽到"大致是那条"就行,
-    误配的风险由 merge_bond_memories 里"新内容不能比旧的短"那道防线兜住。
+    误配的风险由 merge_bond_memories 里"每条旧记忆都要保留信号"的
+    防线兜住；字数只能是弱信号，不能单独判定语义丢失。
     """
     if not a or not b:
         return False
@@ -941,7 +944,13 @@ def save_bond_memory(user_id, character_id, kind, content, source_event_ids=None
     return True
 
 
-def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
+def _merge_retains_target_signal(new_content, old_content):
+    """Require evidence of every merged fragment without treating length as truth."""
+    return _loosely_matches(new_content, old_content)
+
+
+def merge_bond_memories(user_id, character_id, kind, replaces, new_content,
+                        source_event_ids=None):
     """★ 记忆合并:把几条零散的旧记忆替换成一条更完整的。
 
     场景:同一件事分几次聊,库里存成 3-5 条碎片
@@ -953,7 +962,7 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
     安全限制(长期使用必须严格,删错东西比漏记更糟):
       1. 一次最多替换 3 条
       2. 每条 replaces 必须在库里真实存在(用相似度匹配,允许 LLM 复述有出入)
-      3. 新内容必须【不短于】被替换内容里最长的那条 —— 防止越合并信息越少
+      3. 新内容必须对每条被替换记忆保留可匹配的信息信号；允许语义压缩
       4. 匹配不到的 replaces 直接忽略,不影响其他条目
       5. 全过程打日志,可追溯
 
@@ -964,6 +973,7 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
     replaces = [r for r in replaces if isinstance(r, str) and r.strip()][:3]
     if not replaces:
         return False, 0
+    source_ids = _source_ids_from_refs(source_event_ids)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -981,7 +991,7 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
         # ★ 这里用【宽松匹配】,不用 _too_similar ——
         #   LLM 复述旧记忆时常有出入(漏字、改标点、换语序),
         #   严格匹配会导致合并请求全部落空。
-        #   宽松没关系:后面还有"不能信息缩水"那道防线兜着。
+        #   宽松没关系:后面还会确认新内容保留了每个旧目标的信息信号。
         targets = []
         for want in replaces:
             best = None
@@ -1000,12 +1010,34 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
             cur.close(); conn.close()
             return False, 0
 
-        # 防信息缩水:新内容不能比被替换的任何一条更短
+        # 字数是弱信号：短句可以完整压缩长句，不能单独否决 merge。
         longest_old = max(len(c) for _i, c in targets)
         if len(new_content) < longest_old:
-            print(f'[{user_id}] ❌ 合并被拒:新内容({len(new_content)}字)比旧的({longest_old}字)还短,可能丢信息')
+            print(
+                f'[{user_id}] 合并内容较短({len(new_content)}<{longest_old})，'
+                '继续检查每条旧记忆的保留信号'
+            )
+
+        missing = [
+            old for _mid, old in targets
+            if not _merge_retains_target_signal(new_content, old)
+        ]
+        if missing:
+            print(
+                f'[{user_id}] ❌ 合并被拒:无法确认新内容保留 '
+                f'{len(missing)} 条旧记忆的信息'
+            )
             cur.close(); conn.close()
             return False, 0
+
+        # This is the last provenance check before replacing old rows. A
+        # deleted selected user source must not trigger a destructive merge.
+        if source_ids:
+            import raw_events
+            if not raw_events.sources_are_active(
+                    source_ids, user_id, character_id):
+                print(f'[{user_id}] skip merge: required source deleted')
+                return False, 0
 
         ids = [i for i, _c in targets]
         cur.execute('DELETE FROM bond_memory WHERE id = ANY(%s)', (ids,))
@@ -1035,6 +1067,16 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content):
     finally:
         cur.close()
         conn.close()
+
+    try:
+        if source_ids:
+            import raw_events
+            if not raw_events.sources_are_active(source_ids, user_id, character_id):
+                print(f'[{user_id}] skip merge provenance link: required source deleted')
+            else:
+                raw_events.link_memory_sources('bond_memory', new_id, source_ids)
+    except Exception:
+        pass
 
     notify_memory_changed('bond_memory', row_id=new_id, content=new_content)
     return True, deleted
@@ -1380,6 +1422,330 @@ def _short_excerpt(text, limit=160):
     return re.sub(r'\s+', ' ', str(text or '')).strip()[:limit]
 
 
+_MAX_PREVIOUS_CANONICAL_USER_EVIDENCE_EVENTS = 2
+_CANONICAL_USER_EVIDENCE_HOURS = 24
+_ROLEPLAY_MARKERS = (
+    '剧本', '人设', '设定', '扮演', '角色扮演', 'cosplay', 'roleplay',
+    'role-play', 'ロールプレイ', 'ロールプレー', 'なりきり', '台本',
+)
+_STABLE_SELF_CLAIM_RE = re.compile(
+    r'(一向|向来|通常|总是|习惯|风格|性格|原则|我这个人|'
+    r'不擅长|擅长|不会轻易|会直接|一直)'
+)
+_USER_ASSERTS_CHARACTER_HISTORY_RE = re.compile(
+    r'(?:你|您|あなた|君|お前|you).{0,12}'
+    r'(?:之前|以前|上次|曾经|明明|本来|前に|以前|この前|before)?.{0,12}'
+    r'(?:答应|承诺|说过|约过|約束|言った|promise(?:d)?|said)'
+)
+
+
+def _compact_evidence(text):
+    """Normalize display-only differences while preserving meaningful Unicode."""
+    normalized = unicodedata.normalize('NFKC', str(text or '')).casefold()
+    return ''.join(
+        ch for ch in normalized
+        if not unicodedata.category(ch).startswith(('P', 'Z', 'C'))
+    )
+
+
+def _evidence_quote(item):
+    if not isinstance(item, dict):
+        return ''
+    return _clean_content(item.get('evidence_quote'))
+
+
+def _evidence_events(source):
+    """Normalize canonical evidence without introducing a second representation."""
+    if isinstance(source, str):
+        return [{'event_id': '', 'content': source}]
+    out = []
+    for event in source or []:
+        if not isinstance(event, dict):
+            continue
+        content = str(event.get('content') or '')
+        if not content:
+            continue
+        event_id = str(event.get('event_id') or '').strip()
+        out.append({'event_id': event_id, 'content': content})
+    return out
+
+
+def _candidate_evidence_event_ids(item, events, primary_event_id):
+    """Validate the exact canonical user events an extractor says it used."""
+    known = {
+        event['event_id']: event for event in events
+        if event.get('event_id')
+    }
+    if not known:
+        return []
+
+    requested = item.get('evidence_event_ids') if isinstance(item, dict) else None
+    if requested is None:
+        # Single-event output from an older extractor remains safe: infer only
+        # the event that contains its verbatim anchor. Multi-event summaries
+        # must name their sources explicitly so their provenance is retained.
+        quote = _compact_evidence(_evidence_quote(item))
+        ids = [
+            event_id for event_id, event in known.items()
+            if quote and quote in _compact_evidence(event['content'])
+        ]
+    elif not isinstance(requested, list):
+        return None
+    else:
+        ids = []
+        for value in requested:
+            event_id = str(value or '').strip()
+            if event_id and event_id not in ids:
+                ids.append(event_id)
+
+    if not ids or any(event_id not in known for event_id in ids):
+        return None
+    if primary_event_id and primary_event_id not in ids:
+        return None
+    return ids
+
+
+def _has_faithful_evidence(user_id, item, source, label, primary_event_id=None):
+    """Return canonical provenance for a candidate with a real source anchor."""
+    quote = _evidence_quote(item)
+    compact_quote = _compact_evidence(quote)
+    if not compact_quote:
+        print(f'[{user_id}] ❌ {label} 拒绝（缺少原文证据锚点）：{quote}')
+        return None
+
+    events = _evidence_events(source)
+    event_ids = _candidate_evidence_event_ids(item, events, primary_event_id)
+    if event_ids is None:
+        print(f'[{user_id}] ❌ {label} 拒绝（evidence_event_ids 不指向本轮 canonical 用户事件）')
+        return None
+    selected = [
+        event for event in events
+        if not event_ids or event.get('event_id') in event_ids
+    ]
+    if not any(compact_quote in _compact_evidence(event['content']) for event in selected):
+        print(f'[{user_id}] ❌ {label} 拒绝（证据不在权威原文中）：{quote}')
+        return None
+    return {
+        'event_ids': event_ids,
+        'events': selected,
+        'compact_quote': compact_quote,
+    }
+
+
+def _has_japanese_kana(text):
+    return any(
+        '\u3040' <= ch <= '\u30ff' for ch in str(text or '')
+    )
+
+
+def _is_faithful_compression(user_id, content, evidence, label):
+    """Require a conservative, language-neutral support signal for summaries.
+
+    The quote is a provenance anchor, not a dictionary of allowed meanings.
+    For same-script text, require an actual shared phrase between the candidate
+    and its selected canonical evidence. Japanese-to-Chinese summaries cannot
+    be judged by character overlap, so they need selected canonical context
+    beyond the quote anchor itself (another selected event or more text in its
+    source event) plus the extractor's conservative schema instruction.
+    """
+    compact_content = _compact_evidence(content)
+    source_text = ''.join(event['content'] for event in evidence['events'])
+    compact_source = _compact_evidence(source_text)
+    if not compact_content or not compact_source:
+        return False
+    if _has_japanese_kana(content) != _has_japanese_kana(source_text):
+        if any(
+                _compact_evidence(event['content']) != evidence['compact_quote']
+                for event in evidence['events']):
+            return True
+        print(
+            f'[{user_id}] ❌ {label} 拒绝（跨语言 quote 没有额外 canonical 上下文）：'
+            f'{source_text}'
+        )
+        return False
+    shared = SequenceMatcher(
+        None, compact_content, compact_source, autojunk=False
+    ).find_longest_match().size
+    min_shared = 2 if min(len(compact_content), len(compact_source)) <= 4 else 3
+    if shared < min_shared:
+        print(
+            f'[{user_id}] ❌ {label} 拒绝（canonical evidence 无法支持该压缩）：'
+            f'{content}'
+        )
+        return False
+    return True
+
+
+def _looks_like_question(text):
+    raw = str(text or '')
+    compact = _compact_evidence(raw)
+    return (
+        '?' in raw or '？' in raw
+        or bool(re.search(r'(能不能|可不可以|要不要|会不会|是不是|有没有)', compact))
+        or compact.endswith(('吗', '么', '呢', 'か'))
+    )
+
+
+def _looks_like_roleplay(text):
+    compact = _compact_evidence(text)
+    return any(marker in compact for marker in _ROLEPLAY_MARKERS)
+
+
+def _valid_durable_bond(user_id, content, char_name, item,
+                        canonical_user_events, primary_event_id=None,
+                        allow_existing_memory=False):
+    """Accept only a current, user-grounded shared event as a durable bond."""
+    if not _valid_bond(user_id, content, char_name):
+        return None
+    evidence = _has_faithful_evidence(
+        user_id, item, canonical_user_events, 'bond', primary_event_id)
+    if not evidence:
+        return None
+    if (not allow_existing_memory
+            and not _is_faithful_compression(user_id, content, evidence, 'bond')):
+        return None
+    quote = _evidence_quote(item)
+    if _looks_like_question(quote) or _looks_like_roleplay(quote + content):
+        print(f'[{user_id}] ❌ bond 拒绝（单轮提问或 roleplay）：{content}')
+        return None
+    if _USER_ASSERTS_CHARACTER_HISTORY_RE.search(quote):
+        print(f'[{user_id}] ❌ bond 拒绝（用户对角色旧话的断言不是已验证历史）：{content}')
+        return None
+    if content.startswith('我') and not content.startswith(('我和她', '我们')):
+        print(f'[{user_id}] ❌ bond 拒绝（角色单次自述不能成为关系事实）：{content}')
+        return None
+    if char_name and content.startswith(char_name):
+        print(f'[{user_id}] ❌ bond 拒绝（角色单次自述不能成为关系事实）：{content}')
+        return None
+    if content.startswith(('她问', '我问', '我们聊')):
+        print(f'[{user_id}] ❌ bond 拒绝（聊天过程不是 durable event）：{content}')
+        return None
+    return evidence
+
+
+def _valid_stable_character_self_claim(user_id, content, item, assistant_text):
+    """Keep only explicit, general self-model evidence; never a one-turn excuse."""
+    if not _looks_like_character_self_claim(content):
+        return False
+    if not _has_faithful_evidence(
+            user_id, item, assistant_text, 'character_self_claim'):
+        return False
+    quote = _evidence_quote(item)
+    if (_looks_like_question(quote) or _looks_like_roleplay(quote + content)
+            or not _STABLE_SELF_CLAIM_RE.search(content)):
+        print(f'[{user_id}] ❌ self-claim 拒绝（非稳定自我模型）：{content}')
+        return False
+    return True
+
+
+def _canonical_turn_sources(user_id, character_id, source_event_ids,
+                            primary_event_id, user_text, assistant_text):
+    """Prefer existing chat_log provenance without creating another event store."""
+    result = {
+        'user_text': user_text,
+        'assistant_text': assistant_text,
+        'user_is_canonical': False,
+        'assistant_is_canonical': False,
+        'canonical_user_events': [],
+    }
+    if not source_event_ids:
+        result['canonical_user_events'] = [
+            {'event_id': '', 'content': user_text}
+        ] if user_text else []
+        return result
+    import raw_events
+    getter = getattr(raw_events, 'get_active_events_by_ids', None)
+    if not callable(getter):
+        raise raw_events.SourceValidityError('canonical source reader unavailable')
+
+    events = getter(user_id, character_id, source_event_ids)
+    by_id = {
+        str(event.get('event_id') or ''): event
+        for event in events if isinstance(event, dict)
+    }
+    primary = by_id.get(str(primary_event_id or ''))
+    if not primary or str(primary.get('role') or '') != 'user' or not primary.get('content'):
+        # No active row is not permission to trust the copied job payload. It
+        # may simply be waiting for its canonical commit, so the queue retries
+        # it a bounded number of times; explicit deletion was handled earlier.
+        raise raw_events.SourceValidityError('canonical primary user event unavailable')
+
+    result['user_text'] = str(primary['content'])
+    result['user_is_canonical'] = True
+    canonical_users = [{
+        'event_id': str(primary.get('event_id') or ''),
+        'content': result['user_text'],
+    }]
+    for event in events:
+        role = str(event.get('role') or '')
+        content = str(event.get('content') or '')
+        if role == 'assistant' and content:
+            result['assistant_text'] = content
+            result['assistant_is_canonical'] = True
+
+    # A short confirmation can complete one of the two immediately preceding
+    # user turns. The raw-event query enforces the existing chat_log scope,
+    # active status, strict temporal ordering, and 24-hour bound; never use
+    # arbitrary user rows carried alongside the job's primary source ID.
+    prior_getter = getattr(raw_events, 'get_previous_active_user_events', None)
+    if not callable(prior_getter):
+        raise raw_events.SourceValidityError(
+            'previous canonical evidence reader unavailable')
+    prior_events = prior_getter(
+        user_id, character_id, primary_event_id,
+        n=_MAX_PREVIOUS_CANONICAL_USER_EVIDENCE_EVENTS,
+        hours=_CANONICAL_USER_EVIDENCE_HOURS,
+    )
+    known_ids = {item['event_id'] for item in canonical_users}
+    prior = []
+    for event in prior_events:
+        if str(event.get('role') or '') != 'user':
+            continue
+        event_id = str(event.get('event_id') or '')
+        content = str(event.get('content') or '')
+        if not event_id or not content or event_id in known_ids:
+            continue
+        prior.append({'event_id': event_id, 'content': content})
+        known_ids.add(event_id)
+    canonical_users = prior + canonical_users
+    result['canonical_user_events'] = canonical_users
+    return result
+
+
+def _canonical_user_evidence_prompt(events):
+    lines = []
+    for event in events:
+        event_id = str(event.get('event_id') or '').strip()
+        content = str(event.get('content') or '')
+        if event_id and content:
+            lines.append(f'- [event_id:{event_id}] {content}')
+    return '\n'.join(lines) or '（无可用 canonical 用户事件）'
+
+
+def _with_evidence_source_refs(kwargs, evidence_event_ids):
+    """Extend existing long-memory refs with only the selected user evidence."""
+    if not evidence_event_ids:
+        return kwargs
+    updated = dict(kwargs or {})
+    refs = list(updated.get('source_event_refs') or [])
+    existing_ids = set(_source_ids_from_refs(refs))
+    for event_id in evidence_event_ids:
+        if event_id and event_id not in existing_ids:
+            refs.append({'source_id': event_id})
+            existing_ids.add(event_id)
+    updated['source_event_refs'] = refs
+    return updated
+
+
+def _same_event_as_merge(content, merge_content, replaces):
+    candidates = [merge_content] + [
+        item for item in (replaces or []) if isinstance(item, str)
+    ]
+    return bool(content) and any(
+        _loosely_matches(content, candidate) for candidate in candidates if candidate
+    )
+
+
 def _record_character_self_claim_evidence(
     user_id,
     character_id,
@@ -1554,6 +1920,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
         if val and val not in source_ids:
             source_ids.insert(0, val)
     primary_event_id = source_ids[0] if source_ids else None
+    required_source_ids = [primary_event_id] if primary_event_id else []
 
     processor = None
     processor_version = None
@@ -1580,9 +1947,10 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
         processor_version = raw_events.PROCESSOR_MEMORY_EXTRACTOR_VERSION
         source_key = raw_events.derivation_source_key(source_ids)
         proc_id = source_key or primary_event_id
-        if source_ids:
+        if required_source_ids:
             try:
-                if not raw_events.sources_are_active(source_ids, user_id, character_id):
+                if not raw_events.sources_are_active(
+                        required_source_ids, user_id, character_id):
                     print(f'[{user_id}] skip extract: source event deleted')
                     _finish_extract('skipped', 'deleted_source')
                     return True
@@ -1609,6 +1977,30 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
         except Exception:
             pass
         print(f'[{user_id}] extract provenance guard skipped:{e}')
+
+    try:
+        source_view = _canonical_turn_sources(
+            user_id, character_id, source_ids, primary_event_id,
+            user_text, assistant_text,
+        )
+    except Exception as e:
+        # If a canonical source was requested but cannot be read, retry the
+        # durable extraction instead of trusting a copied payload as history.
+        print(f'[{user_id}] skip extract: canonical source lookup failed:{e}')
+        _finish_extract('failed', 'canonical_source_lookup_failed')
+        return False
+    user_text = source_view['user_text']
+    assistant_text = source_view['assistant_text']
+    canonical_user_events = source_view['canonical_user_events']
+    canonical_user_evidence = _canonical_user_evidence_prompt(canonical_user_events)
+    user_source_label = (
+        'canonical chat_log user event(s)' if source_view['user_is_canonical']
+        else 'current request user text (legacy fallback)'
+    )
+    assistant_source_label = (
+        'canonical chat_log assistant event' if source_view['assistant_is_canonical']
+        else 'generated assistant text (not factual evidence)'
+    )
 
     try:
         pending_corrections = plan_memory_corrections(user_id, user_text, character_id)
@@ -1693,20 +2085,40 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
 3. 如果最近对话上下文也无法确定对象，只能泛化（例如“她答应明天拍照片给我看”）或填 null，绝不能从旧记忆补全对象。
 4. 禁止因为旧 bond 里有“谷子”就把当前未明确的对象脑补成谷子。
 
-【这次对话】
-她说：{user_text}
-{char_name}回复：{assistant_text}
+【本轮权威原始证据】
+- 用户 canonical evidence（{user_source_label}；当前 user event 必须参与任何持久候选）：
+{canonical_user_evidence}
+- 角色文本（{assistant_source_label}）：{assistant_text}
+
+【硬性证据边界——优先级最高】
+1. user_fact、told、bond、bond_merge、bond_resolution 只能由上面列出的【用户 canonical evidence】直接支持；
+   角色回复绝不能单独成为历史事实、约定或关系事件。
+2. 用户说“你以前答应过/说过/承诺过”只是用户的断言，不能当作已验证的历史事实。
+   除非当前 user event 直接陈述、确认，或以短确认完成一个相邻 canonical user event 中的新共同事件
+   （如“周六一起看电影”+“约定。”），否则 bond 填 null。
+3. roleplay/剧本/人设、打趣、普通调情、提问、单轮否认、嘴硬、即时辩解都不是 durable memory，bond 填 null。
+4. 每个非 null 的 user_fact/told/bond/bond_merge/bond_resolution 都必须有 evidence_quote 和 evidence_event_ids：
+   - evidence_event_ids 是上面方括号里的一个或多个 event_id，必须包含当前 user event；不得填角色 event 或猜测的 ID。
+   - evidence_quote 必须从其中某一个用户 event 逐字连续摘出；只允许全半角、标点、空白差异，不能翻译、改写或拼接。
+   - quote 可以很短，它只是可追溯锚点，不是唯一语义证明。content 必须是所列 canonical evidence 的保守压缩，
+     不得从角色台词、旧记忆或猜测补入新命题。拿不准填 null。
+5. character_self_claim 只能使用角色文本中的逐字 evidence_quote，且必须是“我一向/我的风格/我不擅长”这类稳定、概括性的自我模型。
+   一次具体情境里的理由、否认、嘴硬或 roleplay 台词一律填 null。
+6. 已记录的事实或 bond 只能用于查重、merge、resolution；它们不能独自证明新的 user_fact/told/bond。
+   对 bond_merge，可以在 current evidence 的锚定下保守压缩已存在且被 replaces 指向的旧片段，但不得丢失其中任何片段。
 
 【四类记忆/证据的定义——每类独立判断，可以同时有，也可以都没有】
 A. user_fact：她透露的、关于她自己的新事实（生日/喜好/近况/经历等）。
    - 内容里【不许】出现角色名字，只写她自己的事。
    - 【只记她本人】：她在讲别人（朋友/同事/家人）的事时，不属于 user_fact，填 null。见通用规则第 9 条。
-B. bond：她和{char_name}之间这次发生的、值得记住的事——约定、承诺、重要表态、她表达的重要情感、{char_name}对她说的重要的话。
-   - 【视角】：以{char_name}的第一人称写，"我"就是{char_name}——这是要存进他自己脑子里的回忆。
-     她做的写"她…对我…"；{char_name}自己做的写"我…"；共同的写"我和她…"。绝不把我说的话写成"她说过"。
+B. bond：她在当前 user event 直接表达或共同确认、或由当前短确认和紧邻 canonical user event 一起确定的、以后仍会被提起的关系事件——例如明确约定、共同完成的事、正式的重要情感表达。
+   - 角色的临场回复不是 bond 的事实来源；不能因为角色说“我答应/我不记得/我承认”就记入。
+   - 用户对角色过去发言的转述、追问或质问也不是验证，填 null。
+   - 只写共同事件（“我和她…”/“我们…”）或她直接表达的事；不要写角色单方面“我说过…”。
+   - 角色扮演、调情、问句和即时互怼一律不写入 bond；evidence_quote/evidence_event_ids 必须来自用户 canonical evidence。
    - 【必须是一句话的总结，30 字以内】：像人脑记事一样只记"发生了什么"，不是聊天记录存档。
      ❌ 绝对禁止：抄日语原文、附中文翻译、加"——这是我在她…时期对她的鼓励"这种旁白解说、写成小作文。
-     ✅ 正确："我鼓励她签证快点下来"、"我劝她早点回家别后悔"、"我安慰她说长辈不是在怨她"。
+     ✅ 正确："我和她约好2026-07-10一起看电影"、"她明确说会在周六和我看电影"。
    - 日常寒暄闲聊不算，只记"以后会被提起"级别的事。
    - 例："我和她约好2026-07-10一起看电影"；"她夸了我的新发型"。
 C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信息——包括原作剧情、他的未来、他不知道的设定。
@@ -1715,7 +2127,8 @@ C. told：她告诉{char_name}的、关于{char_name}本人或他的世界的信
 D. character_self_claim：{char_name}对"我是什么样的人/我为什么这样做/这是我的风格"的自我解释。
    - 这不是 bond，不是长期事实，不是关系事实；最多只是低置信 self-model evidence。
    - 例："我就是这种性格"、"被人说想念就直接应一声是我的风格"、"我不擅长直接表达"。
-   - content 用第一人称简短转述，如"我说被人想念就直接回应是我的风格"。
+   - 只有稳定、概括性的自我模型才可提取；单次反应、辩解、否认或 roleplay 一律 null。
+   - content 用第一人称简短转述，evidence_quote 必须逐字摘自角色文本。
 
 【通用规则】
 
@@ -1740,12 +2153,11 @@ D. character_self_claim：{char_name}对"我是什么样的人/我为什么这�
    ⚠️ 这一条是【白名单】,命中就记,不要再拿第 3 条(简单回应不算)、
    第 8 条(大多数都是 null)、第 12 条(一次分享不算身份)去否决它。
 
-1. 【事实只信她】：user_fact 和 told 只能从"她说"里提取，{char_name}的回复绝不作为这两类的来源。
-2. 【我的话记成我的】：{char_name}（也就是"我"）的重要表态可以记入 bond，写成"我说过/我认为/我答应了…"，
-   绝不写成"她说过"。我随口报的数字、天数、结论（如"我们认识35天了"）多半只是顺着聊，一般不值得记；
-   真要记也只能记成"我当时说…"，绝不能当客观事实。
-   ★ 但"我是这种人/这是我的风格/我不擅长表达/我习惯这样"这类自我解释，不许记成 bond；
-     只能放进 character_self_claim，交给持续认知层以后用更多行为证据验证。
+1. 【事实只信 canonical 用户来源】：user_fact、told、bond、merge、resolution 都只能由所列用户 event 的 evidence_quote/evidence_event_ids 支持。
+   {char_name}的回复绝不作为这些类别的来源；它是一条说话记录，不是事实本身。
+2. 【角色单轮表态不写历史】：{char_name}说“我答应/我不记得/我承认/我拒绝”都不能自动进 bond 或事实。
+   ★ “我是这种人/这是我的风格/我不擅长表达/我习惯这样”也只能在有稳定自我模型和角色逐字 evidence_quote 时，
+     作为低置信 character_self_claim evidence 交给持续认知层；否则填 null。
 3. 撒娇/调侃/情绪宣泄/问候/提问/简单回应都不算。"她问了XX"这类只有在话题本身重大时才值得记。
 4. "确认了认识多少天"这类元对话不要提取；"讨论了是什么关系"只有当某一方给出了值得记住的正式表态时才记，且主语写对。
 5. 时间换算成绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
@@ -1859,11 +2271,12 @@ D. character_self_claim：{char_name}对"我是什么样的人/我为什么这�
     【使用条件——都满足才输出】
     · 【已记录的羁绊记忆】里确实存在这些碎片(replaces 要抄那边的原文,不能凭空编)
     · 这轮对话让这件事变完整了(补了新细节 / 有人完整总结了一遍)
-    · 合并后的内容【包含】所有碎片的信息,不能越合越少
+    · 合并后的内容【保留】每条碎片的关键信息；允许用更短的句子压缩表达
+    · evidence_quote/evidence_event_ids 必须来自用户 canonical evidence；同一事件输出 bond_merge 时，bond 必须填 null
 
     【限制】
     · replaces 最多 3 条
-    · content 必须比任何一条碎片都更完整(更长、信息更全)
+    · content 必须保留每条碎片的信息信号；更短不等于丢失
     · 拿不准就别合并,输出 null —— 漏合并只是效率问题,错误合并会【丢失记忆】
 
     【正例】
@@ -1900,7 +2313,7 @@ D. character_self_claim：{char_name}对"我是什么样的人/我为什么这�
     → 未满足的分支不能继续当 future plan。reason 填 cancelled 或 superseded。
 
 【输出格式——严格 JSON，只输出一行】
-{{"user_fact":{{"content":"她XXX","category":"喜好"}},"bond":{{"content":"我和她XXX 或 我说过XXX 或 她对我XXX"}},"told":{{"content":"她说过XXX"}},"character_self_claim":{{"content":"我说被人想念就直接回应是我的风格"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版"}},"bond_resolution":{{"replaces":["旧 bond 原文"],"content":null,"reason":"completed"}}}}
+{{"user_fact":{{"content":"她XXX","category":"喜好","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"bond":{{"content":"我和她XXX 或 她对我XXX","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"told":{{"content":"她说过XXX","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"character_self_claim":{{"content":"我一向XXX","evidence_quote":"角色原文连续片段"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"bond_resolution":{{"replaces":["旧 bond 原文"],"content":null,"reason":"completed","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}}}}
 没有的类填 null，例如全都没有：
 {{"user_fact":null,"bond":null,"told":null,"character_self_claim":null,"bond_merge":null,"bond_resolution":null}}
 category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
@@ -1938,10 +2351,11 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
             _finish_extract('failed', 'unparsed')
             return False
 
-        if source_ids:
+        if required_source_ids:
             try:
                 import raw_events
-                if not raw_events.sources_are_active(source_ids, user_id, character_id):
+                if not raw_events.sources_are_active(
+                        required_source_ids, user_id, character_id):
                     print(f'[{user_id}] skip extract commit: source deleted after claim')
                     _finish_extract('skipped', 'deleted_source')
                     return True
@@ -1962,7 +2376,11 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
             content = _clean_content(uf.get('content'))
             category = (uf.get('category') or '其他').strip()
             category = _norm_category(category)
-            if _valid_user_fact(user_id, content, char_names, category):
+            evidence = _has_faithful_evidence(
+                user_id, uf, canonical_user_events, 'user_fact', primary_event_id)
+            if (evidence
+                    and _is_faithful_compression(user_id, content, evidence, 'user_fact')
+                    and _valid_user_fact(user_id, content, char_names, category)):
                 try:
                     from memory_lifecycle import apply_user_fact_lifecycle
                     lifecycle = apply_user_fact_lifecycle(
@@ -1982,7 +2400,10 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                     }
 
                 if lifecycle.get('should_save_long_memory'):
-                    kwargs = lifecycle.get('long_memory_kwargs') or {}
+                    kwargs = _with_evidence_source_refs(
+                        lifecycle.get('long_memory_kwargs') or {},
+                        evidence['event_ids'],
+                    )
                     # ★ 单聊里说的只有这个角色知道（谁在场谁知道）；群聊说的才进 shared
                     if save_long_memory(user_id, content, category, character_id, **kwargs):
                         print(f'[{user_id}] ✅ 用户事实 [{category}]（{character_id} 专属）：{content}')
@@ -2000,7 +2421,9 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
             resolve_replaces = br.get('replaces')
             resolve_reason = br.get('reason') or 'superseded'
             resolve_content = _clean_content(br.get('content')) if br.get('content') else ''
-            if isinstance(resolve_replaces, list):
+            resolution_evidence = _has_faithful_evidence(
+                user_id, br, canonical_user_events, 'bond_resolution', primary_event_id)
+            if isinstance(resolve_replaces, list) and resolution_evidence:
                 try:
                     _ok, resolved_rows = resolve_bond_memories(
                         user_id, character_id, 'between',
@@ -2014,17 +2437,35 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
 
         # ★ B0. 记忆合并:只允许"旧事件仍成立、补更多细节"。先处理,把碎片收成一条。
         bm = parsed.get('bond_merge')
+        merge_attempted = False
+        merge_content = ''
+        merge_replaces = []
         if isinstance(bm, dict):
             merge_content = _clean_content(bm.get('content'))
             merge_replaces = bm.get('replaces')
             if merge_content and isinstance(merge_replaces, list):
-                if _valid_bond(user_id, merge_content, char_name):
+                merge_attempted = True
+                merge_evidence = _valid_durable_bond(
+                    user_id, merge_content, char_name, bm,
+                    canonical_user_events, primary_event_id,
+                    allow_existing_memory=True,
+                )
+                if merge_evidence:
                     try:
-                        merge_bond_memories(
+                        merge_ok, _deleted = merge_bond_memories(
                             user_id, character_id, 'between',
-                            merge_replaces, merge_content
+                            merge_replaces, merge_content,
+                            source_event_ids=merge_evidence['event_ids'],
                         )
+                        if not merge_ok:
+                            print(f'[{user_id}] 合并未执行；同事件 bond 不会作为 fallback 直接追加')
                     except Exception as _e:
+                        try:
+                            import raw_events as _raw_events
+                            if isinstance(_e, _raw_events.SourceValidityError):
+                                raise
+                        except ImportError:
+                            pass
                         print(f'[{user_id}] ❌ 记忆合并出错(不影响其他记忆):{_e}')
                 else:
                     print(f'[{user_id}] ❌ 合并内容格式不合规,跳过:{merge_content[:40]}')
@@ -2033,7 +2474,7 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         sc = parsed.get('character_self_claim')
         if isinstance(sc, dict):
             content = _clean_content(sc.get('content'))
-            if _looks_like_character_self_claim(content):
+            if _valid_stable_character_self_claim(user_id, content, sc, assistant_text):
                 result = _record_character_self_claim_evidence(
                     user_id, character_id, content,
                     source_event_id=source_event_id,
@@ -2047,30 +2488,44 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         if isinstance(bd, dict):
             content = _clean_content(bd.get('content'))
             if _looks_like_character_self_claim(content):
-                result = _record_character_self_claim_evidence(
-                    user_id, character_id, content,
-                    source_event_id=source_event_id,
-                    user_text=user_text,
-                    assistant_text=assistant_text,
+                if _valid_stable_character_self_claim(
+                        user_id, content, bd, assistant_text):
+                    result = _record_character_self_claim_evidence(
+                        user_id, character_id, content,
+                        source_event_id=source_event_id,
+                        user_text=user_text,
+                        assistant_text=assistant_text,
+                    )
+                    print(f'[{user_id}] 🧠 bond 改道自我陈述证据（{character_id}）：{content} -> {result}')
+            else:
+                bond_evidence = _valid_durable_bond(
+                    user_id, content, char_name, bd,
+                    canonical_user_events, primary_event_id,
                 )
-                print(f'[{user_id}] 🧠 bond 改道自我陈述证据（{character_id}）：{content} -> {result}')
-            elif _valid_bond(user_id, content, char_name):
-                if any(_loosely_matches(content, old) for old in resolved_texts):
-                    print(f'[{user_id}] 跳过把已结束条件再写成 active bond：{content}')
-                elif save_bond_memory(
-                    user_id, character_id, 'between', content,
-                    source_event_ids=source_ids,
-                ):
-                    print(f'[{user_id}] ✅ 羁绊记忆（{character_id}）：{content}')
+                if bond_evidence:
+                    if any(_loosely_matches(content, old) for old in resolved_texts):
+                        print(f'[{user_id}] 跳过把已结束条件再写成 active bond：{content}')
+                    elif merge_attempted and _same_event_as_merge(
+                            content, merge_content, merge_replaces):
+                        print(f'[{user_id}] 跳过 merge 同事件 bond fallback：{content}')
+                    elif save_bond_memory(
+                        user_id, character_id, 'between', content,
+                        source_event_ids=bond_evidence['event_ids'],
+                    ):
+                        print(f'[{user_id}] ✅ 羁绊记忆（{character_id}）：{content}')
 
         # C. 她告诉我的事 → bond_memory(told)
         td = parsed.get('told')
         if isinstance(td, dict):
             content = _clean_content(td.get('content'))
-            if _valid_told(user_id, content):
+            evidence = _has_faithful_evidence(
+                user_id, td, canonical_user_events, 'told', primary_event_id)
+            if (evidence
+                    and _is_faithful_compression(user_id, content, evidence, 'told')
+                    and _valid_told(user_id, content)):
                 if save_bond_memory(
                     user_id, character_id, 'told', content,
-                    source_event_ids=source_ids,
+                    source_event_ids=evidence['event_ids'],
                 ):
                     print(f'[{user_id}] ✅ 告知记忆（{character_id}）：{content}')
 

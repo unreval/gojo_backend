@@ -2,7 +2,7 @@ import json
 import os
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 
@@ -285,7 +285,57 @@ class FakeCursor:
             ]
             return
 
-        if compact.startswith('SELECT COALESCE(event_id, client_msg_id)'):
+        if compact.startswith('WITH anchor AS'):
+            (anchor_user_id, anchor_chat_id, anchor_event_id,
+             prior_user_id, prior_chat_id, hours, limit) = params
+            anchors = [
+                row for row in self.store.chat_log
+                if row['user_id'] == anchor_user_id
+                and row['chat_id'] == anchor_chat_id
+                and row.get('status', 'active') == 'active'
+                and row['role'] == 'user'
+                and (row.get('event_id') or row.get('client_msg_id')) == anchor_event_id
+            ]
+            if not anchors:
+                return
+            anchor = max(anchors, key=lambda row: (row['created_at'], row['id']))
+            cutoff = anchor['created_at'] - timedelta(hours=int(hours))
+            matched = [
+                row for row in self.store.chat_log
+                if row['user_id'] == prior_user_id
+                and row['chat_id'] == prior_chat_id
+                and row.get('status', 'active') == 'active'
+                and row['role'] == 'user'
+                and row['created_at'] >= cutoff
+                and (row['created_at'], row['id']) < (
+                    anchor['created_at'], anchor['id'])
+            ]
+            matched.sort(key=lambda row: (row['created_at'], row['id']), reverse=True)
+            self._many = [
+                (row.get('event_id') or row.get('client_msg_id'), row['role'],
+                 row['text'], row['kind'], row.get('extra') or '',
+                 row['created_at'], row.get('subtitle') or '')
+                for row in matched[:limit]
+            ]
+            return
+        if (compact.startswith('SELECT COALESCE(event_id, client_msg_id)')
+                or compact.startswith("SELECT COALESCE(NULLIF(event_id, ''), client_msg_id)")):
+            if len(params) == 3 and '= ANY(%s)' in compact:
+                user_id, chat_id, event_ids = params
+                wanted = set(event_ids)
+                matched = [
+                    row for row in self.store.chat_log
+                    if row['user_id'] == user_id and row['chat_id'] == chat_id
+                    and row.get('status', 'active') == 'active'
+                    and (row.get('event_id') or row.get('client_msg_id')) in wanted
+                ]
+                self._many = [
+                    (r.get('event_id') or r.get('client_msg_id'), r['role'], r['text'],
+                     r['kind'], r.get('extra') or '', r['created_at'],
+                     r.get('subtitle') or '')
+                    for r in matched
+                ]
+                return
             if len(params) == 2:
                 user_id, chat_id = params
                 self._many = [
@@ -648,6 +698,12 @@ class RawEventLayerTests(unittest.TestCase):
             and row.get('status') == 'active'
         ]
 
+    def append_user_event_at(self, user_id, character_id, event_id, content, occurred_at):
+        result = self.raw_events.append_raw_event(
+            user_id, character_id, event_id=event_id, role='user', content=content)
+        self.assertTrue(result['inserted'])
+        self.store.chat_log[-1]['created_at'] = occurred_at
+
     def capture_extractor_prompt(self, prior_events, user_text, assistant_text,
                                  existing_bond=''):
         for event_id, role, content in prior_events:
@@ -713,6 +769,74 @@ class RawEventLayerTests(unittest.TestCase):
         self.assertEqual(len(short), 1)
         self.assertEqual(short[0][0], 'user')
         self.assertIn('你好', short[0][1])
+
+    def test_get_active_events_by_ids_reads_canonical_event_ids(self):
+        self.raw_events.append_raw_event(
+            'u', 'gojo', event_id='canonical-user', role='user',
+            content='周六一起看电影')
+        self.raw_events.append_raw_event(
+            'u', 'gojo', event_id='canonical-assistant', role='assistant',
+            content='いいね')
+        events = self.raw_events.get_active_events_by_ids(
+            'u', 'gojo', ['canonical-assistant', 'canonical-user', 'missing'])
+        self.assertEqual(
+            [(event['event_id'], event['role'], event['content']) for event in events],
+            [
+                ('canonical-assistant', 'assistant', 'いいね'),
+                ('canonical-user', 'user', '周六一起看电影'),
+            ],
+        )
+
+    def test_previous_evidence_does_not_cross_character_scope(self):
+        now = datetime.now(timezone.utc)
+        self.append_user_event_at(
+            'u', 'geto', 'geto-plan', '周六一起看电影', now - timedelta(minutes=1))
+        self.append_user_event_at('u', 'gojo', 'gojo-confirm', '约定。', now)
+
+        events = self.raw_events.get_previous_active_user_events(
+            'u', 'gojo', 'gojo-confirm')
+
+        self.assertEqual(events, [])
+
+    def test_previous_evidence_is_strictly_earlier_and_within_recency_window(self):
+        now = datetime.now(timezone.utc)
+        self.append_user_event_at(
+            'u', 'gojo', 'too-old', '周六一起看电影', now - timedelta(hours=25))
+        self.append_user_event_at('u', 'gojo', 'confirm', '约定。', now)
+        self.append_user_event_at(
+            'u', 'gojo', 'future', '周六一起看电影', now + timedelta(minutes=1))
+
+        events = self.raw_events.get_previous_active_user_events('u', 'gojo', 'confirm')
+
+        self.assertEqual(events, [])
+
+    def test_previous_evidence_excludes_deleted_event(self):
+        now = datetime.now(timezone.utc)
+        self.append_user_event_at(
+            'u', 'gojo', 'deleted-plan', '周六一起看电影', now - timedelta(minutes=1))
+        self.assertEqual(
+            self.db_chatlog.delete_message('u', 'gojo', client_msg_id='deleted-plan'), 1)
+        self.append_user_event_at('u', 'gojo', 'confirm', '约定。', now)
+
+        events = self.raw_events.get_previous_active_user_events('u', 'gojo', 'confirm')
+
+        self.assertEqual(events, [])
+
+    def test_previous_evidence_keeps_two_adjacent_active_events_in_order(self):
+        now = datetime.now(timezone.utc)
+        self.append_user_event_at(
+            'u', 'gojo', 'older', '更早的事', now - timedelta(minutes=3))
+        self.append_user_event_at(
+            'u', 'gojo', 'plan', '周六一起看电影', now - timedelta(minutes=2))
+        self.append_user_event_at(
+            'u', 'gojo', 'detail', '下午两点见', now - timedelta(minutes=1))
+        self.append_user_event_at('u', 'gojo', 'confirm', '约定。', now)
+
+        events = self.raw_events.get_previous_active_user_events(
+            'u', 'gojo', 'confirm', n=99, hours=99)
+
+        self.assertEqual(
+            [event['event_id'] for event in events], ['plan', 'detail'])
 
     def test_voice_same_user_text_is_one_raw_event(self):
         self.user_memory.save_user_short_memory_once(
@@ -800,7 +924,7 @@ class RawEventLayerTests(unittest.TestCase):
         recent_section = self.prompt_section(
             prompt, '【最近对话上下文】', '【上下文使用边界】')
         current_section = self.prompt_section(
-            prompt, '【这次对话】', '【四类记忆/证据的定义')
+            prompt, '【本轮权威原始证据】', '【硬性证据边界】')
         self.assertNotIn(user_text, recent_section)
         self.assertNotIn(assistant_text, recent_section)
         self.assertEqual(current_section.count(user_text), 1)

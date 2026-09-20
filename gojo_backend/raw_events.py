@@ -294,6 +294,69 @@ def sources_are_active(event_ids, user_id=None, character_id=None, conn=None):
     return True
 
 
+def get_active_events_by_ids(user_id, character_id, event_ids, conn=None):
+    """Return active canonical chat_log events for the requested ids.
+
+    This is a provenance read, not a second ledger. Derived-memory callers use
+    it to prefer the source committed to chat_log over copied request payloads.
+    """
+    ids = []
+    for item in event_ids or []:
+        event_id = _normalize_event_id(item)
+        if event_id and event_id not in ids:
+            ids.append(event_id)
+    if not ids:
+        return []
+
+    database, owned = _borrow_conn(conn)
+    cur = database.cursor()
+    try:
+        cur.execute(
+            '''SELECT COALESCE(NULLIF(event_id, ''), client_msg_id), role, text, kind, extra,
+                      created_at, subtitle
+               FROM chat_log
+               WHERE user_id=%s AND chat_id=%s
+                 AND COALESCE(status, 'active') = 'active'
+                 AND COALESCE(NULLIF(event_id, ''), client_msg_id) = ANY(%s)''',
+            (user_id, character_id, ids),
+        )
+        rows = cur.fetchall()
+    except SourceValidityError:
+        raise
+    except Exception as e:
+        if owned:
+            try:
+                database.rollback()
+            except Exception:
+                pass
+        raise SourceValidityError(str(e) or 'canonical source lookup failed') from e
+    finally:
+        cur.close()
+        if owned:
+            database.close()
+
+    by_id = {}
+    for event_id, role, text, kind, extra, ts, subtitle in rows:
+        meta = {}
+        if extra:
+            try:
+                parsed = json.loads(extra)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except Exception:
+                pass
+        by_id[event_id] = {
+            'event_id': event_id or '',
+            'role': _prompt_role(role),
+            'content': text or '',
+            'kind': kind or 'text',
+            'metadata': meta,
+            'timestamp': ts,
+            'subtitle': subtitle or '',
+        }
+    return [by_id[event_id] for event_id in ids if event_id in by_id]
+
+
 def any_source_inactive(event_ids, user_id=None, character_id=None, conn=None):
     """True if any required Raw Event is missing-as-deleted / tombstoned.
 
@@ -301,6 +364,95 @@ def any_source_inactive(event_ids, user_id=None, character_id=None, conn=None):
     """
     return not sources_are_active(
         event_ids, user_id, character_id, conn=conn)
+
+_MAX_PREVIOUS_USER_EVIDENCE_EVENTS = 2
+_MAX_PREVIOUS_USER_EVIDENCE_HOURS = 24
+
+
+def get_previous_active_user_events(user_id, character_id, event_id, n=2,
+                                    hours=24, conn=None):
+    """Return the bounded canonical user evidence immediately before one event.
+
+    This is deliberately scoped to the same existing ``(user_id, chat_id)``
+    ledger partition. The primary event is the temporal anchor: prior rows
+    must be active user rows whose ``(created_at, id)`` sorts strictly before
+    it, within the bounded evidence window. No session representation is
+    introduced here because chat_log has no session/thread column.
+    """
+    event_id = _normalize_event_id(event_id)
+    if not event_id:
+        return []
+    n = max(1, min(int(n or _MAX_PREVIOUS_USER_EVIDENCE_EVENTS),
+                   _MAX_PREVIOUS_USER_EVIDENCE_EVENTS))
+    hours = max(1, min(int(hours or _MAX_PREVIOUS_USER_EVIDENCE_HOURS),
+                       _MAX_PREVIOUS_USER_EVIDENCE_HOURS))
+
+    database, owned = _borrow_conn(conn)
+    cur = database.cursor()
+    try:
+        cur.execute(
+            '''WITH anchor AS (
+                   SELECT id, created_at
+                   FROM chat_log
+                   WHERE user_id=%s AND chat_id=%s
+                     AND COALESCE(status, 'active') = 'active'
+                     AND role='user'
+                     AND COALESCE(NULLIF(event_id, ''), client_msg_id)=%s
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT 1
+               )
+               SELECT COALESCE(NULLIF(prior.event_id, ''), prior.client_msg_id),
+                      prior.role, prior.text, prior.kind, prior.extra,
+                      prior.created_at, prior.subtitle
+               FROM chat_log AS prior
+               CROSS JOIN anchor
+               WHERE prior.user_id=%s AND prior.chat_id=%s
+                 AND COALESCE(prior.status, 'active') = 'active'
+                 AND prior.role='user'
+                 AND prior.created_at >= anchor.created_at
+                     - (%s * INTERVAL '1 hour')
+                 AND (prior.created_at, prior.id) < (anchor.created_at, anchor.id)
+               ORDER BY prior.created_at DESC, prior.id DESC
+               LIMIT %s''',
+            (user_id, character_id, event_id, user_id, character_id, hours, n),
+        )
+        rows = cur.fetchall()
+    except SourceValidityError:
+        raise
+    except Exception as e:
+        if owned:
+            try:
+                database.rollback()
+            except Exception:
+                pass
+        raise SourceValidityError(
+            str(e) or 'previous canonical evidence lookup failed') from e
+    finally:
+        cur.close()
+        if owned:
+            database.close()
+
+    out = []
+    for prior_id, role, text, kind, extra, ts, subtitle in reversed(rows):
+        meta = {}
+        if extra:
+            try:
+                parsed = json.loads(extra)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except Exception:
+                pass
+        out.append({
+            'event_id': prior_id or '',
+            'role': _prompt_role(role),
+            'content': text or '',
+            'kind': kind or 'text',
+            'metadata': meta,
+            'timestamp': ts,
+            'subtitle': subtitle or '',
+        })
+    return out
+
 
 
 def deleted_event_ids(user_id, character_id):

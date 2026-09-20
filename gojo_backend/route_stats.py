@@ -124,7 +124,7 @@ async def manual_merge_memory(data: dict):
         'ok': ok,
         'deleted': deleted,
         'content': content if ok else None,
-        'note': '成功' if ok else '未执行:目标找不到 或 新内容比旧的短(防信息缩水)',
+        'note': '成功' if ok else '未执行:目标找不到 或 无法确认保留每条旧记忆的信息',
     })
 
 
