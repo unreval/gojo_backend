@@ -756,10 +756,11 @@ def recall_sticky_notes(user_id, character_id, user_message='', limit=3):
                WHERE user_id = %s
                  AND character_id = %s
                  AND status = 'active'
+                 AND source = %s
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY updated_at DESC
                LIMIT %s''',
-            (user_id, character_id, limit * 2),
+            (user_id, character_id, MEMORY_LIFECYCLE_SOURCE, limit * 2),
         )
         items = []
         for row in cur.fetchall():

@@ -88,6 +88,51 @@ _STICKY_TAXONOMY_RE = re.compile(
     r'|(?:character|user|boundary|observe)\.[a-z][a-z0-9._-]*'
 )
 _STICKY_NARRATOR_RE = re.compile(r'(?:^|[，。；！？\n])(?:用户|角色)')
+_STICKY_SUMMARY_FLOW_RE = re.compile(
+    r'(?:她|他|用户).{0,32}(?:说|表示|告诉|问|做了).{0,80}'
+    r'(?:(?:我|角色).{0,32}(?:说|回答|回复|告诉)|后来|然后)'
+)
+STICKY_NOTE_EMOTIONS = frozenset({
+    '平静', '调皮', '无奈', '得意', '嫌弃', '心动', '感慨',
+    '嘲讽', '自嘲', '疑惑', '开心', '温柔', '愤怒', '悲伤',
+    '认真', '警惕', '嘴硬', '弱情绪', '别扭', '在意', '烦躁',
+    '松口气', '松了口气',
+})
+STICKY_NOTE_TONES = frozenset({
+    '平静', '调皮', '无奈', '得意', '嫌弃', '心动', '感慨',
+    '嘲讽', '自嘲', '疑惑', '开心', '温柔', '愤怒', '悲伤',
+    '认真', '警惕', '嘴硬', '弱情绪', '别扭', '在意', '烦躁',
+    '松口气', '松了口气',
+})
+STICKY_NOTE_EMOTION_TAGS = {
+    '平静': '·',
+    '调皮': 'hh',
+    '无奈': '..',
+    '得意': '哼',
+    '嫌弃': 'tsk',
+    '心动': '♡',
+    '感慨': '...',
+    '嘲讽': '呵',
+    '自嘲': 'hah',
+    '疑惑': '?',
+    '开心': '!',
+    '温柔': '♡',
+    '愤怒': '!!',
+    '悲伤': '..',
+    '认真': '·',
+    '警惕': '!',
+    '嘴硬': '~',
+    '弱情绪': '·',
+    '别扭': '~',
+    '在意': '♡',
+    '烦躁': '!',
+    '松口气': '...',
+    '松了口气': '...',
+}
+
+
+def sticky_emotion_tag(emotion):
+    return STICKY_NOTE_EMOTION_TAGS.get(emotion, '·')
 
 
 class SlowLoopOutputError(ValueError):
@@ -108,6 +153,8 @@ def is_user_facing_sticky_content(text):
         if needle in haystack:
             return False
     if _STICKY_TAXONOMY_RE.search(content):
+        return False
+    if _STICKY_SUMMARY_FLOW_RE.search(content):
         return False
     return True
 
@@ -154,6 +201,17 @@ def _text(value, field, maximum, *, allow_empty=False):
         raise SlowLoopOutputError(f'{field}_must_not_be_empty')
     if len(result) > maximum:
         raise SlowLoopOutputError(f'{field}_too_long')
+    return result
+
+
+def _clip_label(value, field, maximum, *, allow_empty=True):
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        raise SlowLoopOutputError(f'{field}_must_be_string')
+    result = value.strip()[:maximum]
+    if not result and not allow_empty:
+        raise SlowLoopOutputError(f'{field}_must_not_be_empty')
     return result
 
 
@@ -605,7 +663,9 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
     ):
         update = _object(item, f'sticky_note_update_{index}')
         required = {'note_key', 'content', 'status', 'evidence_refs'}
-        optional = {'expires_in_seconds'}
+        optional = {
+            'expires_in_seconds', 'emotion', 'trigger_snippet', 'tone', 'tag',
+        }
         if not required.issubset(update) or set(update) - required - optional:
             raise SlowLoopOutputError(
                 f'sticky_note_update_{index}_fields_invalid',
@@ -614,6 +674,10 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
         if key in sticky_keys:
             raise SlowLoopOutputError(
                 f'sticky_note_update_{index}_duplicate_key',
+            )
+        if key.startswith('memory_lifecycle.'):
+            raise SlowLoopOutputError(
+                f'sticky_note_update_{index}_reserved_namespace',
             )
         sticky_keys.add(key)
         status = _text(update['status'], f'sticky_note_update_{index}_status', 16)
@@ -641,13 +705,42 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
         _require_current_ref(
             refs, f'sticky_note_update_{index}_evidence_refs', current_ids,
         )
+        content = _text(
+            update['content'],
+            f'sticky_note_update_{index}_content',
+            180,
+        )
+        emotion = _clip_label(
+            update.get('emotion'), f'sticky_note_update_{index}_emotion', 24,
+        )
+        if emotion and emotion not in STICKY_NOTE_EMOTIONS:
+            raise SlowLoopOutputError(
+                f'sticky_note_update_{index}_emotion_invalid',
+            )
+        tone = _clip_label(
+            update.get('tone'), f'sticky_note_update_{index}_tone', 24,
+        )
+        if tone and tone not in STICKY_NOTE_TONES:
+            raise SlowLoopOutputError(
+                f'sticky_note_update_{index}_tone_invalid',
+            )
+        trigger_snippet = _clip_label(
+            update.get('trigger_snippet'),
+            f'sticky_note_update_{index}_trigger_snippet',
+            160,
+        )
+        tag = _clip_label(
+            update.get('tag') or sticky_emotion_tag(emotion),
+            f'sticky_note_update_{index}_tag',
+            8,
+        )
         sticky_note_updates.append({
             'note_key': key,
-            'content': _text(
-                update['content'],
-                f'sticky_note_update_{index}_content',
-                500,
-            ),
+            'content': content,
+            'emotion': emotion,
+            'tone': tone,
+            'trigger_snippet': trigger_snippet,
+            'tag': tag,
             'status': status,
             'expires_in_seconds': ttl,
             'evidence_refs': refs,
@@ -1264,13 +1357,21 @@ def persist_slow_loop_output(
             if note.get('expires_in_seconds') and note['status'] == 'active'
             else None
         )
+        metadata = {
+            'emotion': note.get('emotion') or '',
+            'tone': note.get('tone') or '',
+            'trigger_snippet': note.get('trigger_snippet') or '',
+            'tag': note.get('tag') or sticky_emotion_tag(note.get('emotion')),
+        }
         completed_at = now if note['status'] == 'completed' else None
         cur.execute(
             '''INSERT INTO cognitive_sticky_notes (
                    user_id, character_id, note_key, content, status, source,
                    source_event_refs, created_by_cycle_id,
-                   updated_by_cycle_id, expires_at, completed_at, updated_at
-               ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                   updated_by_cycle_id, expires_at, completed_at, metadata,
+                   updated_at
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s,
+                         %s::jsonb, %s)
                ON CONFLICT (user_id, character_id, note_key) DO UPDATE
                SET content = EXCLUDED.content,
                    status = EXCLUDED.status,
@@ -1278,6 +1379,7 @@ def persist_slow_loop_output(
                    source_event_refs = EXCLUDED.source_event_refs,
                    updated_by_cycle_id = EXCLUDED.updated_by_cycle_id,
                    expires_at = EXCLUDED.expires_at,
+                   metadata = EXCLUDED.metadata,
                    completed_at = COALESCE(
                        EXCLUDED.completed_at,
                        cognitive_sticky_notes.completed_at),
@@ -1306,7 +1408,9 @@ def persist_slow_loop_output(
                 user_id, character_id, note['note_key'], note['content'],
                 note['status'], USER_FACING_STICKY_SOURCE,
                 json.dumps(source_refs, ensure_ascii=False),
-                cycle_id, cycle_id, expires_at, completed_at, now,
+                cycle_id, cycle_id, expires_at, completed_at,
+                json.dumps(metadata, ensure_ascii=False),
+                now,
             ),
         )
 

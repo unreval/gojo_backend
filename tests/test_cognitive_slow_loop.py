@@ -101,6 +101,22 @@ def committable_output():
     return output
 
 
+def sticky_update(note_key, content, *, emotion='无奈', tone='',
+                  trigger_snippet='她提到了还没讲完的签证。'):
+    update = {
+        'note_key': note_key,
+        'content': content,
+        'emotion': emotion,
+        'trigger_snippet': trigger_snippet,
+        'status': 'active',
+        'expires_in_seconds': 3600,
+        'evidence_refs': [27],
+    }
+    if tone:
+        update['tone'] = tone
+    return update
+
+
 class TransactionConnection:
     def __init__(self, cursor):
         self._cursor = cursor
@@ -289,13 +305,8 @@ class SlowLoopValidationTests(unittest.TestCase):
 
     def test_optional_sticky_notes_and_diary_require_grounding(self):
         output = valid_output()
-        output['sticky_note_updates'] = [{
-            'note_key': 'reply.pending.topic',
-            'content': '签证那件事她没讲完。之后得再问一句。',
-            'status': 'active',
-            'expires_in_seconds': 3600,
-            'evidence_refs': [27],
-        }]
+        output['sticky_note_updates'] = [sticky_update(
+            'reply.pending.topic', '签证那件事她没讲完。之后得再问一句。')]
         output['diary_entries'] = [{
             'diary_key': 'reflection.20260913.topic',
             'content': '今天这轮让我意识到，她并不是随口提起那件事。',
@@ -308,6 +319,11 @@ class SlowLoopValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(result['sticky_note_updates'][0]['status'], 'active')
+        self.assertEqual(result['sticky_note_updates'][0]['emotion'], '无奈')
+        self.assertEqual(
+            result['sticky_note_updates'][0]['trigger_snippet'],
+            '她提到了还没讲完的签证。',
+        )
         self.assertEqual(result['diary_entries'][0]['reflection_kind'], 'event')
 
     def test_audit_sticky_is_dropped_natural_sticky_kept(self):
@@ -317,20 +333,11 @@ class SlowLoopValidationTests(unittest.TestCase):
             '她明天要抽徽章，还让我帮她选号。到时候看看。'))
         output = valid_output()
         output['sticky_note_updates'] = [
-            {
-                'note_key': 'user.gacha.audit',
-                'content': '用户明天要抽徽章，让我帮她选号码',
-                'status': 'active',
-                'expires_in_seconds': 3600,
-                'evidence_refs': [27],
-            },
-            {
-                'note_key': 'user.gacha.personal',
-                'content': '她明天要抽徽章，还让我帮她选号。到时候看看。',
-                'status': 'active',
-                'expires_in_seconds': 3600,
-                'evidence_refs': [27],
-            },
+            sticky_update('user.gacha.audit', '用户明天要抽徽章，让我帮她选号码'),
+            sticky_update(
+                'user.gacha.personal',
+                '她明天要抽徽章，还让我帮她选号。到时候看看。',
+            ),
         ]
         result = cognitive_output.validate_slow_loop_output(
             output, allowed_event_ids={27},
@@ -345,13 +352,8 @@ class SlowLoopValidationTests(unittest.TestCase):
 
     def test_audit_sticky_does_not_fail_slow_loop(self):
         output = valid_output()
-        output['sticky_note_updates'] = [{
-            'note_key': 'user.gacha.audit',
-            'content': '用户明天要抽徽章，让我帮她选号码',
-            'status': 'active',
-            'expires_in_seconds': 3600,
-            'evidence_refs': [27],
-        }]
+        output['sticky_note_updates'] = [sticky_update(
+            'user.gacha.audit', '用户明天要抽徽章，让我帮她选号码')]
         result = cognitive_output.validate_slow_loop_output(
             output, allowed_event_ids={27},
         )
@@ -359,6 +361,94 @@ class SlowLoopValidationTests(unittest.TestCase):
         self.assertTrue(result['question_updates'])
         self.assertTrue(result['hypothesis_updates'])
         self.assertEqual(result['diary_entries'], [])
+
+    def test_sticky_emotion_labels_cover_inner_reactions(self):
+        cases = [
+            ('心动', '心动', '还特意回来确认一遍。啧，真会让人分心。'),
+            ('自嘲', '自嘲', '刚才那句是不是太硬了。算了，我也就这德行。'),
+            ('无奈', '嘴硬', '高兴？没有。只是她记得这事，勉强算不错。'),
+            ('认真', '认真', '这事不能当玩笑听。下次得接住。'),
+            ('警惕', '警惕', '这句不像随口说的。先别急着给答案。'),
+        ]
+        for index, (emotion, tone, content) in enumerate(cases):
+            output = valid_output()
+            output['sticky_note_updates'] = [sticky_update(
+                f'user.inner.{index}',
+                content,
+                emotion=emotion,
+                tone=tone,
+                trigger_snippet='她特意回来确认蛋糕。',
+            )]
+
+            result = cognitive_output.validate_slow_loop_output(
+                output, allowed_event_ids={27},
+            )
+            note = result['sticky_note_updates'][0]
+            self.assertEqual(note['emotion'], emotion)
+            self.assertEqual(note['tone'], tone)
+            self.assertEqual(note['trigger_snippet'], '她特意回来确认蛋糕。')
+            self.assertEqual(
+                note['tag'], cognitive_output.sticky_emotion_tag(emotion),
+            )
+
+    def test_sticky_payload_without_emotion_fields_still_validates(self):
+        output = valid_output()
+        output['sticky_note_updates'] = [{
+            'note_key': 'reply.pending.topic',
+            'content': '签证那件事她没讲完。之后得再问一句。',
+            'status': 'active',
+            'expires_in_seconds': 3600,
+            'evidence_refs': [27],
+        }]
+        result = cognitive_output.validate_slow_loop_output(
+            output, allowed_event_ids={27},
+        )
+        note = result['sticky_note_updates'][0]
+        self.assertEqual(note['emotion'], '')
+        self.assertEqual(note['trigger_snippet'], '')
+        self.assertEqual(note['tag'], '·')
+
+    def test_sticky_cannot_use_fast_memory_namespace(self):
+        output = valid_output()
+        output['sticky_note_updates'] = [sticky_update(
+            'memory_lifecycle.exam', '这件事不能忘。',
+        )]
+        with self.assertRaisesRegex(
+            cognitive_output.SlowLoopOutputError, 'reserved_namespace',
+        ):
+            cognitive_output.validate_slow_loop_output(
+                output, allowed_event_ids={27},
+            )
+
+    def test_inner_voice_with_one_said_is_kept(self):
+        output = valid_output()
+        output['sticky_note_updates'] = [sticky_update(
+            'user.inner.smitten',
+            '她说得倒是认真。偏偏喜欢上的还是最不会领这种情的人……先看看她能坚持多久吧。',
+            emotion='心动',
+            trigger_snippet='因为satoru才知道喜欢和爱是什么意思',
+        )]
+        result = cognitive_output.validate_slow_loop_output(
+            output, allowed_event_ids={27},
+        )
+        self.assertEqual(result['sticky_note_updates'][0]['emotion'], '心动')
+
+    def test_event_report_summary_sticky_is_dropped(self):
+        cases = [
+            '她说想买蛋糕，我说随便，后来我们结束了聊天。',
+            '她说因为satoru才知道喜欢和爱是什么意思，还说要变强，我告诉她那个人不会领情。',
+        ]
+        for content in cases:
+            output = valid_output()
+            output['sticky_note_updates'] = [sticky_update(
+                'user.summary.bad',
+                content,
+                emotion='平静',
+            )]
+            result = cognitive_output.validate_slow_loop_output(
+                output, allowed_event_ids={27},
+            )
+            self.assertEqual(result['sticky_note_updates'], [])
 
     def test_self_claim_only_cannot_commit_belief(self):
         update = committable_output()['belief_updates'][0]
@@ -563,7 +653,16 @@ class SlowLoopWorkerTests(unittest.TestCase):
         self.assertIn('belief_updates are commit candidates', prompt)
         self.assertIn('reflection_note is a compact internal note', prompt)
         self.assertIn('FIRST PERSON', prompt)
-        self.assertIn('private sticky note', prompt)
+        self.assertIn('private inner note', prompt)
+        self.assertIn('"emotion"', prompt)
+        self.assertIn('"trigger_snippet"', prompt)
+        self.assertIn('Allowed sticky emotions', prompt)
+        self.assertIn('not a recap of the conversation', prompt)
+        self.assertIn('not a chat-response emotion', prompt)
+        self.assertIn('没有说出口、但心里还挂着的一句话', prompt)
+        self.assertIn('她说了什么 / 我说了什么', prompt)
+        self.assertIn('prescribe a chat-response emotion', prompt)
+        self.assertNotIn('Do not invent an emotion field', prompt)
         self.assertIn('self_disclosure', prompt)
         source = inspect.getsource(cognitive_worker)
         self.assertNotIn('UPDATE rel_state', source)
@@ -584,6 +683,11 @@ class SlowLoopSchemaTests(unittest.TestCase):
         self.assertIn('contradicting_evidence_refs', ddl)
         self.assertIn('self_model_evidence', ddl)
         self.assertIn('cognitive_worker_migrations', ddl)
+        self.assertIn('CREATE TABLE IF NOT EXISTS cognitive_sticky_notes', ddl)
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
+            ddl,
+        )
 
     def test_datetime_serialization_failures_are_requeued_once(self):
         source = inspect.getsource(cognitive_db.init_cognitive_tables)
@@ -650,6 +754,91 @@ class SlowLoopInspectionTests(unittest.TestCase):
             cursor, cycle_id=7, user_id='u', character_id='gojo',
             output=output, now=NOW)
         self.assertEqual(getattr(cursor, 'inserted_diary', []), [])
+
+    def test_sticky_metadata_is_written_and_replaced_on_update(self):
+        first = cognitive_output.validate_slow_loop_output(
+            {
+                **valid_output(),
+                'sticky_note_updates': [sticky_update(
+                    'user.cake.confirm',
+                    '连这种事都记着，还特地回来确认。……行吧，多少有点期待。',
+                    emotion='心动',
+                    trigger_snippet='因为satoru才知道喜欢和爱是什么意思',
+                )],
+            },
+            allowed_event_ids={27},
+        )
+        second = cognitive_output.validate_slow_loop_output(
+            {
+                **valid_output(),
+                'sticky_note_updates': [sticky_update(
+                    'user.cake.confirm',
+                    '高兴？没有。只是她记得这事，勉强算不错。',
+                    emotion='嘴硬',
+                    trigger_snippet='还特地回来确认蛋糕。',
+                )],
+            },
+            allowed_event_ids={27},
+        )
+        cursor = StructuredCommitCursor()
+        cognitive_output.persist_slow_loop_output(
+            cursor, cycle_id=7, user_id='u', character_id='gojo',
+            output=first, now=NOW)
+        cognitive_output.persist_slow_loop_output(
+            cursor, cycle_id=8, user_id='u', character_id='gojo',
+            output=second, now=NOW)
+        sticky_params = [
+            params for statement, params in cursor.executed
+            if statement.startswith('INSERT INTO cognitive_sticky_notes')
+        ]
+        self.assertEqual(len(sticky_params), 2)
+        first_meta = json.loads(sticky_params[0][-2])
+        second_meta = json.loads(sticky_params[1][-2])
+        self.assertEqual(sticky_params[0][3], first['sticky_note_updates'][0]['content'])
+        self.assertEqual(first_meta['emotion'], '心动')
+        self.assertEqual(
+            first_meta['trigger_snippet'],
+            '因为satoru才知道喜欢和爱是什么意思',
+        )
+        self.assertEqual(first_meta['tag'], '♡')
+        self.assertEqual(
+            sticky_params[1][3], second['sticky_note_updates'][0]['content'],
+        )
+        self.assertEqual(second_meta['emotion'], '嘴硬')
+        self.assertEqual(second_meta['trigger_snippet'], '还特地回来确认蛋糕。')
+        self.assertEqual(second_meta['tag'], '~')
+        sticky_sql = next(
+            statement for statement, _params in cursor.executed
+            if statement.startswith('INSERT INTO cognitive_sticky_notes')
+        )
+        self.assertIn('metadata = EXCLUDED.metadata', sticky_sql)
+
+    def test_legacy_sticky_persist_writes_empty_display_metadata(self):
+        output = cognitive_output.validate_slow_loop_output(
+            {
+                **valid_output(),
+                'sticky_note_updates': [{
+                    'note_key': 'reply.pending.topic',
+                    'content': '签证那件事她没讲完。之后得再问一句。',
+                    'status': 'active',
+                    'expires_in_seconds': 3600,
+                    'evidence_refs': [27],
+                }],
+            },
+            allowed_event_ids={27},
+        )
+        cursor = StructuredCommitCursor()
+        cognitive_output.persist_slow_loop_output(
+            cursor, cycle_id=7, user_id='u', character_id='gojo',
+            output=output, now=NOW)
+        sticky_params = next(
+            params for statement, params in cursor.executed
+            if statement.startswith('INSERT INTO cognitive_sticky_notes')
+        )
+        metadata = json.loads(sticky_params[-2])
+        self.assertEqual(metadata['emotion'], '')
+        self.assertEqual(metadata['trigger_snippet'], '')
+        self.assertEqual(metadata['tag'], '·')
 
 
 class MemoryContaminationGuardTests(unittest.TestCase):

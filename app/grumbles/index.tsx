@@ -29,7 +29,10 @@ interface Grumble {
   updated_by_cycle_id?: number | null;
   note_key?: string;
   status?: string;
+  emotion?: string;
   trigger_snippet?: string;
+  tag?: string;
+  emotion_tag?: string;
 }
 
 const NOTE_COLORS = ['#FFF9C4', '#FFE0B2', '#E1BEE7', '#BBDEFB', '#C8E6C9'];
@@ -152,6 +155,9 @@ export default function GrumblesScreen() {
             const bg = NOTE_COLORS[idx % NOTE_COLORS.length];
             const rotate = (idx % 2 === 0 ? -1.2 : 1.5);
             const charName = charNames[g.character_id] || g.character_id;
+            const emotion = (g.emotion || '').trim();
+            const title = emotion ? `${charName} · ${emotion}` : charName;
+            const tag = (g.tag || g.emotion_tag || '').trim() || '·';
             return (
               <TouchableOpacity
                 key={g.id}
@@ -163,14 +169,14 @@ export default function GrumblesScreen() {
                 ]}
               >
                 <View style={s.noteHead}>
-                  <Text style={s.noteMeta}>{charName}</Text>
+                  <Text style={s.noteMeta}>{title}</Text>
                   <Text style={s.noteMeta}>{formatTime(g.created_at)}</Text>
                 </View>
                 <Text style={s.noteBody}>{g.content}</Text>
                 {g.trigger_snippet ? (
                   <Text style={s.noteTrigger}>关于:「{g.trigger_snippet}」</Text>
                 ) : null}
-                <Text style={s.noteTag}>·</Text>
+                <Text style={s.noteTag}>{tag}</Text>
               </TouchableOpacity>
             );
           })}

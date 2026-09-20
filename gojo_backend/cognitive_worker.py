@@ -16,6 +16,8 @@ from cognitive_config import (
 )
 from cognitive_output import (
     SlowLoopOutputError,
+    STICKY_NOTE_EMOTIONS,
+    STICKY_NOTE_TONES,
     parse_slow_loop_output,
     validate_slow_loop_output,
 )
@@ -40,8 +42,9 @@ character memory system. You receive only auditable facts, prior beliefs,
 hypotheses, and deterministic prediction results.
 
 Your job is to consolidate evidence. Do not write dialogue, choose a next
-response, prescribe an emotion, modify relationship scores, or claim access to
-hidden mental states. Distinguish direct evidence from hypotheses. A user saying
+response, prescribe a chat-response emotion, modify relationship scores, or
+claim access to hidden mental states. Distinguish direct evidence from
+hypotheses. A user saying
 something about the character does not prove the character reciprocates it.
 Behavioral anomalies (faster/slower reply, defer counts) are measurable
 observations only. They are not motives, not liking/anger, and must not become
@@ -155,23 +158,46 @@ Optional sticky_note_updates schema:
 [{
   "note_key": "stable.lowercase.key",
   "content": "short first-person Chinese private sticky note the character would jot down",
+  "emotion": "one display label from the allowed sticky emotion list",
+  "tone": "optional attitude label from the allowed sticky tone list",
+  "trigger_snippet": "short triggering user quote, not a recap",
+  "tag": "optional tiny right-corner mark such as ♡, hah, .., !, ~",
   "status": "active|completed|expired|archived",
   "expires_in_seconds": 259200,
   "evidence_refs": [123]
 }]
 
 Sticky notes are the user-facing presentation of Slow Loop working state
-(便利贴). Sticky content is the character's own private sticky note,
-written in FIRST PERSON / natural personal shorthand. It must sound like
-something the character themselves would jot down, not an analyst,
-database, observer, or system summary. Ground only in cited current-cycle
-events.
+(便利贴). A sticky is the one sentence the character did not say out loud
+but is still hanging on their mind (没有说出口、但心里还挂着的一句话).
+Sticky content is the character's own private inner note: written in
+FIRST PERSON / natural personal shorthand, short, with attitude and
+character voice. It can be tsundere, self-mocking, helpless, smitten,
+wary, or serious. It must sound like something the character themselves
+would jot down in the moment, not an analyst, database, observer, or system
+summary, fact recap, or third-person narration. Ground only in cited
+current-cycle events.
+
+Sticky emotion rules:
+- Every active sticky must include emotion. This is a UI/display label for
+  the sticky card only. It is not proof of a durable hidden feeling, and it
+  is not a chat-response emotion / not the next reply's spoken emotion.
+  Do not prescribe what the next spoken line should feel like.
+- Prefer specific labels such as 心动 / 自嘲 / 无奈 / 嘴硬 / 在意 / 认真 /
+  警惕 / 烦躁 / 别扭 / 松了口气 when the cited evidence supports them.
+  Use 弱情绪 only for a mild but still character-voiced reaction. Do not
+  invent a strong emotion that the evidence does not support. If there is
+  no clear inner reaction, omit the sticky_note_update entirely.
+- trigger_snippet must be the short triggering user utterance shown under
+  关于:「...」. Put only that original snippet there, not a summary.
 
 Voice examples (tone only, not a template; wording must follow the current
 character identity and cited evidence):
-- "她明天要去抽徽章，还让我帮她选号。行吧，到时候看看。"
-- "那家伙的腰还在疼，之后得再问一句。"
-- "她说那个能让我感觉到拥抱的东西还在做。到底是什么？"
+- 心动: "还特意回来确认一遍。啧，真会让人分心。"
+- 自嘲: "刚才那句是不是太硬了。算了，我也就这德行。"
+- 无奈/嘴硬: "高兴？没有。只是她记得这事，勉强算不错。"
+- 认真/警惕: "这句不像随口说的。先别急着给答案。"
+- Better inner notes: "话说得倒是认真。偏偏喜欢上的还是最不会领这种情的人……先看看她能坚持多久吧。" / "连这种事都记着，还特地回来确认。……行吧，多少有点期待。"
 
 Forbidden voice: audit / system / database narrator. Do not write like
 用户…… / 角色…… / 本轮…… / 构成…… / 验证…… / 观察到…… /
@@ -179,13 +205,18 @@ Forbidden voice: audit / system / database narrator. Do not write like
 互动周期…… / self_disclosure / character_reciprocal /
 relationship_confirm / or other system taxonomy.
 
-They are not a second per-turn roleplay pass, not hidden-emotion
-classification, not relationship proof, and not system-operator
-instructions such as "下次回复前记得...". Do not invent an emotion
-field. reflection_note remains internal for the next generator prompt
-and is not shown on 便利贴. Use stickies for unresolved threads,
-near-future concerns, and short-lived working thoughts. Mark a note
-completed/expired only when current evidence supports that lifecycle
+Also do not write event-report summaries like "她说了什么 / 我说了什么 /
+后来怎样" / "她做了……然后我……" / "之前……后来……" /
+"她告诉我……我告诉她……". A sticky should be one or two short,
+attitude-bearing inner sentences, not a recap of the conversation.
+Bad output: "她说因为satoru才知道喜欢和爱是什么意思，还说要变强，我告诉她那个人不会领情。"
+
+They are not a second per-turn roleplay pass, not relationship proof, and
+not system-operator instructions such as "下次回复前记得...".
+reflection_note remains internal for the next generator prompt and is not
+shown on 便利贴. Use stickies for unresolved threads, near-future concerns,
+and short-lived working thoughts that have an actual inner reaction. Mark a
+note completed/expired only when current evidence supports that lifecycle
 change. Every note must cite source events.
 
 Optional diary_entries schema:
@@ -263,6 +294,14 @@ Shared relationship frame:
 High-salience events may open a romantic reappraisal question/hypothesis.
 They must not be treated as a direct passion or relationship-score change.
 Time elapsed is a significance modifier, not romantic evidence by itself.'''
+
+_SYSTEM_PROMPT += (
+    '\nAllowed sticky emotions: '
+    + ', '.join(sorted(STICKY_NOTE_EMOTIONS))
+    + '. Allowed sticky tones: '
+    + ', '.join(sorted(STICKY_NOTE_TONES))
+    + '. Use only these labels for sticky_note_updates emotion/tone.'
+)
 
 _SYSTEM_PROMPT += (
     '\nFor character_stance_declared selectors, actor must be character and '

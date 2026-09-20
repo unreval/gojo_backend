@@ -637,6 +637,22 @@ class QueueLifecycleTests(unittest.TestCase):
         for phrase in ('应该冷淡', '应该生气', '收短回复', '可以暧昧'):
             self.assertNotIn(phrase, source)
 
+    def test_sticky_read_paths_are_source_partitioned(self):
+        queue_source = inspect.getsource(cognitive_queue.build_reasoning_context)
+        with open(os.path.join(BACKEND, 'cognitive_reader.py'), encoding='utf-8') as handle:
+            reader_source = handle.read()
+        with open(os.path.join(BACKEND, 'memory_lifecycle.py'), encoding='utf-8') as handle:
+            lifecycle_source = handle.read()
+        self.assertIn("AND source = %s", queue_source)
+        self.assertIn('USER_FACING_STICKY_SOURCE', queue_source)
+        self.assertIn("AND source = %s", reader_source)
+        self.assertIn('USER_FACING_STICKY_SOURCE', reader_source)
+        sticky_reader = lifecycle_source.split(
+            'def recall_sticky_notes', 1,
+        )[1].split('def _diary_query_terms', 1)[0]
+        self.assertIn("AND source = %s", sticky_reader)
+        self.assertIn('MEMORY_LIFECYCLE_SOURCE', sticky_reader)
+
     def test_question_trigger_cap_is_applied_during_aggregation(self):
         source = inspect.getsource(cognitive_queue.aggregate_pending_triggers)
         self.assertIn('COGNITIVE_MAX_QUESTIONS_PER_CYCLE', source)

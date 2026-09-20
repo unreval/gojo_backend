@@ -7,6 +7,7 @@ from cognitive_config import (
     SHARED_RELATIONSHIP_FRAME_KEY,
     USER_FACING_STICKY_SOURCE,
 )
+from cognitive_output import sticky_emotion_tag
 from cognitive_revision import current_belief_display, is_stable_reader_belief
 
 
@@ -114,11 +115,13 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                FROM cognitive_sticky_notes
                WHERE user_id = %s AND character_id = %s
                  AND status = 'active'
+                 AND source = %s
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY updated_at DESC, id DESC
                LIMIT %s''',
             (
                 user_id, character_id,
+                USER_FACING_STICKY_SOURCE,
                 COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
             ),
         )
@@ -420,6 +423,13 @@ def _sticky_where(user_id, character_id=None, *, include_inactive=False,
 
 
 def _serialize_sticky_row(row):
+    metadata = _json_value(row[17] if len(row) > 17 else {}, {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    emotion = str(metadata.get('emotion') or '').strip()
+    trigger_snippet = str(metadata.get('trigger_snippet') or '').strip()
+    tone = str(metadata.get('tone') or '').strip()
+    tag = str(metadata.get('tag') or sticky_emotion_tag(emotion)).strip() or '·'
     return {
         'id': row[0],
         'character_id': row[1],
@@ -439,6 +449,12 @@ def _serialize_sticky_row(row):
         'user_hidden': row[15] is not None,
         'user_hidden_at': _iso(row[15]),
         'user_visible': bool(row[16]) if len(row) > 16 else True,
+        'metadata': metadata,
+        'emotion': emotion,
+        'tone': tone,
+        'trigger_snippet': trigger_snippet,
+        'tag': tag,
+        'emotion_tag': tag,
     }
 
 
@@ -467,7 +483,7 @@ def list_sticky_notes(user_id, character_id=None, *, include_inactive=False,
                       source_event_refs, created_by_cycle_id,
                       updated_by_cycle_id, expires_at, completed_at,
                       created_at, updated_at, viewed, viewed_at,
-                      user_hidden_at, user_visible
+                      user_hidden_at, user_visible, metadata
                FROM cognitive_sticky_notes
                WHERE {where_sql}
                ORDER BY updated_at DESC, id DESC

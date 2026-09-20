@@ -311,6 +311,7 @@ COGNITIVE_DDL = (
         viewed_at TIMESTAMPTZ,
         user_hidden_at TIMESTAMPTZ,
         user_visible BOOLEAN NOT NULL DEFAULT TRUE,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (user_id, character_id, note_key)
@@ -323,6 +324,8 @@ COGNITIVE_DDL = (
        ADD COLUMN IF NOT EXISTS user_hidden_at TIMESTAMPTZ''',
     '''ALTER TABLE cognitive_sticky_notes
        ADD COLUMN IF NOT EXISTS user_visible BOOLEAN NOT NULL DEFAULT TRUE''',
+    '''ALTER TABLE cognitive_sticky_notes
+       ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb''',
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_sticky_active
        ON cognitive_sticky_notes (user_id, character_id, expires_at, updated_at DESC)
        WHERE status = 'active' ''',

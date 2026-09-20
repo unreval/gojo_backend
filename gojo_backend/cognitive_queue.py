@@ -15,6 +15,7 @@ from cognitive_config import (
     COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
     COGNITIVE_MAX_RETRY,
     COGNITIVE_MAX_TRIGGERS_PER_CYCLE,
+    USER_FACING_STICKY_SOURCE,
 )
 
 
@@ -933,11 +934,13 @@ def build_reasoning_context(cycle_id, *, conn=None):
                FROM cognitive_sticky_notes
                WHERE user_id = %s AND character_id = %s
                  AND status = 'active'
+                 AND source = %s
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY updated_at DESC, id DESC
                LIMIT %s''',
             (
                 user_id, character_id,
+                USER_FACING_STICKY_SOURCE,
                 COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
             ),
         )

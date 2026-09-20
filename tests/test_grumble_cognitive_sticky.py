@@ -16,6 +16,7 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 from cognitive_config import USER_FACING_STICKY_SOURCE  # noqa: E402
+import cognitive_output  # noqa: E402
 import cognitive_reader  # noqa: E402
 
 
@@ -55,7 +56,12 @@ def make_row(*, note_id=1, character_id='gojo', note_key='thread.visa',
              created_by_cycle_id=90, updated_by_cycle_id=90,
              expires_at=None, completed_at=None, created_at=None,
              updated_at=None, viewed=False, viewed_at=None,
-             user_hidden_at=None, user_visible=True):
+             user_hidden_at=None, user_visible=True, metadata=None):
+    if metadata is None:
+        metadata = {
+            'emotion': '无奈', 'tone': '嘴硬',
+            'trigger_snippet': '她提到签证。', 'tag': '..',
+        }
     return (
         note_id, character_id, note_key, content, status, source,
         source_event_refs if source_event_refs is not None else [
@@ -63,7 +69,7 @@ def make_row(*, note_id=1, character_id='gojo', note_key='thread.visa',
         ],
         created_by_cycle_id, updated_by_cycle_id, expires_at, completed_at,
         created_at or NOW, updated_at or NOW, viewed, viewed_at,
-        user_hidden_at, user_visible,
+        user_hidden_at, user_visible, metadata,
     )
 
 
@@ -202,7 +208,31 @@ class UserFacingStickyQueryTests(unittest.TestCase):
         self.assertEqual(notes[0]['source'], USER_FACING_STICKY_SOURCE)
         self.assertEqual(notes[0]['created_by_cycle_id'], 90)
         self.assertEqual(notes[0]['source_event_refs'][0]['event_id'], 27)
+        self.assertEqual(notes[0]['emotion'], '无奈')
+        self.assertEqual(notes[0]['trigger_snippet'], '她提到签证。')
+        self.assertEqual(notes[0]['tag'], '..')
         self.assertFalse(notes[0]['viewed'])
+
+    def test_legacy_row_without_metadata_keeps_content(self):
+        conn = FakeConn()
+        conn.select_rows = [make_row(metadata={})]
+        notes = cognitive_reader.list_user_facing_sticky_notes(
+            'u1', None, conn=conn,
+        )
+        self.assertEqual(notes[0]['content'], '签证那件事我还挂着。')
+        self.assertEqual(notes[0]['status'], 'active')
+        self.assertEqual(notes[0]['emotion'], '')
+        self.assertEqual(notes[0]['trigger_snippet'], '')
+        self.assertEqual(notes[0]['tag'], '·')
+        conn_null = FakeConn()
+        null_row = make_row(metadata={})[:-1] + (None,)
+        conn_null.select_rows = [null_row]
+        null_notes = cognitive_reader.list_user_facing_sticky_notes(
+            'u1', None, conn=conn_null,
+        )
+        self.assertEqual(null_notes[0]['content'], '签证那件事我还挂着。')
+        self.assertEqual(null_notes[0]['emotion'], '')
+        self.assertEqual(null_notes[0]['trigger_snippet'], '')
 
     def test_memory_lifecycle_sticky_is_not_selected_by_user_facing_source(self):
         conn = FakeConn()
@@ -292,6 +322,7 @@ class PersistStickyProvenanceTests(unittest.TestCase):
         self.assertIn('created_by_cycle_id', sticky_block)
         self.assertIn('source_event_refs', sticky_block)
         self.assertIn('USER_FACING_STICKY_SOURCE', sticky_block)
+        self.assertIn('metadata', sticky_block)
         self.assertIn('viewed = CASE', sticky_block)
         self.assertIn('user_hidden_at = CASE', sticky_block)
         self.assertIn('user_visible = CASE', sticky_block)
@@ -305,9 +336,14 @@ class PersistStickyProvenanceTests(unittest.TestCase):
         src = ' '.join(Path(BACKEND, 'cognitive_worker.py').read_text(encoding='utf-8').split())
         self.assertIn('user-facing presentation of Slow Loop working state', src)
         self.assertIn('not a second per-turn roleplay pass', src)
-        self.assertIn('Do not invent an emotion field', src)
+        self.assertIn('"emotion"', src)
+        self.assertIn('Allowed sticky emotions', src)
         self.assertIn('FIRST PERSON / natural personal shorthand', src)
         self.assertIn('not an analyst, database, observer, or system summary', src)
+        self.assertIn('没有说出口、但心里还挂着的一句话', src)
+        self.assertIn('not a chat-response emotion', src)
+        self.assertIn('"trigger_snippet"', src)
+        self.assertNotIn('Do not invent an emotion field', src)
 
     def test_audit_sticky_dropped_natural_sticky_kept(self):
         import cognitive_output
@@ -324,6 +360,117 @@ class PersistStickyProvenanceTests(unittest.TestCase):
         self.assertIn('dropped non-user-facing sticky', persist_src)
 
 
+class StickyDisplayContractTests(unittest.TestCase):
+    def test_persist_reader_and_grumbles_keep_inner_voice_fields(self):
+        output = {
+            'cycle_summary': {
+                'summary': '用户回来确认喜欢的意思。',
+                'salient_change': '',
+                'uncertainty': '',
+                'confidence': 'medium',
+            },
+            'question_updates': [],
+            'belief_updates': [],
+            'hypothesis_updates': [],
+            'new_predictions': [],
+            'evidence_refs': [{
+                'event_id': 27,
+                'reason': '用户原话触发这张便利贴。',
+            }],
+            'reflection_note': {'content': '', 'evidence_refs': []},
+            'sticky_note_updates': [{
+                'note_key': 'user.cake.confirm',
+                'content': '连这种事都记着，还特地回来确认。……行吧，多少有点期待。',
+                'emotion': '心动',
+                'trigger_snippet': '因为satoru才知道喜欢和爱是什么意思',
+                'status': 'active',
+                'expires_in_seconds': 3600,
+                'evidence_refs': [27],
+            }],
+        }
+        validated = cognitive_output.validate_slow_loop_output(
+            output, allowed_event_ids={27},
+        )
+        note = validated['sticky_note_updates'][0]
+        self.assertEqual(note['emotion'], '心动')
+        self.assertEqual(note['tag'], '♡')
+
+        class _Cursor:
+            def __init__(self):
+                self.executed = []
+                self.one = None
+                self.many = []
+
+            def execute(self, sql, params=None):
+                compact = ' '.join(sql.split())
+                self.executed.append((compact, params))
+                if compact.startswith('INSERT INTO cognitive_'):
+                    self.one = (1,)
+                else:
+                    self.one = None
+                    self.many = []
+
+            def fetchone(self):
+                return self.one
+
+            def fetchall(self):
+                return list(self.many)
+
+            def close(self):
+                pass
+
+        cursor = _Cursor()
+        cognitive_output.persist_slow_loop_output(
+            cursor, cycle_id=7, user_id='u', character_id='gojo',
+            output=validated, now=NOW,
+        )
+        sticky_params = next(
+            params for statement, params in cursor.executed
+            if statement.startswith('INSERT INTO cognitive_sticky_notes')
+        )
+        metadata = json.loads(sticky_params[-2])
+        self.assertEqual(sticky_params[3], note['content'])
+        self.assertEqual(metadata['emotion'], '心动')
+        self.assertEqual(
+            metadata['trigger_snippet'],
+            '因为satoru才知道喜欢和爱是什么意思',
+        )
+        self.assertEqual(metadata['tag'], '♡')
+
+        conn = FakeConn()
+        conn.select_rows = [make_row(
+            content=sticky_params[3],
+            note_key='user.cake.confirm',
+            metadata=metadata,
+        )]
+        read = cognitive_reader.list_user_facing_sticky_notes(
+            'u', 'gojo', conn=conn,
+        )[0]
+        self.assertEqual(read['emotion'], '心动')
+        self.assertEqual(read['trigger_snippet'], metadata['trigger_snippet'])
+        self.assertEqual(read['tag'], '♡')
+
+        public = load_source('route_grumble', {
+            'fastapi': stub('fastapi', APIRouter=Mock()),
+            'fastapi.responses': stub('fastapi.responses', JSONResponse=dict),
+            'cognitive_config': stub(
+                'cognitive_config',
+                USER_FACING_STICKY_SOURCE=USER_FACING_STICKY_SOURCE,
+            ),
+            'cognitive_reader': stub(
+                'cognitive_reader',
+                count_unviewed_sticky_notes=lambda *_a, **_k: 0,
+                hide_sticky_note=lambda *_a, **_k: True,
+                list_user_facing_sticky_notes=lambda *_a, **_k: [],
+                mark_sticky_notes_viewed=lambda *_a, **_k: 0,
+            ),
+        })._public_grumble(read)
+        self.assertEqual(public['emotion'], '心动')
+        self.assertEqual(public['trigger_snippet'], read['trigger_snippet'])
+        self.assertEqual(public['tag'], '♡')
+        self.assertEqual(public['content'], note['content'])
+
+
 class RouteGrumbleApiTests(unittest.TestCase):
     def setUp(self):
         router = Mock()
@@ -335,7 +482,7 @@ class RouteGrumbleApiTests(unittest.TestCase):
                 'id': 11,
                 'character_id': 'gojo',
                 'note_key': 'thread.visa',
-                'content': '签证那件事我还挂着。',
+                'content': '连这种事都记着，还特地回来确认。……行吧，多少有点期待。',
                 'status': 'active',
                 'source': USER_FACING_STICKY_SOURCE,
                 'source_event_refs': [{'event_id': 27, 'reason': 'current'}],
@@ -344,6 +491,11 @@ class RouteGrumbleApiTests(unittest.TestCase):
                 'created_at': NOW.isoformat(),
                 'updated_at': NOW.isoformat(),
                 'viewed': False,
+                'emotion': '心动',
+                'tone': '',
+                'trigger_snippet': '因为satoru才知道喜欢和爱是什么意思',
+                'tag': '♡',
+                'emotion_tag': '♡',
             }
         ]
         self.list_kwargs = []
@@ -399,12 +551,52 @@ class RouteGrumbleApiTests(unittest.TestCase):
         self.assertEqual(self.list_kwargs, [('u1', None, 100)])
         item = body['grumbles'][0]
         self.assertEqual(item['id'], 11)
-        self.assertEqual(item['content'], '签证那件事我还挂着。')
+        self.assertEqual(
+            item['content'],
+            '连这种事都记着，还特地回来确认。……行吧，多少有点期待。',
+        )
         self.assertEqual(item['source'], USER_FACING_STICKY_SOURCE)
         self.assertEqual(item['created_by_cycle_id'], 90)
         self.assertEqual(item['source_event_refs'][0]['event_id'], 27)
-        self.assertNotIn('emotion', item)
-        self.assertNotIn('trigger_snippet', item)
+        self.assertEqual(item['emotion'], '心动')
+        self.assertEqual(
+            item['trigger_snippet'], '因为satoru才知道喜欢和爱是什么意思',
+        )
+        self.assertEqual(item['tag'], '♡')
+
+    def test_get_grumbles_returns_self_mocking_and_wary_emotions(self):
+        cases = [
+            ('自嘲', 'hah', '刚才那句是不是太硬了。算了，我也就这德行。'),
+            ('无奈', '..', '高兴？没有。只是她记得这事，勉强算不错。'),
+            ('嘴硬', '~', '高兴？没有。只是她记得这事，勉强算不错。'),
+            ('认真', '·', '这事不能当玩笑听。下次得接住。'),
+            ('警惕', '!', '这句不像随口说的。先别急着给答案。'),
+        ]
+        for emotion, tag, content in cases:
+            self.listed[0]['emotion'] = emotion
+            self.listed[0]['tag'] = tag
+            self.listed[0]['emotion_tag'] = tag
+            self.listed[0]['content'] = content
+            self.listed[0]['trigger_snippet'] = '她特意回来确认蛋糕。'
+            response = asyncio.run(self.route.get_grumbles('u1', None, 100))
+            item = json.loads(response.body)['grumbles'][0]
+            self.assertEqual(item['emotion'], emotion)
+            self.assertEqual(item['tag'], tag)
+            self.assertEqual(item['trigger_snippet'], '她特意回来确认蛋糕。')
+            self.assertEqual(item['content'], content)
+
+    def test_get_grumbles_legacy_note_without_display_fields(self):
+        self.listed[0].pop('emotion')
+        self.listed[0].pop('tone')
+        self.listed[0].pop('trigger_snippet')
+        self.listed[0].pop('tag')
+        self.listed[0].pop('emotion_tag')
+        response = asyncio.run(self.route.get_grumbles('u1', None, 100))
+        item = json.loads(response.body)['grumbles'][0]
+        self.assertEqual(item['content'], self.listed[0]['content'])
+        self.assertEqual(item['emotion'], '')
+        self.assertEqual(item['trigger_snippet'], '')
+        self.assertEqual(item['tag'], '·')
 
     def test_unviewed_count_uses_user_facing_source(self):
         response = asyncio.run(self.route.unviewed_count('u1', None))
@@ -440,8 +632,10 @@ class RouteGrumbleApiTests(unittest.TestCase):
         self.assertIn('viewed_at TIMESTAMPTZ', blob)
         self.assertIn('user_hidden_at TIMESTAMPTZ', blob)
         self.assertIn('user_visible BOOLEAN NOT NULL DEFAULT TRUE', blob)
+        self.assertIn("metadata JSONB NOT NULL DEFAULT '{}'::jsonb", blob)
         self.assertIn('ADD COLUMN IF NOT EXISTS viewed', blob)
         self.assertIn('ADD COLUMN IF NOT EXISTS user_visible', blob)
+        self.assertIn('ADD COLUMN IF NOT EXISTS metadata', blob)
 
     def test_startup_excludes_pre_presentation_slow_loop_once_without_delete(self):
         source = Path(BACKEND, 'cognitive_db.py').read_text(encoding='utf-8')
