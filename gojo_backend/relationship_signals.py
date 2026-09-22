@@ -12,11 +12,11 @@
 
 Observer 的输出是原子事件（signal），不是结论。
 """
+import json
 from typing import Dict, List, Optional
 
 from ai_client import create_chat
 from config import MODEL_MAIN
-from utils import extract_json
 from relationship_config import (
     SIGNAL_EXTRACTOR_MAX_TOKENS,
 )
@@ -50,6 +50,11 @@ _OBSERVER_SYSTEM_PROMPT = '''你是一个中立的对话观察员。你的任务
     }
   ]
 }
+
+【合法 JSON 示例】
+- 即使只有一条事件，也必须放在 signals 数组里：
+{"signals":[{"signal_type":"small_care","actor":"user","confidence":"high","brief":"用户提醒角色早点休息","attributes":{}}]}
+- 没有事件时：{"signals":[]}
 
 【signal_type 枚举（只用这些，不要发明新的）】
 
@@ -110,6 +115,13 @@ _OBSERVER_SYSTEM_PROMPT = '''你是一个中立的对话观察员。你的任务
 '''
 
 
+_SINGLE_EVENT_EXAMPLE = (
+    '{"signals":[{"signal_type":"small_care","actor":"user",'
+    '"confidence":"high","brief":"用户提醒角色早点休息",'
+    '"attributes":{}}]}'
+)
+
+
 def _build_user_prompt(
     user_message: str, character_reply: Optional[str],
     character_core_snippet: Optional[str] = None,
@@ -143,8 +155,167 @@ def _build_user_prompt(
     return '\n'.join(parts)
 
 
+def _json_value_type(value) -> str:
+    if value is None:
+        return 'null'
+    if isinstance(value, bool):
+        return 'boolean'
+    if isinstance(value, list):
+        return 'array'
+    if isinstance(value, dict):
+        return 'object'
+    if isinstance(value, str):
+        return 'string'
+    if isinstance(value, (int, float)):
+        return 'number'
+    return 'other'
+
+
+def _balanced_container_end(text: str, start: int) -> Optional[int]:
+    """Return the end of one JSON container without exposing nested objects."""
+    if start < 0 or start >= len(text) or text[start] not in '{[':
+        return None
+    stack = []
+    in_string = False
+    escaped = False
+    pairs = {'}': '{', ']': '['}
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in '{[':
+            stack.append(char)
+        elif char in '}]':
+            if not stack or stack[-1] != pairs[char]:
+                return index + 1
+            stack.pop()
+            if not stack:
+                return index + 1
+    return None
+
+
+def _top_level_json_values(text: str) -> List:
+    """Decode root JSON containers embedded in prose, never their children."""
+    values = []
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            # A complete JSON string may itself contain escaped object text.
+            # Skip the whole string so that content inside it is not a candidate.
+            try:
+                value, end = decoder.raw_decode(text, index)
+            except (TypeError, ValueError):
+                index += 1
+                continue
+            if isinstance(value, str):
+                index = end
+                continue
+        if char not in '{[':
+            index += 1
+            continue
+        end = _balanced_container_end(text, index)
+        if end is None:
+            # Everything after an unclosed root is structurally nested/ambiguous.
+            break
+        candidate = text[index:end]
+        try:
+            values.append(json.loads(candidate))
+        except (TypeError, ValueError):
+            pass
+        index = end
+    return values
+
+
+def _extract_relationship_envelope(text: str):
+    """Select the one unambiguous top-level {"signals": [...]} envelope."""
+    diagnostics = {
+        'candidate_count': 0,
+        'has_signals': False,
+        'signals_type': 'missing',
+        'valid_envelope_count': 0,
+        'distinct_envelope_count': 0,
+        'error_reason': None,
+    }
+    if not text or not isinstance(text, str):
+        diagnostics['error_reason'] = 'no_json_object'
+        return None, 'json_parse_failed', diagnostics
+
+    candidates = [
+        value for value in _top_level_json_values(text)
+        if isinstance(value, dict)
+    ]
+    diagnostics['candidate_count'] = len(candidates)
+    with_signals = [candidate for candidate in candidates if 'signals' in candidate]
+    diagnostics['has_signals'] = bool(with_signals)
+    if with_signals:
+        signal_types = sorted({
+            _json_value_type(candidate.get('signals'))
+            for candidate in with_signals
+        })
+        diagnostics['signals_type'] = ','.join(signal_types)
+
+    valid = [
+        candidate for candidate in with_signals
+        if isinstance(candidate.get('signals'), list)
+    ]
+    diagnostics['valid_envelope_count'] = len(valid)
+    if not valid:
+        if not candidates:
+            diagnostics['error_reason'] = 'no_top_level_json_object'
+            return None, 'json_parse_failed', diagnostics
+        if not with_signals:
+            diagnostics['error_reason'] = 'signals_missing'
+        elif diagnostics['signals_type'] == 'null':
+            diagnostics['error_reason'] = 'signals_null'
+        elif diagnostics['signals_type'] == 'object':
+            diagnostics['error_reason'] = 'signals_object_not_array'
+        elif diagnostics['signals_type'] == 'string':
+            diagnostics['error_reason'] = 'signals_string_not_array'
+        else:
+            diagnostics['error_reason'] = 'signals_not_array'
+        return None, 'signals_schema_invalid', diagnostics
+
+    distinct = {}
+    for candidate in valid:
+        canonical = json.dumps(
+            candidate, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':'),
+        )
+        distinct.setdefault(canonical, candidate)
+    diagnostics['distinct_envelope_count'] = len(distinct)
+    if len(distinct) > 1:
+        diagnostics['error_reason'] = 'multiple_distinct_signals_envelopes'
+        return None, 'signals_envelope_ambiguous', diagnostics
+
+    # Repeated semantically identical envelopes are one answer, not ambiguity.
+    return next(iter(distinct.values())), None, diagnostics
+
+
 def _extract_json(text: str) -> Optional[Dict]:
-    return extract_json(text)
+    """Compatibility wrapper for the relationship-specific envelope selector."""
+    parsed, _error, _diagnostics = _extract_relationship_envelope(text)
+    return parsed
+
+
+def _retry_instruction(error: str, error_reason: str) -> str:
+    reason = error_reason or error or 'unknown_format_error'
+    return (
+        f'\n上次输出未通过结构校验，检测到的错误是：{reason}。'
+        '请重新只输出一个完整 JSON 对象。signals 必须是数组；'
+        '即使只有一条事件也必须放进数组。合法单事件示例：'
+        f'{_SINGLE_EVENT_EXAMPLE}；没有事件时返回 {{"signals":[]}}。'
+        '不要输出解释、metadata 或 markdown 围栏；保持 brief 简短。'
+    )
 
 
 def extract_signals(
@@ -185,32 +356,42 @@ def extract_signals(
         except Exception as e:
             return {'signals': [], 'raw': '', 'model': model or MODEL_MAIN,
                     'error': f'llm_call_failed: {e}'}
+        usage = usage or {}
         stop = usage.get('stop_reason') or usage.get('finish_reason')
-        parsed = _extract_json(raw_text)
+        parsed, envelope_error, diagnostics = _extract_relationship_envelope(
+            raw_text)
         error = None
+        error_reason = diagnostics.get('error_reason')
         if stop in {'refusal', 'content_filter'}:
             error = 'model_refused'
+            error_reason = f'stop_reason_{stop}'
         elif stop in {'max_tokens', 'length'}:
             error = 'truncated_response'
+            error_reason = f'stop_reason_{stop}'
             max_tokens = min(max_tokens * 2, 2400)
         elif not raw_text or not raw_text.strip():
             error = 'empty_response'
-        elif parsed is None:
-            error = 'json_parse_failed'
-        elif not isinstance(parsed.get('signals'), list):
-            error = 'signals_schema_invalid'
+            error_reason = 'empty_response'
+        elif envelope_error:
+            error = envelope_error
         if error is None:
             break
         print(f'[relationship_signals] attempt={attempt + 1} error={error} '
-              f'stop={stop} output_tokens={usage.get("output_tokens")} '
-              f'chars={len(raw_text or "")} response_id={usage.get("response_id")}')
+              f'error_reason={error_reason or "unknown"} '
+              f'candidate_count={diagnostics.get("candidate_count", 0)} '
+              f'has_signals={diagnostics.get("has_signals", False)} '
+              f'signals_type={diagnostics.get("signals_type", "missing")} '
+              f'stop_reason={stop or "unknown"} '
+              f'output_tokens={usage.get("output_tokens")} '
+              f'chars={len(raw_text or "")} '
+              f'response_id={usage.get("response_id") or "-"}')
         if attempt == 1 or stop in {'refusal', 'content_filter'}:
             return {'signals': [], 'raw': raw_text, 'model': model or MODEL_MAIN,
-                    'error': error}
-        messages = [{'role': 'user', 'content': user_prompt + (
-            '\n上次输出为空、被截断或不符合格式。请重新只输出完整 JSON 对象，'
-            'signals 必须是数组；没有事件时返回 {"signals":[]}。保持 brief 简短。'
-        )}]
+                    'error': error, 'error_reason': error_reason}
+        messages = [{
+            'role': 'user',
+            'content': user_prompt + _retry_instruction(error, error_reason),
+        }]
 
     # 简单清洗：确保每个 signal 有 signal_type/actor/confidence 三个必填
     valid_signals = []
@@ -228,4 +409,5 @@ def extract_signals(
         valid_signals.append(s)
 
     return {'signals': valid_signals, 'raw': raw_text,
-            'model': model or MODEL_MAIN, 'error': None}
+            'model': model or MODEL_MAIN, 'error': None,
+            'error_reason': None}

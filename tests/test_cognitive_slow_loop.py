@@ -13,6 +13,7 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 import cognitive_db
+import cognitive_config
 import cognitive_inspect
 import cognitive_output
 import cognitive_queue
@@ -115,6 +116,25 @@ def sticky_update(note_key, content, *, emotion='无奈', tone='',
     if tone:
         update['tone'] = tone
     return update
+
+
+_TTL_MISSING = object()
+
+
+def output_with_sticky_ttl(status='active', ttl=_TTL_MISSING, *,
+                           content='这事还挂在心上，过会儿再想。'):
+    output = valid_output()
+    note = {
+        'note_key': 'reply.pending.ttl',
+        'content': content,
+        'emotion': '认真',
+        'status': status,
+        'evidence_refs': [27],
+    }
+    if ttl is not _TTL_MISSING:
+        note['expires_in_seconds'] = ttl
+    output['sticky_note_updates'] = [note]
+    return output
 
 
 class TransactionConnection:
@@ -472,6 +492,275 @@ class SlowLoopValidationTests(unittest.TestCase):
         self.assertEqual(decision['reason'], 'character_self_claim_only')
 
 
+class StickyNoteTTLValidationTests(unittest.TestCase):
+    def _validate(self, status='active', ttl=_TTL_MISSING, **kwargs):
+        return cognitive_output.validate_slow_loop_output(
+            output_with_sticky_ttl(status, ttl, **kwargs),
+            allowed_event_ids={27},
+            current_event_ids={27},
+        )
+
+    def test_active_missing_and_null_use_configured_default(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        for ttl in (_TTL_MISSING, None):
+            with self.subTest(ttl=ttl):
+                note = self._validate('active', ttl)['sticky_note_updates'][0]
+                self.assertEqual(note['expires_in_seconds'], config['default'])
+
+    def test_active_exact_minimum_and_maximum_are_valid(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        for ttl in (config['minimum'], config['maximum']):
+            with self.subTest(ttl=ttl):
+                note = self._validate('active', ttl)['sticky_note_updates'][0]
+                self.assertEqual(note['expires_in_seconds'], ttl)
+
+    def test_active_out_of_range_values_are_rejected_without_clamping(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        for ttl in (config['minimum'] - 1, config['maximum'] + 1, 0, -1):
+            with self.subTest(ttl=ttl), self.assertRaisesRegex(
+                cognitive_output.SlowLoopOutputError, 'ttl_out_of_range',
+            ):
+                self._validate('active', ttl)
+
+    def test_active_bool_string_and_float_are_rejected(self):
+        for ttl in (False, True, '0', '3600', 0.0, 3600.0):
+            with self.subTest(ttl=ttl), self.assertRaisesRegex(
+                cognitive_output.SlowLoopOutputError, 'ttl_invalid',
+            ):
+                self._validate('active', ttl)
+
+    def test_inactive_statuses_accept_missing_null_zero_and_legacy_ttl(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        for status in ('completed', 'expired', 'archived'):
+            for ttl in (_TTL_MISSING, None, 0, config['minimum'],
+                        config['default'], config['maximum']):
+                with self.subTest(status=status, ttl=ttl):
+                    note = self._validate(status, ttl)['sticky_note_updates'][0]
+                    self.assertIsNone(note['expires_in_seconds'])
+
+    def test_inactive_out_of_range_integers_are_rejected(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        for status in ('completed', 'expired', 'archived'):
+            for ttl in (-1, config['minimum'] - 1, config['maximum'] + 1):
+                if ttl == 0:
+                    continue  # A configured minimum of 1 leaves only zero below it.
+                with self.subTest(status=status, ttl=ttl), self.assertRaisesRegex(
+                    cognitive_output.SlowLoopOutputError, 'ttl_out_of_range',
+                ):
+                    self._validate(status, ttl)
+
+    def test_inactive_bool_string_and_float_cannot_use_zero_compatibility(self):
+        for status in ('completed', 'expired', 'archived'):
+            for ttl in (False, True, '0', '3600', 0.0, 3600.0):
+                with self.subTest(status=status, ttl=ttl), self.assertRaisesRegex(
+                    cognitive_output.SlowLoopOutputError, 'ttl_invalid',
+                ):
+                    self._validate(status, ttl)
+
+    def test_inactive_compatibility_ttl_is_normalized_and_revalidates(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        for status in ('completed', 'expired', 'archived'):
+            for ttl in (0, config['minimum'], config['default'], config['maximum']):
+                with self.subTest(status=status, ttl=ttl):
+                    diagnostics = []
+                    normalized = cognitive_output.validate_slow_loop_output(
+                        output_with_sticky_ttl(status, ttl),
+                        allowed_event_ids={27}, current_event_ids={27},
+                        diagnostics=diagnostics,
+                    )
+                    self.assertEqual(normalized, self._validate(status, None))
+                    self.assertEqual(diagnostics, [{
+                        'error_category': ('inactive_zero_normalized' if ttl == 0
+                                           else 'inactive_ttl_ignored'),
+                        'field_path': 'sticky_note_updates[0].expires_in_seconds',
+                        'update_index': 0,
+                        'status': status,
+                        'ttl_source': 'model',
+                        'ttl_type': 'integer',
+                        'ttl_value': ttl,
+                        'ttl_min': config['minimum'],
+                        'ttl_max': config['maximum'],
+                    }])
+                    second_diagnostics = []
+                    revalidated = cognitive_output.validate_slow_loop_output(
+                        normalized,
+                        allowed_event_ids={27}, current_event_ids={27},
+                        diagnostics=second_diagnostics,
+                    )
+                    self.assertEqual(revalidated, normalized)
+                    self.assertEqual(second_diagnostics, [])
+
+    def test_inactive_compatibility_ttl_persists_like_null_without_reactivation(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        for status in ('completed', 'expired', 'archived'):
+            persisted = []
+            for ttl in (None, 0, config['minimum'], config['default'],
+                        config['maximum']):
+                normalized = self._validate(status, ttl)
+                cursor = StructuredCommitCursor()
+                cognitive_output.persist_slow_loop_output(
+                    cursor, cycle_id=7, user_id='u', character_id='gojo',
+                    output=normalized, now=NOW,
+                )
+                sql, params = next(
+                    item for item in cursor.executed
+                    if item[0].startswith('INSERT INTO cognitive_sticky_notes')
+                )
+                persisted.append(params)
+                self.assertEqual(params[4], status)
+                self.assertIsNone(params[9])
+                self.assertEqual(
+                    params[10], NOW if status == 'completed' else None,
+                )
+                self.assertIn(
+                    'completed_at = COALESCE( EXCLUDED.completed_at, '
+                    'cognitive_sticky_notes.completed_at)',
+                    sql,
+                )
+            for params in persisted[1:]:
+                self.assertEqual(persisted[0], params)
+
+    def test_default_above_maximum_is_a_configuration_error(self):
+        with self.assertRaisesRegex(
+            cognitive_config.CognitiveConfigError,
+            'default_out_of_range',
+        ):
+            cognitive_config.validate_sticky_note_ttl_config(
+                minimum=300, default=601, maximum=600,
+            )
+
+    def test_prompt_and_retry_use_effective_ttl_config(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        prompt = cognitive_worker._build_system_prompt()
+        self.assertIn(f'default={config["default"]}', prompt)
+        self.assertIn(
+            f'inclusive range [{config["minimum"]}, {config["maximum"]}]',
+            prompt,
+        )
+        self.assertIn('omit expires_in_seconds or use null', prompt)
+        self.assertIn('integer 0 or a positive JSON integer', prompt)
+        self.assertIn('the redundant TTL is ignored', prompt)
+
+        secret_body = '这段便利贴正文绝不能出现在诊断日志里。'
+        bad = output_with_sticky_ttl(
+            'active', config['maximum'] + 1, content=secret_body,
+        )
+        good = output_with_sticky_ttl('active', config['minimum'])
+        call_model = Mock(side_effect=[
+            (json.dumps(bad, ensure_ascii=False), {}),
+            (json.dumps(good, ensure_ascii=False), {}),
+        ])
+        with patch('builtins.print') as log:
+            result, _usage = cognitive_worker.generate_cycle_output(
+                {'cycle_id': 44, 'events': [{'event_id': 27}]},
+                create_chat_fn=call_model,
+            )
+        self.assertEqual(
+            result['sticky_note_updates'][0]['expires_in_seconds'],
+            config['minimum'],
+        )
+        retry = call_model.call_args_list[1].kwargs['messages'][-1]['content']
+        self.assertIn('sticky_note_updates[0].expires_in_seconds', retry)
+        self.assertIn('status=active', retry)
+        self.assertIn('ttl_type=integer', retry)
+        self.assertIn(str(config['maximum'] + 1), retry)
+        self.assertIn(str(config['minimum']), retry)
+        self.assertIn(str(config['maximum']), retry)
+        logs = '\n'.join(str(item) for item in log.call_args_list)
+        self.assertIn('cycle=44', logs)
+        self.assertIn('attempt=1', logs)
+        self.assertIn('ttl_source=model', logs)
+        self.assertIn('error_category=ttl_out_of_range', logs)
+        self.assertNotIn(secret_body, logs)
+
+    def test_inactive_zero_worker_diagnostic_does_not_log_content(self):
+        secret_body = '这张结束便利贴的正文不能进入日志。'
+        call_model = Mock(return_value=(json.dumps(
+            output_with_sticky_ttl('archived', 0, content=secret_body),
+            ensure_ascii=False,
+        ), {}))
+        with patch('builtins.print') as log:
+            output, _usage = cognitive_worker.generate_cycle_output(
+                {'cycle_id': 45, 'events': [{'event_id': 27}]},
+                create_chat_fn=call_model,
+            )
+        self.assertIsNone(
+            output['sticky_note_updates'][0]['expires_in_seconds'],
+        )
+        logs = '\n'.join(str(item) for item in log.call_args_list)
+        self.assertIn('cycle=45', logs)
+        self.assertIn('status=archived', logs)
+        self.assertIn('ttl_value=0', logs)
+        self.assertIn('error_category=inactive_zero_normalized', logs)
+        self.assertNotIn(secret_body, logs)
+
+    def test_inactive_positive_ttl_succeeds_without_retry_or_content_logging(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        secret_body = '这张结束便利贴的正文不能进入日志。'
+        for status in ('completed', 'expired', 'archived'):
+            for ttl in (config['minimum'], config['default'], config['maximum']):
+                with self.subTest(status=status, ttl=ttl):
+                    call_model = Mock(return_value=(json.dumps(
+                        output_with_sticky_ttl(status, ttl, content=secret_body),
+                        ensure_ascii=False,
+                    ), {}))
+                    with patch('builtins.print') as log:
+                        output, _usage = cognitive_worker.generate_cycle_output(
+                            {'cycle_id': 45, 'events': [{'event_id': 27}]},
+                            create_chat_fn=call_model,
+                        )
+                    call_model.assert_called_once()
+                    self.assertIsNone(
+                        output['sticky_note_updates'][0]['expires_in_seconds'],
+                    )
+                    logs = '\n'.join(str(item) for item in log.call_args_list)
+                    self.assertIn(f'status={status}', logs)
+                    self.assertIn(f'ttl_value={ttl}', logs)
+                    self.assertIn('error_category=inactive_ttl_ignored', logs)
+                    self.assertNotIn(secret_body, logs)
+
+    def test_inactive_retry_accepts_legacy_ttl_using_runtime_bounds(self):
+        config = cognitive_config.validate_sticky_note_ttl_config(
+            minimum=600, default=900, maximum=1200,
+        )
+        call_model = Mock(side_effect=[
+            (json.dumps(output_with_sticky_ttl('expired', 1201)), {}),
+            (json.dumps(output_with_sticky_ttl('expired', 900)), {}),
+        ])
+        with patch.object(cognitive_config, 'COGNITIVE_STICKY_NOTE_TTL_CONFIG', config), \
+             patch('builtins.print'):
+            output, _usage = cognitive_worker.generate_cycle_output(
+                {'cycle_id': 47, 'events': [{'event_id': 27}]},
+                create_chat_fn=call_model,
+            )
+        self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])
+        self.assertEqual(call_model.call_count, 2)
+        prompt = call_model.call_args.kwargs['system']
+        retry = call_model.call_args.kwargs['messages'][-1]['content']
+        self.assertIn('default=900', prompt)
+        for instruction in (prompt, retry):
+            self.assertIn('inclusive range [600, 1200]', instruction)
+            self.assertIn('omit expires_in_seconds or use null', instruction)
+        self.assertIn('status=expired', retry)
+        self.assertIn('integer 0 or a non-boolean positive JSON integer', retry)
+        self.assertIn('accepted and ignored (normalized to null)', retry)
+
+    def test_configuration_error_is_not_sent_to_the_model_for_retry(self):
+        call_model = Mock()
+        error = cognitive_config.CognitiveConfigError(
+            'sticky_note_ttl_config_invalid:default_out_of_range',
+        )
+        with patch.object(
+            cognitive_worker, 'get_sticky_note_ttl_config', side_effect=error,
+        ):
+            with self.assertRaises(cognitive_config.CognitiveConfigError):
+                cognitive_worker.generate_cycle_output(
+                    {'cycle_id': 46, 'events': [{'event_id': 27}]},
+                    create_chat_fn=call_model,
+                )
+        call_model.assert_not_called()
+
+
 class SlowLoopTransactionTests(unittest.TestCase):
     def test_structured_output_and_trigger_consumption_commit_together(self):
         cursor = StructuredCommitCursor()
@@ -544,6 +833,22 @@ class SlowLoopTransactionTests(unittest.TestCase):
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
         sql = '\n'.join(item[0] for item in cursor.executed)
+        self.assertNotIn("SET status = 'consumed'", sql)
+
+    def test_invalid_sticky_ttl_rolls_back_entire_cycle(self):
+        cursor = StructuredCommitCursor()
+        connection = TransactionConnection(cursor)
+        output = output_with_sticky_ttl('active', 0)
+        with self.assertRaisesRegex(
+            cognitive_output.SlowLoopOutputError, 'ttl_out_of_range',
+        ):
+            cognitive_queue.commit_cycle_success(
+                7, structured_output=output, conn=connection, now=NOW,
+            )
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        sql = '\n'.join(item[0] for item in cursor.executed)
+        self.assertNotIn('INSERT INTO cognitive_sticky_notes', sql)
         self.assertNotIn("SET status = 'consumed'", sql)
 
 
@@ -643,6 +948,51 @@ class SlowLoopWorkerTests(unittest.TestCase):
             result = cognitive_worker.run_worker_once(now=NOW)
         self.assertEqual(result['status'], 'failed')
         self.assertIn('bad_schema', fail.call_args.args[1])
+
+    def test_invalid_ttl_releases_then_corrected_retry_commits_once(self):
+        config = cognitive_config.get_sticky_note_ttl_config()
+        bad = output_with_sticky_ttl('active', config['maximum'] + 1)
+        good = output_with_sticky_ttl('active', config['minimum'])
+        call_model = Mock(side_effect=[
+            (json.dumps(bad, ensure_ascii=False), {}),
+            (json.dumps(bad, ensure_ascii=False), {}),
+            (json.dumps(good, ensure_ascii=False), {}),
+        ])
+        claims = [
+            {'status': 'running', 'cycle_id': 7},
+            {'status': 'running', 'cycle_id': 8},
+        ]
+
+        def context(cycle_id):
+            return {'cycle_id': cycle_id, 'events': [{'event_id': 27}]}
+
+        with patch.object(cognitive_worker, 'maintain_scheduled_reflections'), \
+             patch.object(cognitive_worker, 'maintain_pending_cycles'), \
+             patch.object(cognitive_worker, 'claim_next_cycle', side_effect=claims), \
+             patch.object(cognitive_worker, 'build_reasoning_context', side_effect=context), \
+             patch.object(cognitive_worker, 'fail_cycle', return_value={
+                 'status': 'failed',
+                 'triggers': [{'trigger_id': 9, 'status': 'pending'}],
+             }) as fail, \
+             patch.object(cognitive_worker, 'commit_cycle_success', return_value={
+                 'status': 'succeeded', 'output_state_version': 1,
+             }) as commit, \
+             patch('builtins.print'):
+            first = cognitive_worker.run_worker_once(
+                create_chat_fn=call_model, now=NOW,
+            )
+            second = cognitive_worker.run_worker_once(
+                create_chat_fn=call_model, now=NOW,
+            )
+
+        self.assertEqual(first['status'], 'failed')
+        self.assertEqual(first['triggers'][0]['status'], 'pending')
+        self.assertEqual(second['status'], 'succeeded')
+        self.assertEqual(call_model.call_count, 3)
+        fail.assert_called_once()
+        self.assertIn('sticky_note_update_0_ttl_out_of_range', fail.call_args.args[1])
+        commit.assert_called_once()
+        self.assertEqual(commit.call_args.args[0], 8)
 
     def test_worker_prompt_forbids_response_policy_and_relationship_writes(self):
         prompt = cognitive_worker._SYSTEM_PROMPT

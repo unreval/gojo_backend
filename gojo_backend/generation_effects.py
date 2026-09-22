@@ -1,6 +1,7 @@
 """Apply durable chat generation side effects after receipt complete.
 
-Never calls the LLM. Replay/repair uses the same functions.
+Never reruns the main reply generation. relationship_update owns its bounded
+observer call; replay/repair uses the same side-effect functions.
 """
 from datetime import datetime
 
@@ -18,6 +19,10 @@ SYNC_SKIP_EFFECTS = (
     'promise_detector',
 )
 CLIENT_COUPLED_EFFECTS = ('reminder', 'cancel_reminder')
+
+
+class RetryableRelationshipObserverError(RuntimeError):
+    """Signals observer failed; the durable side-effect row should be retried."""
 
 
 def assistant_turn_id_for(endpoint, source_event_id):
@@ -361,11 +366,27 @@ def apply_promise_detector(ctx):
     return {}
 
 
+def _relationship_effect_result(result):
+    if not isinstance(result, dict):
+        return {}
+    observer_error = result.get('observer_error')
+    if observer_error:
+        # Keep the durable queue error useful without copying model output or
+        # arbitrary provider text into chat_generation_side_effect.last_error.
+        error_code = str(observer_error).split(':', 1)[0][:80]
+        raise RetryableRelationshipObserverError(
+            f'relationship_observer_failed:{error_code}')
+    return {
+        'signals_extracted': int(result.get('signals_extracted') or 0),
+        'signals_applied': int(result.get('signals_applied') or 0),
+        'skipped': result.get('skipped'),
+    }
+
+
 def apply_relationship_update(ctx):
     fn = ctx.get('relationship_fn')
     if fn is not None:
-        fn()
-        return {}
+        return _relationship_effect_result(fn())
     user_text = ctx.get('user_text') or _payload(ctx).get('_user_text') or ''
     full_jp = ctx.get('full_jp') or ' '.join(
         str((m or {}).get('jp') or '') for m in (_payload(ctx).get('messages') or []))
@@ -381,7 +402,7 @@ def apply_relationship_update(ctx):
     else:
         recent_ctx = [{'role': r, 'content': c} for r, c in list(short_memories)[-6:]]
     from relationship_engine import process_turn
-    process_turn(
+    result = process_turn(
         user_id=ctx['user_id'],
         character_id=ctx['character_id'],
         user_message=user_text,
@@ -391,7 +412,7 @@ def apply_relationship_update(ctx):
         temporal_context=ctx.get('temporal_snapshot'),
         source_event_id=ctx.get('source_event_id'),
     )
-    return {}
+    return _relationship_effect_result(result)
 
 
 def apply_reminder(ctx):

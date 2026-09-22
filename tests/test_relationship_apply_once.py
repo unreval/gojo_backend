@@ -24,6 +24,104 @@ WARMTH_SIGNAL = {
 
 
 class RelationshipApplyOnceTests(unittest.TestCase):
+    def test_observer_failure_marks_raw_processor_failed_then_retry_applies_once(self):
+        processor = {'status': 'pending'}
+        application = {'payload': None}
+        route_count = {'n': 0}
+        stats_count = {'n': 0}
+        temporal_count = {'n': 0}
+        cognitive_ids = set()
+        cognitive_inserts = {'n': 0}
+
+        def claim(*_args, **_kwargs):
+            if processor['status'] == 'succeeded':
+                return 'already_succeeded'
+            processor['status'] = 'processing'
+            return 'claimed'
+
+        def finish(*args, **kwargs):
+            status = kwargs.get('status') or args[3]
+            processor['status'] = status
+            processor['last_error'] = kwargs.get('last_error')
+
+        def begin(*_args, **kwargs):
+            if application['payload'] is not None:
+                return False
+            application['payload'] = kwargs.get('payload')
+            return True
+
+        def get_payload(*_args, **_kwargs):
+            return application['payload']
+
+        def route(*_args, **_kwargs):
+            route_count['n'] += 1
+            return {'action': 'warmth+'}
+
+        def stats(*_args, **_kwargs):
+            stats_count['n'] += 1
+
+        def temporal(*_args, **_kwargs):
+            temporal_count['n'] += 1
+
+        def ingest(_user_id, _character_id, source_event_id, _signals):
+            if source_event_id in cognitive_ids:
+                return {'status': 'duplicate'}
+            cognitive_ids.add(source_event_id)
+            cognitive_inserts['n'] += 1
+            return {'status': 'inserted'}
+
+        @contextmanager
+        def txn():
+            yield object()
+
+        extraction = [
+            {'signals': [], 'error': 'signals_schema_invalid'},
+            {'signals': [WARMTH_SIGNAL], 'error': None},
+        ]
+        with patch.object(relationship_engine, 'ensure_state_row'), \
+             patch.object(relationship_engine, 'extract_signals',
+                          side_effect=extraction) as extract, \
+             patch.object(relationship_engine, '_route_signal', side_effect=route), \
+             patch.object(relationship_engine, '_log_interaction_stats',
+                          side_effect=stats), \
+             patch.object(relationship_engine, '_log_temporal_observation',
+                          side_effect=temporal), \
+             patch.object(relationship_engine, 'cleanup_hypotheses'), \
+             patch.object(relationship_engine, 'check_retreat_boundary_superseded'), \
+             patch.object(relationship_engine, 'relationship_txn', txn), \
+             patch.object(relationship_engine, 'try_begin_application',
+                          side_effect=begin), \
+             patch.object(relationship_engine, 'get_application_payload',
+                          side_effect=get_payload), \
+             patch.object(relationship_engine, '_ingest_v4', side_effect=ingest), \
+             patch.object(raw_events, 'sources_are_active', return_value=True), \
+             patch.object(raw_events, 'claim_processor', side_effect=claim), \
+             patch.object(raw_events, 'finish_processor', side_effect=finish):
+            first = relationship_engine.process_turn(
+                'u', 'gojo', 'hi', source_event_id='evt-observer-retry')
+            self.assertEqual(first['observer_error'], 'signals_schema_invalid')
+            self.assertEqual(processor['status'], 'failed')
+            self.assertIn('signals_schema_invalid', processor['last_error'])
+            self.assertEqual(route_count['n'], 0)
+            self.assertEqual(stats_count['n'], 0)
+            self.assertEqual(cognitive_inserts['n'], 0)
+
+            second = relationship_engine.process_turn(
+                'u', 'gojo', 'hi', source_event_id='evt-observer-retry')
+            self.assertEqual(processor['status'], 'succeeded')
+            self.assertEqual(second['signals_applied'], 1)
+
+            third = relationship_engine.process_turn(
+                'u', 'gojo', 'hi', source_event_id='evt-observer-retry')
+
+        self.assertEqual(third['skipped'], 'already_processed')
+        self.assertEqual(extract.call_count, 2)
+        self.assertEqual(route_count['n'], 1)
+        self.assertEqual(stats_count['n'], 1)
+        self.assertEqual(temporal_count['n'], 1)
+        self.assertEqual(cognitive_inserts['n'], 1)
+        self.assertEqual(cognitive_ids, {'evt-observer-retry'})
+
     def test_crash_after_application_commit_does_not_reapply_delta(self):
         """Ledger/application already committed, finish_processor not yet succeeded."""
         routes = {'n': 0}

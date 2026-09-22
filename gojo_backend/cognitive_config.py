@@ -2,6 +2,10 @@
 import os
 
 
+class CognitiveConfigError(ValueError):
+    """Invalid server configuration that model retries cannot repair."""
+
+
 def _int_env(name, default, minimum=0):
     try:
         return max(minimum, int(os.environ.get(name, str(default))))
@@ -22,6 +26,49 @@ def _bool_env(name, default):
     if raw is None:
         return bool(default)
     return raw.strip().lower() not in {'0', 'false', 'no', 'off'}
+
+
+def _strict_int_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise CognitiveConfigError(
+            f'sticky_note_ttl_config_invalid:{name}_must_be_integer',
+        ) from exc
+
+
+def validate_sticky_note_ttl_config(*, minimum, default, maximum):
+    values = {
+        'minimum': minimum,
+        'default': default,
+        'maximum': maximum,
+    }
+    for field, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise CognitiveConfigError(
+                f'sticky_note_ttl_config_invalid:{field}_must_be_integer',
+            )
+        if value <= 0:
+            raise CognitiveConfigError(
+                f'sticky_note_ttl_config_invalid:{field}_must_be_positive',
+            )
+    if minimum > maximum:
+        raise CognitiveConfigError(
+            'sticky_note_ttl_config_invalid:minimum_above_maximum',
+        )
+    if default < minimum or default > maximum:
+        raise CognitiveConfigError(
+            'sticky_note_ttl_config_invalid:default_out_of_range',
+        )
+    return {
+        'unit': 'seconds',
+        'minimum': minimum,
+        'default': default,
+        'maximum': maximum,
+    }
 
 
 COGNITIVE_COOLDOWN_SECONDS = _int_env('COGNITIVE_COOLDOWN_SECONDS', 30 * 60)
@@ -104,12 +151,25 @@ COGNITIVE_DIARY_RECALL_LIMIT = min(3, _int_env(
     'COGNITIVE_DIARY_RECALL_LIMIT', 3,
 ))
 COGNITIVE_DIARY_RECALL_ENTRY_CHARS = 600
-COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS = _int_env(
-    'COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS', 3 * 24 * 60 * 60, 300,
+COGNITIVE_STICKY_NOTE_MIN_TTL_SECONDS = _strict_int_env(
+    'COGNITIVE_STICKY_NOTE_MIN_TTL_SECONDS', 300,
 )
-COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS = _int_env(
-    'COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS', 14 * 24 * 60 * 60, 300,
+COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS = _strict_int_env(
+    'COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS', 3 * 24 * 60 * 60,
 )
+COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS = _strict_int_env(
+    'COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS', 14 * 24 * 60 * 60,
+)
+COGNITIVE_STICKY_NOTE_TTL_CONFIG = validate_sticky_note_ttl_config(
+    minimum=COGNITIVE_STICKY_NOTE_MIN_TTL_SECONDS,
+    default=COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS,
+    maximum=COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS,
+)
+
+
+def get_sticky_note_ttl_config():
+    """Return the validated, process-effective sticky TTL contract."""
+    return dict(COGNITIVE_STICKY_NOTE_TTL_CONFIG)
 # User-facing 便利贴 is a presentation of Slow Loop stickies only.
 # memory_lifecycle_fast_loop stickies are internal memory cues.
 USER_FACING_STICKY_SOURCE = 'cognitive_slow_loop'

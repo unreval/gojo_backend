@@ -2,7 +2,8 @@
 
 DB claim is the correctness source. Multiple Zeabur workers may race;
 only the winner of claim_side_effect applies an effect.
-Never calls the LLM.
+Never reruns the main reply generation. The relationship effect may call its
+own bounded observer.
 """
 import threading
 import time
@@ -93,7 +94,7 @@ def build_effect_ctx(row, extra_ctx=None):
 
 
 def process_one_side_effect(row, ctx=None, apply_fn=None):
-    """Claim → apply → completed. Never calls the LLM."""
+    """Claim → apply → completed without rerunning main reply generation."""
     effect = row.get('effect')
     user_id = row['user_id']
     character_id = row['character_id']

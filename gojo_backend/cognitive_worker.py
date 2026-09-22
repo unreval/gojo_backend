@@ -13,6 +13,7 @@ from cognitive_config import (
     COGNITIVE_WORKER_MODEL_ATTEMPTS,
     COGNITIVE_WORKER_POLL_SECONDS,
     PREDICTION_RESOLVER_WHITELIST,
+    get_sticky_note_ttl_config,
 )
 from cognitive_output import (
     SlowLoopOutputError,
@@ -163,7 +164,7 @@ Optional sticky_note_updates schema:
   "trigger_snippet": "short triggering user quote, not a recap",
   "tag": "optional tiny right-corner mark such as ♡, hah, .., !, ~",
   "status": "active|completed|expired|archived",
-  "expires_in_seconds": 259200,
+  "expires_in_seconds": __STICKY_TTL_DEFAULT_SECONDS__,
   "evidence_refs": [123]
 }]
 
@@ -314,6 +315,32 @@ _SYSTEM_PROMPT += (
     'to bypass validation; that would change what the prediction means.'
 )
 
+_SYSTEM_PROMPT_TEMPLATE = _SYSTEM_PROMPT
+
+
+def _build_system_prompt():
+    ttl = get_sticky_note_ttl_config()
+    prompt = _SYSTEM_PROMPT_TEMPLATE.replace(
+        '__STICKY_TTL_DEFAULT_SECONDS__', str(ttl['default']),
+    )
+    return prompt + (
+        '\nSticky note TTL runtime contract (authoritative): '
+        f'unit=seconds; default={ttl["default"]}; explicit active TTL inclusive '
+        f'range [{ttl["minimum"]}, {ttl["maximum"]}]. '
+        'For status=active, omit expires_in_seconds or use null to select the '
+        'default; otherwise use a JSON integer (never boolean, string, or float) '
+        'inside that range. Do not clamp 0, negative, or oversized values. '
+        'For status=completed|expired|archived, omit expires_in_seconds or use '
+        'null because status ends the lifecycle. For backward compatibility, '
+        'an explicit integer 0 or a positive JSON integer in the same inclusive '
+        'range is also accepted for those inactive statuses and normalized to '
+        'null; the redundant TTL is ignored and never extends the lifecycle. '
+        'Booleans, strings, floats, and other out-of-range integers are invalid.'
+    )
+
+
+_SYSTEM_PROMPT = _build_system_prompt()
+
 
 def _utc_now():
     return datetime.now(timezone.utc)
@@ -339,6 +366,72 @@ def _event_ids(context):
 
     visit(context)
     return result
+
+
+def _safe_ttl_numeric(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    rendered = str(value)
+    return rendered if len(rendered) <= 32 else 'numeric_value_too_long'
+
+
+def _log_ttl_diagnostic(context, attempt, details):
+    if not details or not details.get('error_category'):
+        return
+    cycle_id = context.get('cycle_id') if isinstance(context, dict) else None
+    if isinstance(cycle_id, bool) or not isinstance(cycle_id, int):
+        cycle_id = '-'
+    fields = [
+        f'cycle={cycle_id}',
+        f'attempt={int(attempt)}',
+        f'update_index={int(details.get("update_index", -1))}',
+        f'status={details.get("status") or "unknown"}',
+        f'ttl_source={details.get("ttl_source") or "unknown"}',
+        f'ttl_type={details.get("ttl_type") or "unknown"}',
+        f'ttl_min={int(details.get("ttl_min", 0))}',
+        f'ttl_max={int(details.get("ttl_max", 0))}',
+        f'error_category={details.get("error_category")}',
+        f'field_path={details.get("field_path") or "unknown"}',
+    ]
+    numeric = _safe_ttl_numeric(details.get('ttl_value'))
+    if numeric is not None:
+        fields.insert(6, f'ttl_value={numeric}')
+    print('[cognitive_worker][sticky_ttl] ' + ' '.join(fields), flush=True)
+
+
+def _validation_retry_instruction(exc):
+    details = getattr(exc, 'details', None) or {}
+    if not details.get('error_category'):
+        return (
+            f'Validation failed: {exc}. Return a corrected JSON object '
+            'matching the schema exactly.'
+        )
+    status = details.get('status') or 'unknown'
+    numeric = _safe_ttl_numeric(details.get('ttl_value'))
+    value_text = numeric if numeric is not None else '<value not logged; use type>'
+    minimum = int(details.get('ttl_min', 0))
+    maximum = int(details.get('ttl_max', 0))
+    if status == 'active':
+        allowed = (
+            f'For status=active, omit/null uses default='
+            f'{get_sticky_note_ttl_config()["default"]}; otherwise provide a '
+            f'non-boolean JSON integer in inclusive range [{minimum}, {maximum}].'
+        )
+    else:
+        allowed = (
+            f'For status={status}, omit expires_in_seconds or use null. '
+            'For backward compatibility, integer 0 or a non-boolean positive '
+            f'JSON integer in inclusive range [{minimum}, {maximum}] is also '
+            'accepted and ignored (normalized to null); it never extends the lifecycle.'
+        )
+    return (
+        f'Validation failed: {exc}. '
+        f'field_path={details.get("field_path")}; status={status}; '
+        f'ttl_source={details.get("ttl_source")}; '
+        f'ttl_type={details.get("ttl_type")}; ttl_value={value_text}; '
+        f'unit=seconds; ttl_min={minimum}; ttl_max={maximum}. {allowed} '
+        'Return one corrected JSON object matching the entire schema exactly.'
+    )
 
 
 def _worker_error_code(exc):
@@ -426,24 +519,32 @@ def generate_cycle_output(context, *, create_chat_fn=None):
         'role': 'user',
         'content': 'Consolidate this cognitive cycle:\n' + _serialize_context(context),
     }]
+    system_prompt = _build_system_prompt()
     last_error = None
     for attempt in range(COGNITIVE_WORKER_MODEL_ATTEMPTS):
         raw, usage = call_model(
             model=COGNITIVE_WORKER_MODEL,
             messages=messages,
-            system=_SYSTEM_PROMPT,
+            system=system_prompt,
             max_tokens=COGNITIVE_WORKER_MAX_TOKENS,
         )
         try:
             parsed = parse_slow_loop_output(raw)
+            diagnostics = []
             output = validate_slow_loop_output(
                 parsed,
                 allowed_event_ids=allowed_event_ids,
                 current_event_ids=current_event_ids,
+                diagnostics=diagnostics,
             )
+            for diagnostic in diagnostics:
+                _log_ttl_diagnostic(context, attempt + 1, diagnostic)
             return output, usage
         except SlowLoopOutputError as exc:
             last_error = exc
+            _log_ttl_diagnostic(
+                context, attempt + 1, getattr(exc, 'details', None),
+            )
             if attempt + 1 >= COGNITIVE_WORKER_MODEL_ATTEMPTS:
                 break
             if raw and str(raw).strip():
@@ -451,10 +552,7 @@ def generate_cycle_output(context, *, create_chat_fn=None):
             messages.extend([
                 {
                     'role': 'user',
-                    'content': (
-                        f'Validation failed: {exc}. Return a corrected JSON '
-                        'object matching the schema exactly.'
-                    ),
+                    'content': _validation_retry_instruction(exc),
                 },
             ])
     raise last_error or SlowLoopOutputError('model_output_validation_failed')

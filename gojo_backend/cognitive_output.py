@@ -6,11 +6,10 @@ from datetime import timedelta
 from cognitive_config import (
     COGNITIVE_BELIEF_COMMIT_MIN_CONFIDENCE,
     COGNITIVE_BELIEF_COMMIT_MIN_INDEPENDENT_EVIDENCE,
-    COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS,
-    COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS,
     PREDICTION_NUMERIC_OPERATORS,
     PREDICTION_RESOLVER_WHITELIST,
     USER_FACING_STICKY_SOURCE,
+    get_sticky_note_ttl_config,
 )
 from cognitive_predictions import validate_signal_prediction_contract
 from cognitive_revision import (
@@ -136,7 +135,101 @@ def sticky_emotion_tag(emotion):
 
 
 class SlowLoopOutputError(ValueError):
-    pass
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        self.details = dict(details or {})
+
+
+_TTL_MISSING = object()
+
+
+def _ttl_type(value):
+    if value is _TTL_MISSING:
+        return 'missing'
+    if value is None:
+        return 'null'
+    if isinstance(value, bool):
+        return 'boolean'
+    if isinstance(value, int):
+        return 'integer'
+    if isinstance(value, float):
+        return 'float'
+    if isinstance(value, str):
+        return 'string'
+    if isinstance(value, dict):
+        return 'object'
+    if isinstance(value, list):
+        return 'array'
+    return 'other'
+
+
+def _sticky_ttl_details(index, status, source, value, config, category):
+    details = {
+        'error_category': category,
+        'field_path': f'sticky_note_updates[{index}].expires_in_seconds',
+        'update_index': index,
+        'status': status,
+        'ttl_source': source,
+        'ttl_type': _ttl_type(value),
+        'ttl_min': config['minimum'],
+        'ttl_max': config['maximum'],
+    }
+    if (not isinstance(value, bool)
+            and isinstance(value, (int, float))):
+        details['ttl_value'] = value
+    return details
+
+
+def _normalize_sticky_ttl(update, index, status, config, diagnostics):
+    supplied = 'expires_in_seconds' in update
+    raw_ttl = update.get('expires_in_seconds') if supplied else _TTL_MISSING
+
+    if status == 'active':
+        if raw_ttl is _TTL_MISSING or raw_ttl is None:
+            return config['default']
+        if isinstance(raw_ttl, bool) or not isinstance(raw_ttl, int):
+            raise SlowLoopOutputError(
+                f'sticky_note_update_{index}_ttl_invalid',
+                details=_sticky_ttl_details(
+                    index, status, 'model', raw_ttl, config, 'ttl_invalid',
+                ),
+            )
+        if raw_ttl < config['minimum'] or raw_ttl > config['maximum']:
+            raise SlowLoopOutputError(
+                f'sticky_note_update_{index}_ttl_out_of_range',
+                details=_sticky_ttl_details(
+                    index, status, 'model', raw_ttl, config,
+                    'ttl_out_of_range',
+                ),
+            )
+        return raw_ttl
+
+    if raw_ttl is _TTL_MISSING or raw_ttl is None:
+        return None
+    if isinstance(raw_ttl, bool) or not isinstance(raw_ttl, int):
+        raise SlowLoopOutputError(
+            f'sticky_note_update_{index}_ttl_invalid',
+            details=_sticky_ttl_details(
+                index, status, 'model', raw_ttl, config, 'ttl_invalid',
+            ),
+        )
+    if raw_ttl == 0:
+        diagnostics.append(_sticky_ttl_details(
+            index, status, 'model', raw_ttl, config,
+            'inactive_zero_normalized',
+        ))
+        return None
+    if config['minimum'] <= raw_ttl <= config['maximum']:
+        diagnostics.append(_sticky_ttl_details(
+            index, status, 'model', raw_ttl, config, 'inactive_ttl_ignored',
+        ))
+        return None
+    raise SlowLoopOutputError(
+        f'sticky_note_update_{index}_ttl_out_of_range',
+        details=_sticky_ttl_details(
+            index, status, 'model', raw_ttl, config, 'ttl_out_of_range',
+        ),
+    )
 
 
 def is_user_facing_sticky_content(text):
@@ -280,8 +373,11 @@ def _independent_contexts(value, field):
     return result
 
 
-def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=None):
+def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=None,
+                              diagnostics=None):
     """Return a normalized output or reject any ungrounded/model-invented field."""
+    sticky_ttl_config = get_sticky_note_ttl_config()
+    ttl_diagnostics = diagnostics if diagnostics is not None else []
     root = _object(value, 'root')
     missing = ROOT_FIELDS - set(root)
     extra = set(root) - ROOT_FIELDS - OPTIONAL_ROOT_FIELDS
@@ -685,18 +781,9 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
             raise SlowLoopOutputError(
                 f'sticky_note_update_{index}_status_invalid',
             )
-        ttl = update.get('expires_in_seconds')
-        if ttl is None and status == 'active':
-            ttl = COGNITIVE_STICKY_NOTE_DEFAULT_TTL_SECONDS
-        if ttl is not None:
-            if isinstance(ttl, bool) or not isinstance(ttl, int):
-                raise SlowLoopOutputError(
-                    f'sticky_note_update_{index}_ttl_invalid',
-                )
-            if ttl < 300 or ttl > COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS:
-                raise SlowLoopOutputError(
-                    f'sticky_note_update_{index}_ttl_out_of_range',
-                )
+        ttl = _normalize_sticky_ttl(
+            update, index, status, sticky_ttl_config, ttl_diagnostics,
+        )
         refs = _update_refs(
             update['evidence_refs'],
             f'sticky_note_update_{index}_evidence_refs',

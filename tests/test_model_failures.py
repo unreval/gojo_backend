@@ -390,13 +390,89 @@ class ObserverFailureTests(unittest.TestCase):
             'ai_client': stub('ai_client', create_chat=self.call),
         })
         log_patch = patch('builtins.print')
-        log_patch.start()
+        self.log = log_patch.start()
         self.addCleanup(log_patch.stop)
+
+    @staticmethod
+    def _signal():
+        return {
+            'signal_type': 'small_care',
+            'actor': 'user',
+            'confidence': 'high',
+            'brief': '用户提醒角色早点休息',
+            'attributes': {},
+        }
 
     def test_balanced_json_parser_ignores_trailing_metadata_object(self):
         self.call.return_value = ('Result: {"signals":[]}\nmetadata: {"done":true}', {})
         result = self.observer.extract_signals('你好')
         self.assertIsNone(result['error'])
+        self.assertEqual(self.call.call_count, 1)
+
+    def test_leading_metadata_does_not_hide_later_signals_envelope(self):
+        envelope = json.dumps({'signals': [self._signal()]}, ensure_ascii=False)
+        metadata = json.dumps({
+            'request_id': 'metadata-only',
+            'note': 'escaped quote " and fake {"signals":[]}',
+        }, ensure_ascii=False)
+        self.call.return_value = (
+            metadata + '\n' + envelope,
+            {'stop_reason': 'end_turn'},
+        )
+        result = self.observer.extract_signals('你好')
+        self.assertIsNone(result['error'])
+        self.assertEqual(result['signals'], [self._signal()])
+        self.assertEqual(self.call.call_count, 1)
+
+    def test_object_nested_inside_array_cannot_masquerade_as_outer_envelope(self):
+        self.call.return_value = (
+            '[{"signals":[]}]', {'stop_reason': 'end_turn'})
+        result = self.observer.extract_signals('你好')
+        self.assertEqual(result['error'], 'json_parse_failed')
+        self.assertEqual(result['signals'], [])
+        self.assertEqual(self.call.call_count, 2)
+
+    def test_envelope_nested_in_metadata_object_is_not_a_candidate(self):
+        self.call.return_value = (
+            '{"metadata":{"signals":[]}}', {'stop_reason': 'end_turn'})
+        result = self.observer.extract_signals('你好')
+        self.assertEqual(result['error'], 'signals_schema_invalid')
+        self.assertEqual(result['signals'], [])
+        self.assertEqual(self.call.call_count, 2)
+
+    def test_envelope_text_inside_json_string_is_not_a_candidate(self):
+        self.call.return_value = (
+            json.dumps('{"signals":[]}', ensure_ascii=False),
+            {'stop_reason': 'end_turn'},
+        )
+        result = self.observer.extract_signals('你好')
+        self.assertEqual(result['error'], 'json_parse_failed')
+        self.assertEqual(result['signals'], [])
+        self.assertEqual(self.call.call_count, 2)
+
+    def test_distinct_valid_envelopes_are_ambiguous(self):
+        first = json.dumps({'signals': []}, ensure_ascii=False)
+        second = json.dumps({'signals': [self._signal()]}, ensure_ascii=False)
+        self.call.return_value = (
+            first + '\n' + second, {'stop_reason': 'end_turn'})
+        result = self.observer.extract_signals('你好')
+        self.assertEqual(result['error'], 'signals_envelope_ambiguous')
+        self.assertEqual(
+            result['error_reason'], 'multiple_distinct_signals_envelopes')
+        self.assertEqual(result['signals'], [])
+        self.assertEqual(self.call.call_count, 2)
+
+    def test_identical_duplicate_envelopes_are_deduplicated(self):
+        envelope = json.dumps({'signals': [self._signal()]}, ensure_ascii=False)
+        same_envelope_different_formatting = json.dumps(
+            {'signals': [self._signal()]}, ensure_ascii=False,
+            sort_keys=True, indent=2)
+        self.call.return_value = (
+            envelope + '\n' + same_envelope_different_formatting,
+            {'stop_reason': 'end_turn'})
+        result = self.observer.extract_signals('你好')
+        self.assertIsNone(result['error'])
+        self.assertEqual(result['signals'], [self._signal()])
         self.assertEqual(self.call.call_count, 1)
 
     def test_truncation_retries_without_accepting_partial_evidence(self):
@@ -418,6 +494,75 @@ class ObserverFailureTests(unittest.TestCase):
                 self.assertEqual(result['error'], expected)
                 self.assertEqual(result['signals'], [])
                 self.assertEqual(self.call.call_count, 2)
+
+    def test_missing_or_non_array_signals_never_becomes_success(self):
+        invalid = [
+            '{}',
+            '{"signals":null}',
+            '{"signals":{"signal_type":"small_care"}}',
+            '{"signals":"small_care"}',
+        ]
+        for raw in invalid:
+            with self.subTest(raw=raw):
+                self.call.reset_mock()
+                self.call.return_value = (raw, {'stop_reason': 'end_turn'})
+                result = self.observer.extract_signals('你好')
+                self.assertEqual(result['error'], 'signals_schema_invalid')
+                self.assertEqual(result['signals'], [])
+                self.assertEqual(self.call.call_count, 2)
+
+    def test_empty_signals_array_is_success_not_observer_failure(self):
+        self.call.return_value = (
+            '{"signals":[]}', {'stop_reason': 'end_turn'})
+        result = self.observer.extract_signals('你好')
+        self.assertIsNone(result['error'])
+        self.assertEqual(result['signals'], [])
+        self.assertEqual(self.call.call_count, 1)
+
+    def test_retry_uses_detected_reason_and_valid_single_event_example(self):
+        self.call.side_effect = [
+            ('{"signals":null}', {
+                'stop_reason': 'end_turn', 'response_id': 'response-1'}),
+            ('{"signals":[]}', {
+                'stop_reason': 'end_turn', 'response_id': 'response-2'}),
+        ]
+        result = self.observer.extract_signals('你好')
+        self.assertIsNone(result['error'])
+        first, second = self.call.call_args_list
+        self.assertEqual(second.kwargs['max_tokens'], first.kwargs['max_tokens'])
+        valid_example = (
+            '{"signals":[{"signal_type":"small_care","actor":"user",'
+            '"confidence":"high","brief":"用户提醒角色早点休息",'
+            '"attributes":{}}]}')
+        self.assertIn(valid_example, first.kwargs['system'])
+        self.assertIn(valid_example, second.kwargs['messages'][0]['content'])
+        self.assertIn('signals_null', second.kwargs['messages'][0]['content'])
+        self.assertNotIn('flirt_response', first.kwargs['system'])
+        self.assertNotIn('flirt_response', second.kwargs['messages'][0]['content'])
+
+    def test_diagnostic_log_has_shape_not_response_content(self):
+        secret = 'PRIVATE-CONVERSATION-CONTENT-937'
+        self.call.return_value = (
+            json.dumps({'metadata': secret}, ensure_ascii=False),
+            {
+                'stop_reason': 'end_turn',
+                'response_id': 'safe-response-id',
+                'output_tokens': 12,
+            },
+        )
+        result = self.observer.extract_signals(secret)
+        self.assertEqual(result['error'], 'signals_schema_invalid')
+        logs = '\n'.join(
+            ' '.join(str(arg) for arg in call.args)
+            for call in self.log.call_args_list
+        )
+        self.assertIn('candidate_count=1', logs)
+        self.assertIn('has_signals=False', logs)
+        self.assertIn('signals_type=missing', logs)
+        self.assertIn('error_reason=signals_missing', logs)
+        self.assertIn('stop_reason=end_turn', logs)
+        self.assertIn('response_id=safe-response-id', logs)
+        self.assertNotIn(secret, logs)
 
     def test_refusal_is_not_retried_or_accepted_as_evidence(self):
         self.call.return_value = ('{"signals":[]}', {'stop_reason': 'refusal'})

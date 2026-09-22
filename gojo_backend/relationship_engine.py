@@ -184,17 +184,44 @@ def process_turn(
             print(f'[rel_update] claim/validity guard:{e}')
             return _empty_turn_result(skipped='claim_failed')
 
-    extraction = extract_signals(
-        user_message=user_message,
-        character_reply=character_reply,
-        character_core_snippet=character_core_snippet,
-        recent_context=recent_context,
-        temporal_context=temporal_context,
-        model=signal_model,
-    )
+    try:
+        extraction = extract_signals(
+            user_message=user_message,
+            character_reply=character_reply,
+            character_core_snippet=character_core_snippet,
+            recent_context=recent_context,
+            temporal_context=temporal_context,
+            model=signal_model,
+        )
+    except Exception as exc:
+        extraction = {
+            'signals': [],
+            'error': f'observer_exception:{type(exc).__name__}',
+            'error_reason': 'observer_exception',
+        }
     signals = extraction.get('signals', [])
     if extraction.get('error'):
-        return _empty_turn_result(observer_error=extraction['error'])
+        observer_error = extraction['error']
+        observer_error_reason = extraction.get('error_reason')
+        if source_event_id and processor_claimed and rel_processor:
+            observer_error_code = str(observer_error).split(':', 1)[0][:80]
+            last_error = f'observer:{observer_error_code}'
+            if (observer_error_reason
+                    and str(observer_error_reason) != observer_error_code):
+                safe_reason = str(observer_error_reason).split(':', 1)[0][:80]
+                last_error += f':{safe_reason}'
+            try:
+                import raw_events
+                raw_events.finish_processor(
+                    source_event_id, rel_processor, rel_processor_version,
+                    'failed', last_error=last_error)
+            except Exception as exc:
+                print(f'[rel_update] observer failure state update failed: '
+                      f'{type(exc).__name__}')
+        return _empty_turn_result(
+            observer_error=observer_error,
+            observer_error_reason=observer_error_reason,
+        )
 
     if source_event_id:
         try:

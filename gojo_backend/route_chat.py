@@ -437,8 +437,6 @@ def _fire_relationship_update(user_id, character_id, user_text, full_jp,
     ★ 所有异常必须自己捕获——子线程报错默认无声。
     """
     import sys
-    import traceback
-
     def _log(msg):
         # stderr 是 line-buffered，Zeabur/Docker 一定能捕获到
         sys.stderr.write(msg + '\n')
@@ -461,15 +459,23 @@ def _fire_relationship_update(user_id, character_id, user_text, full_jp,
         sig_n = result.get('signals_extracted', 0)
         app_n = result.get('signals_applied', 0)
         err = result.get('observer_error')
+        err_code = str(err).split(':', 1)[0] if err else None
         actions = [a.get('result', {}).get('action', '?')
                    for a in result.get('applied', [])
                    if a.get('result')]
         _log(f'[rel_update] done {user_id}/{character_id} '
              f'signals={sig_n} applied={app_n} '
-             f'actions={actions} err={err}')
+             f'actions={actions} err={err_code}')
+        return result
     except Exception as e:
-        _log(f'[rel_update] EXCEPTION {user_id}/{character_id}: {type(e).__name__}: {e}')
-        _log(traceback.format_exc())
+        _log(f'[rel_update] EXCEPTION {user_id}/{character_id}: '
+             f'{type(e).__name__}')
+        return {
+            'signals_extracted': 0,
+            'signals_applied': 0,
+            'observer_error': f'process_turn_exception:{type(e).__name__}',
+            'applied': [],
+        }
 
 
 def _start_relationship_update(user_id, character_id, user_text, full_jp,
@@ -485,7 +491,7 @@ def _start_relationship_update(user_id, character_id, user_text, full_jp,
         ]
     else:
         recent_ctx = [{'role': r, 'content': c} for r, c in (short_memories or [])[-6:]]
-    _fire_relationship_update(
+    return _fire_relationship_update(
         user_id, character_id, user_text, full_jp,
         core_snippet, recent_ctx, temporal_snapshot, source_event_id,
     )
