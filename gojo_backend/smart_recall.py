@@ -50,6 +50,12 @@ LOOSE_BOND_K = 6        # 兜底池：独立 bond 取几条
 TOLD_TOP_K = 5          # told 桶单独取几条
 PINNED_MAX = 15         # 钉住的记忆最多注入多少条
 
+# 先取一个足够覆盖周级对话、但始终有上界的候选池，再按相关性排序。
+# 不能直接按 Top-K 的最近记录截断，否则一周前仍高度相关的记忆永远没有
+# 进入评分阶段的机会。
+LOOSE_BOND_CANDIDATE_LIMIT = 120
+TOLD_CANDIDATE_LIMIT = 120
+
 # 状态类记忆过期时间（小时）
 STATUS_EXPIRE_HOURS = 48
 
@@ -121,20 +127,71 @@ def _keyword_hits(content, user_message):
     return hits
 
 
+def _vector_score(query_embedding, memory_embedding):
+    """Return the scaled semantic contribution, or zero when unavailable."""
+    if query_embedding is None or memory_embedding is None:
+        return 0.0
+    try:
+        sim = _cosine_sim(query_embedding, memory_embedding)
+        return (sim - VEC_THRESHOLD) * VEC_SCALE if sim > VEC_THRESHOLD else 0.0
+    except Exception:
+        return 0.0
+
+
+def _relevance_score(content, user_message, query_embedding=None, memory_embedding=None):
+    """Lexical + optional vector relevance shared by fact and bond recall."""
+    return _keyword_hits(content, user_message) * 2 + _vector_score(
+        query_embedding, memory_embedding)
+
+
+def _bounded_weight(weight, default=1.0):
+    try:
+        return max(0.0, float(default if weight is None else weight))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _score_bond_candidate(content, timestamp, user_message,
+                          query_embedding=None, memory_embedding=None,
+                          recall_weight=1.0):
+    """Score an independent bond/told without padding unrelated results."""
+    relevance = _relevance_score(
+        content, user_message, query_embedding, memory_embedding)
+    if relevance <= 0:
+        return 0.0, relevance
+    return (
+        relevance
+        * _time_decay(timestamp, _time.time())
+        * _bounded_weight(recall_weight),
+        relevance,
+    )
+
+
+def _trace_selected_items(label, items, item_type):
+    """Debug trace with ids/types/scores only; never include memory content."""
+    refs = []
+    for item in list(items or [])[:12]:
+        if not isinstance(item, dict):
+            continue
+        score = item.get('score')
+        try:
+            score_text = f'{float(score):.3f}'
+        except (TypeError, ValueError):
+            score_text = 'n/a'
+        refs.append(
+            f'id={item.get("id")},type={item.get("recall_kind") or item_type},'
+            f'score={score_text}'
+        )
+    suffix = '' if len(items or []) <= 12 else ',…'
+    print(f'[recall_trace] {label} selected={len(items or [])} '
+          f'items=[{";".join(refs)}{suffix}]')
+
+
 def score_fact(content, category, timestamp, mention_count, last_mentioned,
                user_message, query_embedding=None, memory_embedding=None):
     """给一条 long_memory 打分。分数越高越该被召回。"""
-    kw = _keyword_hits(content, user_message)
-
-    # 向量相似度（可选）
-    vec = 0
-    if query_embedding is not None and memory_embedding is not None:
-        try:
-            sim = _cosine_sim(query_embedding, memory_embedding)
-            if sim > VEC_THRESHOLD:
-                vec = (sim - VEC_THRESHOLD) * VEC_SCALE
-        except Exception:
-            pass
+    relevance = _relevance_score(
+        content, user_message, query_embedding, memory_embedding)
 
     # 时间衰减用 last_mentioned（如果有），否则用创建时间
     now_ts = _time.time()
@@ -142,7 +199,7 @@ def score_fact(content, category, timestamp, mention_count, last_mentioned,
     strength = _mention_strength(mention_count or 1)
     cat_w = _category_weight(category or '其他')
 
-    return (kw * 2 + vec) * strength * decay * cat_w
+    return relevance * strength * decay * cat_w
 
 
 def _cosine_sim(a, b):
@@ -354,10 +411,10 @@ def two_level_recall(user_id, character_id, user_message,
         cur.execute(
             f'''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = 'between'
-                 AND (linked_fact_id IS NULL OR linked_fact_id = 0)
-                 AND {ACTIVE_BOND_SQL}
+                  AND (linked_fact_id IS NULL OR linked_fact_id = 0)
+                  AND {ACTIVE_BOND_SQL}
                ORDER BY timestamp DESC LIMIT %s''',
-            (user_id, character_id, LOOSE_BOND_K * 2)
+            (user_id, character_id, LOOSE_BOND_CANDIDATE_LIMIT)
         )
         loose_candidates = cur.fetchall()
 
@@ -371,27 +428,24 @@ def two_level_recall(user_id, character_id, user_message,
             except Exception:
                 bond_embeddings = {}
 
-        # 对独立 bond 打分；LOOSE_BOND_K 是上限，0 分的不硬塞。
+        # 对独立 bond 打分；bond 表没有 per-row recall_weight，因此固定为 1.0。
+        # LOOSE_BOND_K 只是最终注入上限，0 分的不硬塞。
         loose_bonds = []
         for bid, bcontent, bts in loose_candidates:
             if bid in linked_bond_ids:
                 continue
-            kw_score = _keyword_hits(bcontent, user_message)
-            vec = 0
             mem_emb = bond_embeddings.get(bid)
-            if query_embedding is not None and mem_emb is not None:
-                try:
-                    sim = _cosine_sim(query_embedding, mem_emb)
-                    if sim > VEC_THRESHOLD:
-                        vec = (sim - VEC_THRESHOLD) * VEC_SCALE
-                except Exception:
-                    vec = 0
-            score = kw_score * 2 + vec
+            score, relevance = _score_bond_candidate(
+                bcontent, bts, user_message,
+                query_embedding=query_embedding,
+                memory_embedding=mem_emb,
+                recall_weight=1.0,
+            )
             if score <= 0:
                 continue
             loose_bonds.append({
                 'id': bid, 'content': bcontent, 'timestamp': bts,
-                'score': score
+                'score': score, 'relevance_score': relevance,
             })
 
         try:
@@ -413,11 +467,30 @@ def two_level_recall(user_id, character_id, user_message,
         cur.execute(
             f'''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = 'told'
-                 AND {ACTIVE_BOND_SQL}
+                  AND {ACTIVE_BOND_SQL}
                ORDER BY timestamp DESC LIMIT %s''',
-            (user_id, character_id, TOLD_TOP_K)
+            (user_id, character_id, TOLD_CANDIDATE_LIMIT)
         )
-        tolds = [{'id': r[0], 'content': r[1], 'timestamp': r[2]} for r in cur.fetchall()]
+        told_candidates = cur.fetchall()
+        tolds = []
+        for tid, tcontent, tts in told_candidates:
+            score, relevance = _score_bond_candidate(
+                tcontent, tts, user_message,
+                query_embedding=query_embedding,
+                memory_embedding=bond_embeddings.get(tid),
+                recall_weight=1.0,
+            )
+            if score <= 0:
+                continue
+            tolds.append({
+                'id': tid, 'content': tcontent, 'timestamp': tts,
+                'score': score, 'relevance_score': relevance,
+            })
+        tolds.sort(
+            key=lambda x: (x['score'], x['timestamp'] or datetime.min),
+            reverse=True,
+        )
+        tolds = tolds[:TOLD_TOP_K]
         try:
             told_map = load_memory_source_map(
                 cur, 'bond_memory', [t['id'] for t in tolds])
@@ -433,7 +506,8 @@ def two_level_recall(user_id, character_id, user_message,
         try:
             from memory_lifecycle import recall_lifecycle_memories, recall_sticky_notes
             lifecycle_memories = recall_lifecycle_memories(
-                user_id, character_id, user_message, limit=6)
+                user_id, character_id, user_message, limit=6,
+                query_embedding=query_embedding)
             sticky_notes = recall_sticky_notes(
                 user_id, character_id, user_message, limit=3)
         except Exception as _recall_e:
@@ -454,6 +528,19 @@ def two_level_recall(user_id, character_id, user_message,
             diary_memories = []
 
         diary_memories = drop_recent_covered(diary_memories, recent_exclude)
+
+        print(
+            '[recall_trace] candidates '
+            f'facts={len(all_facts)} loose_bonds={len(loose_candidates)} '
+            f'tolds={len(told_candidates)} '
+            f'vector_enabled={query_embedding is not None} '
+            f'long_vectors={len(fact_embeddings)} '
+            f'bond_vectors={len(bond_embeddings)}'
+        )
+        _trace_selected_items('facts', selected_facts, 'fact')
+        _trace_selected_items('loose_bonds', loose_bonds, 'bond')
+        _trace_selected_items('tolds', tolds, 'told')
+        _trace_selected_items('lifecycle', lifecycle_memories, 'lifecycle')
 
         elapsed = (_time.time() - t0) * 1000
         total_injected = (

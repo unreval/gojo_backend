@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -299,6 +300,108 @@ class RollingSummaryAndPinTests(unittest.TestCase):
         self.assertIn('current_event_id', voice)
         self.assertIn('append_current_user_turn', voice)
         self.assertIn("profile='voice'", voice)
+
+
+class RecallAssemblyTests(unittest.TestCase):
+    def setUp(self):
+        context_layer.use_memory_store(True)
+
+    def tearDown(self):
+        context_layer.use_memory_store(False)
+
+    def _build_with_recall(self, fake_rag):
+        events = [_event(1, text='我想问问以前的行程', minutes_ago=10)]
+        with patch.dict(sys.modules, {'memory_search': fake_rag}), \
+             patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
+             patch.object(raw_events, 'get_hot_candidate_events', return_value=events), \
+             patch.object(context_layer, '_support_items', return_value=([], '')), \
+             patch.object(smart_recall, 'two_level_recall', return_value=None) as recall:
+            pack = context_layer.build_chat_context(
+                'u', 'gojo', user_message='日本那趟行程后来怎么样',
+                include_recall=True, now=NOW)
+        return pack, recall
+
+    def test_build_chat_context_passes_query_embedding_to_recall(self):
+        fake_rag = types.ModuleType('memory_search')
+        fake_rag.is_vector_ready = lambda: True
+        fake_rag.embed = lambda _text: [3.0, 4.0]
+        fake_rag._to_vec = lambda _raw: ('query-vector',)
+
+        pack, recall = self._build_with_recall(fake_rag)
+
+        self.assertFalse(pack.failed_closed)
+        self.assertEqual(recall.call_count, 1)
+        self.assertEqual(
+            recall.call_args.kwargs['query_embedding'], ('query-vector',))
+
+    def test_query_embedding_failure_degrades_to_lexical_recall(self):
+        fake_rag = types.ModuleType('memory_search')
+        fake_rag.is_vector_ready = lambda: True
+
+        def _unavailable(_text):
+            raise RuntimeError('embedding service unavailable')
+
+        fake_rag.embed = _unavailable
+        fake_rag._to_vec = lambda _raw: ('should-not-run',)
+
+        pack, recall = self._build_with_recall(fake_rag)
+
+        self.assertFalse(pack.failed_closed)
+        self.assertEqual(recall.call_count, 1)
+        self.assertIsNone(recall.call_args.kwargs['query_embedding'])
+
+    def test_relevant_historical_summary_is_selected_with_latest_summary(self):
+        context_layer.save_rolling_summary(
+            'u', 'gojo', '最近讨论的是今天的午饭。', ['sum-new'],
+            summary_id='sum-new', range_end=NOW, is_placeholder=False)
+        for index in range(1, 5):
+            context_layer.save_rolling_summary(
+                'u', 'gojo', f'最近的无关事项{index}。', [f'sum-{index}'],
+                summary_id=f'sum-{index}', range_end=NOW - timedelta(days=index),
+                is_placeholder=False)
+        context_layer.save_rolling_summary(
+            'u', 'gojo', '上周讨论过：东京旅行；机票还没买。', ['sum-tokyo'],
+            summary_id='sum-tokyo', range_end=NOW - timedelta(days=7),
+            is_placeholder=False)
+
+        pack = context_layer.assemble_from_events(
+            [_event(99, text='今天聊别的', minutes_ago=1)],
+            user_id='u', character_id='gojo',
+            user_message='日本那趟旅行的行程还记得吗',
+            now=NOW, include_recall=False)
+
+        self.assertIn('最近讨论的是今天的午饭', pack.summary_prompt_text)
+        self.assertIn('东京旅行', pack.summary_prompt_text)
+        self.assertNotIn('最近的无关事项1', pack.summary_prompt_text)
+
+    def test_budget_dropped_trace_has_no_context_text(self):
+        sensitive = 'PRIVATE-MEMORY-DO-NOT-LEAK'
+        events = [
+            _event(index, text=(sensitive + '-') * 30, minutes_ago=30 - index)
+            for index in range(8)
+        ]
+        cfg = context_budget.BudgetConfig(
+            total_token_budget=400,
+            hot_token_budget=4000,
+            hot_min_events=1,
+            hot_max_events=50,
+            min_summary_events=99,
+        )
+
+        with patch('builtins.print') as logged:
+            context_layer.assemble_from_events(
+                events, user_id='u', character_id='gojo', now=NOW,
+                config=cfg, include_recall=False)
+
+        traces = [
+            str(call.args[0]) for call in logged.call_args_list
+            if call.args and str(call.args[0]).startswith('[recall_trace] budget_dropped')
+        ]
+        self.assertTrue(traces)
+        self.assertIn('id=', traces[0])
+        self.assertIn('type=', traces[0])
+        self.assertIn('score=', traces[0])
+        self.assertNotIn(sensitive, traces[0])
 
 
 class CurrentTurnAndCollapseTests(unittest.TestCase):

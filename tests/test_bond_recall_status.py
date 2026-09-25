@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -136,6 +137,9 @@ class BondRecallStore:
             rows = [row for row in rows if self._active(row)]
         if "kind = 'told'" in compact:
             rows = [row for row in rows if row['kind'] == 'told']
+            rows.sort(key=lambda item: item['timestamp'] or NOW, reverse=True)
+            limit = params[-1] if params else 5
+            rows = rows[:int(limit)]
             self._many = [
                 (row['id'], row['content'], row['timestamp']) for row in rows
             ]
@@ -230,6 +234,71 @@ class BondRecallStatusTests(unittest.TestCase):
             ))
         result = smart_recall.two_level_recall('u1', 'gojo', '今天午餐吃什么')
         self.assertEqual(result['loose_bonds'], [])
+
+    def test_week_old_related_bond_and_told_survive_newer_updates(self):
+        old_timestamp = NOW - timedelta(days=7)
+        self.store.bonds.extend([
+            self._bond(
+                id=701,
+                content='我和她约好：东京旅行；机票还没买',
+                timestamp=old_timestamp,
+            ),
+            self._bond(
+                id=702,
+                kind='told',
+                content='她说过：东京旅行；机票还没买',
+                timestamp=old_timestamp,
+            ),
+        ])
+        for index in range(24):
+            self.store.bonds.extend([
+                self._bond(
+                    id=800 + index,
+                    content=f'我和她聊了：日常更新{index}',
+                    timestamp=NOW - timedelta(minutes=index),
+                ),
+                self._bond(
+                    id=900 + index,
+                    kind='told',
+                    content=f'她说过：日常更新{index}',
+                    timestamp=NOW - timedelta(minutes=index),
+                ),
+            ])
+
+        result = smart_recall.two_level_recall('u1', 'gojo', '东京旅行')
+
+        self.assertIn(701, [item['id'] for item in result['loose_bonds']])
+        self.assertIn(702, [item['id'] for item in result['tolds']])
+
+    def test_semantic_old_long_memory_recalled_with_query_embedding(self):
+        for index in range(smart_recall.FACT_TOP_K):
+            self.store.facts.append((
+                100 + index, f'她的日常更新{index}',
+                NOW - timedelta(hours=index), '其他', 1, None,
+                False, 'legacy', 1.0, [],
+            ))
+        self.store.facts.append((
+            999, '她月底计划去东京，机票还没买',
+            NOW - timedelta(days=7), '经历', 1, None,
+            False, 'legacy', 1.0, [],
+        ))
+        fake_rag = types.ModuleType('memory_search')
+        fake_rag.is_vector_ready = lambda: True
+        fake_rag._load_cache = lambda _table: None
+        fake_rag._CACHE = {
+            'long_memory': {999: [1.0, 0.0]},
+            'bond_memory': {},
+        }
+
+        with patch.dict(sys.modules, {'memory_search': fake_rag}):
+            result = smart_recall.two_level_recall(
+                'u1', 'gojo', '日本那个行程后来怎么样',
+                query_embedding=[1.0, 0.0],
+            )
+
+        recalled = next(item for item in result['facts'] if item['id'] == 999)
+        self.assertGreater(recalled['score'], 0)
+        self.assertEqual(result['facts'][0]['id'], 999)
 
     def test_expired_loose_bond_is_not_recalled(self):
         self.store.bonds = [self._bond(

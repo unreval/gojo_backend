@@ -32,6 +32,10 @@ _USE_MEMORY_STORE = False
 _SUMMARIES: Dict[str, dict] = {}
 _PINS: Dict[str, dict] = {}
 
+# Summary selection remains bounded, but no longer only sees the newest two
+# summaries when the current turn clearly refers to an older topic.
+SUMMARY_RECALL_CANDIDATE_LIMIT = 24
+
 CONTEXT_LAYER_DDL = (
     '''CREATE TABLE IF NOT EXISTS rolling_summaries (
         summary_id TEXT PRIMARY KEY,
@@ -774,12 +778,125 @@ def _latency_span(name):
         return _noop()
 
 
-def _pick_prompt_summaries(rows, limit=2):
-    """Prefer real summaries; placeholders only as fallback. No infinite stack."""
-    real = [row for row in rows if not row.get('is_placeholder', True)]
-    placeholders = [row for row in rows if row.get('is_placeholder', True)]
-    chosen = (real or placeholders)[: max(1, int(limit or 2))]
+def _summary_recall_terms(text):
+    """Small bounded lexical signal for selecting historical summaries."""
+    terms = set()
+    for chunk in re.findall(r'[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}', (text or '').lower()):
+        if re.fullmatch(r'[\u4e00-\u9fff]+', chunk):
+            terms.update(chunk[index:index + 2] for index in range(len(chunk) - 1))
+        else:
+            terms.add(chunk)
+    return terms
+
+
+def _summary_relevance_score(summary_text, user_message):
+    query_terms = _summary_recall_terms(user_message)
+    if not query_terms:
+        return 0.0
+    return float(len(query_terms & _summary_recall_terms(summary_text)))
+
+
+def _pick_prompt_summaries(rows, limit=2, user_message=''):
+    """Keep the latest summary and favor one relevant historical summary.
+
+    Real summaries remain preferred over placeholders. The number of prompt
+    summaries stays bounded by ``limit``; this is selection only and does not
+    alter the episode schema or stored summaries.
+    """
+    real = [dict(row) for row in rows if not row.get('is_placeholder', True)]
+    placeholders = [dict(row) for row in rows if row.get('is_placeholder', True)]
+    available = real or placeholders
+    max_items = max(1, int(limit or 2))
+    if not available:
+        return []
+
+    latest = available[0]
+    latest['_prompt_recall_score'] = _summary_relevance_score(
+        latest.get('text') or '', user_message)
+    chosen = [latest]
+    selected_ids = {latest.get('summary_id')}
+
+    scored_history = []
+    for index, row in enumerate(available[1:], start=1):
+        score = _summary_relevance_score(row.get('text') or '', user_message)
+        if score <= 0:
+            continue
+        row['_prompt_recall_score'] = score
+        scored_history.append((score, index, row))
+    scored_history.sort(key=lambda item: (-item[0], item[1]))
+    for _score, _index, row in scored_history:
+        if len(chosen) >= max_items:
+            break
+        chosen.append(row)
+        selected_ids.add(row.get('summary_id'))
+
+    # No related historical summary: preserve the prior newest-first fallback.
+    for row in available:
+        if len(chosen) >= max_items:
+            break
+        if row.get('summary_id') in selected_ids:
+            continue
+        row['_prompt_recall_score'] = _summary_relevance_score(
+            row.get('text') or '', user_message)
+        chosen.append(row)
+        selected_ids.add(row.get('summary_id'))
     return chosen
+
+
+def _build_recall_query_embedding(user_message):
+    """Build an optional recall vector without making chat depend on it."""
+    if not str(user_message or '').strip():
+        print('[recall_trace] query_embedding vector_enabled=False status=empty_query')
+        return None
+    try:
+        import memory_search
+        if not memory_search.is_vector_ready():
+            print('[recall_trace] query_embedding vector_enabled=False status=not_ready')
+            return None
+        vector = memory_search._to_vec(memory_search.embed(user_message))
+        if vector is None:
+            print('[recall_trace] query_embedding vector_enabled=False status=unavailable')
+            return None
+        print(f'[recall_trace] query_embedding vector_enabled=True dim={len(vector)}')
+        return vector
+    except Exception as exc:
+        print('[recall_trace] query_embedding '
+              f'vector_enabled=False status=degraded error={type(exc).__name__}')
+        return None
+
+
+def _trace_context_item(item):
+    """Format a context trace reference without exposing its text."""
+    metadata = item.metadata or {}
+    raw = metadata.get('raw') if isinstance(metadata, dict) else None
+    summary = metadata.get('summary') if isinstance(metadata, dict) else None
+    item_type = metadata.get('recall_kind') if isinstance(metadata, dict) else None
+    if not item_type:
+        item_type = item.item_type
+    score = None
+    if isinstance(raw, dict):
+        score = raw.get('score')
+    elif isinstance(summary, dict):
+        score = summary.get('_prompt_recall_score')
+    try:
+        score_text = f'{float(score):.3f}'
+    except (TypeError, ValueError):
+        score_text = 'n/a'
+    return f'id={item.item_id},type={item_type},score={score_text}'
+
+
+def _trace_budget_dropped(items, allocated):
+    """Emit budget outcomes with ids/types/scores only, capped for safety."""
+    kept = {
+        id(item)
+        for rows in (allocated or {}).values()
+        for item in (rows or [])
+    }
+    dropped = [item for item in (items or []) if id(item) not in kept]
+    refs = [_trace_context_item(item) for item in dropped[:12]]
+    suffix = '' if len(dropped) <= 12 else ',…'
+    print(f'[recall_trace] budget_dropped count={len(dropped)} '
+          f'items=[{";".join(refs)}{suffix}]')
 
 
 def _event_id_set(current_event_id) -> set:
@@ -1240,12 +1357,24 @@ def assemble_from_events(
             reconcile_summaries_for_deleted(user_id, character_id, deleted)
         except Exception as exc:
             print(f'[context_layer] summary reconcile skipped:{exc}')
-    summaries = _pick_prompt_summaries(
-        _verified_derived(
-            list_rolling_summaries(user_id, character_id, status='active', limit=6),
-            deleted,
-        )
+    summary_candidates = _verified_derived(
+        list_rolling_summaries(
+            user_id, character_id, status='active',
+            limit=SUMMARY_RECALL_CANDIDATE_LIMIT),
+        deleted,
     )
+    summaries = _pick_prompt_summaries(
+        summary_candidates, user_message=user_message)
+    summary_refs = []
+    for summary in summaries:
+        try:
+            score_text = f'{float(summary.get("_prompt_recall_score")):.3f}'
+        except (TypeError, ValueError):
+            score_text = 'n/a'
+        summary_refs.append(
+            f'id={summary.get("summary_id")},type=rolling_summary,score={score_text}')
+    print(f'[recall_trace] summary_candidates count={len(summary_candidates)} '
+          f'selected={len(summaries)} items=[{";".join(summary_refs)}]')
     pins = _verified_derived(
         list_pins(user_id, character_id, status='active', limit=12, now=now),
         deleted,
@@ -1261,8 +1390,10 @@ def assemble_from_events(
                 collapse_candidates, from_recall_result, to_recall_result,
             )
             with _latency_span('recall'):
+                query_embedding = _build_recall_query_embedding(user_message)
                 recall_result = two_level_recall(
                     user_id, character_id, user_message or '',
+                    query_embedding=query_embedding,
                     exclude_event_ids=recent_ids,
                 )
                 recall_result = exclude_recall_covered_by_recent(recall_result, recent_ids)
@@ -1292,6 +1423,7 @@ def assemble_from_events(
 
     with _latency_span('budget'):
         allocated = manager.split(items)
+    _trace_budget_dropped(items, allocated)
     hot_kept = allocated.get('hot') or []
     pin_kept = allocated.get('pinned') or []
     sum_kept = allocated.get('summary') or []

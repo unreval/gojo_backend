@@ -3,8 +3,9 @@ import os
 import sys
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -74,6 +75,50 @@ class DiaryConnection:
         pass
 
 
+class LifecycleRecallCursor:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.executed = []
+        self._result = []
+
+    def execute(self, sql, params=None):
+        compact = ' '.join(sql.split())
+        params = tuple(params or ())
+        self.executed.append((compact, params))
+        if 'FROM memory_lifecycle_items' not in compact:
+            self._result = []
+            return
+        limit = int(params[-1])
+        ordered = sorted(
+            self.rows,
+            key=lambda row: row['updated_at'],
+            reverse=True,
+        )[:limit]
+        self._result = [(
+            row['id'], row['memory_kind'], row['topic_key'], row['content'],
+            row['source_event_refs'], row['created_at'], row['updated_at'],
+            row['expires_at'], row['recall_weight'], row['status'],
+            row.get('long_memory_id'),
+        ) for row in ordered]
+
+    def fetchall(self):
+        return list(self._result)
+
+    def close(self):
+        pass
+
+
+class LifecycleRecallConnection:
+    def __init__(self, rows):
+        self.cursor_obj = LifecycleRecallCursor(rows)
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def close(self):
+        pass
+
+
 class MemoryLifecycleTests(unittest.TestCase):
     def test_shower_is_ephemeral_not_durable_long_memory(self):
         cls = classify_memory_lifecycle('我去洗澡了', '她去洗澡了', '状态')
@@ -125,6 +170,46 @@ class MemoryLifecycleTests(unittest.TestCase):
     def test_old_memory_reactivation_requires_new_mention(self):
         self.assertEqual(detect_reactivation_query('我又想起之前失眠那阵子'), 'sleep')
         self.assertIsNone(detect_reactivation_query('今天天气还行'))
+
+    def test_week_old_relevant_lifecycle_survives_newer_updates(self):
+        now = datetime(2026, 9, 18, 18, 0, tzinfo=timezone.utc)
+        rows = [{
+            'id': 701,
+            'memory_kind': 'episodic',
+            'topic_key': 'travel',
+            'content': '她安排了：东京旅行；机票还没买',
+            'source_event_refs': [],
+            'created_at': now - timedelta(days=7),
+            'updated_at': now - timedelta(days=7),
+            'expires_at': None,
+            'recall_weight': 0.5,
+            'status': 'active',
+        }]
+        for index in range(24):
+            rows.append({
+                'id': 800 + index,
+                'memory_kind': 'episodic',
+                'topic_key': f'other-{index}',
+                'content': f'她更新了：日常事项{index}',
+                'source_event_refs': [],
+                'created_at': now - timedelta(minutes=index),
+                'updated_at': now - timedelta(minutes=index),
+                'expires_at': None,
+                'recall_weight': 0.5,
+                'status': 'active',
+            })
+        conn = LifecycleRecallConnection(rows)
+
+        with patch.object(memory_lifecycle, 'get_conn', return_value=conn), \
+             patch.object(memory_lifecycle, '_now', return_value=now):
+            recalled = memory_lifecycle.recall_lifecycle_memories(
+                'u1', 'gojo', '东京旅行', limit=2)
+
+        self.assertIn(701, [item['id'] for item in recalled])
+        self.assertGreaterEqual(
+            conn.cursor_obj.executed[0][1][-1],
+            memory_lifecycle.LIFECYCLE_RECALL_CANDIDATE_LIMIT,
+        )
 
     def test_diary_recall_returns_source_types_without_relationship_evidence(self):
         original_get_conn = memory_lifecycle.get_conn

@@ -31,6 +31,13 @@ REACTIVATION_TTL_SECONDS = 14 * 86400
 
 CONSOLIDATION_THRESHOLD = 3
 
+# Recall reads a bounded recency pool before applying lexical/vector/weight
+# ranking.  This keeps the Fast Loop bounded while giving week-old items a
+# chance to compete after a burst of newer lifecycle updates.
+LIFECYCLE_RECALL_CANDIDATE_LIMIT = 120
+LIFECYCLE_VECTOR_THRESHOLD = 0.35
+LIFECYCLE_VECTOR_SCALE = 6
+
 ROUTINE_TERMS = (
     '洗澡', '洗漱', '睡觉', '睡了', '晚安', '吃饭', '去吃', '在吃',
     '上课', '下课', '复习', '学习', '写作业', '在路上', '出门', '回家',
@@ -681,7 +688,38 @@ def _parse_refs(raw):
     return []
 
 
-def _score_recall_entry(content, user_message, weight=0.5, ts=None):
+def _cosine_similarity(left, right):
+    if left is None or right is None or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = sum(a * a for a in left) ** 0.5
+    right_norm = sum(b * b for b in right) ** 0.5
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _vector_recall_score(query_embedding, memory_embedding):
+    if query_embedding is None or memory_embedding is None:
+        return 0.0
+    try:
+        similarity = _cosine_similarity(query_embedding, memory_embedding)
+        if similarity > LIFECYCLE_VECTOR_THRESHOLD:
+            return (similarity - LIFECYCLE_VECTOR_THRESHOLD) * LIFECYCLE_VECTOR_SCALE
+    except Exception:
+        pass
+    return 0.0
+
+
+def _bounded_recall_weight(weight, default=0.5):
+    try:
+        return max(0.0, float(default if weight is None else weight))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _score_recall_entry(content, user_message, weight=0.5, ts=None,
+                        query_embedding=None, memory_embedding=None):
     text = content or ''
     kw = 0.0
     if user_message and text:
@@ -698,28 +736,72 @@ def _score_recall_entry(content, user_message, weight=0.5, ts=None):
     if ts and hasattr(ts, 'timestamp'):
         age_days = max(0, (_now().timestamp() - ts.timestamp()) / 86400)
         recency = 0.55 + 0.45 * math.exp(-age_days / 30)
-    return (kw + weight) * recency
+    vector = _vector_recall_score(query_embedding, memory_embedding)
+    return (kw + vector + _bounded_recall_weight(weight)) * recency
 
 
-def recall_lifecycle_memories(user_id, character_id, user_message='', limit=6):
+def _lifecycle_embedding_cache(query_embedding):
+    """Use the existing linked long_memory vectors when available.
+
+    Lifecycle rows do not own a second embedding store. Consolidated rows can
+    point at canonical long_memory through long_memory_id, so this remains a
+    read-only recall optimization rather than a second memory representation.
+    """
+    if query_embedding is None:
+        return {}, False
+    try:
+        import memory_search
+        if not memory_search.is_vector_ready():
+            return {}, False
+        memory_search._load_cache('long_memory')
+        return memory_search._CACHE.get('long_memory', {}) or {}, True
+    except Exception:
+        return {}, False
+
+
+def _trace_lifecycle_selection(items):
+    """Debug trace with ids/types/scores only; never include memory text."""
+    refs = []
+    for item in list(items or [])[:12]:
+        try:
+            score_text = f'{float(item.get("score")):.3f}'
+        except (TypeError, ValueError):
+            score_text = 'n/a'
+        refs.append(
+            f'id={item.get("id")},type={item.get("memory_kind") or "lifecycle"},'
+            f'score={score_text}'
+        )
+    suffix = '' if len(items or []) <= 12 else ',…'
+    print(f'[recall_trace] lifecycle selected={len(items or [])} '
+          f'items=[{";".join(refs)}{suffix}]')
+
+
+def recall_lifecycle_memories(user_id, character_id, user_message='', limit=6,
+                              query_embedding=None):
     conn = get_conn()
     cur = conn.cursor()
     try:
+        candidate_limit = max(
+            int(limit or 0), LIFECYCLE_RECALL_CANDIDATE_LIMIT)
         cur.execute(
             '''SELECT id, memory_kind, topic_key, content, source_event_refs,
-                      created_at, updated_at, expires_at, recall_weight, status
+                      created_at, updated_at, expires_at, recall_weight, status,
+                      long_memory_id
                FROM memory_lifecycle_items
                WHERE user_id = %s
                  AND character_id = %s
                  AND memory_kind IN ('ephemeral', 'candidate', 'episodic', 'consolidated')
                  AND status IN ('active', 'reactivated')
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-               ORDER BY recall_weight DESC, last_reinforced_at DESC
+               ORDER BY last_reinforced_at DESC
                LIMIT %s''',
-            (user_id, character_id, limit * 3),
+            (user_id, character_id, candidate_limit),
         )
+        candidates = cur.fetchall()
+        long_memory_embeddings, vector_enabled = _lifecycle_embedding_cache(
+            query_embedding)
         items = []
-        for row in cur.fetchall():
+        for row in candidates:
             item = {
                 'id': row[0],
                 'memory_kind': row[1],
@@ -731,13 +813,24 @@ def recall_lifecycle_memories(user_id, character_id, user_message='', limit=6):
                 'expires_at': row[7],
                 'recall_weight': row[8],
                 'status': row[9],
+                'long_memory_id': row[10] if len(row) > 10 else None,
                 'source_type': 'lifecycle',
             }
             item['score'] = _score_recall_entry(
-                item['content'], user_message, item['recall_weight'], item['updated_at'])
+                item['content'], user_message, item['recall_weight'], item['updated_at'],
+                query_embedding=query_embedding,
+                memory_embedding=long_memory_embeddings.get(item['long_memory_id']),
+            )
             items.append(item)
         items.sort(key=lambda it: (it['score'], it['updated_at'] or datetime.min), reverse=True)
-        return items[:limit]
+        selected = items[:limit]
+        print(
+            '[recall_trace] lifecycle_candidates '
+            f'count={len(candidates)} vector_enabled={vector_enabled} '
+            f'linked_long_vectors={len(long_memory_embeddings)}'
+        )
+        _trace_lifecycle_selection(selected)
+        return selected
     except Exception as e:
         print(f'[memory_lifecycle] lifecycle recall failed: {e}')
         return []
