@@ -1017,6 +1017,12 @@ def invalidate_memories_for_deleted_event(event_id, user_id=None, character_id=N
                 reconcile_summaries_for_deleted(user_id, character_id, [event_id])
         except Exception as hook_exc:
             print(f'[raw_events] summary reconcile skipped:{hook_exc}')
+        try:
+            from episodic_index import reconcile_deleted_sources
+            if user_id and character_id:
+                reconcile_deleted_sources(user_id, character_id, [event_id])
+        except Exception as hook_exc:
+            print(f'[raw_events] episode reconcile skipped:{hook_exc}')
     except Exception as e:
         conn.rollback()
         print(f'[raw_events] invalidate derived failed:{e}')

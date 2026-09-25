@@ -115,6 +115,8 @@ from raw_events import init_raw_event_layer
 init_raw_event_layer()
 from context_layer import init_context_layer_tables
 init_context_layer_tables()
+from episodic_index import init_episodic_index_tables
+init_episodic_index_tables()
 from behavior_evidence import init_behavior_tables
 try:
     init_behavior_tables()

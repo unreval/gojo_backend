@@ -112,8 +112,9 @@ async def delete_chatlog_message(user_id: str, chat_id: str,
             _soft_delete_media_for_keys(user_id, chat_id, event_keys)
         try:
             import raw_events
-            raw_events.invalidate_memories_for_deleted_event(
-                client_msg_id, user_id, chat_id)
+            for event_id in event_keys:
+                raw_events.invalidate_memories_for_deleted_event(
+                    event_id, user_id, chat_id)
         except Exception as inv_err:
             print(f'[chatlog] derived invalidate skipped:{inv_err}')
     except Exception as e:
@@ -138,6 +139,16 @@ async def clear_chatlog(user_id: str, chat_id: str):
         print(f'[chat-media] list before clear skipped:{e}')
         records = []
     n = db_chatlog.clear_chat(user_id, chat_id)
+    if n:
+        try:
+            import raw_events
+            from episodic_index import reconcile_deleted_sources
+            reconcile_deleted_sources(
+                user_id, chat_id,
+                raw_events.deleted_event_ids(user_id, chat_id),
+            )
+        except Exception as inv_err:
+            print(f'[chatlog] episode clear reconcile skipped:{inv_err}')
     try:
         import db_chat_media
         db_chat_media.soft_delete_media_for_chat(user_id, chat_id)

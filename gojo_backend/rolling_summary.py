@@ -222,6 +222,27 @@ def generate_real_summary_text(events: Sequence[dict], previous_text='') -> str:
     return format_real_summary(parsed, len(events or []))
 
 
+def _enqueue_episode_index(user_id, character_id, source_event_ids, summary_text):
+    """Schedule only derived indexing after this worker has its real summary.
+
+    The episode worker re-verifies the Raw Events and does not call an LLM.
+    Keeping this here means the Fast Path still only enqueues work and the
+    summary's one LLM result can be reused instead of summarized twice.
+    """
+    try:
+        from episodic_index import enqueue_episode_job
+        job_id = enqueue_episode_job(
+            user_id, character_id, source_event_ids,
+            summary_text=summary_text,
+        )
+        if job_id is not None:
+            return True
+        print('[rolling_summary] episode index enqueue unavailable')
+    except Exception as exc:
+        print(f'[rolling_summary] episode index enqueue skipped:{type(exc).__name__}')
+    return False
+
+
 def process_summary_job(user_id, character_id, extra, source_event_id=None) -> bool:
     extra = extra or {}
     ids = [str(x) for x in (extra.get('source_event_ids') or []) if str(x).strip()]
@@ -245,7 +266,8 @@ def process_summary_job(user_id, character_id, extra, source_event_id=None) -> b
         if (row.get('processor_version') == SUMMARY_PROCESSOR_VERSION
                 and tuple(row.get('source_event_ids') or ()) == tuple(ids)
                 and not row.get('is_placeholder', True)):
-            return True  # idempotent: real summary already exists
+            return _enqueue_episode_index(
+                user_id, character_id, ids, row.get('text') or '')
 
     events = extra.get('events') or [{'event_id': eid, 'role': 'user', 'content': ''} for eid in ids]
     previous = ''
@@ -298,4 +320,5 @@ def process_summary_job(user_id, character_id, extra, source_event_id=None) -> b
     elif merge_from and payload:
         # Overwrote same id
         pass
-    return True
+    return _enqueue_episode_index(
+        user_id, character_id, ids, payload.get('text') or '')
