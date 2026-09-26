@@ -1,9 +1,10 @@
 import os
 import sys
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -48,6 +49,23 @@ class EpisodicIndexTests(unittest.TestCase):
                 'u', 'gojo', events,
                 summary_text=summary_text,
             )
+
+    def _embedding_metadata(self, title, what_happened, vector,
+                            outcome='', unresolved=''):
+        fields = {
+            'title': title,
+            'what_happened': what_happened,
+            'outcome': outcome,
+            'unresolved': unresolved,
+        }
+        return {
+            'vector': vector,
+            'model': 'test-embedding',
+            'processor_version': episodic_index.EPISODE_PROCESSOR_VERSION,
+            'retrieval_text_hash': episodic_index._retrieval_text_hash(fields),
+            'generated_at': NOW.isoformat(),
+            'dimensions': len(vector),
+        }
 
     def test_same_stable_segment_retry_creates_exactly_one_active_episode(self):
         events = [
@@ -132,6 +150,113 @@ class EpisodicIndexTests(unittest.TestCase):
         self.assertEqual(rebuilt['status'], 'active')
         self.assertEqual(rebuilt['episode_id'], retried['episode_id'])
         self.assertEqual(len(episodic_index.list_episodes('u', 'gojo', status=None)), 2)
+
+    def test_worker_materializes_embedding_metadata_from_documented_fields_only(self):
+        events = [
+            _event('evt-embedding-1', 'user', '讨论东京行程', 5),
+            _event('evt-embedding-2', 'assistant', '确认日期', 4),
+        ]
+        fake_rag = types.ModuleType('memory_search')
+        fake_rag.is_vector_ready = lambda: True
+        fake_rag.embed = Mock(return_value=[3.0, 4.0])
+        fake_rag.EMBED_MODEL = 'test-embedding-v1'
+        source_ids = [item['event_id'] for item in events]
+        with patch.object(raw_events, 'sources_are_active', return_value=True), \
+             patch.object(raw_events, 'get_active_events_by_ids', return_value=events), \
+             patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
+             patch.dict(sys.modules, {'memory_search': fake_rag}):
+            self.assertTrue(episodic_index.process_episode_job(
+                'u', 'gojo',
+                {'source_event_ids': source_ids, 'summary_text': '发生：讨论东京旅行安排'},
+                source_event_id=episodic_index.segment_key(source_ids),
+            ))
+
+        episode = episodic_index.list_episodes('u', 'gojo')[0]
+        metadata = episode['embedding_metadata']
+        self.assertEqual(metadata['model'], 'test-embedding-v1')
+        self.assertEqual(metadata['processor_version'], episodic_index.EPISODE_PROCESSOR_VERSION)
+        self.assertEqual(metadata['dimensions'], 2)
+        self.assertEqual(
+            metadata['retrieval_text_hash'],
+            episodic_index._retrieval_text_hash(episode),
+        )
+        embedded_text = fake_rag.embed.call_args.args[0]
+        self.assertIn('讨论东京旅行安排', embedded_text)
+        self.assertNotIn('evt-embedding-1', embedded_text)
+        self.assertNotIn('assistant', embedded_text)
+
+    def test_embedding_failure_keeps_episode_active_and_lexically_recallable(self):
+        events = [_event('evt-embedding-fail', 'user', '东京旅行安排', 5)]
+        fake_rag = types.ModuleType('memory_search')
+        fake_rag.is_vector_ready = lambda: True
+        fake_rag.embed = Mock(side_effect=RuntimeError('embedding unavailable'))
+        source_ids = [item['event_id'] for item in events]
+        with patch.object(raw_events, 'sources_are_active', return_value=True), \
+             patch.object(raw_events, 'get_active_events_by_ids', return_value=events), \
+             patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
+             patch.dict(sys.modules, {'memory_search': fake_rag}):
+            self.assertTrue(episodic_index.process_episode_job(
+                'u', 'gojo',
+                {'source_event_ids': source_ids, 'summary_text': '发生：东京旅行安排'},
+                source_event_id=episodic_index.segment_key(source_ids),
+            ))
+            episode = episodic_index.list_episodes('u', 'gojo')[0]
+            rows = episodic_index.recall_episodes('u', 'gojo', '东京旅行')
+
+        self.assertEqual(episode['status'], 'active')
+        self.assertEqual(episode['embedding_metadata'], {})
+        self.assertEqual([row['episode_id'] for row in rows], [episode['episode_id']])
+
+    def test_retrieval_text_change_invalidates_a_previous_embedding(self):
+        title = '第一次标题'
+        first = episodic_index.save_episode(
+            'u', 'gojo', title=title, what_happened='第一次已记录经历',
+            outcome='', unresolved='', source_event_ids=('evt-text-change',),
+            embedding_metadata=self._embedding_metadata(
+                title, '第一次已记录经历', [1.0, 0.0]),
+        )
+
+        changed = episodic_index.save_episode(
+            'u', 'gojo', title='第二次标题', what_happened='第二次已记录经历',
+            outcome='', unresolved='', source_event_ids=('evt-text-change',),
+        )
+
+        self.assertEqual(first['episode_id'], changed['episode_id'])
+        self.assertEqual(changed['embedding_metadata'], {})
+
+    def test_rebuild_keeps_v1_vector_for_audit_and_only_recalls_v2_vector(self):
+        events = [_event('evt-rebuild-1'), _event('evt-rebuild-2', 'assistant')]
+        fake_rag = types.ModuleType('memory_search')
+        fake_rag.is_vector_ready = lambda: True
+        fake_rag.embed = Mock(side_effect=[[1.0, 0.0], [0.0, 1.0]])
+        fake_rag.EMBED_MODEL = 'test-embedding-v1'
+        source_ids = [item['event_id'] for item in events]
+        with patch.object(raw_events, 'sources_are_active', return_value=True), \
+             patch.object(raw_events, 'get_active_events_by_ids', return_value=events), \
+             patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
+             patch.dict(sys.modules, {'memory_search': fake_rag}):
+            first = episodic_index.build_episode_from_events(
+                'u', 'gojo', events, summary_text='发生：第一版出行经历')
+            self.assertTrue(episodic_index.materialize_episode_embedding(first['episode_id']))
+            rebuilt = episodic_index.rebuild_episode(
+                first['episode_id'], events, summary_text='发生：第二版出行经历')
+            jobs = [
+                job for job in episodic_index.list_episode_jobs()
+                if job.get('kind') == episodic_index.EMBEDDING_KIND
+            ]
+            self.assertEqual(len(jobs), 1)
+            self.assertTrue(episodic_index.process_episode_embedding_job(
+                'u', 'gojo', jobs[0]['extra'], source_event_id=jobs[0]['source_event_id']))
+            rows = episodic_index.recall_episodes(
+                'u', 'gojo', '完全不同的问法', query_embedding=[0.0, 1.0])
+
+        old = episodic_index.get_episode(first['episode_id'])
+        successor = episodic_index.get_episode(rebuilt['episode_id'])
+        self.assertEqual(old['status'], 'superseded')
+        self.assertEqual(successor['status'], 'active')
+        self.assertEqual(old['embedding_metadata']['vector'], [1.0, 0.0])
+        self.assertEqual(successor['embedding_metadata']['vector'], [0.0, 1.0])
+        self.assertEqual([row['episode_id'] for row in rows], [successor['episode_id']])
 
     def test_summary_worker_queues_non_llm_episode_index_after_real_summary(self):
         events = [_event('evt-1'), _event('evt-2', 'assistant')]

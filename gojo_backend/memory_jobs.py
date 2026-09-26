@@ -247,6 +247,10 @@ def _run_job(row):
             from episodic_index import process_episode_job
             ok = process_episode_job(
                 user_id, character_id, extra, source_event_id=source_event_id)
+        elif kind == 'episodic_embedding':
+            from episodic_index import process_episode_embedding_job
+            ok = process_episode_embedding_job(
+                user_id, character_id, extra, source_event_id=source_event_id)
         elif kind == 'group':
             from user_memory import extract_and_save_group_memory
             ok = extract_and_save_group_memory(

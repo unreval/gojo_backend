@@ -19,10 +19,19 @@ from db import get_conn
 
 EPISODE_PROCESSOR_VERSION = 'episodic_index_v1'
 KIND = 'episodic_index'
+EMBEDDING_KIND = 'episodic_embedding'
 EPISODE_STATUSES = ('active', 'stale', 'invalidated', 'superseded')
-# Episode recall only ranks a bounded recent pool.  The index remains the
-# derived record; this limit is not a retention policy for Raw Events.
-EPISODE_RECALL_CANDIDATE_LIMIT = 160
+# Recall is bounded, but the recent lane must never be the entire candidate
+# pool.  Lexical and semantic lanes are independently gathered before rerank.
+EPISODE_RECENT_POOL_LIMIT = 60
+EPISODE_LEXICAL_POOL_LIMIT = 80
+EPISODE_SEMANTIC_POOL_LIMIT = 80
+EPISODE_SEMANTIC_SCAN_LIMIT = 1000
+EPISODE_RECALL_CANDIDATE_LIMIT = (
+    EPISODE_RECENT_POOL_LIMIT
+    + EPISODE_LEXICAL_POOL_LIMIT
+    + EPISODE_SEMANTIC_POOL_LIMIT
+)
 EPISODE_RECALL_TOP_K = 3
 
 EPISODIC_INDEX_DDL = (
@@ -54,7 +63,23 @@ EPISODIC_INDEX_DDL = (
           (user_id, character_id, source_key, processor_version, version)''',
     '''CREATE INDEX IF NOT EXISTS idx_episodic_index_user_char_status
        ON episodic_memory_index
-          (user_id, character_id, status, range_end DESC)''',
+           (user_id, character_id, status, range_end DESC)''',
+    '''CREATE INDEX IF NOT EXISTS idx_episodic_index_active_lexical
+       ON episodic_memory_index
+       USING GIN (
+           to_tsvector(
+               'simple',
+               COALESCE(title, '') || ' ' || COALESCE(what_happened, '') || ' '
+               || COALESCE(outcome, '') || ' ' || COALESCE(unresolved, '') || ' '
+               || COALESCE(retrieval_text, '')
+           )
+       )
+       WHERE status = 'active' AND rebuild_required = FALSE''',
+    '''CREATE INDEX IF NOT EXISTS idx_episodic_index_active_embedding
+       ON episodic_memory_index
+           (user_id, character_id, updated_at DESC)
+       WHERE status = 'active' AND rebuild_required = FALSE
+         AND embedding_metadata IS NOT NULL''',
 )
 
 _memory_lock = threading.RLock()
@@ -260,6 +285,7 @@ def _episode_payload(
     title = str(title or '').strip() or f'对话经历（{len(ids)} 条事件）'
     people = _source_ids(participants)
     text_parts = [title, what_happened, str(outcome or '').strip(), str(unresolved or '').strip()]
+    derived_retrieval_text = '\n'.join(p for p in text_parts if p).strip()
     return {
         'episode_id': (episode_id or _episode_id(
             user_id, character_id, source_key, processor_version, version))[:120],
@@ -279,9 +305,10 @@ def _episode_payload(
         'processor_version': processor_version or EPISODE_PROCESSOR_VERSION,
         'version': version,
         'superseded_by': superseded_by,
-        # Optional derived retrieval cache.  It never carries provenance or
-        # authorizes a chat recall without fresh Raw Event validation.
-        'retrieval_text': (retrieval_text or '\n'.join(p for p in text_parts if p)).strip(),
+        # Keep the database cache exactly derivable from documented fields.
+        # The compatibility argument is intentionally not authoritative: it
+        # cannot smuggle unverified text into lexical or semantic retrieval.
+        'retrieval_text': derived_retrieval_text,
         'embedding_metadata': _json_dict(embedding_metadata),
         'created_at': _now(),
         'updated_at': _now(),
@@ -356,6 +383,36 @@ def _episode_retrieval_text(item) -> str:
     return '\n'.join(parts)
 
 
+def _retrieval_text_hash(item) -> str:
+    """Hash the only text that an episode embedding is allowed to represent."""
+    text = _episode_retrieval_text(item)
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def _episode_lexical_text(item) -> str:
+    """Return documented text plus the optional derived lexical cache.
+
+    ``retrieval_text`` can help PostgreSQL shortlist historical candidates, but
+    it never becomes response content or an embedding input.  Final lexical
+    scoring below always uses ``_episode_retrieval_text`` alone.
+    """
+    documented = _episode_retrieval_text(item)
+    cached = str((item or {}).get('retrieval_text') or '').strip()
+    if cached and cached != documented:
+        return '\n'.join(part for part in (documented, cached) if part)
+    return documented
+
+
+def _embedding_metadata_is_current(item, metadata=None) -> bool:
+    metadata = _json_dict(
+        (item or {}).get('embedding_metadata') if metadata is None else metadata)
+    if not metadata.get('retrieval_text_hash'):
+        return False
+    if metadata.get('retrieval_text_hash') != _retrieval_text_hash(item):
+        return False
+    return _normalised_vector(metadata.get('vector')) is not None
+
+
 def _search_terms(value) -> set:
     """Return small, deterministic lexical terms for Chinese and word text."""
     text = str(value or '').lower()
@@ -409,9 +466,8 @@ def _normalised_vector(value):
 
 def _episode_vector(item):
     metadata = _json_dict((item or {}).get('embedding_metadata'))
-    for key in ('vector', 'embedding', 'embedding_json'):
-        if metadata.get(key) is not None:
-            return _normalised_vector(metadata.get(key))
+    if _embedding_metadata_is_current(item, metadata):
+        return _normalised_vector(metadata.get('vector'))
     return None
 
 
@@ -429,12 +485,241 @@ def _cosine_score(left, right) -> float:
         return 0.0
 
 
-def _light_recency_score(value) -> float:
+def _light_recency_score(value, *, maximum=0.03) -> float:
     if not isinstance(value, datetime):
         return 0.0
     stamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     age_days = max(0.0, (_now() - stamp).total_seconds() / 86400.0)
-    return 0.03 / (1.0 + age_days / 30.0)
+    return float(maximum) / (1.0 + age_days / 30.0)
+
+
+def _is_recallable_episode(row) -> bool:
+    """Apply index-level eligibility before any candidate lane sees a row."""
+    return bool(
+        row
+        and row.get('status') == 'active'
+        and not row.get('rebuild_required')
+        and _source_ids(row.get('source_event_ids'))
+    )
+
+
+def _memory_episode_rows(user_id, character_id, *, status='active'):
+    """Snapshot all matching in-memory rows without a time-ordered pre-limit."""
+    with _memory_lock:
+        return [
+            _copy_episode(item) for item in _EPISODES.values()
+            if item.get('user_id') == user_id
+            and item.get('character_id') == character_id
+            and (status is None or item.get('status') == status)
+        ]
+
+
+def _lexical_query_terms(value) -> Tuple[str, ...]:
+    query = str(value or '').strip().lower()
+    if not query:
+        return ()
+    terms = {query}
+    terms.update(_search_terms(query))
+    return tuple(sorted(
+        (term[:240] for term in terms if term),
+        key=lambda term: (-len(term), term),
+    )[:24])
+
+
+def _is_vague_episode_query(value) -> bool:
+    """Reserve the recent safety lane for genuinely underspecified follow-ups."""
+    text = re.sub(r'\s+', '', str(value or '').lower())
+    text = re.sub(r'[^\w\u4e00-\u9fff]', '', text)
+    if len(text) <= 4:
+        return bool(text)
+    return text in {
+        '然后呢', '后来呢', '还记得吗', '怎么样了', '那个呢', '这件事呢',
+        'whatnext', 'andthen', 'remember',
+    }
+
+
+def _database_lexical_candidates(user_id, character_id, query, limit):
+    """Use PostgreSQL FTS/substrings before applying the lexical pool limit.
+
+    The built-in FTS expression is supported by the derived GIN index above.
+    The bounded substring clauses retain useful Chinese phrase/n-gram matching
+    when the simple tokenizer cannot segment a query well.
+    """
+    terms = _lexical_query_terms(query)
+    if not terms:
+        return []
+    text_sql = (
+        "COALESCE(e.title, '') || ' ' || COALESCE(e.what_happened, '') || ' ' "
+        "|| COALESCE(e.outcome, '') || ' ' || COALESCE(e.unresolved, '') || ' ' "
+        "|| COALESCE(e.retrieval_text, '')"
+    )
+    tsvector_sql = f"to_tsvector('simple', {text_sql})"
+    hit_sql = ' + '.join(
+        f"CASE WHEN ({text_sql}) ILIKE %s THEN 1 ELSE 0 END"
+        for _term in terms
+    )
+    columns = '''episode_id, user_id, character_id, title, what_happened,
+                 outcome, unresolved, participants, source_event_ids, source_key,
+                 range_start, range_end, status, rebuild_required,
+                 processor_version, version, superseded_by, retrieval_text,
+                 embedding_metadata, created_at, updated_at'''
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f'''WITH lexical_candidates AS (
+                    SELECT e.*, ({hit_sql}) AS lexical_hits,
+                           ts_rank_cd({tsvector_sql},
+                                      plainto_tsquery('simple', %s)) AS lexical_rank
+                    FROM episodic_memory_index e
+                    WHERE e.user_id=%s AND e.character_id=%s
+                      AND e.status='active' AND e.rebuild_required=FALSE
+                )
+                SELECT {columns}
+                FROM lexical_candidates
+                WHERE lexical_hits > 0 OR lexical_rank > 0
+                ORDER BY lexical_hits DESC, lexical_rank DESC,
+                         range_end DESC NULLS LAST, updated_at DESC
+                LIMIT %s''',
+            tuple(f'%{term}%' for term in terms)
+            + (str(query or ''), user_id, character_id, int(limit)),
+        )
+        return [_row_episode(row) for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _lexical_candidate_rows(user_id, character_id, query, limit):
+    """Return relevance-ranked lexical candidates without a recency pre-limit."""
+    try:
+        if _USE_MEMORY_STORE:
+            rows = _memory_episode_rows(user_id, character_id, status='active')
+            scored = [
+                (_lexical_score(query, _episode_lexical_text(row)), row)
+                for row in rows if _is_recallable_episode(row)
+            ]
+            scored = [item for item in scored if item[0] > 0]
+            scored.sort(
+                key=lambda item: (item[0], _sort_time(item[1].get('range_end'))),
+                reverse=True,
+            )
+            return [row for _score, row in scored[:limit]]
+        return _database_lexical_candidates(user_id, character_id, query, limit)
+    except Exception as exc:
+        print('[recall_trace] episode_lexical status=unavailable '
+              f'error={type(exc).__name__}')
+        return []
+
+
+def _database_semantic_rows(user_id, character_id, limit):
+    """Read a bounded persisted vector cache; this is intentionally not ANN."""
+    columns = '''episode_id, user_id, character_id, title, what_happened,
+                 outcome, unresolved, participants, source_event_ids, source_key,
+                 range_start, range_end, status, rebuild_required,
+                 processor_version, version, superseded_by, retrieval_text,
+                 embedding_metadata, created_at, updated_at'''
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f'''SELECT {columns}
+                FROM episodic_memory_index
+                WHERE user_id=%s AND character_id=%s
+                  AND status='active' AND rebuild_required=FALSE
+                  AND embedding_metadata IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT %s''',
+            (user_id, character_id, int(limit)),
+        )
+        return [_row_episode(row) for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _semantic_candidate_rows(user_id, character_id, query_embedding, limit):
+    """Score a bounded persisted-embedding cache using the supplied query vector."""
+    query_vector = _normalised_vector(query_embedding)
+    if query_vector is None:
+        return []
+    try:
+        if _USE_MEMORY_STORE:
+            rows = _memory_episode_rows(user_id, character_id, status='active')
+            rows = [row for row in rows if _is_recallable_episode(row)]
+            rows.sort(
+                key=lambda row: (_sort_time(row.get('updated_at')),
+                                 row.get('episode_id') or ''),
+                reverse=True,
+            )
+            rows = rows[:EPISODE_SEMANTIC_SCAN_LIMIT]
+        else:
+            rows = _database_semantic_rows(
+                user_id, character_id, EPISODE_SEMANTIC_SCAN_LIMIT)
+        scored = []
+        for row in rows:
+            if not _is_recallable_episode(row):
+                continue
+            vector = _episode_vector(row)
+            if vector is None:
+                continue
+            score = _cosine_score(query_vector, vector)
+            if score > 0:
+                scored.append((score, row))
+        scored.sort(
+            key=lambda item: (item[0], _sort_time(item[1].get('range_end'))),
+            reverse=True,
+        )
+        return [(score, row) for score, row in scored[:limit]]
+    except Exception as exc:
+        print('[recall_trace] episode_semantic status=unavailable '
+              f'error={type(exc).__name__}')
+        return []
+
+
+def _merge_episode_candidates(recent_rows, lexical_rows, semantic_rows,
+                              user_message, union_limit):
+    """Union candidate lanes by episode id and retain only non-sensitive labels."""
+    merged = {}
+
+    def add(row, source, score=None):
+        if not _is_recallable_episode(row):
+            return
+        episode_id = row.get('episode_id')
+        if not episode_id:
+            return
+        candidate = merged.setdefault(episode_id, dict(row))
+        candidate.setdefault('_candidate_sources', set()).add(source)
+        if source == 'semantic':
+            candidate['_lane_semantic_score'] = max(
+                float(candidate.get('_lane_semantic_score') or 0), float(score or 0))
+
+    for row in recent_rows:
+        add(row, 'recent')
+    for row in lexical_rows:
+        add(row, 'lexical')
+    for score, row in semantic_rows:
+        add(row, 'semantic', score)
+
+    # Lexical scoring is recalculated from documented fields.  It never trusts
+    # the optional cached retrieval_text used only to shortlist database rows.
+    for candidate in merged.values():
+        candidate['_lane_lexical_score'] = _lexical_score(
+            user_message, _episode_retrieval_text(candidate))
+
+    rows = list(merged.values())
+    if len(rows) <= union_limit:
+        return rows
+    rows.sort(
+        key=lambda row: (
+            float(row.get('_lane_semantic_score') or 0),
+            float(row.get('_lane_lexical_score') or 0),
+            'recent' in row.get('_candidate_sources', set()),
+            _sort_time(row.get('range_end')),
+        ),
+        reverse=True,
+    )
+    return rows[:union_limit]
 
 
 def _active_episode_rows(user_id, character_id, rows):
@@ -444,7 +729,10 @@ def _active_episode_rows(user_id, character_id, rows):
     source ids.  A lookup error intentionally returns no rows: unknown source
     validity is not active.
     """
-    candidates = [dict(row) for row in (rows or []) if row]
+    candidates = [
+        dict(row) for row in (rows or [])
+        if _is_recallable_episode(row)
+    ]
     if not candidates:
         return []
     try:
@@ -497,7 +785,8 @@ def _trace_episode_recall(label, rows, *, vector_enabled=False):
             score = 'n/a'
         refs.append(
             f'id={row.get("episode_id") or row.get("id") or "-"},'
-            f'score={score},source_count={len(_source_ids(row.get("source_event_ids")))},'
+            f'score={score},candidate_sources={"+".join(sorted(row.get("candidate_sources") or ())) or "-"},'
+            f'source_count={len(_source_ids(row.get("source_event_ids")))},'
             f'range={_iso(row.get("range_start"))}..{_iso(row.get("range_end"))}'
         )
     suffix = '' if len(rows or []) <= 12 else ',…'
@@ -522,28 +811,39 @@ def recall_episodes(
     vector exists; lexical recall remains the safe fallback.
     """
     try:
-        pool_limit = max(100, min(int(candidate_limit or EPISODE_RECALL_CANDIDATE_LIMIT), 200))
+        union_limit = max(
+            1,
+            min(int(candidate_limit or EPISODE_RECALL_CANDIDATE_LIMIT),
+                EPISODE_RECALL_CANDIDATE_LIMIT),
+        )
         top_k = max(1, min(int(limit or EPISODE_RECALL_TOP_K), 6))
     except (TypeError, ValueError):
-        pool_limit = EPISODE_RECALL_CANDIDATE_LIMIT
+        union_limit = EPISODE_RECALL_CANDIDATE_LIMIT
         top_k = EPISODE_RECALL_TOP_K
 
     try:
-        rows = list_episodes(user_id, character_id, status='active', limit=pool_limit)
+        recent_rows = list_episodes(
+            user_id, character_id, status='active',
+            limit=EPISODE_RECENT_POOL_LIMIT)
     except Exception as exc:
-        print('[recall_trace] episode_candidates status=unavailable '
+        print('[recall_trace] episode_recent status=unavailable '
               f'error={type(exc).__name__}')
-        return []
-    candidates = [
-        row for row in rows
-        if not row.get('rebuild_required')
-        and _source_ids(row.get('source_event_ids'))
-    ]
+        recent_rows = []
+    recent_rows = [row for row in recent_rows if _is_recallable_episode(row)]
+    lexical_rows = _lexical_candidate_rows(
+        user_id, character_id, user_message, EPISODE_LEXICAL_POOL_LIMIT)
+    semantic_rows = _semantic_candidate_rows(
+        user_id, character_id, query_embedding, EPISODE_SEMANTIC_POOL_LIMIT)
+    candidates = _merge_episode_candidates(
+        recent_rows, lexical_rows, semantic_rows, user_message, union_limit)
     valid_rows = _active_episode_rows(user_id, character_id, candidates)
     print('[recall_trace] episode_candidates '
-          f'count={len(candidates)} source_validated={len(valid_rows)} '
-          f'vector_enabled={query_embedding is not None}')
+          f'recent_count={len(recent_rows)} lexical_count={len(lexical_rows)} '
+          f'semantic_count={len(semantic_rows)} union_count={len(candidates)} '
+          f'source_validated={len(valid_rows)} '
+          f'vector_enabled={_normalised_vector(query_embedding) is not None}')
 
+    query_vector = _normalised_vector(query_embedding)
     scored = []
     for row in valid_rows:
         retrieval_text = _episode_retrieval_text(row)
@@ -556,14 +856,40 @@ def recall_episodes(
             # A malformed optional embedding cannot make provenance-valid
             # lexical recall unavailable.
             episode_vector = None
-        semantic = _cosine_score(query_embedding, episode_vector)
-        # Recency only breaks close ties.  Relevance is always dominant, so an
-        # older relevant episode cannot lose merely because a newer one exists.
-        relevance = 0.66 * semantic + 0.30 * lexical
-        if relevance <= 0:
-            continue
-        source_quality = min(0.01, 0.002 * len(_source_ids(row.get('source_event_ids'))))
-        score = relevance + _light_recency_score(row.get('range_end')) + source_quality
+        semantic_available = query_vector is not None and episode_vector is not None
+        semantic = _cosine_score(query_vector, episode_vector) if semantic_available else 0.0
+        candidate_sources = tuple(sorted(row.get('_candidate_sources') or ()))
+        source_count = len(_source_ids(row.get('source_event_ids')))
+        if semantic_available:
+            # Semantic and lexical scores share a common normalized scale.
+            source_quality = min(0.01, 0.002 * source_count)
+            score = (
+                0.66 * semantic
+                + 0.30 * lexical
+                + _light_recency_score(row.get('range_end'), maximum=0.03)
+                + source_quality
+            )
+            score_mode = 'semantic_lexical'
+        else:
+            # A vector-less episode must not be artificially capped at 0.30.
+            source_quality = min(0.02, 0.004 * source_count)
+            score = (
+                0.94 * lexical
+                + _light_recency_score(row.get('range_end'), maximum=0.04)
+                + source_quality
+            )
+            score_mode = 'lexical_only'
+        if semantic <= 0 and lexical <= 0:
+            # The recent lane is a deliberately small safety net for vague
+            # follow-ups; a lexical shortlist whose documented fields do not
+            # match is not vague relevance (it may only match a stale cache).
+            if ('recent' not in candidate_sources
+                    or 'lexical' in candidate_sources
+                    or not _is_vague_episode_query(user_message)):
+                continue
+            score = 0.001 + _light_recency_score(
+                row.get('range_end'), maximum=0.04) + min(0.02, 0.004 * source_count)
+            score_mode = 'recent_safety'
         candidate = dict(row)
         candidate.update({
             'id': row.get('episode_id'),
@@ -571,6 +897,8 @@ def recall_episodes(
             'score': score,
             'lexical_score': lexical,
             'semantic_score': semantic,
+            'candidate_sources': candidate_sources,
+            'score_mode': score_mode,
             'provenance_quality': 'linked',
             'recall_kind': 'episode',
         })
@@ -583,7 +911,7 @@ def recall_episodes(
     # Validate again immediately before a result crosses the retrieval boundary.
     selected = _active_episode_rows(user_id, character_id, scored[:top_k])
     _trace_episode_recall('episode_ranked', selected,
-                          vector_enabled=query_embedding is not None)
+                          vector_enabled=query_vector is not None)
     return selected
 
 
@@ -616,21 +944,84 @@ def get_episode(episode_id):
 
 
 def _existing_source_version(user_id, character_id, source_key,
-                             processor_version, version):
-    for item in list_episodes(user_id, character_id, status=None, limit=1000):
-        if (item.get('source_key') == source_key
-                and item.get('processor_version') == processor_version
-                and int(item.get('version') or 1) == int(version or 1)):
-            return item
-    return None
+                              processor_version, version):
+    if _USE_MEMORY_STORE:
+        with _memory_lock:
+            for item in _EPISODES.values():
+                if (item.get('user_id') == user_id
+                        and item.get('character_id') == character_id
+                        and item.get('source_key') == source_key
+                        and item.get('processor_version') == processor_version
+                        and int(item.get('version') or 1) == int(version or 1)):
+                    return _copy_episode(item)
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT episode_id, user_id, character_id, title, what_happened,
+                      outcome, unresolved, participants, source_event_ids,
+                      source_key, range_start, range_end, status,
+                      rebuild_required, processor_version, version,
+                      superseded_by, retrieval_text, embedding_metadata,
+                      created_at, updated_at
+               FROM episodic_memory_index
+               WHERE user_id=%s AND character_id=%s AND source_key=%s
+                 AND processor_version=%s AND version=%s
+               LIMIT 1''',
+            (user_id, character_id, source_key, processor_version, int(version or 1)),
+        )
+        row = cur.fetchone()
+        return _row_episode(row) if row else None
+    finally:
+        cur.close()
+        conn.close()
 
 
 def _existing_active_segment(user_id, character_id, source_key, processor_version):
-    for item in list_episodes(user_id, character_id, status='active', limit=1000):
-        if (item.get('source_key') == source_key
-                and item.get('processor_version') == processor_version):
-            return item
-    return None
+    if _USE_MEMORY_STORE:
+        with _memory_lock:
+            for item in _EPISODES.values():
+                if (item.get('user_id') == user_id
+                        and item.get('character_id') == character_id
+                        and item.get('source_key') == source_key
+                        and item.get('processor_version') == processor_version
+                        and item.get('status') == 'active'):
+                    return _copy_episode(item)
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT episode_id, user_id, character_id, title, what_happened,
+                      outcome, unresolved, participants, source_event_ids,
+                      source_key, range_start, range_end, status,
+                      rebuild_required, processor_version, version,
+                      superseded_by, retrieval_text, embedding_metadata,
+                      created_at, updated_at
+               FROM episodic_memory_index
+               WHERE user_id=%s AND character_id=%s AND source_key=%s
+                 AND processor_version=%s AND status='active'
+               ORDER BY version DESC
+               LIMIT 1''',
+            (user_id, character_id, source_key, processor_version),
+        )
+        row = cur.fetchone()
+        return _row_episode(row) if row else None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _metadata_for_episode_save(payload, existing, requested_metadata):
+    """Preserve only a vector bound to the current documented retrieval text."""
+    requested = _json_dict(requested_metadata)
+    if requested_metadata is not None:
+        return requested if _embedding_metadata_is_current(payload, requested) else {}
+    existing_metadata = _json_dict((existing or {}).get('embedding_metadata'))
+    if _embedding_metadata_is_current(payload, existing_metadata):
+        return existing_metadata
+    return {}
 
 
 def save_episode(
@@ -680,12 +1071,16 @@ def save_episode(
         embedding_metadata=embedding_metadata,
         episode_id=episode_id,
     )
+    existing = _existing_source_version(
+        user_id, character_id, payload['source_key'],
+        payload['processor_version'], payload['version'])
+    # A stale vector is worse than no vector: title/outcome/unresolved changes
+    # must cause a worker to regenerate the optional semantic cache.
+    payload['embedding_metadata'] = _metadata_for_episode_save(
+        payload, existing, embedding_metadata)
 
     if _USE_MEMORY_STORE:
         with _memory_lock:
-            existing = _existing_source_version(
-                user_id, character_id, payload['source_key'],
-                payload['processor_version'], payload['version'])
             if existing:
                 payload['episode_id'] = existing['episode_id']
                 payload['created_at'] = existing.get('created_at') or payload['created_at']
@@ -985,8 +1380,194 @@ def build_episode_from_events(
     )
 
 
+def _trace_episode_embedding(item, status):
+    item = item or {}
+    print(
+        '[episode_trace] '
+        f'id={item.get("episode_id") or "-"} '
+        f'source_count={len(_source_ids(item.get("source_event_ids")))} '
+        f'range={_iso(item.get("range_start"))}..{_iso(item.get("range_end"))} '
+        f'status={status} version={item.get("version") or "-"}'
+    )
+
+
+def _plain_embedding_vector(value):
+    vector = _normalised_vector(value)
+    if vector is None:
+        return None
+    try:
+        plain = [float(part) for part in list(vector)]
+    except Exception:
+        return None
+    return plain or None
+
+
+def _write_episode_embedding_metadata(item, metadata):
+    """Persist a vector only while the exact active episode text is unchanged."""
+    if not item or not _embedding_metadata_is_current(item, metadata):
+        return None
+    if _USE_MEMORY_STORE:
+        with _memory_lock:
+            current = _EPISODES.get(item.get('episode_id'))
+            if (not _is_recallable_episode(current)
+                    or _retrieval_text_hash(current) != metadata.get('retrieval_text_hash')):
+                return None
+            current['embedding_metadata'] = _json_dict(metadata)
+            current['updated_at'] = _now()
+            return _copy_episode(current)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''UPDATE episodic_memory_index
+               SET embedding_metadata=%s, updated_at=CURRENT_TIMESTAMP
+               WHERE episode_id=%s AND status='active' AND rebuild_required=FALSE
+                 AND COALESCE(title, '')=%s
+                 AND COALESCE(what_happened, '')=%s
+                 AND COALESCE(outcome, '')=%s
+                 AND COALESCE(unresolved, '')=%s
+               RETURNING episode_id, user_id, character_id, title, what_happened,
+                         outcome, unresolved, participants, source_event_ids,
+                         source_key, range_start, range_end, status,
+                         rebuild_required, processor_version, version,
+                         superseded_by, retrieval_text, embedding_metadata,
+                         created_at, updated_at''',
+            (
+                _dump_json(metadata), item.get('episode_id'),
+                str(item.get('title') or ''), str(item.get('what_happened') or ''),
+                str(item.get('outcome') or ''), str(item.get('unresolved') or ''),
+            ),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return _row_episode(row) if row else None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def materialize_episode_embedding(episode_id) -> bool:
+    """Worker-only optional vector materialization for a committed episode.
+
+    The index row remains usable for lexical retrieval when embeddings are
+    unavailable.  This function deliberately never appears in chat recall.
+    """
+    item = get_episode(episode_id)
+    if not _is_recallable_episode(item):
+        _trace_episode_embedding(item, 'embedding_skipped')
+        return False
+    valid = _active_episode_rows(item['user_id'], item['character_id'], [item])
+    if not valid:
+        _trace_episode_embedding(item, 'embedding_source_unverified')
+        return False
+    item = valid[0]
+    if _embedding_metadata_is_current(item):
+        _trace_episode_embedding(item, 'embedding_current')
+        return True
+    text = _episode_retrieval_text(item)
+    if not text:
+        _trace_episode_embedding(item, 'embedding_skipped')
+        return False
+    try:
+        import memory_search
+        if not memory_search.is_vector_ready():
+            _trace_episode_embedding(item, 'embedding_unavailable')
+            return False
+        vector = _plain_embedding_vector(memory_search.embed(text))
+        if vector is None:
+            _trace_episode_embedding(item, 'embedding_unavailable')
+            return False
+        metadata = {
+            'vector': vector,
+            'model': str(getattr(memory_search, 'EMBED_MODEL', '') or ''),
+            'processor_version': str(item.get('processor_version') or ''),
+            'retrieval_text_hash': _retrieval_text_hash(item),
+            'generated_at': _iso(_now()),
+            'dimensions': len(vector),
+        }
+        saved = _write_episode_embedding_metadata(item, metadata)
+        if saved:
+            _trace_episode_embedding(saved, 'embedding_ready')
+            return True
+        _trace_episode_embedding(item, 'embedding_skipped')
+        return False
+    except Exception as exc:
+        # Embeddings are a derived acceleration only; an outage cannot make a
+        # canonical episode build fail or remove lexical recall.
+        print('[episode_trace] embedding_materialize '
+              f'id={item.get("episode_id") or "-"} error={type(exc).__name__}')
+        return False
+
+
+def _embedding_job_key(item):
+    return 'episode-embedding:' + str(item.get('episode_id') or '') + ':' + (
+        _retrieval_text_hash(item)[:16])
+
+
+def enqueue_episode_embedding_job(item):
+    """Schedule a rebuild successor's vector materialization off the Fast Path."""
+    if not _is_recallable_episode(item):
+        return None
+    key = _embedding_job_key(item)
+    extra = {
+        'episode_id': item.get('episode_id'),
+        'retrieval_text_hash': _retrieval_text_hash(item),
+    }
+    if _uses_memory_store():
+        with _memory_lock:
+            for job in _EPISODE_JOBS:
+                if (job.get('kind') == EMBEDDING_KIND
+                        and job.get('source_event_id') == key
+                        and job.get('status') in ('pending', 'running')):
+                    return job.get('id')
+            job_id = len(_EPISODE_JOBS) + 1
+            _EPISODE_JOBS.append({
+                'id': job_id,
+                'kind': EMBEDDING_KIND,
+                'user_id': item.get('user_id'),
+                'character_id': item.get('character_id'),
+                'source_event_id': key,
+                'status': 'pending',
+                'extra': extra,
+            })
+        return job_id
+    try:
+        from memory_jobs import enqueue_kind
+        return enqueue_kind(
+            EMBEDDING_KIND, item.get('user_id'), item.get('character_id'),
+            source_event_id=key, extra=extra,
+        )
+    except Exception as exc:
+        print(f'[episodic_index] embedding enqueue skipped:{type(exc).__name__}')
+        return None
+
+
+def process_episode_embedding_job(user_id, character_id, extra, source_event_id=None) -> bool:
+    """Best-effort vector job: failure is recorded by trace, never retried as build failure."""
+    extra = extra or {}
+    episode_id = str(extra.get('episode_id') or '').strip()
+    item = get_episode(episode_id)
+    if (not item or item.get('user_id') != user_id
+            or item.get('character_id') != character_id):
+        return True
+    expected_hash = str(extra.get('retrieval_text_hash') or '')
+    if expected_hash and expected_hash != _retrieval_text_hash(item):
+        _trace_episode_embedding(item, 'embedding_superseded')
+        return True
+    try:
+        materialize_episode_embedding(episode_id)
+    except Exception as exc:
+        print('[episode_trace] embedding_job '
+              f'id={episode_id} error={type(exc).__name__}')
+    return True
+
+
 def rebuild_episode(episode_id, events: Sequence[dict], *, summary_text=''):
-    """Create one successor version and mark its prior episode superseded."""
+    """Create one successor version and queue its optional vector materialization."""
     previous = get_episode(episode_id)
     if not previous:
         return None
@@ -994,13 +1575,16 @@ def rebuild_episode(episode_id, events: Sequence[dict], *, summary_text=''):
         successor = get_episode(previous['superseded_by'])
         if successor:
             return successor
-    return build_episode_from_events(
+    successor = build_episode_from_events(
         previous['user_id'], previous['character_id'], events,
         summary_text=summary_text,
         processor_version=previous.get('processor_version') or EPISODE_PROCESSOR_VERSION,
         version=int(previous.get('version') or 1) + 1,
         supersedes_episode_id=previous['episode_id'],
     )
+    if successor:
+        enqueue_episode_embedding_job(successor)
+    return successor
 
 
 def list_episode_jobs():
@@ -1063,4 +1647,13 @@ def process_episode_job(user_id, character_id, extra, source_event_id=None) -> b
         summary_text=extra.get('summary_text') or '',
         processor_version=processor_version,
     )
+    if built:
+        # This code already runs inside the durable episodic-index worker.  A
+        # vector outage remains non-fatal, so the canonical-derived episode is
+        # committed and its lexical lane remains available.
+        try:
+            materialize_episode_embedding(built['episode_id'])
+        except Exception as exc:
+            print('[episode_trace] embedding_materialize '
+                  f'id={built.get("episode_id") or "-"} error={type(exc).__name__}')
     return bool(built)

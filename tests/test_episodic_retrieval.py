@@ -5,7 +5,7 @@ import unittest
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -44,9 +44,28 @@ class EpisodicRetrievalTests(unittest.TestCase):
         context_layer.use_memory_store(False)
 
     def _save(self, episode_id, *, text, source_ids=('source-1',),
-              days_ago=0, status='active', rebuild_required=False,
-              embedding_metadata=None, retrieval_text=None):
+               days_ago=0, status='active', rebuild_required=False,
+               embedding_metadata=None, retrieval_text=None):
         end = NOW - timedelta(days=days_ago)
+        if embedding_metadata is not None:
+            embedding_metadata = dict(embedding_metadata)
+            vector = embedding_metadata.get('vector')
+            if vector is not None:
+                embedding_fields = {
+                    'title': text[:40],
+                    'what_happened': text,
+                    'outcome': '当时已记录的结果',
+                    'unresolved': '',
+                }
+                embedding_metadata.setdefault(
+                    'retrieval_text_hash',
+                    episodic_index._retrieval_text_hash(embedding_fields),
+                )
+                embedding_metadata.setdefault('model', 'test-embedding')
+                embedding_metadata.setdefault(
+                    'processor_version', episodic_index.EPISODE_PROCESSOR_VERSION)
+                embedding_metadata.setdefault('generated_at', NOW.isoformat())
+                embedding_metadata.setdefault('dimensions', len(vector))
         return episodic_index.save_episode(
             'u', 'gojo',
             episode_id=episode_id,
@@ -90,6 +109,29 @@ class EpisodicRetrievalTests(unittest.TestCase):
         rows = self._recall('东京旅行', {'a', 'b', 'c', 'd', 'e'})
 
         self.assertEqual([row['episode_id'] for row in rows], ['active'])
+
+    def test_non_recallable_statuses_are_filtered_before_semantic_candidates(self):
+        cases = (
+            ('stale-vector', 'stale', False),
+            ('invalidated-vector', 'invalidated', False),
+            ('superseded-vector', 'superseded', False),
+            ('rebuild-vector', 'active', True),
+        )
+        active_ids = set()
+        for episode_id, status, rebuild_required in cases:
+            source_id = f'{episode_id}-source'
+            active_ids.add(source_id)
+            self._save(
+                episode_id, text='与当前措辞没有词面交集的经历',
+                source_ids=(source_id,), status=status,
+                rebuild_required=rebuild_required,
+                embedding_metadata={'vector': [1.0, 0.0]},
+            )
+
+        rows = self._recall(
+            '完全不同的提问', active_ids, query_embedding=[1.0, 0.0])
+
+        self.assertEqual(rows, [])
 
     def test_recalled_episode_keeps_exact_raw_event_provenance(self):
         self._save('traceable', text='一起讨论了周末看展', source_ids=('evt-a', 'evt-b'))
@@ -149,6 +191,16 @@ class EpisodicRetrievalTests(unittest.TestCase):
 
         self.assertEqual(rows[0]['episode_id'], 'old-trip')
 
+    def test_recent_safety_lane_is_reserved_for_vague_follow_ups(self):
+        self._save('recent-context', text='上周一起讨论了咖啡店安排', source_ids=('recent',))
+
+        vague = self._recall('然后呢？', {'recent'})
+        specific = self._recall('完全无关的具体问题', {'recent'})
+
+        self.assertEqual([row['episode_id'] for row in vague], ['recent-context'])
+        self.assertEqual(specific, [])
+        self.assertEqual(vague[0]['candidate_sources'], ('recent',))
+
     def test_old_semantically_relevant_episode_beats_new_irrelevant_episode(self):
         self._save(
             'old-semantic', text='过去的一次出行经历', source_ids=('old',), days_ago=180,
@@ -164,6 +216,55 @@ class EpisodicRetrievalTests(unittest.TestCase):
 
         self.assertEqual(rows[0]['episode_id'], 'old-semantic')
         self.assertGreater(rows[0]['semantic_score'], 0.9)
+
+    def test_old_lexical_episode_survives_more_than_two_hundred_newer_rows(self):
+        old = self._save(
+            'old-japan-trip', text='她决定寒假独自去东京旅行',
+            source_ids=('old-japan-source',), days_ago=31,
+        )
+        new_ids = set()
+        with patch('builtins.print'):
+            for index in range(221):
+                source_id = f'new-lexical-{index}'
+                new_ids.add(source_id)
+                self._save(
+                    f'new-lexical-{index}',
+                    text=f'今天处理无关的例行事项编号{index}',
+                    source_ids=(source_id,), days_ago=1,
+                )
+
+        rows = self._recall(
+            '之前日本旅行那个安排呢？', new_ids | {'old-japan-source'})
+
+        self.assertEqual(rows[0]['episode_id'], old['episode_id'])
+        self.assertIn('lexical', rows[0]['candidate_sources'])
+        self.assertNotIn('recent', rows[0]['candidate_sources'])
+
+    def test_old_semantic_episode_survives_more_than_two_hundred_newer_rows(self):
+        old = self._save(
+            'old-semantic-trip', text='冬日的那段远行已经定下',
+            source_ids=('old-semantic-source',), days_ago=31,
+            embedding_metadata={'vector': [1.0, 0.0]},
+        )
+        new_ids = set()
+        with patch('builtins.print'):
+            for index in range(221):
+                source_id = f'new-semantic-{index}'
+                new_ids.add(source_id)
+                self._save(
+                    f'new-semantic-{index}',
+                    text=f'普通例行事务记录{index}',
+                    source_ids=(source_id,), days_ago=1,
+                    embedding_metadata={'vector': [0.0, 1.0]},
+                )
+
+        rows = self._recall(
+            '之前的日程应该怎么安排？', new_ids | {'old-semantic-source'},
+                            query_embedding=[1.0, 0.0])
+
+        self.assertEqual(rows[0]['episode_id'], old['episode_id'])
+        self.assertIn('semantic', rows[0]['candidate_sources'])
+        self.assertEqual(rows[0]['lexical_score'], 0.0)
 
     def test_vector_error_degrades_to_lexical_recall(self):
         self._save('lexical-fallback', text='东京旅行的行程', source_ids=('evt-a',))
@@ -188,12 +289,16 @@ class EpisodicRetrievalTests(unittest.TestCase):
         self.assertEqual(forged, [])
         self.assertEqual([row['episode_id'] for row in documented], ['documented-fields'])
 
-    def test_candidate_pool_is_capped_at_two_hundred(self):
+    def test_candidate_union_is_capped_without_expanding_the_recent_lane(self):
         with patch.object(episodic_index, 'list_episodes', return_value=[]) as listed:
             episodic_index.recall_episodes(
                 'u', 'gojo', '任何问题', candidate_limit=9999)
 
-        self.assertEqual(listed.call_args.kwargs['limit'], 200)
+        self.assertEqual(
+            listed.call_args.kwargs['limit'],
+            episodic_index.EPISODE_RECENT_POOL_LIMIT,
+        )
+        self.assertEqual(episodic_index.EPISODE_RECALL_CANDIDATE_LIMIT, 220)
 
     def test_hot_window_fully_covers_episode_and_excludes_it(self):
         result = context_layer.exclude_recall_covered_by_recent(
@@ -269,7 +374,7 @@ class EpisodicRetrievalTests(unittest.TestCase):
     def test_context_layer_passes_the_existing_query_vector_to_episode_recall(self):
         fake_rag = types.ModuleType('memory_search')
         fake_rag.is_vector_ready = lambda: True
-        fake_rag.embed = lambda _text: [3.0, 4.0]
+        fake_rag.embed = Mock(return_value=[3.0, 4.0])
         fake_rag._to_vec = lambda _raw: ('existing-query-vector',)
         episode = self._save('context-episode', text='一起讨论东京旅行', source_ids=('old',))
         episode.update({
@@ -279,7 +384,7 @@ class EpisodicRetrievalTests(unittest.TestCase):
             'provenance_quality': 'linked',
         })
         with patch.dict(sys.modules, {'memory_search': fake_rag}), \
-             patch.object(smart_recall, 'two_level_recall', return_value={}), \
+             patch.object(smart_recall, 'two_level_recall', return_value={}) as two_level, \
              patch.object(episodic_index, 'recall_episodes', return_value=[episode]) as recalled:
             pack = context_layer.assemble_from_events(
                 [_event('hot', minutes_ago=1)],
@@ -287,6 +392,11 @@ class EpisodicRetrievalTests(unittest.TestCase):
                 now=NOW, include_recall=True,
             )
 
+        self.assertEqual(fake_rag.embed.call_count, 1)
+        self.assertEqual(
+            two_level.call_args.kwargs['query_embedding'],
+            ('existing-query-vector',),
+        )
         self.assertEqual(recalled.call_args.kwargs['query_embedding'], ('existing-query-vector',))
         self.assertIn('【你们以前一起经历过的事】', pack.episode_prompt_text)
         self.assertIn('东京旅行', pack.episode_prompt_text)
@@ -310,6 +420,11 @@ class EpisodicRetrievalTests(unittest.TestCase):
             str(call.args[0]) for call in logged.call_args_list
             if call.args and str(call.args[0]).startswith('[recall_trace]')
         )
+        self.assertIn('recent_count=', trace)
+        self.assertIn('lexical_count=', trace)
+        self.assertIn('semantic_count=', trace)
+        self.assertIn('union_count=', trace)
+        self.assertIn('candidate_sources=', trace)
         self.assertIn('episode_ranked', trace)
         self.assertNotIn(secret, trace)
 
