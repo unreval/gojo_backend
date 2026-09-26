@@ -67,6 +67,9 @@ ITEM_TYPE_CHANNEL = {
     'rolling_summary': 'summary',
     'pinned': 'pinned',
     'recalled_memory': 'recall',
+    # Episode rows compete inside the existing recall budget; they do not open
+    # a second context channel or a separate memory authority.
+    'episodic_memory': 'recall',
     'relationship_state': 'relationship',
     'cognitive_state': 'cognitive',
     'diary': 'diary',

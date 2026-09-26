@@ -15,6 +15,7 @@ _FRAG_SPLIT = re.compile(r'[，。,.\s;；、！!？?：:\n]+')
 _CJK_CHUNK = re.compile(r'[\u4e00-\u9fff]{2,}')
 
 TYPE_ROLE = {
+    'episode_index': 'factual',
     'episodic': 'factual',
     'fact': 'factual',
     'habit': 'factual',
@@ -32,6 +33,7 @@ TYPE_ROLE = {
 
 FACTUAL_RANK = {
     'fact': 0,
+    'episode_index': 1,
     'episodic': 1,
     'habit': 2,
     'lifecycle': 3,
@@ -251,6 +253,10 @@ def from_recall_result(recall_result) -> List[RecallCandidate]:
         cand = _candidate_from_row(kind, row, {'priority': 40})
         if cand:
             out.append(cand)
+    for row in recall_result.get('episodes') or []:
+        cand = _candidate_from_row('episode_index', row, {'priority': 50})
+        if cand:
+            out.append(cand)
     for row in recall_result.get('sticky_notes') or []:
         cand = _candidate_from_row('cognitive_sticky', row, {'priority': 30})
         if cand:
@@ -268,6 +274,10 @@ def _source_related(a: RecallCandidate, b: RecallCandidate) -> bool:
     sa, sb = set(a.source_event_ids), set(b.source_event_ids)
     if not sa or not sb:
         return False
+    # A partly-overlapping episode is still a different stretch of experience.
+    # Only a complete source subset can compete for a deduplication decision.
+    if 'episode_index' in (a.candidate_type, b.candidate_type):
+        return sa <= sb or sb <= sa
     if sa & sb:
         if sa <= sb or sb <= sa:
             return True
@@ -290,6 +300,11 @@ def _prefer(a: RecallCandidate, b: RecallCandidate) -> RecallCandidate:
 
 
 def _same_conclusion(a: RecallCandidate, b: RecallCandidate) -> bool:
+    if 'episode_index' in (a.candidate_type, b.candidate_type):
+        # An episode is broader than a fact/bond.  Keep both unless their text
+        # is nearly the same conclusion, rather than erasing an independent
+        # factual assertion that happens to cite one source in the episode.
+        return text_overlap(a.text, b.text) >= 0.85
     if a.semantic_role != b.semantic_role:
         # factual vs relational may still be the same stated fact
         roles = {a.semantic_role, b.semantic_role}
@@ -361,7 +376,7 @@ def collapse_candidates(candidates: Sequence[RecallCandidate]) -> List[RecallCan
 def to_recall_result(candidates: Sequence[RecallCandidate], original=None) -> dict:
     base = dict(original or {})
     facts, loose_bonds, tolds = [], [], []
-    lifecycle, sticky, diary = [], [], []
+    lifecycle, episodes, sticky, diary = [], [], [], []
     fact_by_id = {}
     for cand in candidates:
         raw = dict(cand.metadata or {})
@@ -386,6 +401,8 @@ def to_recall_result(candidates: Sequence[RecallCandidate], original=None) -> di
             tolds.append(raw)
         elif cand.candidate_type in ('lifecycle', 'episodic', 'habit'):
             lifecycle.append(raw)
+        elif cand.candidate_type == 'episode_index':
+            episodes.append(raw)
         elif cand.candidate_type == 'cognitive_sticky':
             sticky.append(raw)
         elif cand.candidate_type == 'diary':
@@ -394,6 +411,7 @@ def to_recall_result(candidates: Sequence[RecallCandidate], original=None) -> di
     base['loose_bonds'] = loose_bonds
     base['tolds'] = tolds
     base['lifecycle_memories'] = lifecycle
+    base['episodes'] = episodes
     base['sticky_notes'] = sticky
     base['diary_memories'] = diary
     base['collapsed'] = True

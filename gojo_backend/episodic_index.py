@@ -1,8 +1,9 @@
 """Derived episodic-memory index backed by canonical Raw Events.
 
-Episodes are intentionally not a second fact store and are not part of chat
-recall in v1.  Each row is a rebuildable index entry whose only provenance is
-the ordered set of ``chat_log`` event ids that produced it.
+Episodes are intentionally not a second fact store.  Each row is a rebuildable
+index entry whose only provenance is the ordered set of ``chat_log`` event ids
+that produced it.  Chat recall may read an episode only after fresh canonical
+source validation.
 """
 from __future__ import annotations
 
@@ -19,6 +20,10 @@ from db import get_conn
 EPISODE_PROCESSOR_VERSION = 'episodic_index_v1'
 KIND = 'episodic_index'
 EPISODE_STATUSES = ('active', 'stale', 'invalidated', 'superseded')
+# Episode recall only ranks a bounded recent pool.  The index remains the
+# derived record; this limit is not a retention policy for Raw Events.
+EPISODE_RECALL_CANDIDATE_LIMIT = 160
+EPISODE_RECALL_TOP_K = 3
 
 EPISODIC_INDEX_DDL = (
     '''CREATE TABLE IF NOT EXISTS episodic_memory_index (
@@ -274,7 +279,8 @@ def _episode_payload(
         'processor_version': processor_version or EPISODE_PROCESSOR_VERSION,
         'version': version,
         'superseded_by': superseded_by,
-        # Reserved for a future retrieval phase.  v1 never reads it into chat.
+        # Optional derived retrieval cache.  It never carries provenance or
+        # authorizes a chat recall without fresh Raw Event validation.
         'retrieval_text': (retrieval_text or '\n'.join(p for p in text_parts if p)).strip(),
         'embedding_metadata': _json_dict(embedding_metadata),
         'created_at': _now(),
@@ -328,6 +334,257 @@ def list_episodes(user_id, character_id, *, status='active', limit=50):
     finally:
         cur.close()
         conn.close()
+
+
+def _episode_retrieval_text(item) -> str:
+    """Build retrieval text only from documented episode fields.
+
+    ``retrieval_text`` is a cacheable convenience field, not an authority.  By
+    rebuilding this value here, a stale cache or metadata payload cannot add a
+    hidden claim to a chat recall candidate.
+    """
+    parts = []
+    for value in (
+        (item or {}).get('title'),
+        (item or {}).get('what_happened'),
+        (item or {}).get('outcome'),
+        (item or {}).get('unresolved'),
+    ):
+        text = str(value or '').strip()
+        if text:
+            parts.append(text)
+    return '\n'.join(parts)
+
+
+def _search_terms(value) -> set:
+    """Return small, deterministic lexical terms for Chinese and word text."""
+    text = str(value or '').lower()
+    terms = set(re.findall(r'[a-z0-9_]{2,}', text))
+    for chunk in re.findall(r'[\u4e00-\u9fff]{2,}', text):
+        # Whole phrases preserve exact matches; short n-grams preserve useful
+        # overlap when the same trip/event is phrased differently.
+        terms.add(chunk)
+        for width in (2, 3):
+            for index in range(max(0, len(chunk) - width + 1)):
+                terms.add(chunk[index:index + width])
+    return terms
+
+
+def _lexical_score(query, text) -> float:
+    query_text = str(query or '').strip().lower()
+    text_value = str(text or '').strip().lower()
+    if not query_text or not text_value:
+        return 0.0
+    if query_text in text_value:
+        return 1.0
+    query_terms = _search_terms(query_text)
+    text_terms = _search_terms(text_value)
+    if not query_terms or not text_terms:
+        return 0.0
+    return min(1.0, len(query_terms & text_terms) / float(len(query_terms)))
+
+
+def _normalised_vector(value):
+    """Use the existing memory-search normalizer when it is available."""
+    if value is None:
+        return None
+    try:
+        import memory_search
+        vector = memory_search._to_vec(value)
+        if vector is not None:
+            return vector
+    except Exception:
+        pass
+    try:
+        raw = list(value)
+        if not raw:
+            return None
+        norm = sum(float(part) * float(part) for part in raw) ** 0.5
+        if norm <= 0:
+            return None
+        return [float(part) / norm for part in raw]
+    except Exception:
+        return None
+
+
+def _episode_vector(item):
+    metadata = _json_dict((item or {}).get('embedding_metadata'))
+    for key in ('vector', 'embedding', 'embedding_json'):
+        if metadata.get(key) is not None:
+            return _normalised_vector(metadata.get(key))
+    return None
+
+
+def _cosine_score(left, right) -> float:
+    try:
+        if left is None or right is None or len(left) != len(right):
+            return 0.0
+        dot = sum(float(a) * float(b) for a, b in zip(left, right))
+        left_norm = sum(float(a) * float(a) for a in left) ** 0.5
+        right_norm = sum(float(b) * float(b) for b in right) ** 0.5
+        if left_norm <= 0 or right_norm <= 0:
+            return 0.0
+        return max(0.0, min(1.0, dot / (left_norm * right_norm)))
+    except Exception:
+        return 0.0
+
+
+def _light_recency_score(value) -> float:
+    if not isinstance(value, datetime):
+        return 0.0
+    stamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    age_days = max(0.0, (_now() - stamp).total_seconds() / 86400.0)
+    return 0.03 / (1.0 + age_days / 30.0)
+
+
+def _active_episode_rows(user_id, character_id, rows):
+    """Keep only episodes whose complete provenance is active *right now*.
+
+    One bounded tombstone read plus one canonical lookup validate all candidate
+    source ids.  A lookup error intentionally returns no rows: unknown source
+    validity is not active.
+    """
+    candidates = [dict(row) for row in (rows or []) if row]
+    if not candidates:
+        return []
+    try:
+        import raw_events
+        deleted = {
+            str(event_id).strip()
+            for event_id in raw_events.deleted_event_ids(user_id, character_id)
+            if str(event_id).strip()
+        }
+    except Exception as exc:
+        print('[recall_trace] episode_source_validation status=unavailable '
+              f'error={type(exc).__name__}')
+        return []
+    if deleted:
+        candidates = [
+            row for row in candidates
+            if not (set(_source_ids(row.get('source_event_ids'))) & deleted)
+        ]
+    all_ids = _source_ids([
+        event_id
+        for row in candidates
+        for event_id in _source_ids(row.get('source_event_ids'))
+    ])
+    if not candidates or not all_ids:
+        return []
+    try:
+        canonical = raw_events.get_active_events_by_ids(
+            user_id, character_id, all_ids)
+    except Exception as exc:
+        print('[recall_trace] episode_source_validation status=unavailable '
+              f'error={type(exc).__name__}')
+        return []
+    active_ids = {
+        str(row.get('event_id') or '').strip()
+        for row in (canonical or []) if isinstance(row, dict)
+    }
+    return [
+        row for row in candidates
+        if _source_ids(row.get('source_event_ids'))
+        and set(_source_ids(row.get('source_event_ids'))).issubset(active_ids)
+    ]
+
+
+def _trace_episode_recall(label, rows, *, vector_enabled=False):
+    refs = []
+    for row in list(rows or [])[:12]:
+        try:
+            score = f'{float(row.get("score") or 0):.3f}'
+        except (TypeError, ValueError):
+            score = 'n/a'
+        refs.append(
+            f'id={row.get("episode_id") or row.get("id") or "-"},'
+            f'score={score},source_count={len(_source_ids(row.get("source_event_ids")))},'
+            f'range={_iso(row.get("range_start"))}..{_iso(row.get("range_end"))}'
+        )
+    suffix = '' if len(rows or []) <= 12 else ',…'
+    print(f'[recall_trace] {label} count={len(rows or [])} '
+          f'vector_enabled={bool(vector_enabled)} items=[{";".join(refs)}{suffix}]')
+
+
+def recall_episodes(
+    user_id,
+    character_id,
+    user_message,
+    query_embedding=None,
+    *,
+    limit=EPISODE_RECALL_TOP_K,
+    candidate_limit=EPISODE_RECALL_CANDIDATE_LIMIT,
+):
+    """Read active, fully-valid episodes for the existing chat recall pipeline.
+
+    This is intentionally a read-only retrieval function.  It never writes a
+    Raw Event, a long/bond/lifecycle memory, relationship state, or an episode
+    embedding.  Semantic scoring is used only when an already-stored episode
+    vector exists; lexical recall remains the safe fallback.
+    """
+    try:
+        pool_limit = max(100, min(int(candidate_limit or EPISODE_RECALL_CANDIDATE_LIMIT), 200))
+        top_k = max(1, min(int(limit or EPISODE_RECALL_TOP_K), 6))
+    except (TypeError, ValueError):
+        pool_limit = EPISODE_RECALL_CANDIDATE_LIMIT
+        top_k = EPISODE_RECALL_TOP_K
+
+    try:
+        rows = list_episodes(user_id, character_id, status='active', limit=pool_limit)
+    except Exception as exc:
+        print('[recall_trace] episode_candidates status=unavailable '
+              f'error={type(exc).__name__}')
+        return []
+    candidates = [
+        row for row in rows
+        if not row.get('rebuild_required')
+        and _source_ids(row.get('source_event_ids'))
+    ]
+    valid_rows = _active_episode_rows(user_id, character_id, candidates)
+    print('[recall_trace] episode_candidates '
+          f'count={len(candidates)} source_validated={len(valid_rows)} '
+          f'vector_enabled={query_embedding is not None}')
+
+    scored = []
+    for row in valid_rows:
+        retrieval_text = _episode_retrieval_text(row)
+        if not retrieval_text:
+            continue
+        lexical = _lexical_score(user_message, retrieval_text)
+        try:
+            episode_vector = _episode_vector(row)
+        except Exception:
+            # A malformed optional embedding cannot make provenance-valid
+            # lexical recall unavailable.
+            episode_vector = None
+        semantic = _cosine_score(query_embedding, episode_vector)
+        # Recency only breaks close ties.  Relevance is always dominant, so an
+        # older relevant episode cannot lose merely because a newer one exists.
+        relevance = 0.66 * semantic + 0.30 * lexical
+        if relevance <= 0:
+            continue
+        source_quality = min(0.01, 0.002 * len(_source_ids(row.get('source_event_ids'))))
+        score = relevance + _light_recency_score(row.get('range_end')) + source_quality
+        candidate = dict(row)
+        candidate.update({
+            'id': row.get('episode_id'),
+            'content': retrieval_text,
+            'score': score,
+            'lexical_score': lexical,
+            'semantic_score': semantic,
+            'provenance_quality': 'linked',
+            'recall_kind': 'episode',
+        })
+        scored.append(candidate)
+    scored.sort(
+        key=lambda row: (float(row.get('score') or 0), _sort_time(row.get('range_end'))),
+        reverse=True,
+    )
+
+    # Validate again immediately before a result crosses the retrieval boundary.
+    selected = _active_episode_rows(user_id, character_id, scored[:top_k])
+    _trace_episode_recall('episode_ranked', selected,
+                          vector_enabled=query_embedding is not None)
+    return selected
 
 
 def get_episode(episode_id):

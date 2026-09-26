@@ -163,7 +163,7 @@ class EpisodicIndexTests(unittest.TestCase):
         self.assertIn('status=active', trace)
         self.assertNotIn(secret, trace)
 
-    def test_episode_index_is_not_wired_into_main_chat_recall(self):
+    def test_episode_index_is_not_called_when_main_recall_is_disabled(self):
         event = _event('hot-1', content='仍只使用热窗口')
         with patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
              patch.object(raw_events, 'get_hot_candidate_events', return_value=[event]), \
@@ -177,13 +177,15 @@ class EpisodicIndexTests(unittest.TestCase):
 
     def test_episode_module_keeps_raw_relationship_and_cognitive_boundaries(self):
         source = Path(BACKEND, 'episodic_index.py').read_text(encoding='utf-8')
+        context_source = Path(BACKEND, 'context_layer.py').read_text(encoding='utf-8')
         self.assertIn('get_active_events_by_ids', source)
         self.assertIn('sources_are_active', source)
         self.assertNotIn('append_raw_event(', source)
         self.assertNotIn('relationship_', source)
         self.assertNotIn('cognitive_', source)
+        self.assertIn('recall_episodes', context_source)
+        self.assertNotIn('save_episode(', context_source)
         self.assertNotIn('episodic_index', Path(BACKEND, 'smart_recall.py').read_text(encoding='utf-8'))
-        self.assertNotIn('episodic_index', Path(BACKEND, 'context_layer.py').read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__':

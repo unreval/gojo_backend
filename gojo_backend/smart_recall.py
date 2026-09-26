@@ -688,11 +688,15 @@ def format_recall_for_prompt(recall_result):
     loose_bonds = recall_result.get('loose_bonds', [])
     tolds = recall_result.get('tolds', [])
     lifecycle_memories = recall_result.get('lifecycle_memories', [])
+    # Episode index entries are rendered by context_layer in their own derived
+    # history block.  Count them here only to avoid the misleading "no memory"
+    # fallback when they are the sole selected recall candidates.
+    episodes = recall_result.get('episodes', [])
     sticky_notes = recall_result.get('sticky_notes', [])
     diary_memories = recall_result.get('diary_memories', [])
 
     has_any = bool(
-        facts or loose_bonds or tolds or lifecycle_memories
+        facts or loose_bonds or tolds or lifecycle_memories or episodes
         or sticky_notes or diary_memories
     )
     memory_text = RECALL_EVIDENCE_PRIORITY if has_any else ''

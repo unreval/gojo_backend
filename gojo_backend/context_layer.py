@@ -968,12 +968,15 @@ def exclude_recall_covered_by_recent(recall_result, recent_event_ids):
         return not set(ids).issubset(recent)
 
     out = dict(recall_result)
+    dropped_episodes = []
     for key in ('facts', 'loose_bonds', 'tolds', 'lifecycle_memories',
-                'sticky_notes', 'diary_memories'):
+                'episodes', 'sticky_notes', 'diary_memories'):
         rows = list(out.get(key) or [])
         kept = []
         for item in rows:
             if not _keep(item):
+                if key == 'episodes' and isinstance(item, dict):
+                    dropped_episodes.append(str(item.get('episode_id') or item.get('id') or '-'))
                 continue
             if key == 'facts' and isinstance(item, dict) and item.get('bonds'):
                 item = dict(item)
@@ -981,6 +984,10 @@ def exclude_recall_covered_by_recent(recall_result, recent_event_ids):
             kept.append(item)
         out[key] = kept
     out['exclude_event_ids'] = list(recent)
+    if dropped_episodes:
+        print('[recall_trace] episode_deduped_by_source '
+              f'count={len(dropped_episodes)} '
+              f'pairs=[{";".join("episode=" + item + "/hot" for item in dropped_episodes[:12])}]')
     return out
 
 
@@ -999,13 +1006,16 @@ def _items_from_recall(recall_result) -> List[ContextItem]:
                 (ref.get('event_id') if isinstance(ref, dict) else ref)
                 for ref in row.get('source_event_refs') or []
             ])
+        item_type = 'episodic_memory' if kind == 'episode' else (
+            'recalled_memory' if kind != 'diary' else 'diary')
         items.append(ContextItem(
             item_id=f'{kind}:{row.get("id") or row.get("diary_key") or len(items)}',
-            item_type='recalled_memory' if kind != 'diary' else 'diary',
+            item_type=item_type,
             text=text,
             source_event_ids=ids,
             priority=int(priority),
-            created_at=row.get('timestamp') or row.get('updated_at'),
+            created_at=(row.get('range_end') if kind == 'episode' else None)
+            or row.get('timestamp') or row.get('updated_at'),
             metadata={'recall_kind': kind, 'raw': row},
         ))
 
@@ -1020,6 +1030,8 @@ def _items_from_recall(recall_result) -> List[ContextItem]:
         _add('told', row, 45)
     for row in recall_result.get('lifecycle_memories') or []:
         _add('lifecycle', row, 35)
+    for row in recall_result.get('episodes') or []:
+        _add('episode', row, 50)
     for row in recall_result.get('sticky_notes') or []:
         _add('sticky', row, 30)
     for row in recall_result.get('diary_memories') or []:
@@ -1037,7 +1049,7 @@ def _recall_result_from_items(items: Sequence[ContextItem], original):
             kept_ids.add(id(raw))
     out = dict(original)
     for key in ('facts', 'loose_bonds', 'tolds', 'lifecycle_memories',
-                'sticky_notes', 'diary_memories'):
+                'episodes', 'sticky_notes', 'diary_memories'):
         rows = []
         for row in (original.get(key) or []):
             if id(row) in kept_ids:
@@ -1118,6 +1130,7 @@ class ChatContextPack:
     items: List[ContextItem] = field(default_factory=list)
     pinned_prompt_text: str = ''
     summary_prompt_text: str = ''
+    episode_prompt_text: str = ''
     memory_text: str = ''
     bond_text: str = ''
     told_text: str = ''
@@ -1160,6 +1173,102 @@ def _format_summary_block(items: Sequence[ContextItem]) -> str:
     for item in items:
         lines.append(f'- {item.text}')
     return '\n' + '\n'.join(lines) + '\n'
+
+
+def _format_episode_block(items: Sequence[ContextItem]) -> str:
+    """Render selected episodes as derived history, never as new facts."""
+    if not items:
+        return ''
+    lines = ['【你们以前一起经历过的事】']
+    for item in items:
+        raw = (item.metadata or {}).get('raw') or {}
+        stamp = raw.get('range_end') or raw.get('updated_at')
+        date = stamp.strftime('%Y-%m-%d') if hasattr(stamp, 'strftime') else ''
+        prefix = f'[{date}] ' if date else ''
+        lines.append(f'- {prefix}{item.text}')
+    lines.extend((
+        '使用规则：',
+        '1. 这是从可追溯 Raw Event 组织出的历史经历，不是新的事实、关系结论或情感判断。',
+        '2. 优先级始终是：当前用户消息/当前直接事件 > 当前重要事项、active 关系状态、较新的明确事实 > 这段历史经历。',
+        '3. 只能自然记得这里已经描述的经过；不得补写未记录的心理、动机、关系含义或细节。',
+        '4. 当前消息已说明旧事完成、取消、变化或相反时，以当前证据为准，不要坚持旧摘要。',
+    ))
+    return '\n' + '\n'.join(lines) + '\n'
+
+
+def _source_coverage(left, right) -> float:
+    left_ids = set(_json_ids(left))
+    right_ids = set(_json_ids(right))
+    if not left_ids or not right_ids:
+        return 0.0
+    return len(left_ids & right_ids) / float(max(len(left_ids), len(right_ids)))
+
+
+def _drop_summaries_covered_by_episodes(summaries, episodes):
+    """Avoid showing two derived renderings of almost the same Raw segment."""
+    kept = []
+    pairs = []
+    for summary in summaries or []:
+        winner = None
+        for episode in episodes or []:
+            if _source_coverage(summary.get('source_event_ids'),
+                                episode.get('source_event_ids')) >= 0.8:
+                winner = episode
+                break
+        if winner is None:
+            kept.append(summary)
+            continue
+        pairs.append(
+            f'episode={winner.get("episode_id") or winner.get("id") or "-"}/'
+            f'rolling_summary={summary.get("summary_id") or "-"}'
+        )
+    if pairs:
+        suffix = '' if len(pairs) <= 12 else ',…'
+        print('[recall_trace] episode_deduped_by_source '
+              f'count={len(pairs)} items=[{";".join(pairs[:12])}{suffix}]')
+    return kept
+
+
+def _trace_episode_candidate_dedupe(before, after):
+    """Expose cross-recall collapse by ids only, never candidate text."""
+    before = list(before or [])
+    after = list(after or [])
+    after_ids = {candidate.candidate_id for candidate in after}
+    pairs = []
+    for episode in before:
+        if episode.candidate_type != 'episode_index' or episode.candidate_id in after_ids:
+            continue
+        for other in after:
+            if other.candidate_type == 'episode_index':
+                continue
+            if set(episode.source_event_ids) & set(other.source_event_ids):
+                pairs.append(
+                    f'episode={episode.source_object_id or "-"}/'
+                    f'competing={other.candidate_id}'
+                )
+                break
+    if pairs:
+        suffix = '' if len(pairs) <= 12 else ',…'
+        print('[recall_trace] episode_deduped_by_source '
+              f'count={len(pairs)} items=[{";".join(pairs[:12])}{suffix}]')
+
+
+def _trace_selected_episode_items(items):
+    refs = []
+    for item in list(items or [])[:12]:
+        raw = (item.metadata or {}).get('raw') or {}
+        try:
+            score = f'{float(raw.get("score") or 0):.3f}'
+        except (TypeError, ValueError):
+            score = 'n/a'
+        refs.append(
+            f'id={raw.get("episode_id") or raw.get("id") or item.item_id},'
+            f'score={score},source_count={len(item.source_event_ids)},'
+            f'range={raw.get("range_start") or "-"}..{raw.get("range_end") or "-"}'
+        )
+    suffix = '' if len(items or []) <= 12 else ',…'
+    print(f'[recall_trace] episodes_selected count={len(items or [])} '
+          f'items=[{";".join(refs)}{suffix}]')
 
 
 def _format_plain_block(title, items: Sequence[ContextItem]) -> str:
@@ -1380,7 +1489,11 @@ def assemble_from_events(
         deleted,
     )
 
-    items = _hot_items(hot) + _summary_items(summaries) + _pin_items(pins)
+    # Summaries may be suppressed later only when a selected episode covers
+    # almost the same complete Raw Event segment.  Pins and hot context retain
+    # their existing higher-priority paths unchanged.
+    summaries_for_prompt = list(summaries)
+    items = _hot_items(hot) + _pin_items(pins)
     recent_ids = [str(ev.get('event_id') or '') for ev in hot if ev.get('event_id')]
     recall_result = None
     if include_recall:
@@ -1396,15 +1509,38 @@ def assemble_from_events(
                     query_embedding=query_embedding,
                     exclude_event_ids=recent_ids,
                 )
+                if recall_result is not None:
+                    try:
+                        from episodic_index import recall_episodes
+                        recall_result = dict(recall_result)
+                        recall_result['episodes'] = recall_episodes(
+                            user_id, character_id, user_message or '',
+                            query_embedding=query_embedding,
+                        )
+                    except Exception as episode_exc:
+                        # Episode retrieval is additive.  A derived-index
+                        # fault must not erase the pre-existing recall result.
+                        print('[context_layer] episode recall skipped:'
+                              f'{type(episode_exc).__name__}')
+                        recall_result = dict(recall_result)
+                        recall_result['episodes'] = []
                 recall_result = exclude_recall_covered_by_recent(recall_result, recent_ids)
             if recall_result is not None:
                 with _latency_span('collapse'):
-                    collapsed = collapse_candidates(from_recall_result(recall_result))
+                    recall_candidates = from_recall_result(recall_result)
+                    collapsed = collapse_candidates(recall_candidates)
+                    _trace_episode_candidate_dedupe(recall_candidates, collapsed)
                     recall_result = to_recall_result(collapsed, recall_result)
-            items.extend(_items_from_recall(recall_result))
         except Exception as exc:
             print(f'[context_layer] recall wrap skipped:{exc}')
             recall_result = None
+
+    if recall_result is not None:
+        summaries_for_prompt = _drop_summaries_covered_by_episodes(
+            summaries_for_prompt, recall_result.get('episodes') or [])
+    items.extend(_summary_items(summaries_for_prompt))
+    if recall_result is not None:
+        items.extend(_items_from_recall(recall_result))
 
     expression_rules = ''
     if include_support:
@@ -1428,6 +1564,10 @@ def assemble_from_events(
     pin_kept = allocated.get('pinned') or []
     sum_kept = allocated.get('summary') or []
     recall_kept = list(allocated.get('recall') or []) + list(allocated.get('diary') or [])
+    episode_kept = [
+        item for item in recall_kept if item.item_type == 'episodic_memory'
+    ]
+    _trace_selected_episode_items(episode_kept)
     rel_kept = allocated.get('relationship') or []
     cog_kept = allocated.get('cognitive') or []
     aux_kept = allocated.get('aux') or []
@@ -1457,6 +1597,7 @@ def assemble_from_events(
         items=hot_kept + pin_kept + sum_kept + recall_kept + rel_kept + cog_kept + aux_kept,
         pinned_prompt_text=_format_pinned_block(pin_kept),
         summary_prompt_text=_format_summary_block(sum_kept),
+        episode_prompt_text=_format_episode_block(episode_kept),
         relationship_prompt_text=_format_plain_block('', rel_kept),
         cognitive_prompt_text=_format_plain_block(
             '【当前未决认知——主观，不是事实】', cog_kept),

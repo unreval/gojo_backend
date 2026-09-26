@@ -590,9 +590,11 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 
     pinned_block = ''
     summary_block = ''
+    episode_block = ''
     if context_pack is not None:
         pinned_block = getattr(context_pack, 'pinned_prompt_text', '') or ''
         summary_block = getattr(context_pack, 'summary_prompt_text', '') or ''
+        episode_block = getattr(context_pack, 'episode_prompt_text', '') or ''
 
     # ── ★ 角色专属铁律 ──
     canon_lock = load_canon_lock(character_id)
@@ -612,7 +614,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 
     semi_static = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 
-    dynamic_tail = f"""{pinned_block}{summary_block}{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
+    dynamic_tail = f"""{pinned_block}{summary_block}{episode_block}{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}
 
