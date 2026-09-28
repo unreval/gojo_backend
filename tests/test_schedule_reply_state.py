@@ -61,9 +61,52 @@ class PhoneCheckStore:
     def __init__(self):
         self.next_id = 1
         self.rows = {}
+        self.extra_rows = []
         self.schedule_rows = []
         self.sql = []
         self.lock = threading.Lock()
+
+
+def canonical_test_world(activity, now, *, reply_state=None,
+                         phase_id=None, phase_end=None):
+    from schedule_contract import EVENT_ACTIVE
+
+    state = reply_state or activity.get('reply_state') or 'free'
+    start = now.replace(
+        hour=int(activity['start_time'][:2]),
+        minute=int(activity['start_time'][3:]), second=0, microsecond=0)
+    end = now.replace(
+        hour=int(activity['end_time'][:2]),
+        minute=int(activity['end_time'][3:]), second=0, microsecond=0)
+    if end <= start:
+        end += timedelta(days=1)
+    phase_end = phase_end or end
+    event_id = activity.get('event_id') or activity.get('id')
+    event = dict(activity, id=event_id,
+                 revision=activity.get('revision', 1), status=EVENT_ACTIVE,
+                 planned_start_at=start, planned_end_at=end,
+                 event_start_time=activity['start_time'],
+                 event_end_time=activity['end_time'])
+    phase = {
+        'id': phase_id if phase_id is not None else activity.get('phase_id', 1),
+        'schedule_id': event_id, 'status': EVENT_ACTIVE,
+        'title': activity.get('title') or '',
+        'planned_start_at': start, 'planned_end_at': phase_end,
+        'reply_state': state,
+    }
+    current = dict(event, phase_id=phase['id'], phase_title=phase['title'],
+                   phase_start_at=start, phase_end_at=phase_end,
+                   phase_status=EVENT_ACTIVE, start_time=start.strftime('%H:%M'),
+                   end_time=phase_end.strftime('%H:%M'), reply_state=state,
+                   can_reply=state == 'free', effective_busy_minutes=None)
+    return {
+        'event': event, 'phase': phase, 'activity': current,
+        'availability': {
+            'reply_state': state, 'can_reply': state == 'free',
+            'phase_id': phase['id'], 'phase_status': EVENT_ACTIVE,
+        },
+        'now': now,
+    }
 
 
 class FakeCursor:
@@ -74,7 +117,7 @@ class FakeCursor:
         self.rowcount = 0
 
     def _find_by_id(self, oid):
-        for row in self.store.rows.values():
+        for row in list(self.store.rows.values()) + self.store.extra_rows:
             if row['id'] == oid:
                 return row
         return None
@@ -86,6 +129,9 @@ class FakeCursor:
         self._many = []
         self.rowcount = 0
         params = tuple(params or ())
+
+        if 'pg_advisory_xact_lock' in compact:
+            return
 
         if 'phone_check:recover' in compact:
             now = params[0] if params else None
@@ -576,6 +622,27 @@ class FakeConn:
 
 
 class ScheduleReplyStateTests(unittest.TestCase):
+    def test_sanitize_drops_overlapping_generated_items(self):
+        schedule_engine = load_schedule_engine()
+        items = schedule_engine._sanitize([
+            {
+                'start_time': '14:00',
+                'end_time': '15:00',
+                'title': '处理报告',
+                'location': '办公室',
+                'reply_state': 'soft_busy',
+            },
+            {
+                'start_time': '14:30',
+                'end_time': '15:30',
+                'title': '临时通话',
+                'location': '办公室',
+                'reply_state': 'soft_busy',
+            },
+        ], character_id='gojo')
+
+        self.assertEqual([item['title'] for item in items], ['处理报告'])
+
     def test_sanitize_preserves_real_soft_90_and_hard_10_minutes(self):
         schedule_engine = load_schedule_engine()
         items = schedule_engine._sanitize([
@@ -659,13 +726,15 @@ class ScheduleReplyStateTests(unittest.TestCase):
         }]
         samples = [first_check, second_check]
 
-        def _sample(now_arg, activity_arg, after=None):
+        def _sample(now_arg, activity_arg, after=None, replied_at=None):
             return samples.pop(0)
 
         with patch.object(db_schedule, 'get_conn',
                           side_effect=lambda: FakeConn(store)), \
              patch.object(db_schedule, 'sample_next_phone_check_at',
                           side_effect=_sample), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=canonical_test_world(activity, first_check)), \
              patch.object(db_schedule, 'postpone_past_hard_busy',
                           side_effect=lambda *a, **k: (a[2], False)), \
              patch.object(db_schedule.random, 'random', return_value=0.99):
@@ -713,13 +782,15 @@ class ScheduleReplyStateTests(unittest.TestCase):
         }]
         samples = [first_check, second_check]
 
-        def _sample(now_arg, activity_arg, after=None):
+        def _sample(now_arg, activity_arg, after=None, replied_at=None):
             return samples.pop(0)
 
         with patch.object(db_schedule, 'get_conn',
                           side_effect=lambda: FakeConn(store)), \
              patch.object(db_schedule, 'sample_next_phone_check_at',
                           side_effect=_sample), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=canonical_test_world(activity, first_check)), \
              patch.object(db_schedule, 'postpone_past_hard_busy',
                           side_effect=lambda *a, **k: (a[2], False)), \
              patch.object(db_schedule.random, 'random', return_value=0.99):
@@ -766,21 +837,17 @@ class ScheduleReplyStateTests(unittest.TestCase):
                           side_effect=lambda: FakeConn(store)), \
              patch.object(db_schedule, 'sample_next_phone_check_at',
                           return_value=original), \
-             patch.object(db_schedule, 'postpone_past_hard_busy',
-                          side_effect=[
-                              (original, False),   # on create
-                              (postponed, True),   # on consume at due time
-                          ]):
-            db_schedule.decide_phone_check(
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=canonical_test_world(
+                              activity, original, reply_state='hard_busy',
+                              phase_end=postponed - timedelta(minutes=1))):
+            created = db_schedule.decide_phone_check(
                 'gojo', 'u1', now, activity,
                 source_event_id='evt-1', pending_text='hi')
-            decision = db_schedule.decide_phone_check(
-                'gojo', 'u1', original, activity,
-                source_event_id='evt-2', pending_text='again')
+            decision = db_schedule.evaluate_due_phone_check(
+                created['opportunity_id'], original)
 
-        self.assertFalse(decision['seen'])
-        self.assertFalse(decision['can_reply'])
-        self.assertTrue(decision.get('postponed_for_hard_busy'))
+        self.assertEqual(decision['action'], 'postpone')
         self.assertEqual(decision['next_phone_check_at'], postponed)
 
     def test_phone_check_bundle_context_includes_visual_summary(self):
@@ -1220,6 +1287,8 @@ class ActivityPhoneProfileTests(unittest.TestCase):
         with patch.dict(sys.modules, {'characters': fake_chars}), \
              patch.object(db_schedule, 'get_conn',
                           side_effect=lambda: FakeConn(store)), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=canonical_test_world(activity, due)), \
              patch.object(db_schedule, 'postpone_past_hard_busy',
                           side_effect=lambda *a, **k: (a[2], False)), \
              patch.object(db_schedule.random, 'randint', return_value=9), \
@@ -1253,6 +1322,8 @@ class ActivityPhoneProfileTests(unittest.TestCase):
                           side_effect=lambda: FakeConn(store)), \
              patch.object(db_schedule, 'sample_next_phone_check_at',
                           return_value=check_at), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=canonical_test_world(activity, check_at)), \
              patch.object(db_schedule, 'postpone_past_hard_busy',
                           side_effect=lambda *a, **k: (a[2] if len(a) > 2 else check_at, False)), \
              patch.object(db_schedule.random, 'random', return_value=0.01):
@@ -1396,14 +1467,57 @@ class EffectiveBusyWindowTests(unittest.TestCase):
         row.update(overrides)
         return row
 
+    def _world(self, activity, now):
+        from schedule_contract import (
+            EVENT_ACTIVE, advance_phase_states, availability_for_phase,
+            build_phase_plan, event_bounds,
+        )
+
+        phases = advance_phase_states(
+            build_phase_plan(activity, now.date(), now.tzinfo or timezone.utc),
+            now)
+        phase = next((item for item in phases
+                      if item['status'] == EVENT_ACTIVE), None)
+        start, end = event_bounds(
+            activity, now.date(), now.tzinfo or timezone.utc)
+        if not phase or not start <= now < end:
+            return {
+                'event': None, 'phase': None, 'activity': None,
+                'availability': availability_for_phase(None), 'now': now,
+            }
+        event = dict(activity)
+        event.update({
+            'id': activity.get('id'), 'revision': activity.get('revision', 1),
+            'status': EVENT_ACTIVE, 'planned_start_at': start,
+            'planned_end_at': end, 'event_start_time': activity['start_time'],
+            'event_end_time': activity['end_time'],
+        })
+        phase.update({'id': 900 + phase['ordinal'], 'schedule_id': event['id']})
+        current = dict(event)
+        current.update({
+            'start_time': phase['planned_start_at'].strftime('%H:%M'),
+            'end_time': phase['planned_end_at'].strftime('%H:%M'),
+            'phase_id': phase['id'], 'phase_title': phase['title'],
+            'phase_kind': phase['kind'], 'phase_status': phase['status'],
+            'phase_start_at': phase['planned_start_at'],
+            'phase_end_at': phase['planned_end_at'],
+            'reply_state': phase['reply_state'],
+            'can_reply': phase['reply_state'] == 'free',
+            'effective_busy_minutes': None,
+        })
+        availability = availability_for_phase(phase)
+        return {'event': event, 'phase': phase, 'activity': current,
+                'availability': availability, 'now': now}
+
     def test_case1_soft_busy_before_effective_end(self):
         now = self._now(14, 5)
         self.assertEqual(
             db_schedule.effective_reply_state(self.ACTIVITY, now), 'soft_busy')
         busy_end = db_schedule.effective_busy_end(self.ACTIVITY, now)
         self.assertEqual(busy_end, self._now(14, 15))
-        with patch.object(db_schedule, 'get_current_activity',
-                          return_value=dict(self.ACTIVITY)), \
+        world = self._world(self.ACTIVITY, now)
+        with patch.object(db_schedule, 'get_current_world_state',
+                          return_value=world), \
              patch.object(db_schedule, 'get_next_free_time',
                           return_value='14:15'), \
              patch.object(db_schedule, 'decide_phone_check',
@@ -1427,39 +1541,42 @@ class EffectiveBusyWindowTests(unittest.TestCase):
         activity = dict(self.ACTIVITY)
         self.assertEqual(
             db_schedule.effective_reply_state(activity, now), 'free')
-        with patch.object(db_schedule, 'get_current_activity',
-                          return_value=activity), \
+        world = self._world(activity, now)
+        with patch.object(db_schedule, 'get_current_world_state',
+                          return_value=world), \
              patch.object(db_schedule, 'decide_phone_check') as decide:
             decision = reply_availability.check_reply_availability(
                 'gojo', 'u1', now=now)
         decide.assert_not_called()
         self.assertEqual(decision['reply_state'], 'free')
         self.assertTrue(decision['can_reply'])
-        self.assertEqual(decision['activity']['start_time'], '14:00')
+        self.assertEqual(decision['activity']['start_time'], '14:15')
         self.assertEqual(decision['activity']['end_time'], '16:00')
-        self.assertEqual(decision['activity']['reply_state'], 'soft_busy')
-        self.assertEqual(decision['activity']['effective_busy_minutes'], 15)
+        self.assertEqual(decision['activity']['reply_state'], 'free')
+        self.assertIsNone(decision['activity']['effective_busy_minutes'])
 
     def test_case3_next_phone_check_clamped_to_effective_end(self):
         now = self._now(14, 5)
         cap = self._now(14, 15)
         with patch.object(db_schedule.random, 'randint', return_value=29):
-            at = db_schedule.sample_next_phone_check_at(now, self.ACTIVITY)
+            phase_activity = self._world(self.ACTIVITY, now)['activity']
+            at = db_schedule.sample_next_phone_check_at(now, phase_activity)
         self.assertLessEqual(at, cap)
-        self.assertEqual(at, cap)
+        self.assertEqual(at, cap - timedelta(minutes=1))
 
     def test_case4_evaluate_replies_at_effective_busy_end(self):
         store = PhoneCheckStore()
         start = self._now(14, 5)
-        due = self._now(14, 15)
+        due = self._now(14, 14)
         activity = dict(self.ACTIVITY)
+        activity = self._world(activity, start)['activity']
         store.schedule_rows = [self._schedule_row()]
         with patch.object(db_schedule, 'get_conn',
                           side_effect=lambda: FakeConn(store)), \
-             patch.object(db_schedule, 'postpone_past_hard_busy',
-                          side_effect=lambda *a, **k: (a[2], False)), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=self._world(activity, due)), \
              patch.object(db_schedule.random, 'randint', return_value=29), \
-             patch.object(db_schedule.random, 'random', return_value=0.99):
+             patch.object(db_schedule.random, 'random', return_value=0.0):
             created = db_schedule.decide_phone_check(
                 'gojo', 'u1', start, activity,
                 source_event_id='evt-1', pending_text='在吗')
@@ -1489,6 +1606,8 @@ class EffectiveBusyWindowTests(unittest.TestCase):
         store.schedule_rows = [self._schedule_row(effective_busy_minutes=None)]
         with patch.object(db_schedule, 'get_conn',
                           side_effect=lambda: FakeConn(store)), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=self._world(activity, due)), \
              patch.object(db_schedule, 'sample_next_phone_check_at',
                           return_value=due), \
              patch.object(db_schedule, 'postpone_past_hard_busy',
@@ -1510,8 +1629,9 @@ class EffectiveBusyWindowTests(unittest.TestCase):
             db_schedule.effective_reply_state(activity, now), 'hard_busy')
         self.assertEqual(
             db_schedule.effective_busy_end(activity, now), self._now(16, 0))
-        with patch.object(db_schedule, 'get_current_activity',
-                          return_value=activity), \
+        world = self._world(activity, now)
+        with patch.object(db_schedule, 'get_current_world_state',
+                          return_value=world), \
              patch.object(db_schedule, 'get_next_free_time',
                           return_value='16:00'), \
              patch.object(db_schedule, 'decide_phone_check',
@@ -1539,8 +1659,9 @@ class EffectiveBusyWindowTests(unittest.TestCase):
             db_schedule.effective_reply_state(activity, now), 'free')
         self.assertEqual(
             db_schedule.effective_busy_end(activity, now), self._now(16, 0))
-        with patch.object(db_schedule, 'get_current_activity',
-                          return_value=activity), \
+        world = self._world(activity, now)
+        with patch.object(db_schedule, 'get_current_world_state',
+                          return_value=world), \
              patch.object(db_schedule, 'decide_phone_check') as decide:
             decision = reply_availability.check_reply_availability(
                 'gojo', 'u1', now=now)
@@ -1573,22 +1694,24 @@ class EffectiveBusyWindowTests(unittest.TestCase):
                 db_schedule.effective_reply_state(activity, now), 'soft_busy')
 
     def test_case10_visible_schedule_keeps_original_times(self):
-        store = PhoneCheckStore()
-        store.schedule_rows = [self._schedule_row()]
-        with patch.object(db_schedule, 'get_conn',
-                          side_effect=lambda: FakeConn(store)):
+        now = self._now(14, 15)
+        display_event = self._schedule_row()
+        world = self._world(self.ACTIVITY, now)
+        with patch.object(db_schedule, 'get_canonical_schedule',
+                          return_value=[display_event]), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=world):
             items = db_schedule.get_schedule(
-                'gojo', 'u1', self._now(14, 5).date())
-            current = db_schedule.get_current_activity(
-                'gojo', 'u1', self._now(14, 15))
+                'gojo', 'u1', now.date())
+            current = db_schedule.get_current_activity('gojo', 'u1', now)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]['start_time'], '14:00')
         self.assertEqual(items[0]['end_time'], '16:00')
         self.assertEqual(items[0]['reply_state'], 'soft_busy')
         self.assertEqual(items[0]['effective_busy_minutes'], 15)
-        self.assertEqual(current['start_time'], '14:00')
+        self.assertEqual(current['start_time'], '14:15')
         self.assertEqual(current['end_time'], '16:00')
-        self.assertEqual(current['reply_state'], 'soft_busy')
+        self.assertEqual(current['reply_state'], 'free')
         self.assertEqual(current['note'], '15分钟解决')
 
     def test_sanitize_keeps_minutes_on_soft_busy_strips_hard_and_free(self):
@@ -1648,8 +1771,9 @@ class EffectiveBusyWindowTests(unittest.TestCase):
         activity = dict(self.ACTIVITY)
         self.assertEqual(
             db_schedule.effective_reply_state(activity, now), 'free')
-        with patch.object(db_schedule, 'get_current_activity',
-                          return_value=activity), \
+        world = self._world(activity, now)
+        with patch.object(db_schedule, 'get_current_world_state',
+                          return_value=world), \
              patch.object(db_schedule, 'decide_phone_check') as decide:
             decision = reply_availability.check_reply_availability(
                 'gojo', 'u1', now=now)
@@ -1657,32 +1781,36 @@ class EffectiveBusyWindowTests(unittest.TestCase):
         self.assertTrue(decision['can_reply'])
         self.assertEqual(decision['reply_state'], 'free')
 
-        hint = activity_phone.busy_prompt_hint(activity, now)
+        hint = activity_phone.busy_prompt_hint(world['activity'], now)
         self.assertEqual(hint, '')
         self.assertNotIn('在忙', hint)
         self.assertNotIn('瞄一眼', hint)
         self.assertNotIn('简短', hint)
 
-        payload = route_schedule.schedule_now_payload(activity, now)
+        payload = route_schedule.schedule_now_payload(world, now)
         self.assertFalse(payload['busy'])
         self.assertEqual(payload['reply_state'], 'free')
         self.assertEqual(payload['until'], '16:00')
         self.assertEqual(payload['activity'], '处理报告')
 
     def test_1420_timeline_row_keeps_stored_soft_busy(self):
-        store = PhoneCheckStore()
-        store.schedule_rows = [self._schedule_row()]
-        with patch.object(db_schedule, 'get_conn',
-                          side_effect=lambda: FakeConn(store)):
+        now = self._now(14, 20)
+        display_event = self._schedule_row()
+        world = self._world(self.ACTIVITY, now)
+        with patch.object(db_schedule, 'get_canonical_schedule',
+                          return_value=[display_event]), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=world):
             items = db_schedule.get_schedule(
-                'gojo', 'u1', self._now(14, 20).date())
+                'gojo', 'u1', now.date())
             current = db_schedule.get_current_activity(
-                'gojo', 'u1', self._now(14, 20))
+                'gojo', 'u1', now)
         self.assertEqual(items[0]['start_time'], '14:00')
         self.assertEqual(items[0]['end_time'], '16:00')
         self.assertEqual(items[0]['reply_state'], 'soft_busy')
         self.assertEqual(items[0]['effective_busy_minutes'], 15)
-        self.assertEqual(current['reply_state'], 'soft_busy')
+        self.assertEqual(current['reply_state'], 'free')
+        self.assertEqual(current['start_time'], '14:15')
         self.assertEqual(current['end_time'], '16:00')
 
     def test_null_minutes_prompt_and_now_stay_soft_busy(self):
@@ -1694,9 +1822,10 @@ class EffectiveBusyWindowTests(unittest.TestCase):
         activity['effective_busy_minutes'] = None
         self.assertEqual(
             db_schedule.effective_reply_state(activity, now), 'soft_busy')
-        hint = activity_phone.busy_prompt_hint(activity, now)
+        world = self._world(activity, now)
+        hint = activity_phone.busy_prompt_hint(world['activity'], now)
         self.assertIn('偶尔能瞄一眼手机', hint)
-        payload = route_schedule.schedule_now_payload(activity, now)
+        payload = route_schedule.schedule_now_payload(world, now)
         self.assertTrue(payload['busy'])
         self.assertEqual(payload['reply_state'], 'soft_busy')
         self.assertEqual(payload['until'], '16:00')
@@ -1711,10 +1840,11 @@ class EffectiveBusyWindowTests(unittest.TestCase):
         activity['title'] = '出任务'
         self.assertEqual(
             db_schedule.effective_reply_state(activity, now), 'hard_busy')
-        hint = activity_phone.busy_prompt_hint(activity, now)
+        world = self._world(activity, now)
+        hint = activity_phone.busy_prompt_hint(world['activity'], now)
         self.assertIn('没法看手机', hint)
         self.assertNotIn('偶尔能瞄一眼手机', hint)
-        payload = route_schedule.schedule_now_payload(activity, now)
+        payload = route_schedule.schedule_now_payload(world, now)
         self.assertTrue(payload['busy'])
         self.assertEqual(payload['reply_state'], 'hard_busy')
         self.assertEqual(payload['until'], '16:00')
@@ -1723,11 +1853,10 @@ class EffectiveBusyWindowTests(unittest.TestCase):
         context_src = Path(BACKEND, 'context_layer.py').read_text(encoding='utf-8')
         prompt_src = Path(BACKEND, 'prompt.py').read_text(encoding='utf-8')
         route_src = Path(BACKEND, 'route_schedule.py').read_text(encoding='utf-8')
-        self.assertIn('busy_prompt_hint(act, now)', context_src)
-        self.assertIn('busy_prompt_hint(_act, _now)', prompt_src)
-        self.assertIn('effective_reply_state(act, now)', route_src)
-        self.assertNotRegex(
-            context_src, r'busy_prompt_hint\(act\)\s*$')
+        self.assertIn('_dbs.format_world_prompt(', context_src)
+        self.assertIn('_dbs.format_world_prompt(', prompt_src)
+        self.assertIn('get_current_world_state(', route_src)
+        self.assertNotIn('effective_reply_state(', route_src)
 
     def test_effective_busy_end_is_stable_across_query_clock(self):
         expected = self._now(14, 15)

@@ -1371,25 +1371,9 @@ def _support_items(user_id, character_id, user_message, hot_messages, temporal_s
             now = _dt.now(CN_TZ)
         except Exception:
             now = _dt.utcnow()
-        act = _dbs.get_current_activity(character_id, user_id, now)
-        if act:
-            where = f'（在{act["location"]}）' if act.get('location') else ''
-            note = f'\n你当时的想法：{act["note"]}' if act.get('note') else ''
-            try:
-                from activity_phone import busy_prompt_hint
-                busy = busy_prompt_hint(act, now)
-            except Exception:
-                runtime = _dbs.effective_reply_state(act, now)
-                busy = '' if runtime == 'free' else (
-                    '\n★ 这段时间你没法看手机，暂时无法回复。'
-                    if runtime == 'hard_busy' else
-                    '\n★ 这段时间你在忙，但偶尔能瞄一眼手机。语气可以简短一些。'
-                )
-            schedule_text = (
-                f'【你此刻正在做的事——这是你自己安排的，不是设定，是真的在做】\n'
-                f'{act["start_time"]}~{act["end_time"]} {act["title"]}{where}{note}{busy}\n'
-                '用法：她问"在干嘛"就照实说这件事，别另编一个。'
-            )
+        schedule_text, _world = _dbs.format_world_prompt(
+            character_id, user_id, now)
+        if schedule_text:
             _add('schedule', schedule_text, 33, 'schedule:now')
     except Exception as exc:
         print(f'[context_layer] schedule skipped:{exc}')

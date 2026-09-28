@@ -587,9 +587,22 @@ async def chat_image(data: dict):
                 _visible, parsed, state = ingest_model_output(raw)
                 if parsed and isinstance(parsed.get('messages'), list) and parsed['messages']:
                     if all(valid_reply_msg(m) for m in parsed['messages']):
-                        result = parsed
-                        offline_state = state
-                        break
+                        from schedule_transition import validate_generated_schedule_reply
+                        schedule_conflict, _world = validate_generated_schedule_reply(
+                            character_id, user_id, parsed)
+                        if not schedule_conflict:
+                            result = parsed
+                            offline_state = state
+                            break
+                        system_blocks = system_blocks + [{
+                            'type': 'text',
+                            'text': (
+                                '上一候选把 active 日程说成已结束，但没有匹配的 '
+                                'schedule_action_intent。文字不得改写 canonical world state；'
+                                '请重新输出完整 JSON。'
+                            ),
+                        }]
+                        continue
                 system_blocks = system_blocks + [{
                     'type': 'text',
                     'text': '上一候选没有有效回复正文。请根据已附图片重新输出完整 JSON，'
@@ -621,6 +634,21 @@ async def chat_image(data: dict):
         if media_payload:
             failed['media'] = media_payload
         return JSONResponse(failed, status_code=502)
+
+    from schedule_transition import commit_generated_schedule_intent
+    transition = commit_generated_schedule_intent(
+        character_id, user_id, result, source_event_id=source_event_id)
+    if not transition.get('ok'):
+        _fail_image(
+            user_id, character_id, source_event_id, claim_token,
+            transition.get('reason') or 'schedule_transition_failed')
+        return JSONResponse({
+            'error': 'generation_failed',
+            'generation_failed': True,
+            'messages': [],
+            'total_days': total_days,
+            'source_event_id': source_event_id,
+        }, status_code=502)
 
     if offline_state:
         try:
@@ -677,6 +705,8 @@ async def chat_image(data: dict):
         resp['_proactive_promise'] = result.get('proactive_promise')
     if pending_tx:
         resp['pending_transaction'] = pending_tx
+    if not transition.get('noop'):
+        resp['schedule_transition'] = transition
 
     from generation_effects import (
         client_effects_pending_response, commit_and_run_effects,

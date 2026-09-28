@@ -1,10 +1,8 @@
-"""schedule_engine.py —— 让角色自己排一天的行程
+"""Daily schedule generation backed by one canonical schedule world.
 
-★ v5:日程不只吃吃吃
-  · places_engine 现在搜景点/神社/公园/活动/温泉 等非餐饮地点
-  · prompt 鼓励角色安排多样化活动(打卡/散步/参拜/看展/泡汤/花火)
-  · 季节活动(花火大会/初詣/红叶)有真实坐标,去了就上地图
-  · 自动保存逻辑不变:日程里用到的真实地点名 → 写入 char_visited_places
+Generation proposes planned events only. It cannot create a visited map point,
+stable preference, or a state transition; those each have a separate durable
+authority.
 """
 from datetime import datetime
 from config import CN_TZ, MODEL_CN_AUX
@@ -41,20 +39,20 @@ def _busy_priority(title: str) -> int:
 
 
 def _seasonal_hints(month: int) -> str:
-    """★ v5:不只是甜品,加入活动/景点/体验"""
+    """Low-salience seasonal variety, deliberately without fixed landmarks."""
     hints = {
-        1: '正月初詣(明治神宫/浅草寺)、福袋抢购、冬季限定草莓甜品、箱根温泉',
-        2: '情人节巧克力、草莓季、梅花(汤岛天神)、滑雪',
-        3: '樱花季开始(目黑川/上野)、春季限定抹茶、毕业季',
-        4: '满开樱花、花见野餐、春季新品、高尾山登山',
-        5: '黄金周出行、新绿、抹茶新茶、�的场藤花',
-        6: '梅雨季、�的阳花(�的�的)、夏季限定刨冰、室内美术馆',
-        7: '夏祭(高圆寺阿波舞)、花火大会(隅田川)、刨冰、海水浴',
-        8: '盂兰盆节、花火(神宫外苑)、夏季限定冰品、啤酒花园、コミケ',
-        9: '秋季栗子甜品、月见、秋刀鱼、彼岸花',
-        10: '万圣节(涩谷)、红叶开始、栗子蒙布朗、秋季登山',
-        11: '红叶季(六义园/清水寺)、秋季限定、七五三、酉の市',
-        12: '圣诞灯饰(表参道/六本木)、年末、冬季草莓、除夜の鐘',
+        1: '年初整理、冬日室内活动、短途放松',
+        2: '节日社交、早春散步、室内兴趣',
+        3: '换季安排、春日户外、学期事务',
+        4: '春季户外、朋友见面、工作节奏调整',
+        5: '假期出行、自然散步、短期项目',
+        6: '雨天室内活动、文书整理、轻松休息',
+        7: '夏夜活动、避暑、短途任务',
+        8: '暑期事务、夜间休闲、社交活动',
+        9: '入秋整理、学习工作恢复、安静休闲',
+        10: '秋季户外、文化活动、换季安排',
+        11: '年末前事务、室内活动、自然散步',
+        12: '年末整理、节日社交、室内放松',
     }
     return hints.get(month, '')
 
@@ -70,26 +68,44 @@ def _fetch_real_places(city='tokyo'):
         return []
 
 
-def _save_visited_places(character_id, user_id, items, real_places, target_date):
-    """日程生成后,把用到的真实地点写入探店记录(地图打点用)。"""
+def _place_candidates_block(real_places):
+    """Give the model resolver identities, not permission to invent map facts."""
     if not real_places:
-        return
+        return ''
+    lines = []
+    for place in real_places:
+        provider = place.get('provider')
+        place_id = place.get('provider_place_id')
+        if not provider or not place_id:
+            continue
+        lines.append(
+            f'  · poi_ref="{provider}:{place_id}" '
+            f'类别={place.get("verified_category") or place.get("category")} '
+            f'名称={place.get("canonical_name") or place.get("name")} '
+            f'区域={place.get("canonical_address") or place.get("address")}'
+        )
+    if not lines:
+        return ''
+    return (
+        '\n【已验证 POI 候选（可选）】\n' + '\n'.join(lines) +
+        '\n若选择其中一个，只在 planned_place_ref 写对应 poi_ref。'
+        '不能把自己编的店名、地址或坐标当 POI；无法确认时 location 只写一般区域。\n'
+    )
+
+
+def _role_responsibility_block(character_id, user_id, target_date):
     try:
-        import db_visited_places
-        place_map = {p['name']: p for p in real_places}
-        for item in items:
-            text = (item.get('title', '') + ' ' + item.get('location', '')).strip()
-            for name, place in place_map.items():
-                if name in text:
-                    review = item.get('note', '')
-                    db_visited_places.add_visited(
-                        character_id, user_id, place,
-                        review=review, visit_date=target_date
-                    )
-                    print(f'[schedule] 📍 {character_id} 打卡: {name} ({place.get("category", "?")})')
-                    break
-    except Exception as e:
-        print(f'[schedule] 保存打卡记录失败(不影响日程): {e}')
+        from schedule_novelty import responsibility_weights
+        history = db_schedule.get_recent_schedule_history(
+            character_id, user_id, before_date=target_date, days=14)
+        weights = responsibility_weights(history)
+    except Exception:
+        weights = {'teacher': 1.0, 'sorcerer': 1.0, 'clan_head': 1.0}
+    return f'''【职责平衡（最近 14 天动态权重）】
+- teacher={weights['teacher']}: 授课、学生指导、备课、教务。
+- sorcerer={weights['sorcerer']}: 任务安排、巡逻、现场处置、汇报。
+- clan_head={weights['clan_head']}: 家族文件、家族会议、人员/资源安排、对外交涉、必须出席的正式场合。
+家主职责可以中频出现，但绝不做成每天固定模板；“家族事务”必须具体化，且按具体 phase 判断是否能回手机。'''
 
 
 def generate_daily_schedule(character_id, user_id, target_date=None, force=False):
@@ -128,37 +144,11 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         main_city = other
         city_note = f'\n★ 今天角色{random.choice(["出差去了", "临时跑去了", "心血来潮去了"])}{city_names.get(other, other)},日程安排在那边。\n'
 
-    # ★ 搜真实地点(食物 + 景点 + 活动)
+    # Only resolver-verified candidates can become exact planned POIs.
     real_places = _fetch_real_places(main_city)
-    places_block = ''
-    if real_places:
-        food_lines = []
-        activity_lines = []
-        for p in real_places:
-            cat = p.get('category', '')
-            line = f'  · {p["name"]}({p.get("category_label", cat)}) — {p.get("address") or p.get("city", "")}'
-            if cat in ('cafe', 'restaurant', 'sweets', 'bakery', 'ramen', 'fashion', 'bookstore'):
-                food_lines.append(line)
-            else:
-                activity_lines.append(line)
-
-        places_block = '\n【今天可以安排去的真实地点(从中挑几个放进日程,不必全用)】\n'
-        if food_lines:
-            places_block += '  餐饮/购物:\n' + '\n'.join(food_lines) + '\n'
-        if activity_lines:
-            places_block += '  景点/活动:\n' + '\n'.join(activity_lines) + '\n'
-        places_block += '''用到的地点请在 title 或 location 里写上【完整地点名】(必须和上面一字不差),这样系统才能在地图上标记。
-没用到的就不写。也可以不用任何一个(去你自己知道的地方)。
-★ 品味要好!优先选知名/值得打卡的地方。偶尔踩雷可以,但大部分应该是genuinely好的。
-'''
-
-    # ★ 当季限定/热门信息
-    trending_block = ''
-    try:
-        import trending_engine
-        trending_block = trending_engine.get_trending_for_schedule(main_city)
-    except Exception:
-        pass
+    places_block = _place_candidates_block(real_places)
+    responsibility_block = _role_responsibility_block(
+        character_id, user_id, target_date)
 
     # ★ system prompt
     system_prompt = '''你是一个创意写作助手。你的任务是为一个虚拟陪伴 App 生成虚构角色的每日行程表。
@@ -174,11 +164,11 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 角色名:{char_name}
 {core_prompt}
 {rhythm_block}
-【当季关键词】{season}
+【低显著性季节方向】{season}
 {city_note}
 {'今天是周末,安排可以更随性。' if is_weekend else '今天是工作日。'}
 {places_block}
-{trending_block}
+{responsibility_block}
 
 【日程写法要求】
 1. 从起床到睡觉,排 8-12 个时间段。
@@ -186,20 +176,19 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 3. ★★★ 所有内容(title / location / note)必须用【中文】写,不要用日文 ★★★
 
 4. title【极短】(5-15字),手机一行看完,细节放 note:
-   ✅ "去Ivy Place吃brunch" ✅ "原宿买限量可颂"
-   ✅ "溜去PARCO看快闪" ✅ "备课" ✅ "泡澡刷手机"
-   ✅ "明治神宫散步" ✅ "隅田川花火大会" ✅ "六义园看红叶"
+   ✅ "备课" ✅ "家族资源核对" ✅ "夜间巡查" ✅ "泡澡刷手机"
    ❌ 超过15字 = 失败。描述性的长句写进 note 不要写进 title。
 
-5. location 要具体:
-   ✅ "Blue Bottle 表参道" "涩谷PARCO" "明治神宫" "隅田川河畔" ❌ "某店" "外面"
+5. location 规则:
+   - 选择候选 POI 时，写 planned_place_ref，不要把店名/地址/坐标当作自由文本事实。
+   - 没有可靠 POI 时，location 只能是一般区域（如“学校办公室”“东京城区”“附近街区”），不能伪造具体店铺。
 
 6. note 是角色口吻的碎碎念,有趣/有画面:
    ✅ "排了40分钟结果踩雷了,下次不来" "拍照确实出片" "人太多了差点被挤死"
    ❌ "心情不错" ← 太空
 
 7. ★★ 不只是吃!角色是活人不是吃货!一天日程里应该有:
-   · 至少 1 个非餐饮活动(逛景点/参拜/看展/泡汤/散步/打卡/看花火/逛公园)
+   · 至少 1 个非餐饮活动(散步/看展/运动/拜访/安静休息)
    · 可以有 2-3 个餐饮(不是每段都在吃)
    · 剩下的是工作/任务/训练/休息 等日常
    ★ 比例参考:吃 ≤ 3 段,景点/活动 1-2 段,工作/日常 4-6 段
@@ -221,12 +210,20 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
    禁止用这个字段缩短 hard_busy。free 不需要这个字段。
    填写后不要改 start_time / end_time，视觉日程仍是原来的整段。
 
-11. 每天要不一样。
+11. 每天要不一样。不要复用近两周的相同 POI、相同具体食物、相同风味主题或 note 句式。
+    工作职责允许正常重复；严格去重只针对 flavor / 部分 leisure。
+
+12. category 只能为 obligation / routine / social / leisure / flavor。
+    fixedness 只能为 fixed / flexible / optional / flavor；固定职责不要随意取消。
+
+13. 可选 phases 数组：仅当父活动里确实有连续且不同的步骤时填写。
+    每个 phase 有 start_time/end_time/title/reply_state；当前 phase 而非父日程决定手机状态。
 
 【输出:严格 JSON 一行,不要解释】
 {{"schedule":[
-  {{"start_time":"07:00","end_time":"07:45","title":"5-15字","location":"具体地点","note":"碎碎念","reply_state":"free","effective_busy_minutes":null}},
-  {{"start_time":"14:00","end_time":"16:00","title":"处理报告","location":"办公室","note":"15分钟解决","reply_state":"soft_busy","effective_busy_minutes":15}},
+  {{"start_time":"07:00","end_time":"07:45","title":"晨间整理","location":"住处","note":"碎碎念","category":"routine","fixedness":"flexible","reply_state":"free","effective_busy_minutes":null}},
+  {{"start_time":"14:00","end_time":"16:00","title":"处理家族报告","location":"家族办公室","note":"先集中处理十五分钟","category":"obligation","fixedness":"flexible","reply_state":"soft_busy","effective_busy_minutes":15}},
+  {{"start_time":"18:00","end_time":"19:00","title":"短暂休息","location":"东京城区","planned_place_ref":"nominatim:候选ID（仅当从候选选择时）","note":"不必每次都填","category":"leisure","fixedness":"optional","reply_state":"free"}},
   ...
 ]}}'''
 
@@ -254,15 +251,26 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
             print(f'[schedule] {character_id} 解析失败: {raw[:200]}')
             return None
 
-        items = _sanitize(parsed['schedule'], character_id)
+        try:
+            history = db_schedule.get_recent_schedule_history(
+                character_id, user_id, before_date=target_date, days=14)
+        except Exception:
+            history = []
+        items = _sanitize(
+            parsed['schedule'], character_id,
+            poi_candidates=real_places, recent_history=history,
+            target_date=target_date)
         if not items:
             print(f'[schedule] {character_id} 清洗后没有有效条目')
             return None
 
-        db_schedule.save_schedule(character_id, user_id, target_date, items)
-
-        # ★ 自动保存打卡记录(地图打点)
-        _save_visited_places(character_id, user_id, items, real_places, target_date)
+        persisted = db_schedule.save_canonical_schedule(
+            character_id, user_id, target_date, items, force=force,
+            provenance={
+                'source': 'daily_schedule_generation',
+                'stable_preference': False,
+                'visited_on_generation': False,
+            })
 
         busy = [i for i in items if i['reply_state'] != db_schedule.REPLY_FREE]
         hard_busy = [i for i in items if i['reply_state'] == db_schedule.REPLY_HARD_BUSY]
@@ -270,7 +278,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         act_cnt = sum(1 for i in items if any(k in i.get('title','') for k in ('逛','看','散步','打卡','参拜','花火','展','公园','温泉','泡')))
         print(f'[schedule] ✅ {char_name} {target_date} 共 {len(items)} 段,'
               f'忙碌 {len(busy)} 段(硬忙 {len(hard_busy)}), 吃≈{food_cnt} 活动≈{act_cnt}')
-        return items
+        return persisted
 
     except Exception as e:
         print(f'[schedule] {character_id} 生成出错: {e}')
@@ -295,7 +303,8 @@ def _dur(item):
         return 60
 
 
-def _sanitize(raw_items, character_id=None):
+def _sanitize(raw_items, character_id=None, poi_candidates=None,
+              recent_history=None, target_date=None):
     import re
 
     sleep_start, sleep_end = None, None
@@ -322,6 +331,23 @@ def _sanitize(raw_items, character_id=None):
 
     want_start = sleep_start
 
+    def _general_area(raw):
+        value = (raw or '').strip()
+        generic_words = ('学校', '办公室', '住处', '家', '城区', '街区', '附近', '校内', '校园')
+        if value and any(word in value for word in generic_words):
+            return value[:40]
+        return '一般区域'
+
+    def _resolved_place(item):
+        reference = item.get('planned_place_ref') or item.get('planned_place')
+        if not reference or not poi_candidates:
+            return None
+        try:
+            import places_engine
+            return places_engine.resolve_schedule_poi(reference, poi_candidates)
+        except Exception:
+            return None
+
     ok = []
     for it in raw_items:
         st = (it.get('start_time') or '').strip()
@@ -334,8 +360,22 @@ def _sanitize(raw_items, character_id=None):
         it['start_time'] = st
         it['end_time'] = et
         it['title'] = title
-        it['location'] = (it.get('location') or '').strip()
+        place = _resolved_place(it)
+        if place:
+            # A concrete display location can only come from this resolver.
+            it['planned_place'] = place
+            it['location'] = place.get('canonical_name') or place.get('name', '')
+        else:
+            it.pop('planned_place', None)
+            it['location'] = _general_area(it.get('location'))
+        it.pop('planned_place_ref', None)
         it['note'] = (it.get('note') or '').strip()
+        # Category controls which novelty rules apply, so derive it from the
+        # content instead of trusting a model label that could bypass checks.
+        it['category'] = db_schedule._category_for_item(it)
+        fixedness = str(it.get('fixedness') or '').strip().lower()
+        it['fixedness'] = fixedness if fixedness in (
+            'fixed', 'flexible', 'optional', 'flavor') else 'flexible'
         reply_state = db_schedule.normalize_reply_state(
             it.get('reply_state'), it.get('can_reply', True))
 
@@ -364,6 +404,18 @@ def _sanitize(raw_items, character_id=None):
         ok.append(it)
 
     ok.sort(key=lambda x: x['start_time'])
+
+    # A generated day is one canonical timeline. Keep the earlier proposed
+    # item when a later one overlaps it instead of creating two active events.
+    from schedule_contract import timeline_is_valid
+    timeline = []
+    sched_date = target_date or _now().date()
+    for item in ok:
+        if timeline_is_valid(timeline + [item], sched_date, CN_TZ):
+            timeline.append(item)
+        else:
+            print(f'[schedule] dropped overlapping item: {item["title"]}')
+    ok = timeline
 
     hard_busy = [it for it in ok
             if it.get('reply_state') == db_schedule.REPLY_HARD_BUSY
@@ -400,6 +452,27 @@ def _sanitize(raw_items, character_id=None):
         else:
             it['effective_busy_minutes'] = None
 
+    # Strict novelty is intentionally narrow: repeated work obligations are
+    # normal, while repeated discretionary POIs/flavors and copy are not.
+    try:
+        from schedule_novelty import validate_novelty
+        seen_history = list(recent_history or [])
+        for it in ok:
+            decision = validate_novelty(
+                it, seen_history, candidate_date=target_date)
+            if decision.rejected:
+                it.update({
+                    'title': '机动安排',
+                    'location': '一般区域',
+                    'note': '',
+                    'planned_place': None,
+                    'category': 'leisure',
+                    'fixedness': 'optional',
+                })
+                print(f'[schedule] novelty replaced: {decision.reason}')
+            seen_history.append(dict(it))
+    except Exception as exc:
+        print(f'[schedule] novelty validation skipped: {exc}')
     return ok
 
 

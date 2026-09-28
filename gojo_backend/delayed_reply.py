@@ -227,9 +227,24 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
         cache_tag=f'chat:{character_id}',
         salvage=True,
     )
+    # Delayed replies use the same truth guard/commit path as immediate text.
+    # A phone-check may have completed an old phase while the model was running.
+    if result:
+        from schedule_transition import validate_generated_schedule_reply
+        reason, _world = validate_generated_schedule_reply(
+            character_id, user_id, result)
+        if reason:
+            return {'ok': False, 'reason': reason}
     emotion, msgs = helpers._finalize_committed(result)
     if msgs is None:
         return {'ok': False, 'reason': 'generation_failed'}
+
+    from schedule_transition import commit_generated_schedule_intent
+    transition = commit_generated_schedule_intent(
+        character_id, user_id, result,
+        source_event_id=bundle.get('last_source_event_id') or '')
+    if not transition.get('ok'):
+        return {'ok': False, 'reason': transition.get('reason') or 'schedule_transition_failed'}
 
     helpers._commit_offline_state(user_id, character_id, committed_state)
     full_jp = ' '.join(m['jp'] for m in msgs)
@@ -350,11 +365,11 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
                 except Exception as exc:
                     print(f'[delayed_reply] resolve #{oid} retry failed: {exc}')
             if not resolved:
-                try:
-                    db_schedule.resolve_phone_check(oid)
-                    resolved = True
-                except Exception as exc:
-                    print(f'[delayed_reply] resolve #{oid} fallback failed: {exc}')
+                # Never fall back to an unconditional resolve here.  A message
+                # that arrived while this claim was generating belongs to a
+                # successor occurrence; consuming the old row without its
+                # claim watermark would silently lose that message.
+                print(f'[delayed_reply] finish #{oid} did not win watermark CAS; successor remains pending')
             results.append({
                 'id': oid, 'action': 'replied', 'ok': True,
                 'resolved': resolved,

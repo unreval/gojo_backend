@@ -268,6 +268,68 @@ def _safe_reply_to(data):
     }
 
 
+def _busy_response(availability):
+    """One response shape for non-text inbound routes blocked by a phase."""
+    act = availability.get('activity') or {}
+    return JSONResponse({
+        'busy': True,
+        'seen': bool(availability.get('seen')),
+        'can_reply': False,
+        'reply_state': availability.get('reply_state'),
+        'activity': act.get('title', ''),
+        'location': act.get('location', ''),
+        'until': act.get('end_time', ''),
+        'free_at': availability.get('free_at'),
+        'phone_check_id': availability.get('opportunity_id'),
+        'pending_phone_check_count': availability.get('pending_count') or 0,
+    })
+
+
+def _gate_voice_inbound(user_id, character_id, user_text, source_event_id):
+    """Use the exact same canonical availability/phone-check path as text."""
+    try:
+        from reply_availability import check_reply_availability
+        availability = check_reply_availability(
+            character_id, user_id,
+            source_event_id=source_event_id or '',
+            pending_text=user_text,
+            event_meta={
+                'kind': 'voice',
+                'source_event_id': source_event_id or '',
+            },
+        )
+        if not availability.get('can_reply'):
+            return availability, _busy_response(availability)
+        return availability, None
+    except Exception as exc:
+        # Matching the text route's availability-error behavior preserves chat
+        # availability if an operational database outage occurs.
+        print(f'[{user_id}] voice schedule check skipped:{exc}')
+        return None, None
+
+
+def _reject_schedule_candidate(character_id, user_id, parsed, system_blocks):
+    from schedule_transition import validate_generated_schedule_reply
+    reason, _world = validate_generated_schedule_reply(character_id, user_id, parsed)
+    if not reason:
+        return None
+    system_blocks.append({
+        'type': 'text',
+        'text': (
+            '上一候选把 active 日程说成已经结束，但没有匹配 event_id/revision 的'
+            '结构化 schedule_action_intent。文字不能修改现实；请按 canonical world '
+            'state 重新生成。'
+        ),
+    })
+    return reason
+
+
+def _commit_schedule_candidate(character_id, user_id, result, source_event_id=''):
+    from schedule_transition import commit_generated_schedule_intent
+    return commit_generated_schedule_intent(
+        character_id, user_id, result, source_event_id=source_event_id)
+
+
 def _user_prompt_with_reply(user_text, reply_to):
     if not reply_to:
         return user_text
@@ -724,6 +786,13 @@ async def chat_text(data: dict):
               f'{calendar_conflict}')
         return calendar_conflict
 
+    def reject_schedule(parsed):
+        return _reject_schedule_candidate(
+            character_id, user_id, parsed, system_blocks)
+
+    def reject_reply(parsed):
+        return reject_calendar(parsed) or reject_schedule(parsed)
+
     from db_generation_receipt import GenerationHeartbeat
     with GenerationHeartbeat(
             user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT, claim_token):
@@ -733,7 +802,7 @@ async def chat_text(data: dict):
             log_tag=f'{user_id}][{character_id}',
             cache_tag=f'chat:{character_id}',
             salvage=True,
-            reject_fn=reject_calendar,
+            reject_fn=reject_reply,
         )
     llm_ms = (_time.perf_counter() - _tmark) * 1000.0
     _trace.mark('llm', llm_ms)
@@ -757,6 +826,22 @@ async def chat_text(data: dict):
             fail_generation(
                 user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
                 claim_token, last_error='commit_not_ready')
+        except Exception:
+            pass
+        _latency_emit()
+        return _generation_failed_response(user_id, character_id, total_days, attempts=3)
+
+    # Structured transition commit happens before the visible reply is stored
+    # or returned.  If a concurrent revision makes it stale, fail closed rather
+    # than showing text which would disagree with the canonical world.
+    transition = _commit_schedule_candidate(
+        character_id, user_id, result, source_event_id)
+    if not transition.get('ok'):
+        try:
+            from db_generation_receipt import fail_generation
+            fail_generation(
+                user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
+                claim_token, last_error=transition.get('reason') or 'schedule_transition_failed')
         except Exception:
             pass
         _latency_emit()
@@ -795,6 +880,8 @@ async def chat_text(data: dict):
         resp['pending_transaction'] = pending_tx
     if result.get('proactive_promise'):
         resp['_proactive_promise'] = result.get('proactive_promise')
+    if not transition.get('noop'):
+        resp['schedule_transition'] = transition
 
     # 重要反思只由 Slow Loop diary_entries 写入。这里不再做 per-turn diary judge。
     from generation_effects import (
@@ -1031,7 +1118,15 @@ async def chat_voice_text(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
-    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    source_event_id = (str(data.get('source_event_id') or '').strip()
+                       or f'voice_inbound:{uuid.uuid4()}')
+    availability, busy = _gate_voice_inbound(
+        user_id, character_id, user_text, source_event_id)
+    if busy is not None:
+        if availability and availability.get('seen'):
+            save_user_short_memory_once(
+                user_id, user_text, character_id, source_event_id=source_event_id)
+        return busy
     pack, messages = _turn_context(
         user_id, character_id, user_text, profile='voice',
         current_event_id=source_event_id)
@@ -1050,9 +1145,16 @@ async def chat_voice_text(data: dict):
         log_tag=f'voice:{character_id}',
         cache_tag=f'voice:{character_id}',
         salvage=True,
+        reject_fn=lambda parsed: _reject_schedule_candidate(
+            character_id, user_id, parsed, system_blocks),
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
+        return _generation_failed_response(user_id, character_id, attempts=3)
+
+    transition = _commit_schedule_candidate(
+        character_id, user_id, result, source_event_id)
+    if not transition.get('ok'):
         return _generation_failed_response(user_id, character_id, attempts=3)
 
     _commit_offline_state(user_id, character_id, committed_state)
@@ -1075,7 +1177,10 @@ async def chat_voice_text(data: dict):
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
 
     print(f'[voice_text] {character_id} emotion={emotion} segs={len(msgs)}')
-    return JSONResponse({'emotion': emotion, 'messages': msgs})
+    body = {'emotion': emotion, 'messages': msgs}
+    if not transition.get('noop'):
+        body['schedule_transition'] = transition
+    return JSONResponse(body)
 
 
 # ─────────────────── 语音通话·长故事模式 ───────────────────
@@ -1107,7 +1212,15 @@ async def chat_voice_story(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
-    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    source_event_id = (str(data.get('source_event_id') or '').strip()
+                       or f'voice_story:{uuid.uuid4()}')
+    availability, busy = _gate_voice_inbound(
+        user_id, character_id, user_text, source_event_id)
+    if busy is not None:
+        if availability and availability.get('seen'):
+            save_user_short_memory_once(
+                user_id, user_text, character_id, source_event_id=source_event_id)
+        return busy
     pack, messages = _turn_context(
         user_id, character_id, user_text, profile='voice',
         current_event_id=source_event_id)
@@ -1126,9 +1239,16 @@ async def chat_voice_story(data: dict):
         log_tag=f'voice_story:{character_id}',
         cache_tag=f'voice_story:{character_id}',
         min_messages=3,
+        reject_fn=lambda parsed: _reject_schedule_candidate(
+            character_id, user_id, parsed, system_blocks),
     )
     emotion, msgs = _finalize_committed(result, min_messages=3)
     if msgs is None:
+        return _generation_failed_response(user_id, character_id, attempts=5)
+
+    transition = _commit_schedule_candidate(
+        character_id, user_id, result, source_event_id)
+    if not transition.get('ok'):
         return _generation_failed_response(user_id, character_id, attempts=5)
 
     _commit_offline_state(user_id, character_id, committed_state)
@@ -1153,11 +1273,14 @@ async def chat_voice_story(data: dict):
     total_chars = sum(len(m['jp']) for m in msgs)
     print(f'[voice_story] {character_id} emotion={emotion} segs={len(msgs)} chars={total_chars}')
 
-    return JSONResponse({
+    body = {
         'emotion': emotion,
         'messages': msgs,
         'total_chars': total_chars,
-    })
+    }
+    if not transition.get('noop'):
+        body['schedule_transition'] = transition
+    return JSONResponse(body)
 
 
 # ─────────────────── 语音通话主动开口（接通开场 / 沉默追问） ───────────────────
@@ -1174,6 +1297,18 @@ async def chat_voice_proactive(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    try:
+        import db_schedule
+        world = db_schedule.get_current_world_state(character_id, user_id)
+        if not (world.get('availability') or {}).get('can_reply', True):
+            return JSONResponse({
+                'busy': True,
+                'can_reply': False,
+                'reply_state': world['availability'].get('reply_state'),
+                'activity': (world.get('activity') or {}).get('title', ''),
+            })
+    except Exception as exc:
+        print(f'[{user_id}] voice proactive schedule check skipped:{exc}')
     if mode == 'greeting':
         trigger = ('【系统:电话刚接通。'
                    '按你此刻对她的【真实态度】开口——不是"客服接通"式打招呼,不是默认关心。'
@@ -1241,10 +1376,18 @@ async def chat_voice_proactive(data: dict):
         attempts=3,
         log_tag=f'voice_proactive:{character_id}',
         cache_tag=f'voice_proactive:{character_id}',
+        reject_fn=lambda parsed: _reject_schedule_candidate(
+            character_id, user_id, parsed, system_blocks),
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
         print(f'[{user_id}][{character_id}] voice_proactive generation_failed mode={mode}')
+        return _generation_failed_response(user_id, character_id, attempts=3)
+
+    event_id = resolve_voice_proactive_event_id(data)
+    transition = _commit_schedule_candidate(
+        character_id, user_id, result, event_id)
+    if not transition.get('ok'):
         return _generation_failed_response(user_id, character_id, attempts=3)
 
     msgs = msgs[:2] if mode == 'greeting' else msgs[:1]
@@ -1254,7 +1397,6 @@ async def chat_voice_proactive(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    event_id = resolve_voice_proactive_event_id(data)
     save_short_memory(
         user_id, 'assistant', full_jp, character_id,
         source_event_id=event_id,
@@ -1276,12 +1418,15 @@ async def chat_voice_proactive(data: dict):
         m['audio_b64'] = tts_to_b64(m['jp'], emotion, voice_id)
 
     print(f'[voice_proactive] {character_id} mode={mode} silence={silence_seconds}s')
-    return JSONResponse({
+    body = {
         'emotion': emotion,
         'messages': msgs,
         'assistant_turn_id': event_id,
         'event_id': event_id,
-    })
+    }
+    if not transition.get('noop'):
+        body['schedule_transition'] = transition
+    return JSONResponse(body)
 
 
 # ─────────────────── Whisper 转录 ───────────────────

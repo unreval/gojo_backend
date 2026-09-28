@@ -9,7 +9,7 @@ v4 改动:
 import requests
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 _cache: dict = {}
 _CACHE_TTL = 24 * 3600
@@ -52,82 +52,174 @@ ACTIVITY_CATEGORIES = {
 CATEGORIES = {**FOOD_CATEGORIES, **ACTIVITY_CATEGORIES}
 
 
-# ── 季节活动 / 花火大会 等固定地点 ──
-# 这些活动有固定举办地点,Nominatim 搜不到"花火大会"但搜得到河/公园
-# 日程引擎直接拿去喂 LLM,让角色安排去参加
-EVENT_VENUES = {
-    'tokyo': [
-        # 花火大会(7-8月)
-        {'name': '隅田川花火大会', 'lat': 35.7148, 'lng': 139.8019,
-         'address': '隅田川 浅草-駒形', 'category': 'event', 'months': [7, 8],
-         'label_cn': '花火大会'},
-        {'name': '神宫外苑花火大会', 'lat': 35.6745, 'lng': 139.7145,
-         'address': '神宫外苑', 'category': 'event', 'months': [8],
-         'label_cn': '花火大会'},
-        {'name': '江戸川区花火大会', 'lat': 35.7168, 'lng': 139.8969,
-         'address': '江戸川河川敷', 'category': 'event', 'months': [8],
-         'label_cn': '花火大会'},
-        # 夏祭(7-8月)
-        {'name': '麻布十番纳凉祭', 'lat': 35.6545, 'lng': 139.7367,
-         'address': '麻布十番', 'category': 'event', 'months': [8],
-         'label_cn': '夏祭'},
-        {'name': '高圆寺阿波舞', 'lat': 35.7054, 'lng': 139.6495,
-         'address': '高圆寺站周边', 'category': 'event', 'months': [8],
-         'label_cn': '夏祭'},
-        # 初詣(1月)
-        {'name': '明治神宫初詣', 'lat': 35.6764, 'lng': 139.6993,
-         'address': '原宿 明治神宫', 'category': 'event', 'months': [1, 12],
-         'label_cn': '初詣'},
-        # 红叶(11-12月)
-        {'name': '六义园红叶灯光秀', 'lat': 35.7344, 'lng': 139.7454,
-         'address': '�的场 六义园', 'category': 'event', 'months': [11, 12],
-         'label_cn': '红叶'},
-        # 樱花(3-4月)
-        {'name': '目黑川赏樱', 'lat': 35.6447, 'lng': 139.6989,
-         'address': '中目黑 目黑川沿岸', 'category': 'event', 'months': [3, 4],
-         'label_cn': '赏樱'},
-        {'name': '上野公园花见', 'lat': 35.7146, 'lng': 139.7734,
-         'address': '上野公园', 'category': 'event', 'months': [3, 4],
-         'label_cn': '赏樱'},
-        # コミケ / 展会
-        {'name': '东京Big Sight展会', 'lat': 35.6301, 'lng': 139.7965,
-         'address': '有明 东京Big Sight', 'category': 'event', 'months': [8, 12],
-         'label_cn': '展会'},
-        # 万圣节(10月)
-        {'name': '涩谷万圣节', 'lat': 35.6595, 'lng': 139.7004,
-         'address': '涩谷站前', 'category': 'event', 'months': [10],
-         'label_cn': '万圣节'},
-        # 全年常设景点(作为活动备选)
-        {'name': '台场海滨公园', 'lat': 35.6267, 'lng': 139.7755,
-         'address': '台场', 'category': 'landmark', 'months': list(range(1, 13)),
-         'label_cn': '景点'},
-    ],
-    'kyoto': [
-        {'name': '伏见稻荷大社', 'lat': 34.9671, 'lng': 135.7727,
-         'address': '伏见区', 'category': 'shrine', 'months': list(range(1, 13)),
-         'label_cn': '神社'},
-        {'name': '岚山竹林小径', 'lat': 35.0166, 'lng': 135.6717,
-         'address': '右京区 岚山', 'category': 'landmark', 'months': list(range(1, 13)),
-         'label_cn': '景点'},
-        {'name': '祇园祭', 'lat': 35.0038, 'lng': 135.7729,
-         'address': '四条通 八坂神社', 'category': 'event', 'months': [7],
-         'label_cn': '祭典'},
-        {'name': '清水寺红叶', 'lat': 34.9949, 'lng': 135.7850,
-         'address': '东山区 清水寺', 'category': 'event', 'months': [11, 12],
-         'label_cn': '红叶'},
-    ],
-    'osaka': [
-        {'name': '天神祭', 'lat': 34.6929, 'lng': 135.5122,
-         'address': '天满宫 大川沿岸', 'category': 'event', 'months': [7],
-         'label_cn': '祭典'},
-        {'name': '大阪城公园', 'lat': 34.6873, 'lng': 135.5262,
-         'address': '中央区 大阪城', 'category': 'landmark', 'months': list(range(1, 13)),
-         'label_cn': '景点'},
-        {'name': '淀川花火大会', 'lat': 34.7229, 'lng': 135.4876,
-         'address': '�的川河川敷', 'category': 'event', 'months': [8],
-         'label_cn': '花火大会'},
-    ],
+# Nominatim's query text is only a search hint. It is never enough to decide
+# what a returned object actually is. In particular, an industrial facility
+# that happened to rank for "sweets" must not become a dessert-shop map fact.
+_INDUSTRIAL_CLASSES = {'industrial', 'factory', 'works', 'plant', 'warehouse'}
+_CATEGORY_TYPES = {
+    'cafe': {('amenity', 'cafe')},
+    'restaurant': {('amenity', 'restaurant'), ('amenity', 'fast_food')},
+    'sweets': {
+        ('shop', 'confectionery'), ('shop', 'pastry'), ('shop', 'bakery'),
+        ('shop', 'chocolate'), ('shop', 'ice_cream'), ('amenity', 'ice_cream'),
+        ('amenity', 'cafe'), ('amenity', 'restaurant'),
+    },
+    'bakery': {('shop', 'bakery')},
+    'ramen': {('amenity', 'restaurant'), ('amenity', 'fast_food')},
+    'fashion': {('shop', 'clothes'), ('shop', 'fashion'), ('shop', 'boutique')},
+    'bookstore': {('shop', 'books'), ('shop', 'bookstore')},
+    'shrine': {('amenity', 'place_of_worship'), ('historic', 'shrine')},
+    'temple': {('amenity', 'place_of_worship'), ('historic', 'temple')},
+    'park': {('leisure', 'park'), ('leisure', 'garden')},
+    'landmark': {
+        ('tourism', 'attraction'), ('tourism', 'viewpoint'),
+        ('man_made', 'tower'), ('historic', 'monument'),
+    },
+    'museum': {('tourism', 'museum'), ('tourism', 'gallery')},
+    'entertainment': {
+        ('amenity', 'cinema'), ('amenity', 'theatre'), ('amenity', 'nightclub'),
+        ('leisure', 'adult_gaming_centre'),
+    },
+    'shopping': {('shop', 'mall'), ('shop', 'department_store')},
+    'onsen': {('amenity', 'public_bath'), ('leisure', 'spa')},
 }
+
+
+def _raw_tags(item):
+    # Nominatim exposes useful OSM tags and localized names in separate maps.
+    # Merge them; choosing one with ``or`` used to discard name data whenever
+    # extratags happened to be present.
+    tags = {}
+    for source in (item.get('extratags'), item.get('namedetails')):
+        if isinstance(source, dict):
+            tags.update(source)
+    return tags
+
+
+def _is_industrial(item):
+    raw_class = str(item.get('class') or '').strip().lower()
+    raw_type = str(item.get('type') or '').strip().lower()
+    tags = {str(k).lower(): str(v).lower() for k, v in _raw_tags(item).items()}
+    values = {raw_class, raw_type, tags.get('landuse', ''), tags.get('man_made', '')}
+    display = str(item.get('display_name') or '').lower()
+    return bool(values & _INDUSTRIAL_CLASSES) or any(
+        term in display for term in ('factory', 'industrial', '工場', '工厂')
+    )
+
+
+def _matches_requested_category(item, category):
+    raw_class = str(item.get('class') or '').strip().lower()
+    raw_type = str(item.get('type') or '').strip().lower()
+    actual = (raw_class, raw_type)
+    allowed = _CATEGORY_TYPES.get(category, set())
+    if actual not in allowed:
+        return False
+    if category == 'sweets':
+        specific_sweets = {
+            ('shop', 'confectionery'), ('shop', 'pastry'),
+            ('shop', 'bakery'), ('shop', 'chocolate'),
+            ('shop', 'ice_cream'), ('amenity', 'ice_cream'),
+        }
+        if actual in specific_sweets:
+            return True
+        tags = _raw_tags(item)
+        evidence = ' '.join((
+            str(tags.get('cuisine') or ''),
+            str(tags.get('name') or ''),
+            str(item.get('display_name') or ''),
+        )).lower()
+        return any(term in evidence for term in (
+            'dessert', 'sweets', 'sweet shop', 'patisserie', 'pastry',
+            'cake', 'confectionery', 'chocolate', 'ice cream',
+            'ケーキ', '菓子', '洋菓子', 'デザート', '甜品', '蛋糕',
+        ))
+    # Ramen needs a restaurant that is actually named/tagged as ramen; do not
+    # label an arbitrary restaurant as ramen merely because of the query.
+    if category == 'ramen':
+        tags = _raw_tags(item)
+        text = ' '.join([
+            str(item.get('display_name') or ''),
+            str(tags.get('cuisine') or ''), str(tags.get('name') or ''),
+        ]).lower()
+        return 'ramen' in text or 'ラーメン' in text or '拉面' in text
+    return True
+
+
+def validate_nominatim_result(item, requested_category, city='tokyo'):
+    """Convert one verified Nominatim result into a resolver-owned POI.
+
+    ``requested_category`` is validated against OSM's actual class/type/tags.
+    The returned ``verified_category`` is derived from that validation; callers
+    must not write a free-text location as a coordinate-bearing map fact.
+    """
+    if not isinstance(item, dict) or requested_category not in CATEGORIES:
+        return None
+    if _is_industrial(item) or not _matches_requested_category(item, requested_category):
+        return None
+    display = str(item.get('display_name') or '').strip()
+    parts = [part.strip() for part in display.split(',') if part.strip()]
+    name = str((_raw_tags(item).get('name') or (parts[0] if parts else ''))).strip()
+    if len(name) < 2:
+        return None
+    try:
+        lat = float(item.get('lat'))
+        lng = float(item.get('lon'))
+    except (TypeError, ValueError):
+        return None
+    if not lat or not lng:
+        return None
+    provider_place_id = str(item.get('place_id') or '').strip()
+    if not provider_place_id:
+        return None
+    city_info = CITIES.get(city, CITIES['tokyo'])
+    address = ', '.join(parts[1:4]) if len(parts) > 1 else city_info['name_cn']
+    raw_type = {
+        'class': item.get('class'),
+        'type': item.get('type'),
+        'osm_type': item.get('osm_type'),
+        'osm_id': item.get('osm_id'),
+        'tags': _raw_tags(item),
+    }
+    return {
+        # Canonical resolver fields.
+        'provider': 'nominatim',
+        'provider_place_id': provider_place_id,
+        'canonical_name': name,
+        'canonical_address': address,
+        'lat': lat,
+        'lng': lng,
+        'verified_category': requested_category,
+        'provider_raw_type': raw_type,
+        'fetched_at': datetime.now(timezone.utc).isoformat(),
+        # Compatibility/display aliases. They are derived only from the
+        # verified fields above, never from a model-generated location string.
+        'name': name,
+        'address': address,
+        'category': requested_category,
+        'category_label': CATEGORIES[requested_category]['label_cn'],
+        'city': city,
+        'osm_id': item.get('osm_id'),
+    }
+
+
+def resolve_schedule_poi(reference, candidates):
+    """Resolve a planned-place reference only against this verified pool."""
+    if not reference or not candidates:
+        return None
+    if isinstance(reference, str):
+        provider, _, provider_place_id = reference.partition(':')
+    elif isinstance(reference, dict):
+        provider = str(reference.get('provider') or '').strip()
+        provider_place_id = str(reference.get('provider_place_id') or '').strip()
+    else:
+        return None
+    if not provider or not provider_place_id:
+        return None
+    for candidate in candidates:
+        if (candidate.get('provider') == provider
+                and str(candidate.get('provider_place_id')) == provider_place_id):
+            return dict(candidate)
+    return None
 
 
 def search_places(city='tokyo', category='cafe', limit=30):
@@ -152,6 +244,8 @@ def search_places(city='tokyo', category='cafe', limit=30):
                 'format': 'json',
                 'limit': 50,
                 'addressdetails': 1,
+                'extratags': 1,
+                'namedetails': 1,
                 'viewbox': f'{city_info["lng"]-0.15},{city_info["lat"]+0.1},{city_info["lng"]+0.15},{city_info["lat"]-0.1}',
                 'bounded': 1,
             },
@@ -166,22 +260,9 @@ def search_places(city='tokyo', category='cafe', limit=30):
 
     results = []
     for item in data:
-        display = item.get('display_name', '')
-        parts = display.split(',')
-        name = parts[0].strip() if parts else ''
-        if not name or len(name) < 2:
-            continue
-        lat = float(item.get('lat', 0))
-        lng = float(item.get('lon', 0))
-        if not lat or not lng:
-            continue
-        addr = ', '.join(p.strip() for p in parts[1:3]) if len(parts) > 1 else city_info['name_cn']
-        results.append({
-            'name': name, 'lat': lat, 'lng': lng,
-            'address': addr, 'category': category,
-            'category_label': cat_info['label_cn'],
-            'city': city, 'osm_id': item.get('osm_id'),
-        })
+        verified = validate_nominatim_result(item, category, city)
+        if verified:
+            results.append(verified)
 
     if results:
         _cache[cache_key] = (now, results)
@@ -194,14 +275,6 @@ def get_random_place(city='tokyo', category=None):
         category = random.choice(list(CATEGORIES.keys()))
     places = search_places(city, category, limit=50)
     return random.choice(places) if places else None
-
-
-def get_seasonal_events(city='tokyo', month=None):
-    """拿当前月份适用的季节活动/地标。"""
-    if month is None:
-        month = datetime.now().month
-    venues = EVENT_VENUES.get(city, [])
-    return [v for v in venues if month in v.get('months', [])]
 
 
 def get_schedule_places(city='tokyo', count=5):
@@ -229,21 +302,10 @@ def get_schedule_places(city='tokyo', count=5):
         if len(act_places) >= 2:
             break
 
-    # 季节活动:当月适用的挑 1 个(概率 40%)
-    events = get_seasonal_events(city)
-    event_place = None
-    if events and random.random() < 0.40:
-        evt = random.choice(events)
-        event_place = {
-            'name': evt['name'], 'lat': evt['lat'], 'lng': evt['lng'],
-            'address': evt['address'], 'category': evt['category'],
-            'category_label': evt.get('label_cn', '活动'),
-            'city': city, 'osm_id': None,
-        }
-
-    # 合并,控制总量
+    # Do not inject a fixed seasonal venue every year. It anchored generation
+    # to the same famous entities (and was not resolver-verified); seasonal
+    # variety is now an abstract prompt hint and POIs always come from the
+    # validated resolver pool above.
     combined = food_places + act_places
-    if event_place:
-        combined.append(event_place)
     random.shuffle(combined)
     return combined[:count]

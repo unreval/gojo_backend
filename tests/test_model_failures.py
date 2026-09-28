@@ -328,8 +328,20 @@ class ImageFailureTests(unittest.TestCase):
             'reply_state': 'hard_busy',
             'can_reply': False,
         }
+        world = {
+            'event': {'id': 9, 'revision': 1, 'status': 'active'},
+            'phase': {'id': 1, 'status': 'active'},
+            'activity': activity,
+            'availability': {
+                'reply_state': 'hard_busy',
+                'can_reply': False,
+                'phase_id': 1,
+                'phase_status': 'active',
+            },
+        }
         schedule = stub(
             'db_schedule',
+            get_current_world_state=Mock(return_value=world),
             get_current_activity=Mock(return_value=activity),
             effective_reply_state=Mock(return_value='hard_busy'),
             decide_phone_check=Mock(return_value={

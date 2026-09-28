@@ -18,6 +18,7 @@ import test_schedule_reply_state as sched_tests  # noqa: E402
 
 FakeConn = sched_tests.FakeConn
 PhoneCheckStore = sched_tests.PhoneCheckStore
+canonical_test_world = sched_tests.canonical_test_world
 
 
 NOW = datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc)
@@ -39,6 +40,14 @@ def _conn(store):
 
 
 class PhoneCheckAtomicTests(unittest.TestCase):
+    def setUp(self):
+        self.world_patcher = patch.object(
+            db_schedule, 'get_current_world_state',
+            side_effect=lambda character_id, user_id, now:
+            canonical_test_world(ACTIVITY, now))
+        self.world_patcher.start()
+        self.addCleanup(self.world_patcher.stop)
+
     def test_concurrent_claim_only_one_wins(self):
         store = PhoneCheckStore()
         due = NOW - timedelta(minutes=1)

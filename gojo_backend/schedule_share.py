@@ -259,7 +259,8 @@ def _tick_character(character_id):
         return
     _last_tick_at[character_id] = now_ts
 
-    act = db_schedule.get_current_activity(character_id, TARGET_USER, now)
+    world = db_schedule.get_current_world_state(character_id, TARGET_USER, now)
+    act = world.get('activity')
     if not _worth_sharing(act):
         return
 

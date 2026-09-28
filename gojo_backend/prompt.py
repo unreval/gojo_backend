@@ -185,6 +185,22 @@ emotion字段从以下选一个：{emotion_list}
 {{"emotion":"情绪","messages":[{{"jp":"日语","zh":"中文翻译"}}]}}
 不要输出 <<<OFFLINE_CHARACTER_STATES>>> 或任何内部状态 JSON。那些不是当前协议，用户永远不该看到。
 
+【日程事实与结构化行动意图】
+动态上下文里的 canonical world state 是唯一现实。只要当前 event 的 status=active，
+你不能仅凭台词说“已经结束/做完/取消/到了某家店”。想让角色真的改变行程时，
+在正常 messages 之外额外给出一个 machine-only 字段 schedule_action_intent；它只是提案，
+后端会按 event_id + expected_revision 验证并决定是否提交。
+
+可用格式（没有明确行动变化就完全不要输出该字段）：
+{{"schedule_action_intent":{{"type":"complete","event_id":123,"expected_revision":4}}}}
+{{"schedule_action_intent":{{"type":"extend","event_id":123,"expected_revision":4,"extend_minutes":20}}}}
+{{"schedule_action_intent":{{"type":"cancel","event_id":123,"expected_revision":4}}}}
+{{"schedule_action_intent":{{"type":"relocate","event_id":123,"expected_revision":4,
+ "planned_place":{{"provider":"nominatim","provider_place_id":"已验证候选ID"}}}}}}
+{{"schedule_action_intent":{{"type":"insert","event":{{"title":"简短事项","duration_minutes":20,
+ "reply_state":"soft_busy","category":"routine","fixedness":"flexible"}}}}}}
+绝不从自由文本猜地点、地址、坐标或完成状态；没有后端提交成功前，台词也不得把变化说成事实。
+
 【提醒功能——添加新提醒】
 如果对方请求提醒/叫他/在某时间做某事，必须额外添加 reminder 字段：
 {{"emotion":"...","messages":[...],"reminder":{{"date":"YYYY-MM-DD","time":"HH:MM","content":"具体事","notification":"日语+括号中文"}}}}
@@ -532,30 +548,8 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
         try:
             import db_schedule as _dbs
             _now = datetime.now(CN_TZ)
-            _act = _dbs.get_current_activity(character_id, user_id, _now)
-            if _act:
-                _where = f'（在{_act["location"]}）' if _act.get('location') else ''
-                _note = f'\n你当时的想法：{_act["note"]}' if _act.get('note') else ''
-                _busy = ''
-                try:
-                    from activity_phone import busy_prompt_hint
-                    _busy = busy_prompt_hint(_act, _now)
-                except Exception:
-                    _runtime = _dbs.effective_reply_state(_act, _now)
-                    _busy = '' if _runtime == 'free' else (
-                        '\n★ 这段时间你没法看手机，暂时无法回复。'
-                        if _runtime == 'hard_busy' else
-                        '\n★ 这段时间你在忙，但偶尔能瞄一眼手机。语气可以简短一些。')
-                schedule_text = f'''
-
-【你此刻正在做的事——这是你自己安排的，不是设定，是真的在做】
-{_act["start_time"]}~{_act["end_time"]} {_act["title"]}{_where}{_note}{_busy}
-
-用法：
-- 她问"在干嘛"就照实说这件事，别另编一个。
-- 不用每句话都提，但语气要和这件事对得上
-  （在开会就带点不耐烦，在吃甜品就轻松些）。
-- 这是【你的】日程，不是她的。别搞混。'''
+            schedule_text, _world = _dbs.format_world_prompt(
+                character_id, user_id, _now)
         except Exception as _e:
             print(f'[prompt] 日程注入跳过：{_e}')
         diary_hint = ''

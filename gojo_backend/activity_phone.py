@@ -51,6 +51,12 @@ PROFILES = {
         check_interval_min=15, check_interval_max=35,
         quick_reply_probability=0.34, defer_probability=0.66,
     ),
+    'clan_admin': ActivityPhoneProfile(
+        kind='clan_admin', busy_state='soft_busy',
+        interruptibility='medium', phone_access='medium-high',
+        check_interval_min=10, check_interval_max=26,
+        quick_reply_probability=0.38, defer_probability=0.62,
+    ),
     'soft_default': ActivityPhoneProfile(
         kind='soft_default', busy_state='soft_busy',
         interruptibility='medium', phone_access='medium-high',
@@ -120,6 +126,7 @@ _TITLE_RULES = (
     ('class', ('上课', '授课', '教学', '讲课', '上课中', '课堂')),
     ('hygiene', ('洗澡', '泡澡', '沐浴')),
     ('driving', ('开车', '驾驶')),
+    ('clan_admin', ('家族文件', '家族会议', '家主', '本家', '资源安排', '人员安排', '对外交涉', '正式场合')),
     ('meeting', ('会议', '开会', '例会', '谈判', '会谈')),
     ('lesson_prep', ('备课', '教案', '改作业', '批改')),
     ('report_work', ('报告', '汇报', '汇报材料', '处理报告', '写报告', '文书')),
@@ -131,20 +138,14 @@ _TITLE_RULES = (
 
 
 def busy_prompt_hint(activity, now=None) -> str:
-    """Prompt tone for the current activity. Soft and hard must not share copy.
+    """Prompt tone from a canonical activity's already-computed phase state.
 
-    Pass `now` so runtime effective_reply_state is used. Stored reply_state
-    alone would keep injecting soft_busy copy after effective_busy_end.
-    Profiles are not consulted here.
+    ``now`` remains a harmless compatibility parameter.  This helper must not
+    recalculate availability from parent event duration; callers pass the
+    canonical activity built by ``get_current_world_state``.
     """
     activity = activity or {}
     state = str(activity.get('reply_state') or '').strip()
-    if now is not None:
-        try:
-            from db_schedule import effective_reply_state
-            state = effective_reply_state(activity, now)
-        except Exception:
-            pass
     if state == 'hard_busy':
         return '\n★ 这段时间你没法看手机，暂时无法回复。'
     if state == 'soft_busy':

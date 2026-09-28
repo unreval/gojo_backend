@@ -1,13 +1,9 @@
-"""Reply availability guard shared by text and image chat routes.
+"""Reply availability guard shared by every inbound chat route.
 
-The schedule layer decides whether a character is free, soft-busy, or hard-busy.
-This module turns that into the concrete per-message behavior:
-  - free: seen + reply now
-  - soft_busy: shared next_phone_check_at per activity; new messages only
-    append pending inbox; consume check only when due; defer schedules the next one
-  - hard_busy: persist pending context, no phone-check roll
-  Runtime availability uses effective_busy_end / effective_reply_state:
-  a long soft_busy block may stop blocking replies before its visual end_time.
+The canonical schedule world returns the active event, active phase, and
+availability together.  This module deliberately does not recalculate whether
+the character can reply: it only turns that one decision into phone-check
+inbox behavior.
 
 The durable source of truth for pending busy-period messages is
 char_phone_check (including event_meta / visual_summary for images).
@@ -122,13 +118,17 @@ def check_reply_availability(character_id, user_id, source_event_id='',
         CN_TZ = timezone.utc
 
     now = now or datetime.now(CN_TZ)
-    activity = db_schedule.get_current_activity(character_id, user_id, now)
-    if not activity or db_schedule.effective_reply_state(activity, now) == 'free':
+    world = db_schedule.get_current_world_state(character_id, user_id, now)
+    activity = world.get('activity')
+    availability = world.get('availability') or {}
+    reply_state = availability.get('reply_state') or 'free'
+    if not activity or availability.get('can_reply', reply_state == 'free'):
         return {
             'reply_state': 'free',
             'seen': True,
             'can_reply': True,
             'activity': activity,
+            'world': world,
             'free_at': None,
             'opportunity_id': None,
             'source_event_id': source_event_id,
@@ -142,7 +142,9 @@ def check_reply_availability(character_id, user_id, source_event_id='',
         pending_text=pending_text,
         event_meta=event_meta,
     )
+    decision['world'] = world
     decision['source_event_id'] = source_event_id
-    decision['free_at'] = db_schedule.get_next_free_time(character_id, user_id, now) \
+    decision['free_at'] = db_schedule.get_next_free_time(
+        character_id, user_id, now, world=world) \
         or activity.get('end_time')
     return decision

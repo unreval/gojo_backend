@@ -102,6 +102,38 @@ async def chat_voice_stream(data: dict):
     if not char:
         return _err(f'character {character_id} not found')
 
+    # Streaming voice is an inbound chat surface, so it enters through the
+    # same canonical availability/phone-check gate as text and image.
+    try:
+        from reply_availability import check_reply_availability
+        availability = check_reply_availability(
+            character_id, user_id,
+            source_event_id=source_event_id or '',
+            pending_text=user_text,
+            event_meta={
+                'kind': 'voice_stream',
+                'source_event_id': source_event_id or '',
+            },
+        )
+        if not availability.get('can_reply'):
+            act = availability.get('activity') or {}
+            return StreamingResponse(
+                iter([(json.dumps({
+                    'type': 'busy',
+                    'busy': True,
+                    'seen': bool(availability.get('seen')),
+                    'can_reply': False,
+                    'reply_state': availability.get('reply_state'),
+                    'activity': act.get('title', ''),
+                    'location': act.get('location', ''),
+                    'until': act.get('end_time', ''),
+                    'phone_check_id': availability.get('opportunity_id'),
+                }) + '\n').encode()]),
+                media_type='application/x-ndjson',
+            )
+    except Exception as exc:
+        print(f'[{user_id}] voice_stream schedule check skipped:{exc}')
+
     voice_id = char.get('voice_id')
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
 
@@ -148,6 +180,13 @@ async def chat_voice_stream(data: dict):
         temporal_snapshot=temporal_snapshot,
         context_pack=pack,
     )
+    system_blocks = system_blocks + [{
+        'type': 'text',
+        'text': (
+            '这是流式语音格式，不能输出结构化 schedule_action_intent。因此绝不能'
+            '声称任何仍为 active 的日程已经结束，也不能用台词改地点或日程。'
+        ),
+    }]
 
     async def event_stream():
         emotion = '平静'
@@ -186,6 +225,17 @@ async def chat_voice_stream(data: dict):
                 if not valid_reply_pair(jp_to_tts, zh_final):
                     print(f'[voice_stream] skip invalid pair jp={jp_to_tts!r} zh={zh_final!r}')
                     return out
+                try:
+                    import db_schedule
+                    from schedule_contract import completion_claim_conflict
+                    world = db_schedule.get_current_world_state(
+                        character_id, user_id)
+                    if completion_claim_conflict(
+                            [{'jp': jp_to_tts, 'zh': zh_final}], world, None):
+                        print('[voice_stream] dropped uncommitted completion claim')
+                        return out
+                except Exception as exc:
+                    print(f'[voice_stream] schedule truth guard skipped:{exc}')
                 try:
                     audio_b64 = await loop.run_in_executor(
                         None, tts_to_b64, jp_to_tts, emotion, voice_id

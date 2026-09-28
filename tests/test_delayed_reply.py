@@ -141,7 +141,11 @@ class DelayedReplyTests(unittest.TestCase):
             patch('behavior_evidence.record_reply_cycle', Mock()),
             patch('push_notify.push_to_user', Mock()),
             patch.object(delayed_reply, 'assistant_already_committed',
-                         return_value=False),
+                          return_value=False),
+            patch.object(
+                db_schedule, 'get_current_world_state',
+                side_effect=lambda character_id, user_id, now=None:
+                sched_tests.canonical_test_world(ACTIVITY, now or NOW)),
         ]
         for item in self._io_patches:
             item.start()
@@ -601,10 +605,10 @@ class DelayedReplyTests(unittest.TestCase):
         activity = {
             **ACTIVITY,
             'start_time': '14:00',
-            'end_time': '16:00',
+            'end_time': '14:15',
             'title': '处理报告',
             'reply_state': 'soft_busy',
-            'effective_busy_minutes': 15,
+            'effective_busy_minutes': None,
         }
         with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
              patch.object(db_schedule, 'postpone_past_hard_busy',
@@ -630,7 +634,17 @@ class DelayedReplyTests(unittest.TestCase):
             generate_calls.append(bundle)
             return {'ok': True, 'messages': []}
 
+        free_activity = {
+            **activity,
+            'start_time': '14:15',
+            'end_time': '16:00',
+            'reply_state': 'free',
+            'can_reply': True,
+        }
         with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule, 'get_current_world_state',
+                          return_value=sched_tests.canonical_test_world(
+                              free_activity, due)), \
              patch.object(db_schedule, 'postpone_past_hard_busy',
                           side_effect=lambda *a, **k: (a[2] if len(a) > 2 else due, False)), \
              patch.object(db_schedule.random, 'random', return_value=0.99):
