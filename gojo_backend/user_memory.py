@@ -894,7 +894,8 @@ def _bigrams(s: str) -> set:
     return {s[i:i + 2] for i in range(len(s) - 1)}
 
 
-def save_bond_memory(user_id, character_id, kind, content, source_event_ids=None):
+def save_bond_memory(user_id, character_id, kind, content, source_event_ids=None,
+                     *, atomic_sources=False):
     """kind='between'（我们之间）或 'told'（她告诉我的）。带去重。"""
     if source_event_ids:
         import raw_events
@@ -932,13 +933,28 @@ def save_bond_memory(user_id, character_id, kind, content, source_event_ids=None
     except Exception:
         pass  # 关联失败不影响存入
 
-    conn.commit()
+    try:
+        if atomic_sources:
+            for source_id in dict.fromkeys(source_event_ids or []):
+                cur.execute(
+                    '''INSERT INTO memory_source_events
+                       (memory_type, memory_id, source_event_id)
+                       VALUES ('bond_memory', %s, %s)
+                       ON CONFLICT (memory_type, memory_id, source_event_id) DO NOTHING''',
+                    (new_id, source_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        raise
     cur.close()
     conn.close()
     _bg_embed('bond_memory', new_id, content)   # ★ RAG 启用时后台补向量
     try:
         import raw_events
-        raw_events.link_memory_sources('bond_memory', new_id, source_event_ids or [])
+        if not atomic_sources:
+            raw_events.link_memory_sources('bond_memory', new_id, source_event_ids or [])
     except Exception:
         pass
     return True
@@ -1088,7 +1104,7 @@ BOND_RESOLUTION_REASONS = frozenset({
 
 
 def resolve_bond_memories(user_id, character_id, kind, replaces,
-                          new_content=None, reason='superseded'):
+                          new_content=None, reason='superseded', *, exact=False):
     """Close resolved/cancelled/superseded bonds without DELETE.
 
     bond_merge is additive (old event still true, more detail).
@@ -1119,7 +1135,8 @@ def resolve_bond_memories(user_id, character_id, kind, replaces,
             for mid, mcontent in rows:
                 if mid in [item[0] for item in targets]:
                     continue
-                if _loosely_matches(want, mcontent):
+                if (_clean_for_compare(want) == _clean_for_compare(mcontent)
+                        if exact else _loosely_matches(want, mcontent)):
                     best = (mid, mcontent)
                     break
             if best:
@@ -1647,6 +1664,7 @@ def _canonical_turn_sources(user_id, character_id, source_event_ids,
         'user_is_canonical': False,
         'assistant_is_canonical': False,
         'canonical_user_events': [],
+        'canonical_turn_events': [],
     }
     if not source_event_ids:
         result['canonical_user_events'] = [
@@ -1672,6 +1690,7 @@ def _canonical_turn_sources(user_id, character_id, source_event_ids,
 
     result['user_text'] = str(primary['content'])
     result['user_is_canonical'] = True
+    result['canonical_turn_events'] = [dict(primary)]
     canonical_users = [{
         'event_id': str(primary.get('event_id') or ''),
         'content': result['user_text'],
@@ -1682,6 +1701,20 @@ def _canonical_turn_sources(user_id, character_id, source_event_ids,
         if role == 'assistant' and content:
             result['assistant_text'] = content
             result['assistant_is_canonical'] = True
+            # Only the actual reply to this user event can support a decision
+            # delta. Arbitrary assistant rows carried by a job are not evidence.
+            event_id = str(event.get('event_id') or '')
+            meta = event.get('metadata') or {}
+            reply_to = (event.get('reply_to_event_id') or meta.get('reply_to_event_id')
+                        or (event.get('extra') or {}).get('reply_to_event_id'))
+            if reply_to and str(reply_to) != str(primary_event_id):
+                continue
+            if (event_id in (f'chat_reply:{primary_event_id}', f'image_reply:{primary_event_id}')
+                    or str(event.get('reply_to_event_id') or meta.get('reply_to_event_id') or '')
+                    == str(primary_event_id)):
+                linked_event = dict(event)
+                linked_event['reply_to_event_id'] = str(primary_event_id)
+                result['canonical_turn_events'].append(linked_event)
 
     # A short confirmation can complete one of the two immediately preceding
     # user turns. The raw-event query enforces the existing chat_log scope,
@@ -1744,6 +1777,126 @@ def _same_event_as_merge(content, merge_content, replaces):
     return bool(content) and any(
         _loosely_matches(content, candidate) for candidate in candidates if candidate
     )
+
+
+from cognitive_events import QUESTION_DELTA_KINDS as _BOND_DELTA_KINDS
+
+
+def _validated_turn_delta(user_id, item, canonical_events, primary_event_id):
+    """A scoped utterance/state change, never a new personality inference.
+
+    Ordinary facts retain their user-only gate. This exception requires the
+    real current user and linked assistant events, plus a verbatim anchor in
+    the actual assistant answer; copied/generated payloads cannot qualify.
+    """
+    if not isinstance(item, dict) or not primary_event_id:
+        return None
+    from cognitive_events import validate_question_operation_evidence
+    try:
+        validate_question_operation_evidence(item, canonical_events)
+    except ValueError:
+        return None
+    ids = item.get('evidence_event_ids')
+    if not isinstance(ids, list) or primary_event_id not in ids:
+        return None
+    quote = _compact_evidence(_evidence_quote(item))
+    if not quote or _looks_like_question(_evidence_quote(item)):
+        return None
+    actor = item.get('actor', 'character')
+    if actor not in ('character', 'user'):
+        return None
+    role = 'assistant' if actor == 'character' else 'user'
+    speakers = [event for event in canonical_events if event.get('role') == role
+                and event.get('event_id') in ids]
+    if not any(quote in _compact_evidence(event.get('content')) for event in speakers):
+        return None
+    content = _clean_content(item.get('content'))
+    if not content or _looks_like_roleplay(content + _evidence_quote(item)):
+        return None
+    evidence = _has_faithful_evidence(
+        user_id, item, canonical_events, 'explicit_state_delta', primary_event_id)
+    if not evidence:
+        return None
+    # Binary answers already passed the shared full-fragment polarity gate.
+    if (str(item.get('value') or '').casefold() not in {'yes', 'no'}
+            and not _is_faithful_compression(user_id, content, evidence, 'explicit_state_delta')):
+        return None
+    return evidence
+
+
+def _apply_extracted_bond_delta(user_id, character_id, item, canonical_events,
+                               primary_event_id, existing_bonds, *, merge_ok=False,
+                               merge_rejected=False, merged_content='', merged_replaces=()):
+    """Separate overwrite safety from semantic novelty in the same extractor.
+
+    The extractor compares actual existing memories and supplies delta-only
+    content. Repeated wording is additionally rejected locally. A rejected
+    merge never authorizes appending the full candidate or arbitrary fallback.
+    """
+    if not isinstance(item, dict):
+        if merge_rejected:
+            print('[memory_merge] merge_rejected=true novel_delta=false delta_saved=false reason=no_delta')
+        return []
+    kind = item.get('kind')
+    content = _clean_content(item.get('content'))
+    evidence = _validated_turn_delta(user_id, item, canonical_events, primary_event_id)
+    if (kind not in _BOND_DELTA_KINDS or item.get('novel') is not True or not evidence
+            or (kind != 'explicit_promise' and item.get('value') in (None, ''))
+            or not item.get('question_text')):
+        if merge_rejected:
+            reason = 'no_novel_state' if item.get('novel') is not True else 'invalid_delta_evidence_or_schema'
+            print('[memory_merge] merge_rejected=true novel_delta=false delta_saved=false reason=' + reason)
+        return []
+    # Compare against persisted memories, not the model's claimed replaces.
+    existing_texts = [str(row[1]) for row in existing_bonds]
+    if merge_ok and merged_content:
+        # Additive merge success is not proof it included the independent delta.
+        existing_texts = [old for old in existing_texts if old not in merged_replaces] + [merged_content]
+    requested = item.get('replaces') or []
+    exact_targets = [old for old in existing_texts if old in requested
+                     and not _too_similar(content, old)]
+    if (merge_ok and merged_content and merged_replaces
+            and all(old in requested for old in merged_replaces)
+            and not _too_similar(content, merged_content)):
+        exact_targets.append(merged_content)
+    duplicate = any(_too_similar(content, old) for old in existing_texts)
+    if duplicate and not exact_targets:
+        print('[memory_merge] merge_rejected=%s novel_delta=false delta_saved=false reason=duplicate'
+              % str(merge_rejected).lower())
+        return []
+    import raw_events
+    if not raw_events.sources_are_active(evidence['event_ids'], user_id, character_id):
+        raise raw_events.SourceValidityError('delta_source_deleted')
+    from cognitive_events import ingest_question_update
+    update = dict(item)
+    update['type'] = 'pending_answer' if kind == 'explicit_promise' else 'resolution'
+    result = ingest_question_update(
+        user_id=user_id, character_id=character_id, update=update,
+        canonical_events=canonical_events)
+    if result.get('status') == 'already_resolved':
+        return []
+    if result.get('status') not in ('resolved', 'inserted', 'pending', 'duplicate', 'active'):
+        raise ValueError('explicit_delta_lifecycle_not_committed')
+    saved = False
+    if not duplicate:
+        saved = save_bond_memory(user_id, character_id, 'between', content,
+                                 source_event_ids=evidence['event_ids'], atomic_sources=True)
+        # On a retry the delta may already exist. Closing old rows is safe only
+        # after persistence (or a confirmed duplicate), never before the save.
+        if not saved:
+            current = get_bond_memories(user_id, character_id, 'between', limit=100)
+            if not any(_too_similar(content, row[1]) for row in current):
+                raise ValueError('explicit_delta_not_saved')
+    replaced = []
+    if update['type'] == 'resolution':
+        if exact_targets:
+            _ok, rows = resolve_bond_memories(
+                user_id, character_id, 'between', exact_targets,
+                reason='completed', exact=True)
+            replaced = [old for _mid, old in rows]
+    print('[memory_merge] merge_rejected=%s novel_delta=true delta_saved=%s reason=%s'
+          % (str(merge_rejected).lower(), str(saved or duplicate).lower(), kind))
+    return replaced
 
 
 def _record_character_self_claim_evidence(
@@ -1992,6 +2145,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
     user_text = source_view['user_text']
     assistant_text = source_view['assistant_text']
     canonical_user_events = source_view['canonical_user_events']
+    canonical_turn_events = source_view['canonical_turn_events']
     canonical_user_evidence = _canonical_user_evidence_prompt(canonical_user_events)
     user_source_label = (
         'canonical chat_log user event(s)' if source_view['user_is_canonical']
@@ -2028,6 +2182,10 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
         existing_text = '\n'.join(f'- {m[0]}' for m in existing) if existing else '（暂无）'
         existing_bond = get_bond_memories(user_id, character_id, limit=20)
         bond_text = '\n'.join(f'- {r[1]}' for r in existing_bond) if existing_bond else '（暂无）'
+        question_state = []
+        if canonical_turn_events:
+            from cognitive_events import question_extraction_state
+            question_state = question_extraction_state(user_id, character_id)
 
         recent_messages = get_short_memory_for_prompt(
             user_id, n=6, character_id=character_id,
@@ -2317,6 +2475,41 @@ D. character_self_claim：{char_name}对"我是什么样的人/我为什么这�
 没有的类填 null，例如全都没有：
 {{"user_fact":null,"bond":null,"told":null,"character_self_claim":null,"bond_merge":null,"bond_resolution":null}}
 category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
+        # Extend the existing extractor, not a second relationship decision LLM.
+        # Only explicit already-observed changes qualify; never infer yes/no.
+        prompt_content += '''
+
+【显式状态变化 / 待回答问题——同一提取器的窄例外】
+普通 user_fact/told/bond/bond_merge 的用户来源规则不变。
+新增 bond_delta 和 cognitive_update 字段（没有则 null）。下面 canonical 本轮事件
+仅可证明“这次确实表达/承诺了什么”，不是性格、长期偏好或新的关系推断。
+已有 question_key 必须复用；不能把 unresolved 自行判成 yes/no。
+
+bond_delta: {"kind":"explicit_acceptance|explicit_rejection|explicit_correction|explicit_decision|explicit_promise|relationship_resolution|answer_to_unresolved_question","actor":"character|user",
+"novel":true,"content":"只写新增的明确状态变化，不重述旧提问或整个 bond",
+"question_key":"已有 key，没有则省略","question_text":"具体问题/事项",
+"value":"明确回答/决定值","replaces":["确实被解决的旧 bond 原文"],
+"evidence_quote":"角色 canonical event 中逐字回答","evidence_event_ids":["当前 user event","实际 assistant event"]}
+必须先与已记录 bond 及 question resolution 做语义查重：只是重说、近义复述、已经
+接受后又说接受，novel=false。单次问句、打趣、角色扮演、自我辩解不算变化。
+有真正新增接受/拒绝/纠正/决定/承诺/问题答案时，即使 bond_merge 存在也必须给出
+delta-only 内容；merge 只是覆盖保全，不能吞掉新结果。不能把全部新 bond 当 delta。
+
+cognitive_update: {"type":"pending_answer|resolution","question_key":"已有 key，没有则省略",
+"question_text":"用户明确提出、尚待回答的问题","content":"明确承诺/答案",
+"value":"resolution 时的明确答案，pending_answer 可省略",
+"evidence_quote":"角色 canonical event 逐字原文","evidence_event_ids":["当前 user event","实际 assistant event"]}
+角色说“明天给你回答”必须为 pending_answer，问题仍 open，不能当成拒绝/接受。
+resolution 只能是本轮已明确表达的具体结果；与 bond_delta 同一变化只输出 bond_delta。
+角色的变化必须同时引用当前 user 和实际 assistant event。用户明确回答/纠正可用
+actor=user，仅引用当前 canonical user event；不得把用户答案写成角色自己的决定。
+未提供对应说话方的 canonical event 时，字段必须为 null。
+'''
+        # Source text already occurs once in the authoritative section above.
+        prompt_content += '\n【本轮事件身份（原文见上方权威证据，不重复注入）】\n' + json.dumps([
+            {'event_id': event['event_id'], 'role': event['role']}
+            for event in canonical_turn_events], ensure_ascii=False)
+        prompt_content += '\n【现有问题及结果（只供匹配/查重）】\n' + json.dumps(question_state, ensure_ascii=False, default=str)
         raw, _usage = create_chat(
             model=MODEL_CN_AUX, max_tokens=2000,
             messages=[{'role': 'user', 'content': prompt_content}],
@@ -2435,9 +2628,18 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                 except Exception as _e:
                     print(f'[{user_id}] ❌ 结束旧 bond 出错(不影响其他记忆):{_e}')
 
+        delta_item = parsed.get('bond_delta')
+        for question in question_state:
+            recovery = ((question.get('metadata') or {}).get('resolution') or {}).get('bond_delta')
+            if (isinstance(recovery, dict)
+                    and primary_event_id in (recovery.get('evidence_event_ids') or [])):
+                delta_item = recovery
+                break
+
         # ★ B0. 记忆合并:只允许"旧事件仍成立、补更多细节"。先处理,把碎片收成一条。
         bm = parsed.get('bond_merge')
         merge_attempted = False
+        merge_ok = False
         merge_content = ''
         merge_replaces = []
         if isinstance(bm, dict):
@@ -2450,6 +2652,13 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                     canonical_user_events, primary_event_id,
                     allow_existing_memory=True,
                 )
+                if isinstance(delta_item, dict) and delta_item.get('kind') != 'explicit_promise':
+                    terminal_targets = delta_item.get('replaces') or []
+                    if (any(old in terminal_targets for old in merge_replaces)
+                            and not all(old in terminal_targets for old in merge_replaces)):
+                        # Keep unrelated fragments intact; the existing resolution
+                        # path can retire only its exact target after saving delta.
+                        merge_evidence = None
                 if merge_evidence:
                     try:
                         merge_ok, _deleted = merge_bond_memories(
@@ -2458,7 +2667,7 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                             source_event_ids=merge_evidence['event_ids'],
                         )
                         if not merge_ok:
-                            print(f'[{user_id}] 合并未执行；同事件 bond 不会作为 fallback 直接追加')
+                            print(f'[{user_id}] 合并未执行；仅独立校验结构化新 delta，禁止整条 fallback')
                     except Exception as _e:
                         try:
                             import raw_events as _raw_events
@@ -2469,6 +2678,40 @@ category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
                         print(f'[{user_id}] ❌ 记忆合并出错(不影响其他记忆):{_e}')
                 else:
                     print(f'[{user_id}] ❌ 合并内容格式不合规,跳过:{merge_content[:40]}')
+
+        # Overwrite preservation and novel explicit evidence have independent
+        # gates. Keep the rejected old row intact, save only the actual delta,
+        # then retire its unresolved reading using the existing lifecycle.
+        if (delta_item is None and merge_attempted and not merge_ok
+                and len(canonical_turn_events) > 1):
+            # One bounded repair by the SAME extractor, not a second decision
+            # engine: isolate facts already stated in the supplied raw turn.
+            repaired, _repair_usage = create_chat(
+                model=MODEL_CN_AUX, max_tokens=800,
+                messages=[{'role': 'user', 'content': prompt_content
+                           + '\n合并覆盖检查已拒绝。只补提 bond_delta（没有新状态则 null）。'
+                             '不要重写 bond，不要决定答案，只记录上述原始事件已明确的新增变化。'
+                             '返回 {"bond_delta":对象或null}。'}])
+            repair = extract_json(str(repaired or '').strip())
+            if not isinstance(repair, dict) or 'bond_delta' not in repair:
+                raise ValueError('rejected_merge_delta_repair_invalid')
+            delta_item = repair.get('bond_delta')
+        resolved_texts.extend(_apply_extracted_bond_delta(
+            user_id, character_id, delta_item, canonical_turn_events,
+            primary_event_id, existing_bond, merge_ok=merge_ok,
+            merge_rejected=merge_attempted and not merge_ok,
+            merged_content=merge_content, merged_replaces=merge_replaces))
+        cognitive_update = parsed.get('cognitive_update')
+        if (isinstance(cognitive_update, dict)
+                and cognitive_update.get('type') in ('pending_answer', 'resolution')
+                and _validated_turn_delta(user_id, cognitive_update,
+                                          canonical_turn_events, primary_event_id)):
+            from cognitive_events import ingest_question_update
+            result = ingest_question_update(
+                user_id=user_id, character_id=character_id,
+                update=cognitive_update, canonical_events=canonical_turn_events)
+            if result.get('status') not in ('inserted', 'duplicate', 'already_resolved'):
+                raise ValueError('cognitive_update_not_committed')
 
         # B-guard. 角色临场自我解释不进 bond，只入持续认知层的低置信证据。
         sc = parsed.get('character_self_claim')

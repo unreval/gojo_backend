@@ -148,16 +148,20 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
     char_name = char['name']
     voice_id = char.get('voice_id')
 
-    # 拉一点上下文让 LLM 判断关系状态（canonical profile，不是 short_memory SoT）
+    # Read the existing canonical state; only expression/initiative is generated.
+    pack = None
     try:
         from context_layer import load_profile_transcript
-        recent, _pack = load_profile_transcript(
-            TARGET_USER, character_id, 'proactive', limit=4)
+        recent, pack = load_profile_transcript(
+            TARGET_USER, character_id, 'proactive', limit=4,
+            user_message=f'{comment_content}\n{diary_content}')
         if not recent:
             shorts = get_short_memory(TARGET_USER, 4, character_id)
             recent = '\n'.join(f'{"她" if r=="user" else "我"}:{c}' for r, c in shorts) if shorts else '(最近没聊)'
     except Exception:
         recent = ''
+    from shared_relation_prompt import format_cognitive_expression_context
+    cognition = format_cognitive_expression_context(pack)
     try:
         bonds = get_bond_memories(TARGET_USER, character_id, kind='between', limit=6)
         bond_text = '\n'.join(f'- {b[1]}' for b in bonds) if bonds else '(还没什么共同的事)'
@@ -194,8 +198,11 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
 【你们之间累计的事】
 {bond_text}
 
+{cognition}
+日记是主观回顾，不是新的关系证据；不能用日记或本次反应覆盖当前判断。
+
 【★ 你要判断】
-1. 根据当前你对她的态度,这条留言【值不值得主动开口反应】?
+1. 只依据已读取的关系状态决定这条留言【值不值得主动开口反应】，不重新判定核心关系。
    - 关系深、留言触动你 → 主动去找她说
    - 关系浅、留言普通("加油"、"看到了") → 可以不理,skip
    - 留言挑衅 / 有攻击性 → 冷淡打断她 / 讽刺 / 划线

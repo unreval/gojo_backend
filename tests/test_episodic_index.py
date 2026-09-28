@@ -292,6 +292,7 @@ class EpisodicIndexTests(unittest.TestCase):
         event = _event('hot-1', content='仍只使用热窗口')
         with patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
              patch.object(raw_events, 'get_hot_candidate_events', return_value=[event]), \
+             patch.object(context_layer, '_support_items', return_value=[]), \
              patch.object(episodic_index, 'list_episodes',
                           side_effect=AssertionError('episode recall is not enabled')):
             pack = context_layer.build_chat_context(

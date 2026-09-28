@@ -61,10 +61,12 @@ def generate_from_promise(promise, now):
         temporal_text = build_prompt_context(
             user_id, character_id, snapshot=temporal_snapshot)
 
+        pack = None
         try:
             from context_layer import load_profile_transcript
-            recent, _pack = load_profile_transcript(
-                user_id, character_id, 'proactive', limit=4)
+            recent, pack = load_profile_transcript(
+                user_id, character_id, 'proactive', limit=4,
+                user_message=f'{origin_text}\n{context}')
             if not recent:
                 shorts = get_short_memory(user_id, 4, character_id)
                 recent = '\n'.join(
@@ -72,6 +74,8 @@ def generate_from_promise(promise, now):
                 ) if shorts else '(最近没聊)'
         except Exception:
             recent = '(最近没聊)'
+        from shared_relation_prompt import format_cognitive_expression_context
+        cognition = format_cognitive_expression_context(pack)
 
         try:
             bonds = get_bond_memories(user_id, character_id, kind='between', limit=6)
@@ -101,8 +105,10 @@ def generate_from_promise(promise, now):
 【关系背景】
 {bond_text}
 
+{cognition}
+
 【生成规则】
-根据角色和用户的关系深浅决定:
+只依据以上已读取的关系状态决定是否开口和表达方式，不重新判定关系或承诺问题的答案:
 - 关系深 → 自然带上关心
 - 关系浅 → 简短提醒,不越界
 - 完全陌生/反感 → 可以选择不说,输出 {{"skip": true, "reason": "原因"}}

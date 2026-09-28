@@ -3,21 +3,21 @@ diary_engine 共同使用,避免两处规则分裂导致 gojo 在聊天和日记
 
 ★ v4 改动（重点）：
   - 关系判断从"让 LLM 现场读记忆自然语言判断"改为"读 v4 后台账本估算的结果"。
-  - 原来的 A~G 段规则本体保留在 _LEGACY_RELATION_RULES_BODY 里，向后兼容 + 兜底 fallback。
+  - 原来的 A~G 段规则本体仅保留为历史常量，运行入口不再退回现场重判。
   - build_relation_rules 保留旧签名（first_days/bond_count/fact_count），
     追加两个可选参数 (user_id, character_id)。传了就走 v4 路径。
   - v4 路径下：拼装出的文本 = "v4 关系状态摘要" + "永远该守的表达约束段"
     表达约束段包含：爱情腔词汇/句式禁用、陌生阶段真实反应、情绪不受关系锁定、G 段真情绪。
     这些是"角色应该怎么说话"的规则，即使有了 v4 摘要也仍然有效。
-  - 保底：如果 build_state_summary 抛异常/账本为空，会打印 warning 并 fallback 到旧的完整规则。
+  - 保底：状态不可读时保持未决，只保留表达约束，不授予 Generator 判断权。
 
-★ 老版本行为（不改）：
-  - 老调用点（还没升级传 user_id/character_id 的地方）继续走 legacy 路径，行为 100% 不变。
+★ 没有传身份的兼容调用点同样只得到表达约束，不产生第二套关系判断。
 """
 
 
 def build_relation_rules(first_days, bond_count: int, fact_count: int,
-                         user_id: str = None, character_id: str = None) -> str:
+                         user_id: str = None, character_id: str = None,
+                         user_message='') -> str:
     """生成关系判断规则文本。
 
     Args:
@@ -39,7 +39,7 @@ def build_relation_rules(first_days, bond_count: int, fact_count: int,
             try:
                 from cognitive_reader import build_cognitive_prompt_context
                 cognitive_summary = build_cognitive_prompt_context(
-                    user_id, character_id,
+                    user_id, character_id, query=user_message,
                 )
             except Exception as cognitive_error:
                 print(
@@ -55,13 +55,24 @@ def build_relation_rules(first_days, bond_count: int, fact_count: int,
             parts.append(_EXPRESSION_ONLY_RULES)
             return '\n\n'.join(parts)
         except Exception as e:
-            # v4 挂了不能让主聊天崩，打印 warning 后 fallback 到旧规则
-            print(f'[shared_relation_prompt] v4 摘要生成失败 fallback 到 legacy: {e}')
-            # 继续走下面的 legacy 路径
+            # Keep chat available without re-authorizing a second judgment path.
+            print(f'[shared_relation_prompt] state unavailable; expression only: {e}')
+            return _build_meet_line(first_days, bond_count, fact_count) + _EXPRESSION_ONLY_RULES
 
-    # ═══ Legacy 路径（老调用点 + v4 失败时的 fallback）═══
+    # No state identity: expression-only, never a parallel relationship judge.
     meet_line = _build_meet_line(first_days, bond_count, fact_count)
-    return meet_line + _LEGACY_RELATION_RULES_BODY
+    return meet_line + _EXPRESSION_ONLY_RULES
+
+
+def format_cognitive_expression_context(pack):
+    """Render the existing canonical pack; never fetch or decide a second state."""
+    if pack is None or getattr(pack, 'failed_closed', False):
+        return '【当前认知不可用：保持未决，不从历史素材推断答案】\n' + _EXPRESSION_ONLY_RULES
+    return '\n'.join(part for part in (
+        getattr(pack, 'relationship_prompt_text', '') or '',
+        getattr(pack, 'cognitive_prompt_text', '') or '',
+        getattr(pack, 'expression_rules', '') or _EXPRESSION_ONLY_RULES,
+    ) if part)
 
 
 def _build_meet_line(first_days, bond_count: int, fact_count: int) -> str:
@@ -75,7 +86,7 @@ def _build_meet_line(first_days, bond_count: int, fact_count: int) -> str:
 
     return f'''
 
-【你们的关系——由你自己读记忆判断，不由她的话决定】
+【你们的相处历史——不是现场重判关系结论的授权】
 {meet_line}累计的共同记忆 {bond_count} 条、你了解的关于她的事 {fact_count} 件（都列在上方，那是你们全部真实的相处痕迹）。
 ⚠️ 你并没有在数日子——别向她断言"我们认识了X天"这种精确数字；她问起就用有日期的具体事件回答，或坦率说记不清。
 '''
@@ -85,12 +96,21 @@ def _build_meet_line(first_days, bond_count: int, fact_count: int) -> str:
 # v4 表达约束段 —— 关系状态由 v4 摘要给，但"角色该怎么说话"的规则永远有效
 # 从原 A~G 里抽出与"表达"相关的部分，保留在 v4 路径下继续注入。
 # ═══════════════════════════════════════════════════════════════════
-_EXPRESSION_ONLY_RULES = '''━━ 【★ 表达约束——永远遵守，与账本状态无关】 ━━
+_COGNITIVE_EXPRESSION_CONTRACT = '''【认知与表达的职责边界：READ → EXPRESS】
+当前/已形成的判断由已有认知状态提供。Generator 只决定语言、语气、情绪表达和句式；
+不得忽略当前判断后重新决定核心关系结论，也不能把已确认的 yes 改成 no，反之亦然。
+针对同一具体问题，当前已明确的结论优先于宽泛历史标签；只表达该结论的范围，不外推成别的问题的答案。
+问题仍是 open/unresolved 且没有当前结论时，必须保留未决，不能现场决定 yes/no；
+不能把猜测、预测、便利贴、旧事件或“明天回答”的承诺写成已确定的答案。
+当前证据冲突或状态读取失败时只承认不确定；由认知生命周期更新判断，不由措辞覆盖状态。
+'''
+
+_EXPRESSION_ONLY_RULES = _COGNITIVE_EXPRESSION_CONTRACT + '''━━ 【★ 表达约束——遵守当前账本与认知】 ━━
 
 【★ 首要警告——对抗训练数据的默认引力】
 你（作为语言模型）在"角色 + 长期互动对象"的场景下，训练数据 99% 来自言情/纯爱/同人。
 你若不【主动对抗】，默认就会把"关系近 + 有温度"直接判成爱情——不管账本里到底是什么关系。
-所以你的默认判断应该是：拿不准 → 不是爱情。差不多够了 → 也不是爱情。
+所以拿不准时保持未决，不能凭语言模型默认倾向回答“是”，也不能自动判成“不是”。
 【当前关系性质由上面账本摘要给出，你按摘要落地，不要私自"升级"关系。】
 
 【★ 零号铁律——情绪不受关系锁定】
@@ -427,4 +447,4 @@ _LEGACY_RELATION_RULES_BODY = '''━━ A. 判断的地基（所有关系判断�
 
 
 # 向后兼容：老代码如果 import RELATION_RULES_BODY 也不会断
-RELATION_RULES_BODY = _LEGACY_RELATION_RULES_BODY
+RELATION_RULES_BODY = _EXPRESSION_ONLY_RULES

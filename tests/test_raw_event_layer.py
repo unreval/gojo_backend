@@ -646,6 +646,10 @@ class FakeCursor:
             self._one = None
             return
 
+        if compact.startswith('SELECT question_key, question_text, status, metadata FROM cognitive_questions'):
+            self._many = []
+            return
+
         raise AssertionError(f'unhandled SQL in raw-event fake: {compact}')
 
 
@@ -740,6 +744,7 @@ class RawEventLayerTests(unittest.TestCase):
              patch('ai_client.create_chat', side_effect=fake_chat), \
              patch('characters.get_character', return_value={'name': '五条'}), \
              patch('memory_lifecycle.reactivate_lifecycle_memories', return_value=0), \
+             patch('cognitive_events.question_extraction_state', return_value=[]), \
              patch('smart_recall.reinforce_mentioned_facts'):
             ok = self.user_memory.extract_and_save_memory(
                 'u', user_text, assistant_text, 'gojo',

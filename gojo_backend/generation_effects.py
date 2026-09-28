@@ -308,6 +308,26 @@ def apply_private_extraction(ctx):
         return {}
     full_jp = ctx.get('full_jp') or ' '.join(
         str((m or {}).get('jp') or '') for m in (_payload(ctx).get('messages') or []))
+    assistant_event_id = assistant_turn_id_for(
+        ctx.get('endpoint') or ENDPOINT_CHAT_TEXT, ctx.get('source_event_id'))
+    read_sources = _ctx_fn(
+        ctx, 'get_active_events_by_ids', 'raw_events', 'get_active_events_by_ids')
+
+    def canonical_reply_ready():
+        return any(
+            event.get('event_id') == assistant_event_id
+            and event.get('role') == 'assistant' and event.get('content')
+            for event in read_sources(
+                ctx['user_id'], ctx['character_id'], [assistant_event_id]))
+
+    if not canonical_reply_ready():
+        # Side effects may be claimed out of order. Reuse the existing keyed
+        # aggregate writer; do not enqueue copied model text as factual evidence.
+        apply_assistant_short_memory(ctx)
+        # The compatibility writer's raw-event mirror is best-effort, so its
+        # return alone is not proof the canonical source exists.
+        if not canonical_reply_ready():
+            raise RuntimeError('canonical_assistant_event_unavailable')
     enqueue = _ctx_fn(
         ctx, 'enqueue_private_extraction',
         'memory_jobs', 'enqueue_private_extraction')
@@ -315,6 +335,7 @@ def apply_private_extraction(ctx):
         ctx['user_id'], user_text, full_jp, ctx['character_id'],
         temporal_context=ctx.get('temporal_snapshot'),
         source_event_id=ctx.get('source_event_id'),
+        assistant_event_id=assistant_event_id,
     )
     return {}
 

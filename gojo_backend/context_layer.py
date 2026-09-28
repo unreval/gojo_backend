@@ -726,11 +726,13 @@ def assemble_fallback_from_messages(
     )
 
 
-def load_profile_transcript(user_id, character_id, profile, limit=6, include_recall=False):
+def load_profile_transcript(user_id, character_id, profile, limit=6, include_recall=False,
+                            *, user_message=''):
     """Background modules: canonical events through a Context Profile."""
     try:
         pack = build_chat_context(
-            user_id, character_id, profile=profile, include_recall=include_recall)
+            user_id, character_id, profile=profile, include_recall=include_recall,
+            user_message=user_message)
         if pack and not getattr(pack, 'failed_closed', False):
             return compact_transcript(pack, limit), pack
     except Exception as exc:
@@ -897,6 +899,20 @@ def _trace_budget_dropped(items, allocated):
     suffix = '' if len(dropped) <= 12 else ',…'
     print(f'[recall_trace] budget_dropped count={len(dropped)} '
           f'items=[{";".join(refs)}{suffix}]')
+    critical = [item for item in items if item.metadata.get('critical_kind')]
+    critical_kept = [item for item in critical if id(item) in kept]
+    critical_dropped = [item for item in critical if id(item) not in kept]
+    kinds = [item.metadata['critical_kind'] for item in critical_kept]
+    reasons = [
+        f'{item.item_id}:{item.metadata.get("critical_reservation_reason", "channel_budget")}'
+        for item in critical_dropped[:12]
+    ]
+    print('[cognitive_context] '
+          f'relationship_state_included={str("relationship" in kinds).lower()} '
+          f'judgments_included={kinds.count("judgment")} '
+          f'questions_included={kinds.count("question")} '
+          f'stickies_included={kinds.count("sticky")} '
+          f'critical_dropped={len(critical_dropped)} reasons={reasons}')
 
 
 def _event_id_set(current_event_id) -> set:
@@ -1312,18 +1328,21 @@ def _support_items(user_id, character_id, user_message, hot_messages, temporal_s
 
     try:
         from relationship_reader import build_state_summary
-        rel_text = build_state_summary(user_id, character_id)
-        _add('relationship_state', rel_text, 80, 'rel:state')
+        rel_text = build_state_summary(user_id, character_id, compact=True)
+        _add('relationship_state', rel_text, 80, 'rel:state',
+             {'critical_kind': 'relationship'})
     except Exception as exc:
         print(f'[context_layer] relationship state skipped:{exc}')
 
     try:
         from cognitive_reader import iter_active_cognitive_items
-        for index, row in enumerate(iter_active_cognitive_items(user_id, character_id)):
+        for index, row in enumerate(iter_active_cognitive_items(
+                user_id, character_id, query=user_message)):
             _add(
                 'cognitive_state', row.get('text') or '',
-                40, f"cog:{row.get('kind')}:{index}",
-                {'kind': row.get('kind'), 'source_event_ids': row.get('source_event_ids')},
+                85 if row.get('critical_kind') else 40,
+                f"cog:{row.get('kind')}:{index}",
+                row,
                 subjective=True,
             )
     except Exception as exc:
@@ -1600,7 +1619,7 @@ def assemble_from_events(
         episode_prompt_text=_format_episode_block(episode_kept),
         relationship_prompt_text=_format_plain_block('', rel_kept),
         cognitive_prompt_text=_format_plain_block(
-            '【当前未决认知——主观，不是事实】', cog_kept),
+            '【当前认知——结论只表达，未决保持未决】', cog_kept),
         diary_hint_text=_format_plain_block('', [
             item for item in recall_kept if (item.metadata or {}).get('kind') == 'hint'
         ] + _take('diary')),

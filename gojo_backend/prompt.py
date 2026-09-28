@@ -500,7 +500,8 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
         accounts_text = getattr(context_pack, 'accounts_text', '') or _accounts_block(user_id)
     else:
         stage_text = build_relation_rules(first_days, bond_count, fact_count,
-                                          user_id=user_id, character_id=character_id)
+                                          user_id=user_id, character_id=character_id,
+                                          user_message=user_message)
         temporal_text = ''
         try:
             from temporal_awareness import build_prompt_context

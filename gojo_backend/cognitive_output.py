@@ -441,7 +441,7 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
         expected = {
             'question_key', 'question_text', 'status', 'evidence_refs',
         }
-        if set(update) != expected:
+        if not expected.issubset(update) or set(update) - expected - {'current_judgment'}:
             raise SlowLoopOutputError(f'question_update_{index}_fields_invalid')
         key = _key(update['question_key'], f'question_update_{index}_key')
         if key in question_keys:
@@ -468,6 +468,20 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
             'status': status,
             'evidence_refs': refs,
         })
+        if 'current_judgment' in update:
+            judgment = update['current_judgment']
+            if judgment is not None:
+                judgment = _object(judgment, f'question_update_{index}_current_judgment')
+                if set(judgment) != {'value', 'content', 'status'}:
+                    raise SlowLoopOutputError(f'question_update_{index}_judgment_fields_invalid')
+                if judgment['status'] not in {'current', 'committed'}:
+                    raise SlowLoopOutputError(f'question_update_{index}_judgment_status_invalid')
+                judgment = {
+                    'value': _text(judgment['value'], f'question_update_{index}_judgment_value', 80),
+                    'content': _text(judgment['content'], f'question_update_{index}_judgment_content', 600),
+                    'status': judgment['status'],
+                }
+            question_updates[-1]['current_judgment'] = judgment
 
     belief_updates = []
     belief_keys = set()
@@ -761,6 +775,7 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
         required = {'note_key', 'content', 'status', 'evidence_refs'}
         optional = {
             'expires_in_seconds', 'emotion', 'trigger_snippet', 'tone', 'tag',
+            'question_key',
         }
         if not required.issubset(update) or set(update) - required - optional:
             raise SlowLoopOutputError(
@@ -831,6 +846,9 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
             'status': status,
             'expires_in_seconds': ttl,
             'evidence_refs': refs,
+            'question_key': (_key(update['question_key'],
+                                  f'sticky_note_update_{index}_question_key')
+                             if update.get('question_key') else None),
         })
 
     diary_entries = []
@@ -1157,6 +1175,7 @@ def persist_slow_loop_output(
     cur, *, cycle_id, user_id, character_id, output, now,
 ):
     """Apply durable questions, hypotheses, predictions, and gated beliefs."""
+    from cognitive_events import question_transition_status
     refs_by_id = {
         item['event_id']: item for item in output['evidence_refs']
     }
@@ -1170,14 +1189,64 @@ def persist_slow_loop_output(
     event_metadata = _load_event_metadata(
         cur, user_id, character_id, all_referenced_event_ids,
     )
+    cur.execute(
+        '''SELECT question_key FROM cognitive_questions
+           WHERE user_id = %s AND character_id = %s
+             AND (status = 'resolved' OR metadata ? 'resolution') ''',
+        (user_id, character_id),
+    )
+    explicitly_resolved = {row[0] for row in cur.fetchall()}
 
     question_ids = {}
     for update in output['question_updates']:
+        cur.execute(
+            '''SELECT id, question_key, question_text, status, metadata, source_event_refs
+               FROM cognitive_questions WHERE user_id = %s AND character_id = %s
+                 AND (question_key = %s OR question_text = %s)
+               ORDER BY (question_key = %s) DESC, updated_at DESC LIMIT 1 FOR UPDATE''',
+            (user_id, character_id, update['question_key'], update['question_text'], update['question_key']),
+        )
+        previous = cur.fetchone()
+        if previous and previous[1] != update['question_key']:
+            raise SlowLoopOutputError('question_identity_mismatch_use_existing_key')
+        old_metadata = _json_meta(previous[4]) if previous else {}
+        status = question_transition_status(
+            previous[3] if previous else ('resolved' if update['question_key'] in explicitly_resolved else None),
+            update['status'], metadata=old_metadata)
+        was_resolved = (previous and (previous[3] == 'resolved' or old_metadata.get('resolution') is not None))
+        if was_resolved:
+            explicitly_resolved.add(update['question_key'])
         source_refs = full_refs(update['evidence_refs'])
         metadata = {
             'updated_by': 'cognitive_slow_loop',
             'lifecycle_separate_from_predictions': True,
         }
+        if status == 'resolved' and old_metadata.get('pending_answer'):
+            metadata['pending_answer'] = dict(old_metadata['pending_answer'], status='fulfilled')
+        if 'current_judgment' in update and update['question_key'] not in explicitly_resolved:
+            judgment = update['current_judgment']
+            if judgment is None:
+                metadata['current_judgment'] = None
+            else:
+                raw_ids = []
+                for event_id in update['evidence_refs']:
+                    event = event_metadata.get(event_id, {})
+                    payload = event.get('payload') or {}
+                    event_ids = payload.get('evidence_event_ids') or []
+                    if (not event_ids and event.get('source') in
+                            {'memory_extraction', 'relationship_engine_v4'}):
+                        event_ids = [event.get('source_event_id')]
+                    if event.get('source_event_type') == 'scheduled_reflection':
+                        continue
+                    for raw_id in event_ids:
+                        if isinstance(raw_id, str) and raw_id and raw_id not in raw_ids:
+                            raw_ids.append(raw_id)
+                if not raw_ids:
+                    raise SlowLoopOutputError('question_judgment_requires_factual_evidence')
+                metadata['current_judgment'] = dict(
+                    judgment, evidence_refs=source_refs, evidence_event_ids=raw_ids,
+                    cycle_id=cycle_id, updated_at=now.isoformat(),
+                )
         cur.execute(
             '''INSERT INTO cognitive_questions (
                    user_id, character_id, question_key, question_text,
@@ -1188,20 +1257,23 @@ def persist_slow_loop_output(
                ON CONFLICT (user_id, character_id, question_key) DO UPDATE
                SET question_text = EXCLUDED.question_text,
                    status = EXCLUDED.status,
-                   metadata = EXCLUDED.metadata,
-                   source_event_refs = EXCLUDED.source_event_refs,
+                   metadata = cognitive_questions.metadata || EXCLUDED.metadata,
+                   source_event_refs = cognitive_questions.source_event_refs
+                                       || EXCLUDED.source_event_refs,
                    updated_by_cycle_id = EXCLUDED.updated_by_cycle_id,
                    updated_at = EXCLUDED.updated_at
                RETURNING id''',
             (
                 user_id, character_id, update['question_key'],
-                update['question_text'], update['status'],
+                update['question_text'], status,
                 json.dumps(metadata, ensure_ascii=False),
                 json.dumps(source_refs, ensure_ascii=False),
                 cycle_id, cycle_id, now,
             ),
         )
         question_ids[update['question_key']] = cur.fetchone()[0]
+        if status == 'resolved':
+            explicitly_resolved.add(update['question_key'])
 
     def resolve_question_id(question_key):
         if question_key in question_ids:
@@ -1234,6 +1306,8 @@ def persist_slow_loop_output(
 
     hypothesis_ids = {}
     for update in output['hypothesis_updates']:
+        if update['question_key'] in explicitly_resolved:
+            continue
         question_id = resolve_question_id(update['question_key'])
         supporting_refs = full_refs(update['supporting_evidence_refs'])
         contradicting_refs = full_refs(update['contradicting_evidence_refs'])
@@ -1345,9 +1419,15 @@ def persist_slow_loop_output(
 
     belief_commit_decisions = []
     for update in output['belief_updates']:
+        existing = existing_beliefs.get(update['belief_key'])
+        review = existing.get('metadata', {}) if existing else {}
+        if (review.get('review_reason') == 'question_explicitly_resolved'
+                and review.get('resolution_event_id') not in update['evidence_refs']):
+            # An older running cycle cannot restore a conclusion whose source
+            # question was explicitly resolved while that cycle was generating.
+            continue
         hypothesis_id = resolve_hypothesis_id(update['from_hypothesis_key'])
         source_refs = full_refs(update['evidence_refs'])
-        existing = existing_beliefs.get(update['belief_key'])
         decision = _belief_commit_decision(
             update, source_refs, event_metadata, hypothesis_id,
             existing=existing,
@@ -1408,6 +1488,8 @@ def persist_slow_loop_output(
         )
 
     for prediction in output['new_predictions']:
+        if prediction['question_key'] in explicitly_resolved:
+            continue
         question_id = resolve_question_id(prediction['question_key'])
         hypothesis_id = resolve_hypothesis_id(prediction['hypothesis_key'])
         metadata = dict(prediction['metadata'])
@@ -1438,6 +1520,8 @@ def persist_slow_loop_output(
         )
 
     for note in output.get('sticky_note_updates', []):
+        if (note.get('question_key') or note['note_key']) in explicitly_resolved:
+            continue
         source_refs = full_refs(note['evidence_refs'])
         expires_at = (
             now + timedelta(seconds=note['expires_in_seconds'])
@@ -1449,6 +1533,7 @@ def persist_slow_loop_output(
             'tone': note.get('tone') or '',
             'trigger_snippet': note.get('trigger_snippet') or '',
             'tag': note.get('tag') or sticky_emotion_tag(note.get('emotion')),
+            'question_key': note.get('question_key'),
         }
         completed_at = now if note['status'] == 'completed' else None
         cur.execute(

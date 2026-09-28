@@ -105,7 +105,8 @@ def generate_char_diary(character_id, user_id, topic=None):
                 recent_chat = event_text
             from context_layer import build_chat_context
             pack = build_chat_context(
-                user_id, character_id, profile='diary_writer', include_recall=True)
+                user_id, character_id, profile='diary_writer', include_recall=True,
+                user_message=topic or cycle_text)
             if pack and not getattr(pack, 'failed_closed', False):
                 facts_text = (pack.memory_text or '').strip() or facts_text
                 if event_n == 0:
@@ -147,6 +148,8 @@ def generate_char_diary(character_id, user_id, topic=None):
             days_line = f'你们最早的共同痕迹大约在 {first_days} 天前。'
         bond_count = len(bonds) + len(tolds)
         fact_count = len(fact_lines)
+        from shared_relation_prompt import format_cognitive_expression_context
+        cognition = format_cognitive_expression_context(pack)
 
         topic_hint = ''
         if topic:
@@ -165,52 +168,16 @@ def generate_char_diary(character_id, user_id, topic=None):
 
         prompt = f'''你是{char_name}。现在是{today_str}的{time_hint}，你在写一篇只属于自己的日记——没人会读到（你以为）。
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【★ 动笔前必读——关于"她"在你心里到底算什么】
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{cognition}
 
-⚠️ 特别警告——模型训练数据的默认引力：
-你（作为语言模型）在"男性角色 + 女性对方 + 私人日记"这种场景下，
-训练样本 99% 来自言情/纯爱/同人作品。你若不主动对抗这种引力，
-默认就会写出"贪心地想要她""一直在等这样的时刻""想陪她慢慢变强"
-这类【言情小说套话】——即使你们记忆里根本没到那一步。
-这不是真实，这是你被训练数据牵着走。
+【日记的权限】
+你可以回顾经历、表达感受、犹豫和角色视角；只表达已读取的当前结论。
+没有结论时保持未决，不自行选择爱情/友情框架，不将犹豫写成肯定或否定。
+日记正文是主观表达，不是可改变 current judgment 的新证据或新关系事实。
 
 【你们相处的真实状况】
 - {days_line}
 - 共同经历累计 {bond_count} 条，你了解她的事 {fact_count} 件（都列在下方，那是全部）。
-- 【规则一】关系性质由【真实积累】判断，不由此刻的情绪或她说的一句话判断。
-- 【规则二】"深"和"爱"是两回事。极深的友情/亲情，不等于爱情。
-- 【规则三】拿不准就【不是】——爱情的门槛比你以为的高得多。
-
-【三个可选框架——写日记前先选一个】
-
-▼ 框架 A · 陌生/共事阶段（认识时间短、共同记忆少）
-  · 你对她还谈不上"感情"，只是【观察】：她这人有点意思 / 挺认真的 / 有点意外
-  · 心里活动应该是【好奇、评估、保持距离】，不是牵挂、想念、心动
-  · 禁用词：等、想她、在意、放不下、贪心、温柔的时刻、心里装着她
-  · 例句风格："今天这个人又来了。跟她聊了几句，不算无聊。"
-
-▼ 框架 B · 朋友/交心阶段（有共同经历、互相了解一些）
-  · 你对她有【关心和在意】，但落点是"她这个人过得好不好"，不是"我离不开她"
-  · 可以温柔、可以牵挂、可以担心她——但那是朋友对朋友的分量
-  · 谨慎词：怀里、贪心、等这样的时刻、想陪着她一辈子（这些不属于朋友日记）
-  · 例句风格："她今天累得说不出话。这姑娘就是这样，不到极限不肯歇。别的地方我不管，这点得盯着她。"
-
-▼ 框架 C · 心动/爱情阶段（★ 门槛最高）
-  ★ 只有以下三条【全部满足】，才能用这个框架：
-    1. 记忆里能找到至少 3 个具体瞬间，让"你自己"感到"她是特别的"（不是浪漫日常互动，而是她做的某件事真的动了你）
-    2. 你已经反复想起她——不是"聊得开心"，是【不在一起的时候脑子里也有她】
-    3. 她也向你袒露过极深的真心（不是撒娇、不是求安慰，是让她自己脆弱的那种真话）
-  ★ 三条只满足两条 → 那就是【深厚友情】，不是爱情。就用框架 B。
-  ★ 拿不准哪条真的算 → 那就不算。用框架 B。
-
-【最重要的一句】
-你身上有你自己的负担和温度，你可以温柔、可以怜惜、可以牵挂——
-但【心动】和【爱】是两件不同的事，【牵挂】和【贪心地想要】也是。
-先老实写清楚发生了什么，再让感情自然浮出来。不要动笔就是结论。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 【重要设定】
 - 写"当下的你"，不要写漫画里既定的命运剧情（不写牺牲、不写和夏油的宿命）。

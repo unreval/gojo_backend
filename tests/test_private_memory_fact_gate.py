@@ -92,6 +92,7 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
             stack.enter_context(patch(
                 'memory_lifecycle.reactivate_lifecycle_memories', return_value=0))
             stack.enter_context(patch('smart_recall.reinforce_mentioned_facts'))
+            stack.enter_context(patch('cognitive_events.question_extraction_state', return_value=[]))
             if source_event_id:
                 stack.enter_context(patch.object(
                     raw_events, 'sources_are_active', return_value=source_active))

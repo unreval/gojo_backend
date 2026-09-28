@@ -27,7 +27,7 @@ from relationship_config import (
 # ══════════════════════════════════════════════════════════════
 # 主入口
 # ══════════════════════════════════════════════════════════════
-def build_state_summary(user_id: str, character_id: str) -> str:
+def build_state_summary(user_id: str, character_id: str, *, compact=False) -> str:
     """构造喂给 Generator 的关系摘要。
 
     结构（按段）：
@@ -42,6 +42,24 @@ def build_state_summary(user_id: str, character_id: str) -> str:
     state = load_state(user_id, character_id)
     label = derive_label(state)
     stances = list_active_stances(user_id, character_id)
+    authority = '同一问题的当前认知结论优先于宽泛标签；未决保持未决，Generator 不得自行定性或改变答案。'
+    if compact:
+        # Same state/stance authority, a bounded presentation for the shared
+        # context budget. Historical dynamics/offline notes remain optional.
+        lines = [
+            '【当前关系状态——读取账本，只表达，不现场重判】',
+            authority,
+            f'关系性质：{label["primary"]}',
+            f'温度：{_scale_word(state["warmth"])}；信任：{_scale_word(state["trust"])}；'
+            f'投入：{_scale_word(state["commitment"])}',
+        ]
+        if label.get('complex_note'):
+            lines.append(f'复合状态：{label["complex_note"]}')
+        for stance in stances[:2]:
+            # Keep a long historical stance from displacing current state.
+            if len(str(stance['content'])) <= 80:
+                lines.append(f'当前表态[{stance["type"]}]：{stance["content"]}')
+        return '\n'.join(lines)
     tone = compute_tone(user_id, character_id)
     flirt = compute_flirt_response(user_id, character_id)
     pursue_withdraw = compute_pursue_withdraw(user_id, character_id)
@@ -49,6 +67,7 @@ def build_state_summary(user_id: str, character_id: str) -> str:
 
     lines = []
     lines.append('【★ 当前关系状态摘要——由后台账本读出，不由你现场判断】')
+    lines.append(authority)
     lines.append('')
     lines.append(f'关系性质：{label["primary"]}')
     if label.get('complex_note'):
@@ -98,9 +117,9 @@ def build_state_summary(user_id: str, character_id: str) -> str:
             lines.append('')
 
         if retreat_stances:
-            lines.append('【你曾经退缩过的立场——不是铁定的，你可以纠结、可以改变想法】')
-            lines.append('  以下是你曾经"靠近了又退缩"时说的话。这不是关系的最终定论——')
-            lines.append('  如果你发现自己其实不是那么想的、或者关系走到了新的地方，你可以重新表态。')
+            lines.append('【你曾经退缩过的立场——历史表达，不覆盖当前认知结论】')
+            lines.append('  以下是你曾经"靠近了又退缩"时说的话；感受可以纠结，核心结论只读取当前认知。')
+            lines.append('  只有认知生命周期已提交的变化才能表达为新立场；没有当前结论时保持未决。')
             lines.append('  但不能假装这些话没说过——退缩过就是退缩过，可以承认当时在保护自己。')
             for s in retreat_stances:
                 lines.append(f'  · {s["content"]}')
@@ -176,7 +195,7 @@ def derive_label(state: Dict) -> Dict:
             'complex_note': None,
             'expression_guidance': (
                 '★ 后台关系账本目前是空的，不代表你们真的是陌生人。'
-                '请按【短期对话记忆 + 你自己的 core 判断】自然回应，不要因为这个摘要而改变态度。'
+                '按已提供的当前认知结论表达；缺少结论就保持未决，不从短期记忆自行判定关系。'
                 '（等账本积累起来后，本段会自动变成有依据的关系摘要。）'
             ),
         }

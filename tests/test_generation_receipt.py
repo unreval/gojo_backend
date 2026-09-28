@@ -73,6 +73,14 @@ def stub(name, **attributes):
     return module
 
 
+def canonical_assistant_events(_user_id, _character_id, event_ids):
+    """Match the receipt fixtures' stubbed assistant aggregate writer."""
+    return [
+        {'event_id': event_id, 'role': 'assistant', 'content': 'canonical reply fixture'}
+        for event_id in event_ids
+    ]
+
+
 def load_source(name, modules):
     with patch.dict(sys.modules, modules):
         spec = importlib.util.spec_from_file_location(
@@ -760,6 +768,7 @@ class RouteIdempotencyTests(unittest.TestCase):
             ),
             'raw_events': stub(
                 'raw_events',
+                get_active_events_by_ids=canonical_assistant_events,
                 SourceValidityError=type('SourceValidityError', (Exception,), {})),
             'db_chat_media': stub(
                 'db_chat_media',
@@ -1558,6 +1567,10 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
                 update_chat_days=Mock(return_value=1),
             ),
             'memory_jobs': stub('memory_jobs', enqueue_private_extraction=self.jobs),
+            'raw_events': stub(
+                'raw_events',
+                get_active_events_by_ids=canonical_assistant_events,
+                SourceValidityError=type('SourceValidityError', (Exception,), {})),
             'temporal_awareness': stub(
                 'temporal_awareness',
                 get_temporal_snapshot=Mock(return_value={}),

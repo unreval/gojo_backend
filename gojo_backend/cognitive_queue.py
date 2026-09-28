@@ -171,6 +171,19 @@ def recover_expired_claims(user_id, character_id, *, conn=None, now=None):
             database.close()
 
 
+def _suppress_daily_limited_triggers(cur, user_id, character_id, now):
+    """One quota policy at aggregation AND success cleanup; promises stay pending."""
+    cur.execute(
+        '''UPDATE cognitive_event_triggers
+           SET status = 'suppressed', slow_cycle_suppressed_reason = 'daily_limit',
+               suppressed_at = %s
+           WHERE user_id = %s AND character_id = %s AND status = 'pending'
+             AND payload->>'reason' IS DISTINCT FROM 'pending_answer' ''',
+        (now, user_id, character_id),
+    )
+    return cur.rowcount
+
+
 def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
     """Claim pending occurrences into one queued cycle under a short xact lock."""
     database, owns_connection = _get_connection(conn)
@@ -214,16 +227,7 @@ def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
         )
         successful_today = int(cur.fetchone()[0])
         if successful_today >= COGNITIVE_DAILY_CYCLE_LIMIT:
-            cur.execute(
-                '''UPDATE cognitive_event_triggers
-                   SET status = 'suppressed',
-                       slow_cycle_suppressed_reason = 'daily_limit',
-                       suppressed_at = %s
-                   WHERE user_id = %s AND character_id = %s
-                     AND status = 'pending' ''',
-                (current_time, user_id, character_id),
-            )
-            suppressed = cur.rowcount
+            suppressed = _suppress_daily_limited_triggers(cur, user_id, character_id, current_time)
             database.commit()
             return {
                 'status': 'daily_limit',
@@ -607,15 +611,7 @@ def commit_cycle_success(
             ),
         )
         if int(cur.fetchone()[0]) >= COGNITIVE_DAILY_CYCLE_LIMIT:
-            cur.execute(
-                '''UPDATE cognitive_event_triggers
-                   SET status = 'suppressed',
-                       slow_cycle_suppressed_reason = 'daily_limit',
-                       suppressed_at = %s
-                   WHERE user_id = %s AND character_id = %s
-                     AND status = 'pending' ''',
-                (current_time, user_id, character_id),
-            )
+            _suppress_daily_limited_triggers(cur, user_id, character_id, current_time)
         database.commit()
         return {
             'status': 'succeeded',
@@ -768,7 +764,8 @@ def build_reasoning_context(cycle_id, *, conn=None):
                 reactivated_questions.append({
                     'question_id': payload.get('question_id'),
                     'similarity': payload.get('similarity'),
-                    'relation': 'possibly_related',
+                    'relation': payload.get('relation', 'possibly_related'),
+                    'reason': payload.get('reason'),
                 })
 
         settled_predictions = []
@@ -822,7 +819,7 @@ def build_reasoning_context(cycle_id, *, conn=None):
 
         cur.execute(
             '''SELECT question_key, question_text, status,
-                      source_event_refs, updated_at
+                      source_event_refs, updated_at, metadata
                FROM cognitive_questions
                WHERE user_id = %s AND character_id = %s
                  AND status IN ('active', 'dormant')
@@ -838,8 +835,26 @@ def build_reasoning_context(cycle_id, *, conn=None):
                 'source_event_refs': _json_value(row[3], []),
                 'updated_at': row[4],
                 'lifecycle': 'separate_from_prediction_status',
+                'metadata': _json_value(row[5], {}) if len(row) > 5 else {},
             }
             for row in cur.fetchall()
+        ]
+
+        cur.execute(
+            '''SELECT question_key, question_text, metadata, source_event_refs
+               FROM cognitive_questions
+               WHERE user_id = %s AND character_id = %s
+                 AND status = 'resolved' AND metadata ? 'resolution'
+               ORDER BY updated_at DESC, id DESC LIMIT 6''',
+            (user_id, character_id),
+        )
+        explicit_resolutions = [
+            {'question_key': row[0], 'question_text': row[1],
+             'resolution': _json_value(row[2], {}).get('resolution'),
+             'source_event_refs': _json_value(row[3], [])}
+            for row in cur.fetchall()
+            if isinstance(_json_value(row[2], {}), dict)
+            and _json_value(row[2], {}).get('resolution')
         ]
 
         cur.execute(
@@ -985,6 +1000,7 @@ def build_reasoning_context(cycle_id, *, conn=None):
             'settled_predictions': settled_predictions,
             'reactivated_questions': reactivated_questions,
             'current_questions': current_questions,
+            'explicit_resolutions': explicit_resolutions,
             'current_beliefs': current_beliefs,
             'current_hypotheses': current_hypotheses,
             'pending_predictions': pending_predictions,

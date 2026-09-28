@@ -132,6 +132,15 @@ def passthrough_generation_receipt():
                             one_ctx.get('user_text') or '', reply_zh)
                 return {}
             from generation_effects import apply_effect
+            if effect == 'private_extraction':
+                # This harness stubs the aggregate writer. Its canonical read
+                # must stay in-memory too; production verifies the real ledger.
+                one_ctx = dict(one_ctx)
+                one_ctx.setdefault('get_active_events_by_ids', lambda _u, _c, ids: [
+                    {'event_id': event_id, 'role': 'assistant',
+                     'content': one_ctx.get('full_jp') or 'canonical reply fixture'}
+                    for event_id in ids
+                ])
             return apply_effect(effect, one_ctx)
 
         for effect in needed_effects(endpoint, payload, ctx):

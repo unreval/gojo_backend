@@ -285,6 +285,27 @@ Scope:
 Questions:
 - Every open/supported hypothesis must keep a real unresolved question_key.
 - Reuse the same question_key instead of creating near-duplicates.
+- Resolved questions stay resolved. Ordinary output/retry/pending_answer cannot
+  reopen them or replace their answer; no explicit reopen protocol is enabled.
+- metadata.pending_answer is a witnessed promise to answer, not an answer.
+  Reflect on that question in this cycle even without a new inbound message.
+  Keep it open until a supported judgment/explicit resolution exists; never
+  infer yes/no merely because an answer was promised.
+- You own the narrow current answer, not the Generator. When the evidence
+  supports one, include optional question_updates[].current_judgment:
+  {"value":"yes|no|other narrow decision", "content":"the current answer",
+   "status":"current|committed"}. It inherits that question update's cited
+  evidence_refs. This is a scoped current decision, NOT a stable personality
+  belief and does not require promoting one episode to a durable trait.
+  The Generator must express this decision without deciding yes/no again.
+  Keep the pending question active until the promised answer is expressed.
+  If still uncertain, omit the judgment; if current evidence invalidates an
+  earlier judgment, explicitly set current_judgment:null. A clock tick or the
+  mere existence of a promise is not evidence for choosing yes or no.
+- Explicit resolution evidence is authoritative for that narrow question.
+  Do not reopen it from an older uncertain hypothesis or general persona.
+- A sticky about an unresolved question must include optional question_key
+  so resolving that question can retire its obsolete reminder.
 
 Shared relationship frame:
 - Maintain belief_key shared.relationship.frame when evidence supports how both
@@ -571,6 +592,13 @@ def run_worker_once(*, create_chat_fn=None, now=None):
     cycle_id = claimed['cycle_id']
     try:
         context = build_reasoning_context(cycle_id)
+        for trigger in context.get('triggers', []):
+            payload = trigger.get('payload') or {}
+            if payload.get('reason') in {'pending_answer', 'resolution'}:
+                print('[cognitive_trace] '
+                      f'question_id={payload.get("question_id")} '
+                      f'trigger=question_reactivation cycle_id={cycle_id} '
+                      'status=processing', flush=True)
         output, usage = generate_cycle_output(
             context, create_chat_fn=create_chat_fn,
         )

@@ -7,7 +7,7 @@ no tokenizer service, no network.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -277,9 +277,74 @@ def allocate_channels(
     grouped: Dict[str, Sequence[ContextItem]],
     config: Optional[BudgetConfig] = None,
 ) -> Dict[str, List[ContextItem]]:
-    """Floor + share + unused-budget borrow. Hot keeps the newest turn."""
+    """Reserve a small working set inside the existing total, never above it.
+
+    Validity/relevance are reader responsibilities. Only explicitly marked
+    candidates qualify, one per kind; ordinary facts cannot spend this budget.
+    The newest hot message keeps its existing whole-message protection.
+    """
     cfg = config or BudgetConfig()
     total = max(1, int(cfg.total_token_budget))
+    hot = list(grouped.get('hot') or [])
+    newest = hot[-1] if hot else None
+    latest_cost = newest.token_cost if newest else 0
+    available = max(0, total - latest_cost)
+    reserved_budget = min(900, int(total * .25), available)
+    kind_order = {
+        'relationship': 0, 'judgment': 1, 'question': 2,
+        'promise': 3, 'prediction': 4, 'sticky': 5,
+    }
+    candidates = [
+        item for rows in grouped.values() for item in rows
+        if item.metadata.get('critical_kind') in kind_order
+    ]
+    candidates.sort(key=lambda item: (
+        kind_order[item.metadata['critical_kind']],
+        -int(item.metadata.get('authority_priority') or 0),
+        -float(item.metadata.get('relevance') or 0), -item.priority,
+    ))
+    reserved, seen_kinds, seen_text = [], set(), set()
+    used = 0
+    for item in candidates:
+        kind = item.metadata['critical_kind']
+        text_key = ''.join(item.text.lower().split())
+        if kind in seen_kinds or text_key in seen_text:
+            reason = 'per_kind_limit_or_duplicate'
+        elif item.token_cost > reserved_budget:
+            reason = 'item_exceeds_reserved_budget'
+        elif used + item.token_cost > reserved_budget:
+            reason = 'reserved_budget_exhausted'
+        else:
+            reserved.append(item)
+            seen_kinds.add(kind)
+            seen_text.add(text_key)
+            used += item.token_cost
+            reason = 'reserved'
+        item.metadata['critical_reservation_reason'] = reason
+    locked = {id(item) for item in reserved}
+    if newest is not None:
+        locked.add(id(newest))
+    ordinary = {
+        name: [item for item in rows if id(item) not in locked]
+        for name, rows in grouped.items()
+    }
+    out = _allocate_regular_channels(
+        ordinary, replace(cfg, total_token_budget=max(0, available - used)),
+    )
+    for item in reserved:
+        out.setdefault(item.channel, []).append(item)
+    if newest is not None:
+        out.setdefault('hot', []).append(newest)
+    return out
+
+
+def _allocate_regular_channels(
+    grouped: Dict[str, Sequence[ContextItem]],
+    config: Optional[BudgetConfig] = None,
+) -> Dict[str, List[ContextItem]]:
+    """Floor + share + unused-budget borrow. Hot keeps the newest turn."""
+    cfg = config or BudgetConfig()
+    total = max(0, int(cfg.total_token_budget))
     specs = CHANNEL_SPECS
     requested = {}
     for name in specs:
@@ -335,7 +400,7 @@ def allocate_channels(
         items = list(grouped.get(name) or [])
         budget = granted[name]
         if name == 'hot':
-            out[name] = trim_items(items, budget, drop_from='oldest', keep_last=True)
+            out[name] = trim_items(items, budget, drop_from='oldest')
         elif name == 'pinned':
             out[name] = trim_items(items, budget, drop_from='priority')
         else:

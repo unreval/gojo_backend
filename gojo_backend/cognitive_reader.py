@@ -1,6 +1,7 @@
 """Read-only bridge from durable Slow Loop state into character context."""
 import json
 import re
+from datetime import datetime, timezone
 
 from cognitive_config import (
     COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
@@ -47,10 +48,13 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
         cycle_row = cur.fetchone()
 
         cur.execute(
-            '''SELECT question_key, question_text, status, updated_at
+            '''SELECT question_key, question_text, status, updated_at,
+                      metadata, source_event_refs
                FROM cognitive_questions
                WHERE user_id = %s AND character_id = %s
-                 AND status IN ('active', 'dormant')
+                 AND (status IN ('active', 'dormant')
+                      OR (status = 'resolved' AND
+                          (metadata ? 'resolution' OR metadata ? 'current_judgment')))
                ORDER BY updated_at DESC, id DESC
                LIMIT 6''',
             (user_id, character_id),
@@ -61,13 +65,15 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                 'question_text': row[1],
                 'status': row[2],
                 'updated_at': row[3],
+                'metadata': _json_value(row[4] if len(row) > 4 else {}, {}),
+                'source_event_refs': _json_value(row[5] if len(row) > 5 else [], []),
             }
             for row in cur.fetchall()
         ]
 
         cur.execute(
             '''SELECT belief_key, statement, confidence, belief_type,
-                      updated_at, metadata
+                      updated_at, metadata, evidence_refs
                FROM cognitive_beliefs
                WHERE user_id = %s AND character_id = %s
                  AND status = 'active'
@@ -84,13 +90,14 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                 'updated_at': row[4],
                 'metadata': _json_value(row[5] if len(row) > 5 else {}, {}),
                 'status': 'active',
+                'evidence_refs': _json_value(row[6] if len(row) > 6 else [], []),
             }
             for row in cur.fetchall()
         ]
 
         cur.execute(
             '''SELECT hypothesis_key, statement, status, hypothesis_type,
-                      confidence, updated_at
+                      confidence, updated_at, supporting_evidence_refs
                FROM cognitive_hypotheses
                WHERE user_id = %s AND character_id = %s
                  AND status IN ('open', 'supported')
@@ -106,12 +113,14 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                 'hypothesis_type': row[3],
                 'confidence': float(row[4]),
                 'updated_at': row[5],
+                'evidence_refs': _json_value(row[6] if len(row) > 6 else [], []),
             }
             for row in cur.fetchall()
         ]
 
         cur.execute(
-            '''SELECT id, note_key, content, status, expires_at, updated_at
+            '''SELECT id, note_key, content, status, expires_at, updated_at,
+                      source_event_refs
                FROM cognitive_sticky_notes
                WHERE user_id = %s AND character_id = %s
                  AND status = 'active'
@@ -133,10 +142,24 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                 'status': row[3],
                 'expires_at': row[4],
                 'updated_at': row[5],
+                'source_event_refs': _json_value(row[6] if len(row) > 6 else [], []),
             }
             for row in cur.fetchall()
         ]
 
+        cur.execute(
+            '''SELECT prediction_key, metadata, expires_at
+               FROM cognitive_predictions
+               WHERE user_id=%s AND character_id=%s AND status='pending'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+               ORDER BY created_at DESC, id DESC LIMIT 4''',
+            (user_id, character_id),
+        )
+        predictions = [
+            {'prediction_key': row[0], 'metadata': _json_value(row[1], {}),
+             'expires_at': row[2], 'status': 'pending'}
+            for row in cur.fetchall()
+        ]
         summary = _json_value(cycle_row[0], {}) if cycle_row else {}
         reflection_note = _json_value(cycle_row[1], {}) if cycle_row else {}
         return {
@@ -149,6 +172,7 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
             'beliefs': beliefs,
             'hypotheses': hypotheses,
             'sticky_notes': sticky_notes,
+            'predictions': predictions,
         }
     finally:
         cur.close()
@@ -220,13 +244,22 @@ def fetch_shared_frame(user_id, character_id, *, conn=None):
             database.close()
 
 
-def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
+def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=None):
     """Format current cognition only; model reasoning and predictions stay private."""
     state = fetch_cognitive_reader_state(
         user_id, character_id, conn=conn,
     )
+    if query is not None:
+        items = iter_active_cognitive_items(
+            user_id, character_id, conn=conn, query=query, _state=state,
+        )
+        if not items:
+            return ''
+        return '【当前认知——结论只表达，未决保持未决】\n' + '\n'.join(
+            row['text'] for row in items)
     reflection_note = state['reflection_note']
-    questions = state['questions']
+    questions = [row for row in state['questions']
+                 if row.get('status') in ('active', 'dormant')]
     beliefs = state['beliefs']
     hypotheses = state['hypotheses']
     sticky_notes = state['sticky_notes']
@@ -317,77 +350,134 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None):
     return '\n'.join(lines)
 
 
-def iter_active_cognitive_items(user_id, character_id, *, conn=None):
-    """Active working-set only: questions, open hypotheses, sticky, recent errors.
+def iter_active_cognitive_items(user_id, character_id, *, conn=None,
+                                query='', now=None, _state=None):
+    """Select the current, relevant working set from the existing Slow Loop.
 
-    Does not dump the full belief ledger into the chat prompt.
+    No second judgment engine: confidence/revision/lifecycle were decided by
+    the writers. This reader only validates, matches the query, and deduplicates.
     """
-    state = fetch_cognitive_reader_state(user_id, character_id, conn=conn)
+    state = _state if _state is not None else fetch_cognitive_reader_state(
+        user_id, character_id, conn=conn)
     items = []
-    for question in state.get('questions') or []:
-        if question.get('status') != 'active':
+    seen = set()
+    now = now or datetime.now(timezone.utc)
+    from context_layer import _summary_recall_terms
+    query_terms = _summary_recall_terms(query)
+
+    def add(kind, text, row, critical_kind=None, *, related_text='', raw_ids=(),
+            authority_priority=0):
+        text = _safe_text(text, 520)
+        if not text:
+            return
+        relevance = len(query_terms & _summary_recall_terms(text + ' ' + related_text))
+        if query_terms and not relevance:
+            return
+        expires = row.get('expires_at')
+        if expires:
+            if isinstance(expires, str):
+                expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+            if expires.replace(tzinfo=expires.tzinfo or timezone.utc) <= now:
+                return
+        raw_ids = list(raw_ids)
+        refs = [] if raw_ids else (row.get('source_event_refs') or row.get('evidence_refs') or [])
+        for ref in refs:
+            if isinstance(ref, dict) and ref.get('source') in (
+                    'memory_extraction', 'raw_event', 'chat_log', 'relationship_engine_v4'):
+                source_id = str(ref.get('source_id') or '')
+                source_id = source_id.removeprefix('memory_job:').removeprefix('raw_event:')
+                if source_id:
+                    raw_ids.append(source_id)
+        raw_ids = list(dict.fromkeys(str(value) for value in raw_ids if value))
+        if raw_ids:
+            try:
+                from raw_events import get_active_events_by_ids
+                active = get_active_events_by_ids(user_id, character_id, raw_ids, conn=conn)
+                if {str(row.get('event_id')) for row in active} != set(raw_ids):
+                    print('[cognitive_context] candidate_dropped reason=inactive_source')
+                    return
+            except Exception:
+                print('[cognitive_context] candidate_dropped reason=source_validity_unavailable')
+                return
+        normalized = ''.join(text.lower().split())
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        items.append({
+            'kind': kind, 'text': text, 'source_event_ids': tuple(raw_ids),
+            'subjective': True, 'critical_kind': critical_kind,
+            'relevance': relevance, 'authority_priority': authority_priority,
+        })
+        return True
+
+    for belief in state.get('beliefs') or []:
+        if not is_stable_reader_belief(belief):
             continue
+        add('cognitive_judgment',
+            '当前已形成的判断（只表达，不现场重判）：' + current_belief_display(belief),
+            belief, 'judgment')
+    for question in state.get('questions') or []:
+        meta = question.get('metadata') or {}
+        resolution = meta.get('resolution') or {}
         text = _safe_text(question.get('question_text'), 420)
-        if text:
-            items.append({
-                'kind': 'cognitive_question',
-                'text': f'未解决问题：{text}',
-                'source_event_ids': (),
-                'subjective': True,
-            })
+        pending = meta.get('pending_answer') or {}
+        followup_text = ''
+        if pending.get('status') == 'pending':
+            # A short "答案呢" refers to the pending answer without repeating
+            # the original question. Match only this same question's promise.
+            followup_text = str(pending.get('content') or '') + ' 待回答的问题答案'
+        if question.get('status') == 'resolved' and resolution:
+            add('cognitive_judgment',
+                f'当前已明确的结论：{resolution.get("content") or resolution.get("value")}',
+                question, 'judgment', related_text=text,
+                raw_ids=resolution.get('evidence_event_ids') or (), authority_priority=2)
+            continue
+        if question.get('status') not in ('active', 'resolved'):
+            continue
+        judgment = meta.get('current_judgment') or {}
+        judgment_added = False
+        if judgment.get('status') in ('current', 'committed') and judgment.get('content'):
+            judgment_added = add('cognitive_judgment',
+                f'当前问题的已形成判断（READ → EXPRESS）：{judgment["content"]}',
+                question, 'judgment', related_text=text + ' ' + followup_text,
+                raw_ids=judgment.get('evidence_event_ids') or (), authority_priority=1)
+        if not judgment_added and question.get('status') == 'active':
+            add('cognitive_question', f'未解决问题（unresolved，不能现场决定 yes/no）：{text}',
+                question, 'question', related_text=followup_text)
+        if pending.get('status') == 'pending':
+            add('cognitive_promise', f'待履行的明确承诺：{pending.get("content") or text}',
+                question, 'promise', related_text=text + ' ' + followup_text,
+                raw_ids=pending.get('evidence_event_ids') or ())
     for hypothesis in state.get('hypotheses') or []:
         if hypothesis.get('status') not in ('open', 'supported'):
             continue
         text = _safe_text(hypothesis.get('statement'), 420)
         if text:
-            items.append({
-                'kind': 'cognitive_hypothesis',
-                'text': f'进行中的假设（主观，待验证）：{text}',
-                'source_event_ids': (),
-                'subjective': True,
-            })
+            add('cognitive_hypothesis', f'进行中的假设（主观，待验证）：{text}', hypothesis)
     for note in state.get('sticky_notes') or []:
+        if note.get('status') != 'active':
+            continue
         text = _safe_text(note.get('content'), 300)
         if text:
-            items.append({
-                'kind': 'cognitive_sticky',
-                'text': f'近期备忘：{text}',
-                'source_event_ids': parse_source_ids(note) if False else (),
-                'subjective': True,
-            })
-    try:
-        database = conn
-        owns = database is None
-        if database is None:
-            from db import get_conn
-            database = get_conn()
-        cur = database.cursor()
-        try:
-            cur.execute(
-                '''SELECT prediction_key, metadata, settled_at
-                   FROM cognitive_predictions
-                   WHERE user_id=%s AND character_id=%s AND status='violated'
-                   ORDER BY settled_at DESC NULLS LAST, id DESC
-                   LIMIT 2''',
-                (user_id, character_id),
-            )
-            for key, metadata, settled in cur.fetchall() or []:
-                meta = _json_value(metadata, {})
-                statement = _safe_text(meta.get('statement') or key, 280)
-                if statement:
-                    items.append({
-                        'kind': 'cognitive_prediction_error',
-                        'text': f'最近一次预测落空：{statement}',
-                        'source_event_ids': (),
-                        'subjective': True,
-                    })
-        finally:
-            cur.close()
-            if owns:
-                database.close()
-    except Exception:
-        pass
-    return items
+            add('cognitive_sticky', f'近期备忘：{text}', note, 'sticky')
+    for prediction in state.get('predictions') or []:
+        if prediction.get('status') != 'pending':
+            continue
+        meta = prediction.get('metadata') or {}
+        text = meta.get('statement') or meta.get('description')
+        if text:
+            add('cognitive_prediction', f'待验证预测（不是事实）：{text}',
+                {**prediction, 'evidence_refs': meta.get('evidence_refs') or []}, 'prediction')
+    ranked = sorted(items, key=lambda row: (
+        -row['authority_priority'], -row['relevance']))
+    counts, selected = {}, []
+    for row in ranked:
+        kind = row['kind']
+        if counts.get(kind, 0) >= 2:
+            continue
+        counts[kind] = counts.get(kind, 0) + 1
+        selected.append(row)
+    return selected[:12]
 
 
 def _iso(value):
