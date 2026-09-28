@@ -11,6 +11,11 @@ from cognitive_triggers import (
     create_trigger_occurrence,
     high_weight_trigger_specs,
 )
+from relationship_semantics import (
+    ROMANTIC_LABEL_KEY,
+    is_nonrelationship_generated_source,
+    normalize_romantic_label,
+)
 
 
 def _utc_now(value=None):
@@ -282,6 +287,8 @@ def ingest_question_update(
     if update_type == 'resolution' and update.get('value') in (None, ''):
         raise ValueError('question_resolution_requires_value')
     evidence_ids, evidence, source_id = validate_question_operation_evidence(update, canonical_events)
+    if is_nonrelationship_generated_source(source_id):
+        return {'status': 'skipped_nonrelationship_generated_source'}
     event_time = _utc_now(occurred_at)
     database = conn
     owns_connection = database is None
@@ -315,6 +322,11 @@ def ingest_question_update(
             raise ValueError('question_update_unknown_key_without_question_text')
         if not question_key:
             question_key = 'explicit.' + hashlib.sha256(question_text.encode('utf-8')).hexdigest()[:24]
+        resolution_value = update.get('value')
+        if update_type == 'resolution' and question_key == ROMANTIC_LABEL_KEY:
+            resolution_value = normalize_romantic_label(resolution_value)
+            if resolution_value is None:
+                raise ValueError('relationship_romantic_label_resolution_invalid')
         metadata = dict(_question_json(previous[4], {}) if previous else {})
         # A postponed answer is not evidence that a prior explicit yes/no vanished.
         status = question_transition_status(
@@ -330,7 +342,8 @@ def ingest_question_update(
             source_event_type=f'question_{update_type}:{question_key}',
             source_event_id=source_id, source='memory_extraction', occurred_at=event_time,
             payload={'question_key': question_key, 'question_text': question_text,
-                     'type': update_type, 'content': content, 'value': update.get('value'),
+                     'type': update_type, 'content': content,
+                     'value': resolution_value,
                      'evidence_event_ids': evidence_ids,
                      'canonical_turns': [{'event_id': e['event_id'], 'role': e['role'],
                                           'content': e.get('content', '')} for e in evidence]},
@@ -352,7 +365,7 @@ def ingest_question_update(
                                          'promised_at': event_time.isoformat(),
                                          'evidence_event_ids': evidence_ids}
         else:
-            metadata['resolution'] = {'value': update['value'], 'content': content,
+            metadata['resolution'] = {'value': resolution_value, 'content': content,
                                       'actor': update.get('actor', 'character'),
                                       'evidence_event_ids': evidence_ids,
                                       'resolved_at': event_time.isoformat()}
@@ -361,7 +374,7 @@ def ingest_question_update(
                     'explicit_decision', 'relationship_resolution',
                     'answer_to_unresolved_question'}):
                 metadata['resolution']['bond_delta'] = {
-                    'kind': update['kind'], 'content': content, 'value': update['value'],
+                    'kind': update['kind'], 'content': content, 'value': resolution_value,
                     'actor': update.get('actor', 'character'),
                     'question_key': question_key, 'question_text': question_text,
                     'replaces': [item for item in update.get('replaces', []) if isinstance(item, str)],
@@ -458,6 +471,15 @@ def ingest_v4_signals(
     aggregate=True,
 ):
     """Ingest the existing relationship v4 signal list without reshaping it."""
+    if is_nonrelationship_generated_source(source_event_id):
+        return {
+            'status': 'skipped_nonrelationship_generated_source',
+            'event_id': None,
+            'trigger_ids': [],
+            'settled_predictions': [],
+            'reactivated_questions': [],
+            'cycle': None,
+        }
     database = conn
     owns_connection = database is None
     if database is None:

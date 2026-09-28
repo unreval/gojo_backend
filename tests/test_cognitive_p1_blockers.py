@@ -327,18 +327,30 @@ class RuntimeCognitionTests(unittest.TestCase):
         import relationship_reader as reader
         state = dict.fromkeys(('warmth', 'intimacy', 'trust', 'attachment', 'commitment', 'passion'), 0)
         state['friction'] = {}
+        panel = {
+            'ledger': {**state, 'has_state_row': True},
+            'attachment': {'status': 'observed', 'value': 0},
+            'commitment': {'status': 'observed', 'value': 0},
+            'engagement_style': {'status': 'unassessed', 'value': 'unassessed'},
+            'romantic_label': {'value': 'unresolved'},
+            'romantic_openness': {'status': 'unassessed', 'value': 'unassessed'},
+            'care': {'active': [], 'historical': []},
+            'boundary': {'active': [], 'historical': []},
+            'internal_conflict': {'status': 'unassessed', 'value': 'unassessed'},
+            'direction': {'status': 'unassessed', 'value': 'unassessed'},
+            'legacy_label': {'value': 'legacy:ledger_unassessed'},
+        }
         with ExitStack() as stack:
-            for name, value in [('load_state', state), ('list_active_stances',
-                    [{'type': 'retreat_boundary', 'content': '我之前退缩过'}]),
+            for name, value in [('build_relationship_panel', panel),
                     ('compute_tone', ''), ('compute_flirt_response', {}),
                     ('compute_pursue_withdraw', {}), ('_temporal_note', ''), ('initiative_guidance', '')]:
                 stack.enter_context(patch.object(reader, name, return_value=value))
-            stack.enter_context(patch('relationship_state.load_offline_character_state', return_value=None))
+            stack.enter_context(patch.object(reader, 'load_offline_continuity_state', return_value=None))
             for compact in (False, True):
                 text = reader.build_state_summary('u', 'gojo', compact=compact)
                 self.assertNotIn('你自己的 core 判断', text)
                 self.assertNotIn('你可以重新表态', text)
-                self.assertIn('未决', text)
+                self.assertIn('unresolved', text)
 
 
 if __name__ == '__main__':

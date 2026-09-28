@@ -10,6 +10,14 @@ from cognitive_config import (
 )
 from cognitive_output import sticky_emotion_tag
 from cognitive_revision import current_belief_display, is_stable_reader_belief
+from relationship_semantics import (
+    ENGAGEMENT_STYLE_KEY,
+    INTERNAL_CONFLICT_KEY,
+    ROMANTIC_LABEL_KEY,
+    ROMANTIC_OPENNESS_KEY,
+    is_nonrelationship_generated_source,
+    normalize_romantic_label,
+)
 
 
 def _json_value(value, fallback):
@@ -23,9 +31,221 @@ def _json_value(value, fallback):
     return value
 
 
+def _json_list(value):
+    parsed = _json_value(value, [])
+    return parsed if isinstance(parsed, list) else []
+
+
 def _safe_text(value, maximum):
     text = re.sub(r'\s+', ' ', str(value or '')).strip()
     return text[:maximum]
+
+
+def _source_event_ids_from_refs(user_id, character_id, refs, *, conn):
+    """Resolve Cognitive event references back to their canonical Raw Events.
+
+    Relationship panels fail closed when this provenance bridge is unavailable.
+    A Cognitive row alone is not proof that its source is still active.
+    """
+    raw_ids = []
+    cognitive_ids = []
+    for ref in refs or []:
+        if not isinstance(ref, dict):
+            continue
+        source_id = str(ref.get('source_id') or '').strip()
+        if source_id:
+            raw_ids.append(source_id.removeprefix('memory_job:').removeprefix('raw_event:'))
+            continue
+        event_id = ref.get('event_id')
+        if isinstance(event_id, int) or (isinstance(event_id, str) and event_id.isdigit()):
+            cognitive_ids.append(int(event_id))
+    if cognitive_ids:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                '''SELECT id, source_event_id
+                   FROM cognitive_events
+                   WHERE user_id = %s AND character_id = %s AND id = ANY(%s)''',
+                (user_id, character_id, list(dict.fromkeys(cognitive_ids))),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close()
+        found = {int(row[0]): str(row[1] or '').strip() for row in rows}
+        if set(cognitive_ids) != set(found):
+            return ()
+        raw_ids.extend(found[event_id] for event_id in cognitive_ids)
+    return tuple(dict.fromkeys(item for item in raw_ids if item))
+
+
+def _active_relationship_source_ids(user_id, character_id, *, refs=(), raw_ids=(), conn):
+    """Return source ids only when all are active and non-generated evidence."""
+    ids = list(raw_ids or ())
+    if not ids:
+        try:
+            ids = list(_source_event_ids_from_refs(
+                user_id, character_id, refs, conn=conn))
+        except Exception:
+            return ()
+    ids = list(dict.fromkeys(str(item).strip() for item in ids if str(item).strip()))
+    if not ids or any(is_nonrelationship_generated_source(item) for item in ids):
+        return ()
+    try:
+        import raw_events
+        if not raw_events.sources_are_active(ids, user_id, character_id, conn=conn):
+            return ()
+    except Exception:
+        return ()
+    return tuple(ids)
+
+
+def _relationship_item(kind, row, *, source_event_ids, value=None):
+    return {
+        'kind': kind,
+        'status': row.get('status'),
+        'statement': row.get('statement') or row.get('content') or '',
+        'content': row.get('content') or row.get('statement') or '',
+        'value': value,
+        'confidence': row.get('confidence'),
+        'source_event_ids': tuple(source_event_ids),
+        'updated_at': row.get('updated_at'),
+    }
+
+
+def read_relationship_semantic_state(user_id, character_id, *, conn=None):
+    """Read only the canonical Slow Loop items used by ``relationship_panel``.
+
+    This is a narrow reader, not a relationship judge: item lifecycles,
+    confidence, and semantic values are all decided by existing Cognitive
+    writers.  Every item is dropped if its linked Raw Event is unavailable.
+    """
+    database = conn
+    owns_connection = database is None
+    if database is None:
+        from db import get_conn
+        database = get_conn()
+    result = {
+        'engagement_style': None,
+        'romantic_label': None,
+        'romantic_openness': None,
+        'internal_conflict': None,
+    }
+    cur = database.cursor()
+    try:
+        cur.execute(
+            '''SELECT question_key, question_text, status, metadata,
+                      source_event_refs, updated_at
+               FROM cognitive_questions
+               WHERE user_id = %s AND character_id = %s AND question_key = %s
+               LIMIT 1''',
+            (user_id, character_id, ROMANTIC_LABEL_KEY),
+        )
+        question = cur.fetchone()
+        if question:
+            metadata = _json_value(question[3], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            resolution = metadata.get('resolution') or {}
+            judgment = metadata.get('current_judgment') or {}
+            candidate = resolution if question[2] == 'resolved' and resolution else judgment
+            if isinstance(candidate, dict):
+                value = normalize_romantic_label(candidate.get('value'))
+                raw_ids = candidate.get('evidence_event_ids') or ()
+                refs = _json_list(candidate.get('evidence_refs')) or _json_list(question[4])
+                source_ids = _active_relationship_source_ids(
+                    user_id, character_id, refs=refs, raw_ids=raw_ids, conn=database,
+                )
+                if value and source_ids:
+                    result['romantic_label'] = _relationship_item(
+                        'question',
+                        {
+                            'status': question[2],
+                            'content': candidate.get('content') or question[1],
+                            'updated_at': question[5],
+                        },
+                        source_event_ids=source_ids,
+                        value=value,
+                    )
+
+        cur.execute(
+            '''SELECT belief_key, statement, confidence, belief_type, status,
+                      evidence_refs, metadata, updated_at
+               FROM cognitive_beliefs
+               WHERE user_id = %s AND character_id = %s
+                 AND status = 'active' AND belief_key = ANY(%s)''',
+            (user_id, character_id, [ENGAGEMENT_STYLE_KEY, INTERNAL_CONFLICT_KEY]),
+        )
+        for row in cur.fetchall():
+            key = row[0]
+            belief = {
+                'belief_key': key,
+                'statement': row[1],
+                'confidence': float(row[2] or 0),
+                'belief_type': row[3],
+                'status': row[4],
+                'evidence_refs': _json_list(row[5]),
+                'metadata': _json_value(row[6], {}),
+                'updated_at': row[7],
+            }
+            if not is_stable_reader_belief(belief):
+                continue
+            source_ids = _active_relationship_source_ids(
+                user_id, character_id, refs=belief['evidence_refs'], conn=database,
+            )
+            if not source_ids:
+                continue
+            if key == ENGAGEMENT_STYLE_KEY and belief['belief_type'] == 'relationship_observation':
+                result['engagement_style'] = _relationship_item(
+                    'belief', belief, source_event_ids=source_ids,
+                )
+            elif key == INTERNAL_CONFLICT_KEY:
+                result['internal_conflict'] = _relationship_item(
+                    'belief', belief, source_event_ids=source_ids,
+                )
+
+        cur.execute(
+            '''SELECT hypothesis_key, statement, status, hypothesis_type,
+                      confidence, supporting_evidence_refs,
+                      contradicting_evidence_refs, updated_at
+               FROM cognitive_hypotheses
+               WHERE user_id = %s AND character_id = %s
+                 AND status IN ('open', 'supported')
+                 AND hypothesis_key = ANY(%s)''',
+            (
+                user_id, character_id,
+                [ENGAGEMENT_STYLE_KEY, ROMANTIC_OPENNESS_KEY, INTERNAL_CONFLICT_KEY],
+            ),
+        )
+        for row in cur.fetchall():
+            key = row[0]
+            hypothesis = {
+                'hypothesis_key': key,
+                'statement': row[1],
+                'status': row[2],
+                'hypothesis_type': row[3],
+                'confidence': float(row[4] or 0),
+                'evidence_refs': (
+                    _json_list(row[5]) + _json_list(row[6])
+                ),
+                'updated_at': row[7],
+            }
+            source_ids = _active_relationship_source_ids(
+                user_id, character_id, refs=hypothesis['evidence_refs'], conn=database,
+            )
+            if not source_ids:
+                continue
+            item = _relationship_item('hypothesis', hypothesis, source_event_ids=source_ids)
+            if key == ENGAGEMENT_STYLE_KEY and hypothesis['hypothesis_type'] == 'relationship':
+                if result['engagement_style'] is None:
+                    result['engagement_style'] = item
+            elif key == ROMANTIC_OPENNESS_KEY and hypothesis['hypothesis_type'] == 'relationship':
+                result['romantic_openness'] = item
+            elif key == INTERNAL_CONFLICT_KEY and result['internal_conflict'] is None:
+                result['internal_conflict'] = item
+        return result
+    finally:
+        cur.close()
+        if owns_connection:
+            database.close()
 
 
 def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):

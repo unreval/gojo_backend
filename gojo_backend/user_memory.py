@@ -2799,6 +2799,20 @@ actor=user，仅引用当前 canonical user event；不得把用户答案写成�
 
 # ────────── ★ 群聊统一提取（用户事实 + 定向告知）──────────
 
+_GROUP_RELATIONSHIP_CONCLUSION_TERMS = (
+    '喜欢', '不喜欢', '心动', '爱情', '恋爱', '浪漫', '暧昧', '表白',
+    '告白', '爱上', '恋人', '男女朋友', '确认关系', '关系升级', '在乎',
+    '关心', '老夫老妻',
+)
+
+
+def _group_bond_is_neutral_continuity(content):
+    """Generated group recollections may retain events, never conclusions."""
+    text = str(content or '').casefold()
+    return bool(text) and not any(
+        term.casefold() in text for term in _GROUP_RELATIONSHIP_CONCLUSION_TERMS
+    )
+
 def extract_and_save_group_memory(user_id, user_text, round_transcript, members):
     """群聊版提取（bond 在群里语义模糊，只做 A 和 C 两类）：
     A user_fact —— 她的新事实 → long_memory(shared)
@@ -2869,7 +2883,7 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
    - 为每个相关角色各写一条（0~3条），以【该角色的第一人称】写，"我"=该角色本人。
    - target 是这条回忆属于谁；content 例："我和杰在群里为说话方式拌了几句嘴，她在旁边看着"（存进五条悟）、
      "我和悟斗了几句嘴，她说我们像老夫老妻"（存进夏油杰）。
-   - 日常寒暄不记，只记有内容的互动。
+   - 日常寒暄不记，只记有内容的互动。char_bonds 只能记录可观察动作/话语连续性，不能作为关心或浪漫关系的新证据。
 
 【通用规则】
 1. 【事实只信群主】：user_fact 和 told 只能来自群主的发言；角色说的话（哪怕角色说"她喜欢XX"）不得作为这两类的来源。
@@ -2878,8 +2892,8 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
 3. 时间换算绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
 4. user_fact 和 told 以"她"开头；char_bonds 以"我"或"我们"开头。与已有记录重复的不提。没有就填 null。
 5. ★【词汇中性化——同样重要】跟单聊记忆一样，你在描述"男女互动"时训练数据默认走言情风，
-   必须【主动对抗】。char_bonds 里只用中性动词（问/说/告诉/约/答应/劝/催/提醒/关心），
-   禁用言情腔词（试探/心思/心动/暗示/直言/坦言/表白/引导/情愫/心事）。
+   必须【主动对抗】。char_bonds 里只用中性动词（问/说/告诉/约/答应/劝/催/提醒），
+   禁用关系结论或言情腔词（关心/在乎/试探/心思/心动/暗示/直言/坦言/表白/引导/情愫/心事）。
    写完自查：是否像言情小说旁白？像就重写成流水账。宁可平实无聊，也不要暧昧文艺。
 
 【输出格式——严格 JSON，只输出一行】
@@ -2948,7 +2962,8 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
                 content = _clean_content(cb.get('content'))
                 target_name = (cb.get('target') or '').strip()
                 target_id = name_to_id.get(target_name)
-                if target_id and _valid_bond(user_id, content):
+                if (target_id and _valid_bond(user_id, content)
+                        and _group_bond_is_neutral_continuity(content)):
                     if save_bond_memory(user_id, target_id, 'between', content):
                         print(f'[{user_id}][group] ✅ 互动记忆（{target_id}）：{content}')
 

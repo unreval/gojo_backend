@@ -422,7 +422,7 @@ class CharacterInitiativeTests(unittest.TestCase):
             'gojo', _state(passion=20), is_love=False,
         )
         self.assertIn('主动试探', text)
-        self.assertIn('不代表账本已经升级', text)
+        self.assertIn('不代表已意识到或确认浪漫性质', text)
 
     def test_initiative_does_not_write_relationship_state(self):
         source = inspect.getsource(relationship_initiative)
@@ -471,11 +471,11 @@ class ReaderStructureTests(unittest.TestCase):
         label = relationship_reader.derive_label(_state(
             attachment=70, commitment=70, passion=20, warmth=70, intimacy=70,
         ))
-        self.assertEqual(label['primary'], '深厚的挚友 / 亲情')
-        self.assertNotEqual(label['primary'], '爱情')
+        self.assertEqual(label['primary'], 'legacy:high_attachment_commitment_ledger')
+        self.assertNotIn('爱情', label['primary'])
         self.assertNotIn('不带心动色彩', label['expression_guidance'])
-        self.assertIn('尚未确认的心动', label['expression_guidance'])
-        self.assertIn('不代表底层关系状态已经升级', label['expression_guidance'])
+        self.assertIn('不用于表达', label['expression_guidance'])
+        self.assertIn('relationship_panel', label['expression_guidance'])
 
     def test_reader_partitions_cognition_types(self):
         class Cursor:

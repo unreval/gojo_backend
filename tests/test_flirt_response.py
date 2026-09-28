@@ -234,10 +234,21 @@ class BuildStateSummaryCopyTests(unittest.TestCase):
     }
 
     def _summary(self, flirt):
-        with patch.object(relationship_reader, 'load_state',
-                          return_value=self._STATE), \
-             patch.object(relationship_reader, 'list_active_stances',
-                          return_value=[]), \
+        panel = {
+            'ledger': {**self._STATE, 'has_state_row': True},
+            'romantic_label': {'value': 'unresolved'},
+            'attachment': {'status': 'observed', 'value': 9},
+            'commitment': {'status': 'observed', 'value': 4},
+            'engagement_style': {'status': 'unassessed', 'value': 'unassessed'},
+            'romantic_openness': {'status': 'unassessed', 'value': 'unassessed'},
+            'care': {'active': [], 'historical': []},
+            'boundary': {'active': [], 'historical': []},
+            'internal_conflict': {'status': 'unassessed', 'value': 'unassessed'},
+            'direction': {'status': 'unassessed', 'value': 'unassessed'},
+            'legacy_label': {'value': 'legacy:ledger_unassessed'},
+        }
+        with patch.object(relationship_reader, 'build_relationship_panel',
+                          return_value=panel), \
              patch.object(relationship_reader, 'compute_tone',
                           return_value='支持型（温和陪伴）'), \
              patch.object(relationship_reader, 'compute_flirt_response',
@@ -246,8 +257,10 @@ class BuildStateSummaryCopyTests(unittest.TestCase):
                           return_value={'pattern': None}), \
              patch.object(relationship_reader, '_temporal_note',
                           return_value=None), \
-             patch.object(relationship_reader, 'derive_label',
-                          return_value={'primary': '普通朋友'}):
+             patch.object(relationship_reader, 'load_offline_continuity_state',
+                          return_value={}), \
+             patch.object(relationship_reader, 'initiative_guidance',
+                          return_value=''):
             return relationship_reader.build_state_summary('u', 'gojo')
 
     def test_summary_omits_flirt_dimension_when_sample_is_empty(self):

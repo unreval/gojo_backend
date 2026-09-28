@@ -28,6 +28,7 @@ from relationship_config import (
     STAGE_FRIEND_C_MIN,
     NEGATIVE_RELATIONSHIP_F_TO_W_RATIO, NEGATIVE_RELATIONSHIP_W_ZERO,
     PENDING_PASSION_THRESHOLD,
+    PENDING_PASSION_MIN_SESSIONS,
     PASSION_TO_LOVE_REQUIRED_TRUST,
     HYPOTHESIS_ACTIVE_EVIDENCE_MIN, HYPOTHESIS_MAX_AGE_DAYS,
 )
@@ -37,8 +38,9 @@ from relationship_state import (
     apply_commitment, apply_passion, apply_friction,
     update_pending_passion,
     push_hypothesis_evidence, promote_hypothesis, cleanup_hypotheses,
-    declare_stance,
+    declare_stance, provenance_source_event,
 )
+from relationship_semantics import is_nonrelationship_generated_source
 
 from relationship_signals import extract_signals
 from relationship_flirt import (
@@ -81,25 +83,30 @@ def _ingest_v4(user_id, character_id, source_event_id, signals):
 def _apply_extracted_signals(user_id, character_id, signals, session_id,
                              temporal_context, source_event_id=None):
     applied = []
-    _log_interaction_stats(
-        user_id, character_id, signals, session_id,
-        source_event_id=source_event_id,
-    )
-    _log_temporal_observation(user_id, character_id, temporal_context)
-    for sig in signals:
+    # All ledger mutations beneath this scope receive the source event through
+    # relationship_state._write_provenance without changing each handler API.
+    with provenance_source_event(source_event_id):
+        _log_interaction_stats(
+            user_id, character_id, signals, session_id,
+            source_event_id=source_event_id,
+        )
+        _log_temporal_observation(
+            user_id, character_id, temporal_context, source_event_id=source_event_id,
+        )
+        for sig in signals:
+            try:
+                result = _route_signal(user_id, character_id, sig, session_id)
+                applied.append({'signal': sig, 'result': result})
+            except Exception as e:
+                applied.append({'signal': sig, 'error': str(e)})
         try:
-            result = _route_signal(user_id, character_id, sig, session_id)
-            applied.append({'signal': sig, 'result': result})
-        except Exception as e:
-            applied.append({'signal': sig, 'error': str(e)})
-    try:
-        cleanup_hypotheses(user_id, character_id, HYPOTHESIS_MAX_AGE_DAYS)
-    except Exception:
-        pass
-    try:
-        check_retreat_boundary_superseded(user_id, character_id)
-    except Exception:
-        pass
+            cleanup_hypotheses(user_id, character_id, HYPOTHESIS_MAX_AGE_DAYS)
+        except Exception:
+            pass
+        try:
+            check_retreat_boundary_superseded(user_id, character_id)
+        except Exception:
+            pass
     return applied
 
 
@@ -124,6 +131,8 @@ def process_turn(
     unique (event_id, processor_type, processor_version) in rel_event_applications
     is committed in the same transaction as apply_* / provenance / finish_processor.
     """
+    if is_nonrelationship_generated_source(source_event_id):
+        return _empty_turn_result(skipped='nonrelationship_generated_source')
     ensure_state_row(user_id, character_id)
 
     rel_processor = None
@@ -431,13 +440,14 @@ def _route_signal(user_id: str, character_id: str, sig: Dict,
         if content and _is_duplicate_stance(user_id, character_id, stance_type, content):
             return {'action': 'stance_dedup_skipped', 'type': stance_type}
 
-        # ★ retreat_boundary 特殊处理：标记为可被关系深化推翻
+        # A retreat remains historical unless a later, source-valid conclusion
+        # explicitly supersedes it.
         if stance_type == 'retreat_boundary':
             stance_id = declare_stance(
                 user_id, character_id,
                 stance_type='retreat_boundary',
                 content=content,
-                source_event_ref=f'turn/{_now_iso()}',
+                source_event_ref=None,
             )
             return {'action': 'retreat_boundary_noted', 'stance_id': stance_id}
 
@@ -445,7 +455,7 @@ def _route_signal(user_id: str, character_id: str, sig: Dict,
             user_id, character_id,
             stance_type=stance_type,
             content=content,
-            source_event_ref=f'turn/{_now_iso()}',
+            source_event_ref=None,
         )
         return {'action': 'stance_declared', 'stance_id': stance_id, 'type': stance_type}
 
@@ -826,23 +836,25 @@ def _maybe_convert_pending_passion(user_id, character_id, conf) -> Dict:
         return {'action': 'pending_reached_but_low_diversity',
                 'current': state['pending_passion']}
 
-    # 转化：pending_passion 清零，P 增加
+    # Convert only interaction-tension telemetry; this is not a romantic
+    # recognition or label and relationship_panel never reads it as one.
     p_delta = BASE_DELTA['positive_reciprocal'] * 2.0
     update_pending_passion(user_id, character_id, 0,
                            signal_type='pending_conversion',
                            confidence=conf,
                            rule='pending_to_passion',
-                           note='跨时间跨会话多样性达标，正式转化')
+                           note='跨时间跨会话多样性达标，转为互动张力遥测')
     apply_passion(user_id, character_id, p_delta,
                   signal_type='pending_conversion',
                   confidence=conf, rule='passion_from_pending',
-                  note='从 pending_passion 转化')
+                  note='从 pending_passion 转化的互动张力遥测')
 
-    # 检查是否满足"爱情候选"的额外 Trust 门槛
+    # Preserve old ledger cues for debugging/compatibility only. They are never
+    # mapped to a Cognitive belief, a confirmed label, or reader guidance.
     state = _load_state(user_id, character_id)
     if state['trust'] >= PASSION_TO_LOVE_REQUIRED_TRUST:
         promote_hypothesis(user_id, character_id, 'love_candidate', 'active')
-        return {'action': 'pending_converted_love_candidate_active',
+        return {'action': 'pending_converted_legacy_love_candidate',
                 'passion_delta': p_delta}
 
     # Trust 不够 → 复合过渡态
@@ -853,16 +865,19 @@ def _maybe_convert_pending_passion(user_id, character_id, conf) -> Dict:
 
 
 def _passion_diversity_ok(user_id, character_id) -> bool:
-    """检查最近的 pending_passion 相关事件是否跨时间/跨会话。
-    简化实现：查 rel_provenance_log 里最近 N 条 signal_type='positive_reciprocal'
+    """Require elapsed time and distinct recorded sessions for telemetry.
+
+    This gate only converts pending interaction tension to the numeric passion
+    ledger.  It never establishes awareness, romance, or a romantic label.
     """
     from relationship_config import PENDING_PASSION_MIN_TIMESPAN_HOURS as MIN_H
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('''SELECT timestamp FROM rel_provenance_log
+    cur.execute('''SELECT timestamp, session_id FROM rel_interaction_stats
                    WHERE user_id = %s AND character_id = %s
-                     AND signal_type = 'positive_reciprocal'
-                   ORDER BY timestamp DESC LIMIT %s''',
+                     AND flirt_response = 'accepted'
+                     AND session_id IS NOT NULL AND session_id <> ''
+                   ORDER BY timestamp DESC, id DESC LIMIT %s''',
                 (user_id, character_id, PENDING_PASSION_THRESHOLD))
     rows = cur.fetchall()
     cur.close()
@@ -873,7 +888,11 @@ def _passion_diversity_ok(user_id, character_id) -> bool:
     if not times:
         return False
     span_hours = (max(times) - min(times)).total_seconds() / 3600.0
-    return span_hours >= MIN_H
+    session_ids = {str(row[1]).strip() for row in rows if row[1]}
+    return (
+        span_hours >= MIN_H
+        and len(session_ids) >= PENDING_PASSION_MIN_SESSIONS
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1007,7 +1026,8 @@ def _log_interaction_stats(user_id, character_id, signals, session_id,
     conn.close()
 
 
-def _log_temporal_observation(user_id, character_id, temporal_context):
+def _log_temporal_observation(user_id, character_id, temporal_context,
+                              source_event_id=None):
     """把有意义的时间断档写进 provenance，但不改任何关系数值。"""
     if not temporal_context or not temporal_context.get('has_history'):
         return
@@ -1020,6 +1040,7 @@ def _log_temporal_observation(user_id, character_id, temporal_context):
             f"上次互动 {temporal_context.get('last_interaction_cn', '未知')}"
         )
         evidence = [{
+            'source_event_id': source_event_id,
             'elapsed_seconds': int(elapsed),
             'elapsed_label': temporal_context.get('elapsed_label'),
             'gap_bucket': temporal_context.get('gap_bucket'),
@@ -1086,49 +1107,57 @@ def _is_duplicate_stance(user_id, character_id, stance_type, content) -> bool:
 # Retreat Boundary 自动推翻检查
 # ══════════════════════════════════════════════════════════════
 def check_retreat_boundary_superseded(user_id, character_id):
-    """当关系深化到一定程度时，自动把 retreat_boundary 类型的 stance 标记为 superseded。
+    """Revoke a retreat only after a later, explicit relationship resolution.
 
-    触发条件（全部满足）：
-    - 存在 active 的 retreat_boundary stance
-    - Attachment ≥ 65（依恋到了"离不开"的程度）
-    - Passion ≥ 25（有了不可忽略的心动）
-    - 存在比 retreat_boundary 更晚的 care_admission（说明角色在退缩之后又主动靠近了）
-
-    ★ 这是铁律 5 的补丁：retreat_boundary 不是"正面承诺"，是"靠近后的自我保护退缩"——
-      它可以被关系的自然深化推翻，不需要负面事件。
+    Numeric ledger values, care, passion, pending hypotheses, and generated
+    prose are deliberately excluded. A retreat remains historical until either
+    a later explicit declared stance or the source-gated Slow Loop conclusion
+    for the same romantic question contradicts it.
     """
-    from relationship_state import list_active_stances, revoke_stance, load_state
+    from cognitive_reader import read_relationship_semantic_state
+    from relationship_state import list_active_stances, revoke_stance
 
     stances = list_active_stances(user_id, character_id)
-    retreat_stances = [s for s in stances if s['type'] == 'retreat_boundary']
-    if not retreat_stances:
+    retreats = [stance for stance in stances if stance['type'] == 'retreat_boundary']
+    if not retreats:
         return
 
-    state = load_state(user_id, character_id)
-    attach = state.get('attachment', 0)
-    passion = state.get('passion', 0)
+    semantic = read_relationship_semantic_state(user_id, character_id) or {}
+    label = semantic.get('romantic_label') or {}
+    slow_loop_affirmed_at = (
+        label.get('updated_at')
+        if label.get('kind') == 'question' and label.get('value') == 'affirmed'
+        and label.get('source_event_ids')
+        else None
+    )
+    explicit_stances = [
+        stance for stance in stances if stance['type'] == 'relationship_confirm'
+    ]
 
-    if attach < 65 or passion < 25:
-        return  # 关系还没深到能推翻退缩
-
-    # 检查是否有比 retreat 更晚的 care_admission（说明角色退缩之后又靠近了）
-    care_after_retreat = False
-    for s in stances:
-        if s['type'] == 'care_admission':
-            for r in retreat_stances:
-                if s.get('declared_at') and r.get('declared_at'):
-                    if s['declared_at'] > r['declared_at']:
-                        care_after_retreat = True
-                        break
-        if care_after_retreat:
-            break
-
-    if not care_after_retreat:
-        return  # 退缩之后没有再次靠近，不推翻
-
-    # 推翻所有 retreat_boundary
-    for r in retreat_stances:
-        revoke_stance(
-            user_id, character_id, r['id'],
-            reason='关系深化推翻：Attachment/Passion 达到阈值，且角色在退缩之后有再次主动靠近的证据'
+    for retreat in retreats:
+        retreat_at = retreat.get('declared_at')
+        replacement = next(
+            (stance for stance in explicit_stances
+             if _is_later_than(stance.get('declared_at'), retreat_at)),
+            None,
         )
+        if replacement:
+            revoke_stance(
+                user_id, character_id, retreat['id'],
+                reason='已被更晚的明确 relationship_confirm 表态取代',
+            )
+        elif _is_later_than(slow_loop_affirmed_at, retreat_at):
+            revoke_stance(
+                user_id, character_id, retreat['id'],
+                reason='已被同一浪漫议题的 source-gated Slow Loop 结论取代',
+            )
+
+
+def _is_later_than(candidate, baseline) -> bool:
+    """Fail closed when timestamps are missing or incomparable."""
+    if candidate is None or baseline is None:
+        return False
+    try:
+        return candidate > baseline
+    except TypeError:
+        return False

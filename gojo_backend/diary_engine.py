@@ -173,7 +173,7 @@ def generate_char_diary(character_id, user_id, topic=None):
 【日记的权限】
 你可以回顾经历、表达感受、犹豫和角色视角；只表达已读取的当前结论。
 没有结论时保持未决，不自行选择爱情/友情框架，不将犹豫写成肯定或否定。
-日记正文是主观表达，不是可改变 current judgment 的新证据或新关系事实。
+日记正文是主观表达，不是新的关系证据，不能改变 current judgment 或新建关系事实。
 
 【你们相处的真实状况】
 - {days_line}
@@ -311,15 +311,14 @@ def peek_user_diary(character_id, user_id, visited_at=None):
         tag = '🔓解锁了私密篇' if unlocked else '看了可见篇'
         print(f'[diary] 👀 {character_id} 偷看了日记 #{target["id"]}({tag})')
 
-        # ★ C 记忆闭环:偷看这件事进 bond,gojo 下次聊天时能自然引用
+        # Keep the visit as continuity only; diary prose cannot become new
+        # care/romance evidence through a generated bond summary.
         try:
             from user_memory import save_bond_memory
-            snippet = (target.get('content') or '')[:60]
-            snippet = snippet + ('…' if len(target.get('content') or '') > 60 else '')
             if unlocked:
-                bond_text = f'我偷偷解开她的私密日记看了:「{snippet}」'
+                bond_text = '我查看过她的一篇私密日记（仅连续性记录，不是新的关系证据）。'
             else:
-                bond_text = f'我偷看了她的日记:「{snippet}」'
+                bond_text = '我查看过她的一篇日记（仅连续性记录，不是新的关系证据）。'
             save_bond_memory(user_id, character_id, 'between', bond_text)
         except Exception as e:
             print(f'[diary] 偷看→bond 写入失败(不影响主流程):{e}')

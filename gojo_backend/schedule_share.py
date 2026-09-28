@@ -159,14 +159,14 @@ def _generate_share(character_id, user_id, activity):
 {bond_text}
 
 【判断规则】
-主动分享日常是"在乎对方"才会做的事。判断顺序:
-1. 按关系深浅判断角色对用户到了什么程度
-2. 以这个关系,角色会主动说这件事吗?
+主动分享是可选表达行为，不构成 relationship evidence，也不证明关心、浪漫或关系升级。判断顺序:
+1. 只使用已读取的关系面板决定表达边界，不重新判定关系性质
+2. 结合角色、当下事情和近期互动，判断这次是否自然值得说
 
 不同阶段:
 · 还很浅 → 不说。skip。
-· 开始在意了 → 有特别值得说的才说(限定/翘班)
-· 很在乎了 → 有意思的事第一反应就想说
+· 已有互动背景 → 仅特别自然、与当下有关的事才可能说(限定/翘班)
+· 任何背景 → 都可以跳过；分享本身不携带额外关系含义
 
 大部分情况应该 skip。宁可不发也不要发得尴尬。
 真的要说时:顺手一提的语气,1-2 句。不要问"你在干嘛",不要汇报行程。
@@ -226,6 +226,7 @@ def _generate_share(character_id, user_id, activity):
                     'proactive_id': mid,
                     'activity_title': activity.get('title'),
                     'activity_start': activity.get('start_time'),
+                    'relationship_evidence_excluded': True,
                 },
             )
             record_assistant_message(

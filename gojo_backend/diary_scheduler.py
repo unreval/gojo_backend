@@ -199,7 +199,7 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
 {bond_text}
 
 {cognition}
-日记是主观回顾，不是新的关系证据；不能用日记或本次反应覆盖当前判断。
+日记和本次反应都是表达/连续性，不是新的关系证据；不能用它们覆盖当前判断或产生关心、浪漫结论。
 
 【★ 你要判断】
 1. 只依据已读取的关系状态决定这条留言【值不值得主动开口反应】，不重新判定核心关系。
@@ -279,19 +279,22 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
                     'proactive_id': mid,
                     'comment_id': comment_id,
                     'revisit_count': revisit_count,
+                    'relationship_evidence_excluded': True,
                 },
             )
         except Exception:
             pass
 
-        # ★ C 记忆闭环:这次反应也进 bond,gojo 后续聊天时能自然引用"我上次因为她那句留言说了 X"
+        # Keep this in continuity memory without preserving generated prose as
+        # a new care/romance evidence trail.
         try:
-            comment_snippet = comment_content[:40] + ('…' if len(comment_content) > 40 else '')
-            reaction_snippet = zh[:40] + ('…' if len(zh) > 40 else '')
             if revisit_count == 0:
-                bond_text = f'她在我日记下留言「{comment_snippet}」,我回她「{reaction_snippet}」'
+                bond_text = '她曾在我的日记下留言，我已作出一次回应（仅连续性记录，不是新的关系证据）。'
             else:
-                bond_text = f'她那条日记留言「{comment_snippet}」我还没消气,第{revisit_count+1}次跟她说「{reaction_snippet}」'
+                bond_text = (
+                    f'我曾就一条日记留言作出第{revisit_count + 1}次回应'
+                    '（仅连续性记录，不是新的关系证据）。'
+                )
             save_bond_memory(TARGET_USER, character_id, 'between', bond_text)
         except Exception as e:
             print(f'[diary_scheduler] 反应→bond 写入失败:{e}')

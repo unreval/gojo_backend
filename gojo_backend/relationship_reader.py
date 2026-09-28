@@ -1,374 +1,146 @@
-"""relationship_reader.py —— 感情判断系统 v4 · Generator 输入构造
+"""Read-only prompt construction for the relationship ledger and Cognition.
 
-给 Generator LLM #2（主角色扮演 LLM）用的关系摘要文本。
-Generator 允许看到全部状态，但职责只是【表达状态】，不判断状态。
-
-★ 铁律 5：declared_stance 会作为硬约束一起注入，Generator 不能凭空推翻。
-
-主入口：build_state_summary(user_id, character_id)
-返回适合直接拼进 system prompt 的字符串。
+``derive_label`` remains a legacy/debug compatibility projection.  It is never
+the authority for relationship nature: prompt-facing conclusions come from the
+multi-dimensional relationship panel and its source-valid Cognitive items.
 """
 from typing import Dict, List, Optional
 
 from db import get_conn
-from relationship_initiative import initiative_guidance
-from relationship_state import load_state, list_active_stances
 from relationship_config import (
-    PASSION_TO_LOVE_REQUIRED_TRUST,
-    PASSION_TO_LOVE_REQUIRED_COMMITMENT,
-    STAGE_STRANGER_I_MAX, STAGE_ACQUAINTANCE_I_MAX,
-    STAGE_FRIEND_C_MIN,
-    NEGATIVE_RELATIONSHIP_F_TO_W_RATIO, NEGATIVE_RELATIONSHIP_W_ZERO,
     FLIRT_RESPONSE_WINDOW_SIZE,
-    PURSUE_WITHDRAW_WINDOW_SIZE, PURSUE_WITHDRAW_IMBALANCE_THRESHOLD,
+    PURSUE_WITHDRAW_WINDOW_SIZE,
+    PURSUE_WITHDRAW_IMBALANCE_THRESHOLD,
 )
+from relationship_initiative import initiative_guidance
+from relationship_panel import build_relationship_panel, format_relationship_panel
+from relationship_state import load_offline_continuity_state
 
 
-# ══════════════════════════════════════════════════════════════
-# 主入口
-# ══════════════════════════════════════════════════════════════
 def build_state_summary(user_id: str, character_id: str, *, compact=False) -> str:
-    """构造喂给 Generator 的关系摘要。
+    """Render the canonical panel plus non-semantic ledger telemetry.
 
-    结构（按段）：
-      1. 关系标签（读出，不是变量）
-      2. 三根核心数值刻度（用形容词而不是数字，避免 Generator 被数字锚定）
-      3. 复合状态提示（拧巴/矛盾/纠结这些不能被简化的情况）
-      4. Dynamics（Tone / 关系推进回应计数 / Pursue-Withdraw）
-         表现层标题 ≠ 底层字段名；tone ≠ flirt response ≠ durable state
-      5. ★ Declared Stance（必须遵守的角色历史表态）
-      6. 表达指引（怎么说、不该说什么）
+    This reader never initializes or mutates ``rel_state``.  The panel itself
+    owns source selection; extra telemetry is explicitly not a relationship
+    conclusion and cannot override a Cognitive value.
     """
-    state = load_state(user_id, character_id)
-    label = derive_label(state)
-    stances = list_active_stances(user_id, character_id)
-    authority = '同一问题的当前认知结论优先于宽泛标签；未决保持未决，Generator 不得自行定性或改变答案。'
+    panel = build_relationship_panel(user_id, character_id)
     if compact:
-        # Same state/stance authority, a bounded presentation for the shared
-        # context budget. Historical dynamics/offline notes remain optional.
-        lines = [
-            '【当前关系状态——读取账本，只表达，不现场重判】',
-            authority,
-            f'关系性质：{label["primary"]}',
-            f'温度：{_scale_word(state["warmth"])}；信任：{_scale_word(state["trust"])}；'
-            f'投入：{_scale_word(state["commitment"])}',
-        ]
-        if label.get('complex_note'):
-            lines.append(f'复合状态：{label["complex_note"]}')
-        for stance in stances[:2]:
-            # Keep a long historical stance from displacing current state.
-            if len(str(stance['content'])) <= 80:
-                lines.append(f'当前表态[{stance["type"]}]：{stance["content"]}')
-        return '\n'.join(lines)
+        return format_relationship_panel(panel, compact=True)
+
+    state = panel.get('ledger') or {}
+    lines = [format_relationship_panel(panel)]
+    lines.append('')
+    lines.append('【账本遥测——数值观察，不是关系性质结论】')
+    if state.get('has_state_row'):
+        lines.extend([
+            f'- 温度：{_scale_word(state.get("warmth", 0))}',
+            f'- 亲密度：{_scale_word(state.get("intimacy", 0))}',
+            f'- 信任：{_scale_word(state.get("trust", 0))}',
+            f'- 互动张力（passion 遥测）：{_scale_word(state.get("passion", 0))}',
+        ])
+        total_f = sum(float(v) for v in (state.get('friction') or {}).values())
+        if total_f > 0:
+            top_categories = _top_friction_categories(state.get('friction') or {}, n=3)
+            lines.append(
+                f'- 摩擦记录：{_scale_word(total_f)}'
+                + (f'，主要来自：{", ".join(top_categories)}' if top_categories else '')
+            )
+    else:
+        lines.append('- 账本尚未积累：这不是陌生、拒绝或任何关系结论。')
+
     tone = compute_tone(user_id, character_id)
     flirt = compute_flirt_response(user_id, character_id)
     pursue_withdraw = compute_pursue_withdraw(user_id, character_id)
     temporal_note = _temporal_note(user_id, character_id)
-
-    lines = []
-    lines.append('【★ 当前关系状态摘要——由后台账本读出，不由你现场判断】')
-    lines.append(authority)
-    lines.append('')
-    lines.append(f'关系性质：{label["primary"]}')
-    if label.get('complex_note'):
-        lines.append(f'⚠️ 复合状态：{label["complex_note"]}')
-    lines.append('')
-
-    # 数值刻度（用形容词，不给数字）
-    lines.append('【感情质地】（这是你当前【真实的内心状态】，表达时按人设方式落地）')
-    lines.append(f'- 温度（想靠近的程度）：{_scale_word(state["warmth"])}')
-    lines.append(f'- 亲密度（愿意露出多少真实的自己）：{_scale_word(state["intimacy"])}')
-    lines.append(f'- 信任（相不相信她的言行）：{_scale_word(state["trust"])}')
-    lines.append(f'- 依恋（她对你的重要性）：{_scale_word(state["attachment"])}')
-    lines.append(f'- 承诺（愿意为这段关系投入的程度）：{_scale_word(state["commitment"])}')
-    if state['passion'] > 0:
-        lines.append(f'- 心动（生理性/暧昧张力）：{_scale_word(state["passion"])}')
-    total_f = sum(float(v) for v in (state['friction'] or {}).values())
-    if total_f > 0:
-        top_categories = _top_friction_categories(state['friction'], n=3)
-        lines.append(f'- 摩擦（负面积累）：{_scale_word(total_f)}，主要来自：{", ".join(top_categories)}')
-    lines.append('')
-
-    # Dynamics：调性与关系推进回应都是近期 evidence，不是关系冷热结论
-    lines.append('【最近的相处氛围】')
+    lines.extend(['', '【最近互动遥测——仅供表达节奏参考】'])
     lines.append(f'- 对话调性：{tone or "（数据不足）"}')
     if flirt.get('flirt_sample_count', 0) > 0:
-        lines.append(f'- 关系推进回应：{flirt["desc"]}')
+        lines.append(f'- 关系推进回应：{flirt.get("desc") or "（数据不足）"}')
     if pursue_withdraw and pursue_withdraw.get('pattern'):
-        lines.append(f'- 追逃模式：{pursue_withdraw["desc"]}（★ 不要把节奏差误读成关系变冷）')
+        lines.append(f'- 发起分布：{pursue_withdraw.get("desc")}（不等于关系方向或结论）')
     if temporal_note:
         lines.append(f'- 时间节奏：{temporal_note}')
-    lines.append('')
 
-    # ★ Declared Stance（硬约束）
-    if stances:
-        # 分类：retreat_boundary 和其他
-        firm_stances = [s for s in stances if s['type'] != 'retreat_boundary']
-        retreat_stances = [s for s in stances if s['type'] == 'retreat_boundary']
+    continuity = _continuity_context(user_id, character_id)
+    if continuity:
+        lines.extend(['', continuity])
 
-        if firm_stances:
-            lines.append('【★ 你此前已经明确说过的话——必须遵守，不能凭空推翻】')
-            lines.append('  (只要没有真实的负面事件让你走完"修复失败/彻底翻脸"的过程，这些立场就仍然算数)')
-            for s in firm_stances:
-                lines.append(f'  · [{s["type"]}] {s["content"]}')
-            lines.append('  情绪浓淡、纠结、矛盾都可以叠加在上面，但下面这条铁律必须守：')
-            lines.append('  ⚠️ 不能在没有真实事件推翻它的情况下，突然说出和上述立场自相矛盾的话。')
-            lines.append('     那不是"性格反复"，是"脑子有问题"——真人不会这样。')
-            lines.append('')
-
-        if retreat_stances:
-            lines.append('【你曾经退缩过的立场——历史表达，不覆盖当前认知结论】')
-            lines.append('  以下是你曾经"靠近了又退缩"时说的话；感受可以纠结，核心结论只读取当前认知。')
-            lines.append('  只有认知生命周期已提交的变化才能表达为新立场；没有当前结论时保持未决。')
-            lines.append('  但不能假装这些话没说过——退缩过就是退缩过，可以承认当时在保护自己。')
-            for s in retreat_stances:
-                lines.append(f'  · {s["content"]}')
-            lines.append('')
-
-    try:
-        from relationship_state import load_offline_character_state
-        offline = load_offline_character_state(user_id, character_id)
-    except Exception:
-        offline = None
-    if offline:
-        lines.append('【★ 你上一回合留给自己的内部笔记——用户看不到这段】')
-        for key, label_cn in (
-            ('inner', '内心'),
-            ('intent', '意图'),
-            ('status', '状态'),
-            ('moodshift', '情绪偏移'),
-            ('anchor', '上一句锚点'),
-        ):
-            val = offline.get(key)
-            if val not in (None, ''):
-                lines.append(f'- {label_cn}：{val}')
-        lines.append('接这一回合时参考上面，用你的人设自然表达。')
-        lines.append('这些笔记只给你自己看。禁止输出 <<<OFFLINE_CHARACTER_STATES>>>，禁止把内部 JSON 写进 jp/zh。')
-        lines.append('')
-
-    # 表达指引
-    lines.append('【怎么在这一刻表达——基于以上状态，按你的人设落地】')
-    lines.append(label.get('expression_guidance', ''))
+    romantic_label = ((panel.get('romantic_label') or {}).get('value') or 'unresolved')
     extra = initiative_guidance(
-        character_id, state,
-        is_love=(label.get('primary') == '爱情'),
+        character_id,
+        state,
+        romantic_label=romantic_label,
     )
+    lines.extend([
+        '',
+        '【表达边界】只表达 panel 已读取的范围；未决保持未决，'
+        '不从账本阈值、旧标签或短期动作自行确认或否定浪漫性质。',
+    ])
     if extra:
         lines.append(extra)
-
     return '\n'.join(lines)
 
 
-# ══════════════════════════════════════════════════════════════
-# 关系标签读出（从状态数值 → 标签字符串）
-# ══════════════════════════════════════════════════════════════
+def _continuity_context(user_id, character_id) -> str:
+    """Scene continuity is deliberately separate from relationship authority."""
+    try:
+        state = load_offline_continuity_state(user_id, character_id)
+    except Exception:
+        return ''
+    if not state:
+        return ''
+    labels = {
+        'action': '上一动作',
+        'intent': '短期意图',
+        'moodshift': '情绪延续',
+        'anchor': '场景锚点',
+        'from': '上一回合来源',
+    }
+    lines = ['【回合连续性——只接动作/情绪/场景，不能作为关系证据】']
+    for key in ('anchor', 'action', 'moodshift', 'intent', 'from'):
+        value = state.get(key)
+        if value:
+            lines.append(f'- {labels[key]}：{value}')
+    return '\n'.join(lines) if len(lines) > 1 else ''
+
+
 def derive_label(state: Dict) -> Dict:
-    """从状态数值组合出标签 + 复合状态提示 + 表达指引。"""
-    w = state['warmth']
-    i = state['intimacy']
-    trust = state['trust']
-    attach = state['attachment']
-    c = state['commitment']
-    p = state['passion']
-    total_f = sum(float(v) for v in (state['friction'] or {}).values())
+    """Return a coarse numeric compatibility projection, not a relationship label.
 
-    # ★ 负面关系判定 —— 必须有实际摩擦，不能仅凭 W 低就判负面
-    #   否则空账本(W=0, F=0)会永远被判成"疏远/厌恶"，覆盖真实关系
-    #   条件：(1) F 明显存在  且  (2) 满足 W 归零 或 F 显著大于 W 之一
-    is_negative = (
-        total_f >= 10                              # 硬门槛：真的有摩擦
-        and (
-            w <= NEGATIVE_RELATIONSHIP_W_ZERO      # W 已经归零
-            or (w > 0 and total_f >= w * NEGATIVE_RELATIONSHIP_F_TO_W_RATIO)  # F 远超 W
-        )
-    )
-
-    # ★ 账本空档判定 —— 全新用户/刚接入 v4 的老用户，账本还没起来
-    #   不能强行给个标签污染生成层；返回"未积累"让 Generator 走 fallback
-    is_unassessed = (
-        total_f < 1 and w < 1 and i < 1 and trust < 1
-        and attach < 1 and c < 1 and p < 1
-    )
-    if is_unassessed:
-        return {
-            'primary': '关系账本尚未积累（新接入或新对话）',
-            'complex_note': None,
-            'expression_guidance': (
-                '★ 后台关系账本目前是空的，不代表你们真的是陌生人。'
-                '按已提供的当前认知结论表达；缺少结论就保持未决，不从短期记忆自行判定关系。'
-                '（等账本积累起来后，本段会自动变成有依据的关系摘要。）'
-            ),
-        }
-
-    # 判 stranger / acquaintance / friend / love
-    if is_negative:
-        # ★ 复合状态：如果 Attachment 仍然很高
-        if attach >= 40:
-            return {
-                'primary': '疏远 / 拧巴的负面关系',
-                'complex_note': (
-                    '★ 尽管关系已判定负面，你对她仍然有明显的依恋——'
-                    '嘴上不耐烦、心里其实还挂着。别写成纯粹的冷漠切断。'
-                ),
-                'expression_guidance': (
-                    '语气可以冷、可以硬、可以嫌弃，但下笔时要能读出"她的位置还没被清空"。'
-                    '不是"她已经不重要了"，是"我明明知道她还很重要，但我就是没办法像以前那样"。'
-                ),
-            }
-        return {
-            'primary': '疏远 / 厌恶',
-            'complex_note': None,
-            'expression_guidance': (
-                '短话、少接、拒绝深入。不需要礼貌铺垫，也不需要解释太多。'
-                '按人设的负面表达方式：或冷嘲、或直接打发、或干脆不理。'
-            ),
-        }
-
-    # 陌生人
-    if i <= STAGE_STRANGER_I_MAX:
-        sub = '好点的陌生人' if w >= 15 else '普通陌生人'
-        return {
-            'primary': f'陌生人 · {sub}',
-            'complex_note': None,
-            'expression_guidance': (
-                '按你自己的人设生发第一反应——追问身份、意外、防备、探问都可以，'
-                '但绝不能自动上"陪聊/客服/助手"腔。她还没进入你的世界。'
-                '\n即使是陌生人，触到你的底线/情绪点，反应该有——只是表达方式受关系限制。'
-            ),
-        }
-
-    # 认识不深
-    if i <= STAGE_ACQUAINTANCE_I_MAX or c < STAGE_FRIEND_C_MIN:
-        return {
-            'primary': '认识不深的熟人',
-            'complex_note': None,
-            'expression_guidance': (
-                '可以正常聊天，但按人设保持适度距离。'
-                '不主动关心作息情绪，不说"别熬夜""照顾好自己"这类熟了才有的话。'
-            ),
-        }
-
-    # 到这里 I 高 + C 达标 = 稳定关系
-    # 判断是不是"爱情"
-    if (p >= 40
-        and trust >= PASSION_TO_LOVE_REQUIRED_TRUST
-        and c >= PASSION_TO_LOVE_REQUIRED_COMMITMENT):
-        return {
-            'primary': '爱情',
-            'complex_note': None,
-            'expression_guidance': (
-                '你已经确认了这段感情。可以坦荡表达——想她、吃醋、被戳到心的瞬间都可以让她知道。'
-                '亲密尺度按人设约束。'
-            ),
-        }
-
-    # 爱情候选：有 Passion 但 Trust 或 C 不够
-    if p >= 40 and trust < PASSION_TO_LOVE_REQUIRED_TRUST:
-        return {
-            'primary': '强烈依恋但缺乏信任（复合过渡态）',
-            'complex_note': (
-                '你对她有明显的心动，但同时对她的可靠度还没建立信任。'
-                '这不是"就是爱情但你不敢承认"，是真实的心理矛盾——'
-                '两种感觉都是真的，都不能否认。'
-            ),
-            'expression_guidance': (
-                '可以露出在意、也可以露出戒备。不要突然大方袒露真心（Trust 不够），'
-                '也不要装作完全不在乎（心里的感觉是真的）。'
-            ),
-        }
-
-    # ═══ 朋友档细分 —— 不是一刀切"朋友"，按深度/调性/张力分出 ═══
-
-    # 深厚友情/亲情：高 Attachment + 高 Commitment
-    if attach >= 60 and c >= 60:
-        if p >= 15:
-            return {
-                'primary': '深厚的挚友 / 亲情',
-                'complex_note': (
-                    '关系基础非常深，同时存在一定尚未确认的心动或暧昧张力。'
-                    '目前不足以把底层关系状态判定为爱情。'
-                ),
-                'expression_guidance': (
-                    '关系基础非常深，同时存在一定尚未确认的心动或暧昧张力；'
-                    '目前不足以将 durable relationship state 判定为爱情。'
-                    '允许你依据性格与当前认知主动表现出试探、调情、靠近、回避或其他关系行为，'
-                    '但这些行为本身不代表底层关系状态已经升级。'
-                ),
-            }
-        return {
-            'primary': '深厚的挚友 / 亲情',
-            'complex_note': None,
-            'expression_guidance': (
-                '并肩式的关心，行动多于言语。可以损她、可以调侃，'
-                '也可以在她需要的时候接住。但不带心动色彩——'
-                '这份深不需要变成爱情来证明自己。'
-            ),
-        }
-
-    # ★ 高亲密 + 高依恋但承诺不够：是"极亲近但还没到生死之交"
-    #   你的 W/I 打满 + Attach 很高，但 C 不够高 → 说明角色愿意付出关心但还没"为她做重大牺牲"的觉悟
-    if attach >= 50 and w >= 60 and i >= 60:
-        # 再看有没有暧昧张力
-        if p >= 15:
-            # 有暧昧张力 → "极亲近的朋友 + 未确认的心动"
-            complex = (
-                '你们的关系已经远远超过了"普通朋友"——'
-                '你在意她、她在你心里有很重的位置、你愿意接住她的脆弱。'
-                '同时存在一丝暧昧张力，但还没有到你自己认定"这就是爱"的地步。'
-                '这种"极亲近但悬而未决"的状态是真实的——不需要急着给它一个名字。'
-            )
-            # 看摩擦情况补充
-            if total_f >= 40:
-                complex += (
-                    '\n⚠️ 但同时也有不少摩擦积累——她踩过你的线、你也有过失约。'
-                    '这份关系既深又有磨损痕迹，不是无条件的甜。'
-                )
-            return {
-                'primary': '极亲近的朋友（有未确认的暧昧张力）',
-                'complex_note': complex,
-                'expression_guidance': (
-                    '你可以真诚、可以深入、可以在她脆弱时接住她——你们已经到了这个位置。'
-                    '偶尔的调情/暧昧是允许的（因为那份张力确实存在），'
-                    '但不主动推进到"表白/确认关系"——因为你自己还没走到那一步。'
-                    '\n按人设方式表达在意：可以嘴硬心软、可以用行动代替言语、'
-                    '可以在她看不到的地方默默关心——但不能假装不在乎。'
-                ),
-            }
-        else:
-            # 没暧昧张力 → "极亲近的挚友"
-            complex = (
-                '你们之间已经远超普通朋友——她在你心里有位置，你愿意为她停下来。'
-                '但这份在意不是心动，是"并肩"和"信任"的积累。'
-            )
-            if total_f >= 40:
-                complex += (
-                    '\n不过也有不少磨损——她踩过你的线，你也有过没兑现的承诺。'
-                    '这段关系有真实的裂痕在里面，不是只有温暖。'
-                )
-            return {
-                'primary': '极亲近的挚友',
-                'complex_note': complex,
-                'expression_guidance': (
-                    '你的关心是真的、你的在意是真的——按人设方式落地。'
-                    '可以损她、可以嘴硬、但该接住的时候必须接住。'
-                    '不带心动色彩，但不需要刻意保持距离——你们已经过了那个阶段。'
-                ),
-            }
-
-    # 普通朋友（W 中等但 Attach/I 不够高）
+    The previous implementation translated ledger thresholds into durable
+    statements such as confirmed love or absence of romantic feeling.  This
+    compatibility function intentionally exposes only a diagnostic code.  No
+    reader may use it to determine what the character feels or should say.
+    """
+    state = state or {}
+    total_f = sum(float(v) for v in (state.get('friction') or {}).values())
+    w = float(state.get('warmth') or 0)
+    i = float(state.get('intimacy') or 0)
+    trust = float(state.get('trust') or 0)
+    attach = float(state.get('attachment') or 0)
+    commitment = float(state.get('commitment') or 0)
+    passion = float(state.get('passion') or 0)
+    if not any((total_f, w, i, trust, attach, commitment, passion)):
+        code = 'ledger_unassessed'
+    elif total_f >= 10 and (w <= 5 or total_f >= max(w, 1) * 2):
+        code = 'friction_dominant_ledger'
+    elif passion >= 40 and trust >= 55 and commitment >= 45:
+        code = 'high_passion_trust_commitment_ledger'
+    elif attach >= 60 and commitment >= 60:
+        code = 'high_attachment_commitment_ledger'
+    elif i <= 5:
+        code = 'low_interaction_history_ledger'
+    else:
+        code = 'mixed_ledger_signals'
     return {
-        'primary': '朋友',
-        'complex_note': None,
-        'expression_guidance': (
-            '按人设的朋友式表达：可以开玩笑、可以真诚、可以吐槽她——'
-            '但不主动进入"独占""亲密身体""时间绑定"这类爱情腔的表达。'
-        ),
+        'primary': f'legacy:{code}',
+        'code': code,
+        'complex_note': '仅为兼容/调试数值投影，不构成关系性质。',
+        'expression_guidance': '不用于表达或关系定性；以 relationship_panel 为准。',
     }
 
 
-# ══════════════════════════════════════════════════════════════
-# 数值 → 形容词（避免 Generator 被数字锚定）
-# ══════════════════════════════════════════════════════════════
 def _scale_word(v: float) -> str:
     if v <= 5:
         return '几乎没有'
@@ -386,8 +158,8 @@ def _scale_word(v: float) -> str:
 def _top_friction_categories(friction: Dict, n: int = 3) -> List[str]:
     if not friction:
         return []
-    items = sorted(friction.items(), key=lambda x: -float(x[1]))
-    return [k for k, v in items[:n] if float(v) > 1.0]
+    items = sorted(friction.items(), key=lambda item: -float(item[1]))
+    return [key for key, value in items[:n] if float(value) > 1.0]
 
 
 def _temporal_note(user_id, character_id) -> Optional[str]:
@@ -416,11 +188,8 @@ def _temporal_note(user_id, character_id) -> Optional[str]:
     return f'上次互动约 {label} 前'
 
 
-# ══════════════════════════════════════════════════════════════
-# Dynamics 计算（滑动窗口，不持久化）
-# ══════════════════════════════════════════════════════════════
 def compute_tone(user_id, character_id) -> Optional[str]:
-    """最近若干条消息里各 tone_category 的比例，返回主导标签。"""
+    """Return a recent style observation, never a relationship verdict."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('''SELECT tone_category, COUNT(*)
@@ -436,10 +205,10 @@ def compute_tone(user_id, character_id) -> Optional[str]:
     conn.close()
     if not rows:
         return None
-    total = sum(r[1] for r in rows)
+    total = sum(row[1] for row in rows)
     if total == 0:
         return None
-    rows.sort(key=lambda r: -r[1])
+    rows.sort(key=lambda row: -row[1])
     top = rows[0]
     if top[1] / total >= 0.5:
         mapping = {
@@ -452,12 +221,7 @@ def compute_tone(user_id, character_id) -> Optional[str]:
 
 
 def compute_flirt_response(user_id, character_id) -> Dict:
-    """Count flirt_response inside the last N recorded interaction turns.
-
-    Window is last N rows, then count. Do not skip NULL and backfill from
-    older history. Legacy Boolean column is ignored. Does not cover voice/group
-    turns that never called process_turn.
-    """
+    """Count recorded response evidence in a bounded recent interaction window."""
     window = FLIRT_RESPONSE_WINDOW_SIZE
     conn = get_conn()
     cur = conn.cursor()
@@ -473,13 +237,12 @@ def compute_flirt_response(user_id, character_id) -> Dict:
     rows = cur.fetchall()
     cur.close()
     conn.close()
-
     counts = {'accepted': 0, 'held': 0, 'rejected': 0, 'mixed': 0}
     for (value,) in rows:
         if value in counts:
             counts[value] += 1
     sample = sum(counts.values())
-    stats = {
+    return {
         'accepted': counts['accepted'],
         'held': counts['held'],
         'rejected': counts['rejected'],
@@ -489,7 +252,6 @@ def compute_flirt_response(user_id, character_id) -> Dict:
         'window': window,
         'desc': _format_flirt_response_desc(counts, sample, window),
     }
-    return stats
 
 
 def _format_flirt_response_desc(counts, sample, window) -> str:
@@ -502,14 +264,11 @@ def _format_flirt_response_desc(counts, sample, window) -> str:
     ]
     if counts['mixed']:
         parts.append(f'混合 {counts["mixed"]}')
-    return (
-        f'最近 {window} 轮已记录互动中有 {sample} 次相关回应'
-        f'（{" / ".join(parts)}）'
-    )
+    return f'最近 {window} 轮已记录互动中有 {sample} 次相关回应（{" / ".join(parts)}）'
 
 
 def compute_pursue_withdraw(user_id, character_id) -> Dict:
-    """最近若干条 is_initiator 分布，判定是否有明显追逃模式。"""
+    """Describe recent initiation counts without deciding relationship direction."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('''SELECT direction, is_initiator, COUNT(*)
@@ -522,17 +281,22 @@ def compute_pursue_withdraw(user_id, character_id) -> Dict:
     rows = cur.fetchall()
     cur.close()
     conn.close()
-
-    user_init = sum(cnt for d, init, cnt in rows if d == 'user' and init)
-    char_init = sum(cnt for d, init, cnt in rows if d == 'character' and init)
+    user_init = sum(count for direction, initiated, count in rows
+                    if direction == 'user' and initiated)
+    char_init = sum(count for direction, initiated, count in rows
+                    if direction == 'character' and initiated)
     total = user_init + char_init
     if total < 5:
         return {'pattern': None}
     user_ratio = user_init / total
     if user_ratio >= PURSUE_WITHDRAW_IMBALANCE_THRESHOLD:
-        return {'pattern': 'user_pursue',
-                'desc': '她最近在主动靠近（发起次数明显偏多），你按自己节奏回应即可'}
+        return {
+            'pattern': 'user_more_initiative',
+            'desc': '记录中用户侧发起次数明显偏多，仅供回复节奏参考',
+        }
     if user_ratio <= 1 - PURSUE_WITHDRAW_IMBALANCE_THRESHOLD:
-        return {'pattern': 'user_withdraw',
-                'desc': '她最近相对被动（发起次数明显偏少），可能是她的节奏，不一定是关系变冷'}
+        return {
+            'pattern': 'character_more_initiative',
+            'desc': '记录中角色侧发起次数明显偏多，仅供回复节奏参考',
+        }
     return {'pattern': None}

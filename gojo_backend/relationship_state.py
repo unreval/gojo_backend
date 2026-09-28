@@ -10,6 +10,8 @@
 ★ 所有 apply_* 函数都是"接收 delta，写入并留痕"的原子操作
 """
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Dict, List
 
 from relationship_db import ensure_state_row, work_get_conn as get_conn
@@ -19,6 +21,32 @@ from relationship_config import (
     WARMTH_MIN, WARMTH_MAX,
     TRUST_POSITIVE_MULTIPLIER, TRUST_NEGATIVE_MULTIPLIER,
 )
+from relationship_semantics import is_new_pending_relationship_semantic_key
+
+
+_PROVENANCE_EVIDENCE_REFS = ContextVar(
+    'relationship_provenance_evidence_refs', default=(),
+)
+
+
+@contextmanager
+def provenance_source_event(source_event_id):
+    """Attach one Raw Event id to ledger provenance written in this scope."""
+    event_id = str(source_event_id or '').strip()
+    refs = ({'source_event_id': event_id},) if event_id else ()
+    token = _PROVENANCE_EVIDENCE_REFS.set(refs)
+    try:
+        yield
+    finally:
+        _PROVENANCE_EVIDENCE_REFS.reset(token)
+
+
+def current_provenance_source_event():
+    for ref in _PROVENANCE_EVIDENCE_REFS.get() or ():
+        source_event_id = ref.get('source_event_id') if isinstance(ref, dict) else None
+        if source_event_id:
+            return source_event_id
+    return None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -43,6 +71,33 @@ def load_state(user_id: str, character_id: str) -> Dict:
         # ensure_state_row 已插入，理论不会到这
         return _default_state()
 
+    return _state_from_row(row, has_state_row=True)
+
+
+def read_state(user_id: str, character_id: str) -> Dict:
+    """Read the ledger without creating a row.
+
+    Prompt construction and relationship panels must be observational.  Writers
+    continue using ``load_state`` so their first mutation can initialize the
+    row atomically.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''SELECT warmth, friction, intimacy, trust, attachment,
+                          commitment, passion, pending_passion,
+                          pending_hypothesis, banter_baseline, last_updated
+                   FROM rel_state
+                   WHERE user_id = %s AND character_id = %s''',
+                (user_id, character_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return _default_state(has_state_row=False)
+    return _state_from_row(row, has_state_row=True)
+
+
+def _state_from_row(row, *, has_state_row: bool) -> Dict:
     return {
         'warmth': float(row[0] or 0),
         'friction': row[1] or {},
@@ -55,16 +110,17 @@ def load_state(user_id: str, character_id: str) -> Dict:
         'pending_hypothesis': row[8] or [],
         'banter_baseline': row[9] or 'reserved',
         'last_updated': row[10],
+        'has_state_row': has_state_row,
     }
 
 
-def _default_state() -> Dict:
+def _default_state(*, has_state_row=False) -> Dict:
     return {
         'warmth': 0.0, 'friction': {}, 'intimacy': 0.0,
         'trust': 0.0, 'attachment': 0.0, 'commitment': 0.0,
         'passion': 0.0, 'pending_passion': 0,
         'pending_hypothesis': [], 'banter_baseline': 'reserved',
-        'last_updated': None,
+        'last_updated': None, 'has_state_row': has_state_row,
     }
 
 
@@ -78,6 +134,8 @@ def _write_provenance(
     rule: str = None, evidence_refs: List = None, note: str = None,
 ):
     """写一条 provenance 日志。所有状态变化都必须调用。"""
+    if evidence_refs is None:
+        evidence_refs = list(_PROVENANCE_EVIDENCE_REFS.get() or ())
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('''INSERT INTO rel_provenance_log
@@ -276,6 +334,10 @@ def push_hypothesis_evidence(user_id, character_id, hypothesis_type: str, eviden
     """向指定类型的 hypothesis 追加一条 evidence。
     如果这个类型不存在则新建。evidence 是任意 dict，会被 append 到 evidence 数组。
     """
+    # New relationship semantics are owned by Cognitive questions / hypotheses
+    # / beliefs. Existing legacy cues can remain for compatibility only.
+    if is_new_pending_relationship_semantic_key(hypothesis_type):
+        return False
     state = load_state(user_id, character_id)
     plist = list(state['pending_hypothesis']) if state['pending_hypothesis'] else []
 
@@ -299,10 +361,13 @@ def push_hypothesis_evidence(user_id, character_id, hypothesis_type: str, eviden
     found['last_seen_at'] = _now_iso()
 
     _save_hypotheses(user_id, character_id, plist)
+    return True
 
 
 def promote_hypothesis(user_id, character_id, hypothesis_type: str, new_status: str):
     """把某个 hypothesis 的状态改成 active/confirmed/dismissed。"""
+    if is_new_pending_relationship_semantic_key(hypothesis_type):
+        return False
     state = load_state(user_id, character_id)
     plist = list(state['pending_hypothesis']) if state['pending_hypothesis'] else []
     for h in plist:
@@ -311,6 +376,7 @@ def promote_hypothesis(user_id, character_id, hypothesis_type: str, new_status: 
             h['last_seen_at'] = _now_iso()
             break
     _save_hypotheses(user_id, character_id, plist)
+    return True
 
 
 def cleanup_hypotheses(user_id, character_id, max_age_days: int):
@@ -350,6 +416,7 @@ def declare_stance(user_id, character_id, stance_type: str, content: str,
     """新增一条角色的明确表态。返回新记录 id。
     典型 stance_type: 'care_admission' / 'promise' / 'relationship_confirm' / 'boundary_stated'
     """
+    source_event_ref = source_event_ref or current_provenance_source_event()
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('''INSERT INTO rel_declared_stance
@@ -407,11 +474,43 @@ def list_active_stances(user_id, character_id) -> List[Dict]:
             for r in rows]
 
 
+def list_declared_stances(user_id, character_id, *, include_inactive=True) -> List[Dict]:
+    """Read active and historical stances for a read-only relationship panel."""
+    conn = get_conn()
+    cur = conn.cursor()
+    if include_inactive:
+        cur.execute('''SELECT id, stance_type, content, source_event_ref, status,
+                              declared_at, revoked_at, revoke_reason
+                       FROM rel_declared_stance
+                       WHERE user_id = %s AND character_id = %s
+                       ORDER BY declared_at ASC, id ASC''',
+                    (user_id, character_id))
+    else:
+        cur.execute('''SELECT id, stance_type, content, source_event_ref, status,
+                              declared_at, revoked_at, revoke_reason
+                       FROM rel_declared_stance
+                       WHERE user_id = %s AND character_id = %s AND status = 'active'
+                       ORDER BY declared_at ASC, id ASC''',
+                    (user_id, character_id))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            'id': row[0], 'type': row[1], 'content': row[2],
+            'source_event_ref': row[3], 'status': row[4],
+            'declared_at': row[5], 'revoked_at': row[6],
+            'revoke_reason': row[7],
+        }
+        for row in rows
+    ]
+
+
 def save_offline_character_state(user_id: str, character_id: str, state: Dict):
-    """upsert 最新一条内部状态。JSON 本身保留，供下一回合连续性使用。"""
+    """Persist only short-term continuity cues, never relationship authority."""
     if not user_id or not character_id or not isinstance(state, dict):
         return
-    payload = {k: v for k, v in state.items() if v is not None}
+    payload = _offline_continuity_payload(state)
     if not payload:
         return
     conn = get_conn()
@@ -431,7 +530,7 @@ def save_offline_character_state(user_id: str, character_id: str, state: Dict):
 
 
 def load_offline_character_state(user_id: str, character_id: str) -> Dict:
-    """读取上一回合内部状态。没有则返回空 dict。"""
+    """Read filtered short-term continuity cues.  Historical rows are filtered too."""
     if not user_id or not character_id:
         return {}
     conn = get_conn()
@@ -452,4 +551,37 @@ def load_offline_character_state(user_id: str, character_id: str) -> Dict:
             payload = json.loads(payload)
         except Exception:
             return {}
-    return payload if isinstance(payload, dict) else {}
+    return _offline_continuity_payload(payload) if isinstance(payload, dict) else {}
+
+
+_OFFLINE_CONTINUITY_KEYS = ('action', 'intent', 'moodshift', 'anchor', 'from')
+_OFFLINE_RELATIONSHIP_TERMS = (
+    '爱情', '恋爱', '心动', '喜欢', '不喜欢', '告白', '表白', '拒绝',
+    'relationship', 'romantic', 'love',
+)
+
+
+def _offline_continuity_payload(state: Dict) -> Dict:
+    """Keep scene/action continuity while dropping hidden relationship claims."""
+    if not isinstance(state, dict):
+        return {}
+    payload = {}
+    for key in _OFFLINE_CONTINUITY_KEYS:
+        value = state.get(key)
+        if value in (None, ''):
+            continue
+        text = str(value).strip()[:300]
+        if not text:
+            continue
+        # A short-term intent may remain useful, but it cannot smuggle a
+        # romance/rejection conclusion back into the next prompt.
+        if key in {'action', 'intent'} and any(
+                term in text.casefold() for term in _OFFLINE_RELATIONSHIP_TERMS):
+            continue
+        payload[key] = text
+    return payload
+
+
+def load_offline_continuity_state(user_id: str, character_id: str) -> Dict:
+    """Explicit name for consumers that need scene continuity only."""
+    return load_offline_character_state(user_id, character_id)

@@ -1,70 +1,70 @@
-"""Character initiative policy: expression only, never writes rel_state."""
+"""Character initiative policy for expression pacing only.
+
+Passion is interaction-tension telemetry.  It may adjust whether a character
+tries a cautious probe or slows down, but it never means the character has
+recognized, confirmed, or denied a romantic relationship.
+"""
 
 POLICIES = {
     'gojo': {
         'style': 'active',
-        'romantic_awareness': 12,
-        'flirt_probe': 15,
-        'confession': 40,
-        'commitment': 55,
+        'tension_watch': 12,
+        'tension_probe': 15,
     },
     'geto': {
         'style': 'cautious',
-        'romantic_awareness': 18,
-        'flirt_probe': 28,
-        'confession': 48,
-        'commitment': 60,
+        'tension_watch': 18,
+        'tension_probe': 28,
     },
     'minato': {
         'style': 'avoidant',
-        'romantic_awareness': 20,
-        'flirt_probe': 35,
-        'confession': 55,
-        'commitment': 65,
+        'tension_watch': 20,
+        'tension_probe': 35,
     },
 }
 DEFAULT_POLICY = {
     'style': 'cautious',
-    'romantic_awareness': 18,
-    'flirt_probe': 28,
-    'confession': 45,
-    'commitment': 60,
+    'tension_watch': 18,
+    'tension_probe': 28,
 }
 
 
 def initiative_policy(character_id, state=None) -> dict:
     policy = dict(POLICIES.get(str(character_id or ''), DEFAULT_POLICY))
     policy['character_id'] = character_id
-    state = state or {}
-    policy['passion'] = float(state.get('passion') or 0)
+    policy['passion'] = float((state or {}).get('passion') or 0)
     return policy
 
 
-def initiative_guidance(character_id, state=None, *, is_love=False) -> str:
-    """Tell the generator it may act, without rewriting durable relationship state."""
-    if is_love:
+def initiative_guidance(character_id, state=None, *, romantic_label='unresolved',
+                         is_love=None) -> str:
+    """Give pacing guidance without declaring a hidden relationship state.
+
+    ``is_love`` remains a tolerated keyword for older callers but is
+    intentionally ignored.  Only the panel-provided Cognitive label can turn
+    off the unresolved-state caution.
+    """
+    if romantic_label == 'affirmed':
         return ''
     policy = initiative_policy(character_id, state)
-    passion = policy['passion']
+    tension = policy['passion']
     style = policy['style']
-    aware = passion >= policy['romantic_awareness']
-    can_probe = passion >= policy['flirt_probe']
-    if not aware:
+    if tension < policy['tension_watch']:
         return (
-            '底层关系状态仍不是爱情。你可以按人设正常互动；'
-            '不要把一次玩笑或关心自动说成确认恋爱。'
+            '互动张力遥测不足以改变关系结论。按人设正常互动；'
+            '不要把玩笑、关心或一次回应写成确认的浪漫关系。'
         )
-    if style == 'active' and can_probe:
+    if style == 'active' and tension >= policy['tension_probe']:
         return (
-            '底层关系状态仍不是爱情，但按你的性格可以主动试探、调情或靠近。'
-            '这些是你的行为，不代表账本已经升级。用户怎么回应才会成为新的关系证据。'
+            '互动张力可供节奏参考；按人设可以主动试探、调情或靠近。'
+            '这些只是表达行为，不代表已意识到或确认浪漫性质。'
         )
-    if style == 'avoidant' and aware:
+    if style == 'avoidant':
         return (
-            '你可能已经察觉到自己的在意，但按性格更可能拉开距离、嘴硬或转移话题。'
-            '主动回避也是行为，不是把关系状态改回去。'
+            '互动张力可供节奏参考；按人设可以拉开距离、嘴硬或转移话题。'
+            '这是节奏与风险管理，不是对关系性质的判断。'
         )
     return (
-        '你或许已经意识到某种心动或暧昧张力，但按性格仍应继续观察，'
-        '不必急着表白或确认关系。主动与否由人设决定，不能改写底层关系事实。'
+        '互动张力可供节奏参考；按人设继续观察或谨慎回应。'
+        '不得把它解释为角色已经意识到心动、爱情或任何确认结论。'
     )

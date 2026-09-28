@@ -98,7 +98,7 @@ def extract_json(raw: str):
 # ══════════════════════════════════════════════
 OFFLINE_STATE_MARKER = '<<<OFFLINE_CHARACTER_STATES>>>'
 _OFFLINE_MARKER_RE = re.compile(r'<<<\s*OFFLINE_CHARACTER_STATES\s*>>>', re.IGNORECASE)
-_OFFLINE_KEYS = {'inner', 'intent', 'moodshift', 'anchor', 'from', 'status'}
+_OFFLINE_KEYS = {'action', 'inner', 'intent', 'moodshift', 'anchor', 'from', 'status'}
 
 
 def _looks_like_offline_state(obj) -> bool:

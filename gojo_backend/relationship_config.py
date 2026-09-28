@@ -63,7 +63,7 @@ STRANGER_BOUNDARY_MULTIPLIER = 3.0
 PENDING_PASSION_THRESHOLD = 3          # 达到 N 次正向互惠才可能转化
 PENDING_PASSION_MIN_TIMESPAN_HOURS = 6 # ★ 必须跨时间：至少 N 次分布在 6h+
 PENDING_PASSION_MIN_SESSIONS = 2       # ★ 必须跨对话：至少 2 场不同会话
-# Passion 转化后，进入"爱情候选"额外要求
+# Passion 转化后的 legacy telemetry cue（不构成爱情确认或 romantic_label）
 PASSION_TO_LOVE_REQUIRED_TRUST = 55    # Trust 达标线
 PASSION_TO_LOVE_REQUIRED_COMMITMENT = 45  # 承诺也要有基础
 # Passion 衰减

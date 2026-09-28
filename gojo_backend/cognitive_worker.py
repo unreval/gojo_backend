@@ -312,6 +312,26 @@ Shared relationship frame:
   sides currently treat the relationship (friends, playful_ambiguous, probing,
   serious_unconfirmed, committed_romantic, frame_shifting).
 - Friendship frames are revisable. Later romantic evidence can challenge them.
+- This broad frame never substitutes for relationship.romantic_label. Do not
+  write committed_romantic unless the same cycle has source-valid evidence for
+  an affirmed narrow romantic label; no frame can turn unresolved into affirmed.
+
+Relationship semantic keys (use only when the cited evidence warrants them):
+- relationship.engagement_style is a relationship_observation belief or a
+  relationship hypothesis about how the character handles relationship topics
+  (for example, immediate avoidance changing to a deferred but direct answer).
+  Confidence must pass the ordinary evidence gate; never assign a fixed number.
+- relationship.romantic_label belongs only to its narrow question. Its current
+  judgment value is exactly unresolved, affirmed, declined, or other. Unknown
+  is unresolved, not false; do not put this key in a belief or hypothesis.
+- relationship.romantic_openness belongs only to a relationship hypothesis.
+  A promise, flirt, passion telemetry, or Generator's ambiguous line cannot
+  promote it into a romantic conclusion.
+- relationship.internal_conflict is optional and only belongs in a
+  relationship_observation belief or relationship hypothesis with direct
+  evidence. Do not manufacture it from mixed numeric signals.
+- These items have independent lifecycles. An engagement-style change cannot
+  affirm a romantic label, and a label does not settle openness or conflict.
 
 High-salience events may open a romantic reappraisal question/hypothesis.
 They must not be treated as a direct passion or relationship-score change.

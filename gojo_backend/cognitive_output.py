@@ -12,6 +12,13 @@ from cognitive_config import (
     get_sticky_note_ttl_config,
 )
 from cognitive_predictions import validate_signal_prediction_contract
+from relationship_semantics import (
+    ENGAGEMENT_STYLE_KEY,
+    INTERNAL_CONFLICT_KEY,
+    ROMANTIC_LABEL_KEY,
+    ROMANTIC_LABEL_VALUES,
+    ROMANTIC_OPENNESS_KEY,
+)
 from cognitive_revision import (
     EVIDENCE_RELATIONS,
     EVIDENCE_STRENGTHS,
@@ -373,6 +380,42 @@ def _independent_contexts(value, field):
     return result
 
 
+def _validate_relationship_semantic_contract(
+        question_updates, belief_updates, hypothesis_updates):
+    """Keep the narrow relationship vocabulary in the existing Cognitive path.
+
+    This is a schema guard, not a scorer: normal evidence/reference validation
+    above remains responsible for whether a belief or hypothesis is justified.
+    """
+    for update in question_updates:
+        key = update['question_key']
+        if key in {ENGAGEMENT_STYLE_KEY, ROMANTIC_OPENNESS_KEY, INTERNAL_CONFLICT_KEY}:
+            raise SlowLoopOutputError('relationship_semantic_key_wrong_lifecycle')
+        if key != ROMANTIC_LABEL_KEY:
+            continue
+        judgment = update.get('current_judgment')
+        if judgment is not None and judgment['value'] not in ROMANTIC_LABEL_VALUES:
+            raise SlowLoopOutputError('relationship_romantic_label_value_invalid')
+        if update['status'] == 'resolved' and judgment is None:
+            raise SlowLoopOutputError('relationship_romantic_label_resolution_requires_value')
+
+    for update in belief_updates:
+        key = update['belief_key']
+        if key in {ROMANTIC_LABEL_KEY, ROMANTIC_OPENNESS_KEY}:
+            raise SlowLoopOutputError('relationship_semantic_key_wrong_lifecycle')
+        if key in {ENGAGEMENT_STYLE_KEY, INTERNAL_CONFLICT_KEY}:
+            if update['belief_type'] != 'relationship_observation':
+                raise SlowLoopOutputError('relationship_observation_belief_type_invalid')
+
+    for update in hypothesis_updates:
+        key = update['hypothesis_key']
+        if key == ROMANTIC_LABEL_KEY:
+            raise SlowLoopOutputError('relationship_semantic_key_wrong_lifecycle')
+        if key in {ENGAGEMENT_STYLE_KEY, ROMANTIC_OPENNESS_KEY, INTERNAL_CONFLICT_KEY}:
+            if update['hypothesis_type'] != 'relationship':
+                raise SlowLoopOutputError('relationship_semantic_hypothesis_type_invalid')
+
+
 def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=None,
                               diagnostics=None):
     """Return a normalized output or reject any ungrounded/model-invented field."""
@@ -652,6 +695,10 @@ def validate_slow_loop_output(value, *, allowed_event_ids, current_event_ids=Non
                 f'hypothesis_update_{index}_independent_contexts',
             ),
         })
+
+    _validate_relationship_semantic_contract(
+        question_updates, belief_updates, hypothesis_updates,
+    )
 
     new_predictions = []
     prediction_keys = set()
