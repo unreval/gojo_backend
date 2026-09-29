@@ -1488,13 +1488,17 @@ def _evidence_events(source):
 
 
 def _candidate_evidence_event_ids(item, events, primary_event_id):
-    """Validate the exact canonical user events an extractor says it used."""
+    """Keep extractor hints inside the job's canonical user provenance."""
     known = {
         event['event_id']: event for event in events
         if event.get('event_id')
     }
     if not known:
         return []
+
+    primary_event_id = str(primary_event_id or '').strip()
+    if primary_event_id and primary_event_id not in known:
+        return None
 
     requested = item.get('evidence_event_ids') if isinstance(item, dict) else None
     if requested is None:
@@ -1515,9 +1519,16 @@ def _candidate_evidence_event_ids(item, events, primary_event_id):
             if event_id and event_id not in ids:
                 ids.append(event_id)
 
+    # The memory job's primary canonical user event is authoritative. A
+    # list-shaped extractor hint may suggest extra canonical context, but a
+    # bad list must never select another historical event. Bind it to the
+    # primary and let the quote gate verify that binding.
+    if (primary_event_id
+            and (not ids
+                 or any(event_id not in known for event_id in ids)
+                 or primary_event_id not in ids)):
+        return [primary_event_id]
     if not ids or any(event_id not in known for event_id in ids):
-        return None
-    if primary_event_id and primary_event_id not in ids:
         return None
     return ids
 

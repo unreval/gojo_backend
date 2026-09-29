@@ -226,6 +226,79 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
         self.assertIn('我没有约定周六看电影', result['prompt'])
         self.assertNotIn('你之前答应周六和我看电影', result['prompt'])
 
+    def test_invalid_extractor_event_id_uses_primary_canonical_event(self):
+        result = self.extract(
+            empty_payload(user_fact={
+                'content': '她有计算机系统结构课，下午3点开会',
+                'category': '状态',
+                'evidence_quote': '计算机系统结构课，下午3点开会',
+                'evidence_event_ids': ['1790641541152'],
+            }),
+            '我有计算机系统结构课，下午3点开会', '知道了。',
+            source_event_id='evt-primary',
+            canonical_events=[{
+                'event_id': 'evt-primary',
+                'role': 'user',
+                'content': '我有计算机系统结构课，下午3点开会',
+            }],
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['facts']), 1)
+        self.assertEqual(result['facts'][0][1]['source_event_refs'], [
+            {'source_id': 'evt-primary'},
+        ])
+
+    def test_extractor_hint_cannot_bind_loaded_context_without_primary(self):
+        result = self.extract(
+            empty_payload(user_fact={
+                'content': '她明天要看电影',
+                'category': '状态',
+                'evidence_quote': '明天要看电影',
+                'evidence_event_ids': ['evt-context'],
+            }),
+            '我今天有计算机系统结构课', '知道了。',
+            source_event_id='evt-primary',
+            canonical_events=[{
+                'event_id': 'evt-primary',
+                'role': 'user',
+                'content': '我今天有计算机系统结构课',
+            }],
+            canonical_context_events=[{
+                'event_id': 'evt-context',
+                'role': 'user',
+                'content': '我明天要看电影',
+            }],
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['facts'], [])
+
+    def test_primary_fallback_keeps_quote_bound_to_primary_event(self):
+        result = self.extract(
+            empty_payload(user_fact={
+                'content': '她今天有计算机系统结构课',
+                'category': '状态',
+                'evidence_quote': '下午3点开会',
+                'evidence_event_ids': ['not-a-canonical-event'],
+            }),
+            '我今天有计算机系统结构课', '知道了。',
+            source_event_id='evt-primary',
+            canonical_events=[{
+                'event_id': 'evt-primary',
+                'role': 'user',
+                'content': '我今天有计算机系统结构课',
+            }],
+            canonical_context_events=[{
+                'event_id': 'evt-context',
+                'role': 'user',
+                'content': '我下午3点开会',
+            }],
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['facts'], [])
+
     def test_shorter_merge_is_allowed_when_each_fragment_is_retained(self):
         store = MergeStore([
             (1, '她答应和我周六一起在市中心电影院见面看电影'),

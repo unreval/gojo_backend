@@ -1600,9 +1600,9 @@ def _advance_world_tx(cur, character_id, user_id, now):
     cur.execute(
         '''UPDATE char_schedule_phase AS phase
            SET status=%s,
-               actual_start_at=COALESCE(actual_start_at, planned_start_at),
-               actual_end_at=COALESCE(actual_end_at, planned_end_at),
-               revision=revision+1
+               actual_start_at=COALESCE(phase.actual_start_at, phase.planned_start_at),
+               actual_end_at=COALESCE(phase.actual_end_at, phase.planned_end_at),
+               revision=phase.revision+1
            FROM char_schedule AS event
            WHERE phase.schedule_id=event.id
              AND event.character_id=%s AND event.user_id=%s
@@ -1614,8 +1614,8 @@ def _advance_world_tx(cur, character_id, user_id, now):
     cur.execute(
         '''UPDATE char_schedule_phase AS phase
            SET status=%s,
-               actual_start_at=COALESCE(actual_start_at, planned_start_at),
-               revision=revision+1
+               actual_start_at=COALESCE(phase.actual_start_at, phase.planned_start_at),
+               revision=phase.revision+1
            FROM char_schedule AS event
            WHERE phase.schedule_id=event.id
              AND event.character_id=%s AND event.user_id=%s

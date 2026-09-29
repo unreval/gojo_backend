@@ -622,6 +622,33 @@ class FakeConn:
 
 
 class ScheduleReplyStateTests(unittest.TestCase):
+    def test_world_clock_phase_updates_qualify_phase_columns(self):
+        cursor = Mock()
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = None
+
+        db_schedule._advance_world_tx(
+            cursor, 'gojo', 'u1',
+            datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc),
+        )
+
+        completed_phase_sql = cursor.execute.call_args_list[0].args[0]
+        active_phase_sql = cursor.execute.call_args_list[1].args[0]
+        self.assertIn(
+            'COALESCE(phase.actual_start_at, phase.planned_start_at)',
+            completed_phase_sql,
+        )
+        self.assertIn(
+            'COALESCE(phase.actual_end_at, phase.planned_end_at)',
+            completed_phase_sql,
+        )
+        self.assertIn('revision=phase.revision+1', completed_phase_sql)
+        self.assertIn(
+            'COALESCE(phase.actual_start_at, phase.planned_start_at)',
+            active_phase_sql,
+        )
+        self.assertIn('revision=phase.revision+1', active_phase_sql)
+
     def test_sanitize_drops_overlapping_generated_items(self):
         schedule_engine = load_schedule_engine()
         items = schedule_engine._sanitize([
