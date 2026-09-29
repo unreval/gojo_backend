@@ -1374,7 +1374,18 @@ def _support_items(user_id, character_id, user_message, hot_messages, temporal_s
         schedule_text, _world = _dbs.format_world_prompt(
             character_id, user_id, now)
         if schedule_text:
-            _add('schedule', schedule_text, 33, 'schedule:now')
+            event = (_world or {}).get('event') or {}
+            phase = (_world or {}).get('phase') or {}
+            availability = (_world or {}).get('availability') or {}
+            _add('schedule', schedule_text, 33, 'schedule:now', {
+                'event_id': event.get('id'),
+                'event_revision': event.get('revision'),
+                'event_status': event.get('status'),
+                'phase_id': phase.get('id'),
+                'phase_status': phase.get('status'),
+                'phase_kind': phase.get('phase_kind'),
+                'reply_state': availability.get('reply_state'),
+            })
     except Exception as exc:
         print(f'[context_layer] schedule skipped:{exc}')
 

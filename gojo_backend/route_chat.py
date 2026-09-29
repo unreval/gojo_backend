@@ -24,6 +24,7 @@
   - 修复原实现里 `except Exception:` 后 `print({e})` 但 e 未定义的 bug。
 """
 from datetime import datetime
+import hashlib
 import json
 import re
 import uuid
@@ -68,6 +69,310 @@ def _create_json(model, max_tokens, system_blocks, messages):
     )
     raw = extract_text(response).strip()
     return raw, response
+
+
+_TRACE_REF_CHARS = 24
+_TRACE_TOKEN_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$')
+_TRACE_OUTCOMES = {
+    'accepted', 'parse_invalid', 'candidate_rejected', 'provider_error',
+}
+_TRACE_RETRY_REASONS = {
+    'parse_invalid',
+    'provider_error',
+    'candidate_rejected',
+    'tomorrow_noon_rewritten_as_today',
+    'past_noon_used_as_future_deadline',
+    'active_event_completion_claim_without_intent',
+}
+_TRACE_PROVIDERS = {'anthropic'}
+_TRACE_MESSAGE_ROLES = {'user', 'assistant'}
+_TRACE_BLOCK_TYPES = {'text'}
+_TRACE_EVENT_STATUSES = {'planned', 'active', 'completed', 'cancelled'}
+_TRACE_REPLY_STATES = {'free', 'soft_busy', 'hard_busy'}
+_TRACE_PHASE_KINDS = {
+    'activity', 'appointment', 'commute', 'errand', 'exercise', 'leisure',
+    'meal', 'meeting', 'rest', 'routine', 'sleep', 'study', 'travel', 'work',
+}
+_TRACE_SCORE_MODES = {'semantic_lexical', 'lexical_only', 'recent_safety'}
+_TRACE_STOP_REASONS = {
+    'end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn',
+    'refusal',
+}
+
+
+def _trace_ref(value):
+    """Return a stable, fixed-length correlation ref without logging an ID."""
+    if isinstance(value, str):
+        raw = value
+    elif isinstance(value, int) and not isinstance(value, bool):
+        raw = str(value)
+    else:
+        return None
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:_TRACE_REF_CHARS]
+
+
+def _trace_enum(value, allowed):
+    if not isinstance(value, str):
+        return None
+    return value if value in allowed else 'unknown'
+
+
+def _trace_token(value):
+    """Keep bounded provider identifiers, hash anything outside that grammar."""
+    if not isinstance(value, str):
+        return None
+    if _TRACE_TOKEN_RE.fullmatch(value):
+        return value
+    return _trace_ref(value)
+
+
+def _trace_number(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _trace_error_type(error):
+    if error is None:
+        return None
+    try:
+        name = type(error).__name__
+    except Exception:
+        return 'unknown'
+    return name if _TRACE_TOKEN_RE.fullmatch(name) else 'unknown'
+
+
+def _trace_chars(value):
+    try:
+        return len(value) if isinstance(value, str) else 0
+    except Exception:
+        return 0
+
+
+def _trace_system_blocks(system_blocks):
+    blocks = []
+    for index, block in enumerate(system_blocks or []):
+        if isinstance(block, dict):
+            blocks.append({
+                'index': index,
+                'type': _trace_enum(block.get('type'), _TRACE_BLOCK_TYPES) or 'unknown',
+                'chars': _trace_chars(block.get('text')),
+                'cache_control': bool(block.get('cache_control')),
+            })
+        else:
+            blocks.append({
+                'index': index,
+                'type': 'unknown',
+                'chars': _trace_chars(block),
+                'cache_control': False,
+            })
+    return blocks
+
+
+def _trace_messages(messages):
+    rows = []
+    for index, message in enumerate(messages or []):
+        if isinstance(message, dict):
+            role = _trace_enum(message.get('role'), _TRACE_MESSAGE_ROLES) or 'unknown'
+            content = message.get('content')
+        else:
+            role = 'unknown'
+            content = None
+        rows.append({
+            'index': index,
+            'role': role,
+            'chars': _trace_chars(content),
+        })
+    return rows
+
+
+def _trace_selected_episodes(context_pack):
+    selected = []
+    try:
+        items = list(getattr(context_pack, 'items', None) or [])
+    except Exception:
+        items = []
+    for item in items:
+        try:
+            item_type = getattr(item, 'item_type', None)
+        except Exception:
+            continue
+        if item_type != 'episodic_memory':
+            continue
+        try:
+            metadata = getattr(item, 'metadata', None) or {}
+        except Exception:
+            metadata = {}
+        raw = metadata.get('raw') if isinstance(metadata, dict) else {}
+        raw = raw if isinstance(raw, dict) else {}
+        try:
+            source_count = len(getattr(item, 'source_event_ids', None) or ())
+        except Exception:
+            source_count = 0
+        try:
+            item_id = getattr(item, 'item_id', None)
+            injected_text = getattr(item, 'text', None)
+        except Exception:
+            item_id = None
+            injected_text = None
+        selected.append({
+            'episode_ref': _trace_ref(
+                raw.get('episode_id') or raw.get('id') or item_id),
+            'final_score': _trace_number(raw.get('score')),
+            'semantic_score': _trace_number(raw.get('semantic_score')),
+            'lexical_score': _trace_number(raw.get('lexical_score')),
+            'score_mode': _trace_enum(raw.get('score_mode'), _TRACE_SCORE_MODES),
+            'source_count': source_count,
+            'injected_chars': _trace_chars(injected_text),
+        })
+    return selected
+
+
+def _trace_schedule_context(context_pack):
+    try:
+        items = list(getattr(context_pack, 'items', None) or [])
+    except Exception:
+        items = []
+    schedule_items = []
+    for item in items:
+        try:
+            if getattr(item, 'item_type', None) == 'schedule':
+                schedule_items.append(item)
+        except Exception:
+            continue
+    if not schedule_items:
+        return {'injected': False}
+    try:
+        metadata = getattr(schedule_items[-1], 'metadata', None) or {}
+    except Exception:
+        metadata = {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        'injected': True,
+        'block_count': len(schedule_items),
+        'chars': sum(_trace_chars(getattr(item, 'text', None)) for item in schedule_items),
+        'event_ref': _trace_ref(metadata.get('event_id')),
+        'event_revision': _trace_number(metadata.get('event_revision')),
+        'event_status': _trace_enum(metadata.get('event_status'), _TRACE_EVENT_STATUSES),
+        'phase_ref': _trace_ref(metadata.get('phase_id')),
+        'phase_status': _trace_enum(metadata.get('phase_status'), _TRACE_EVENT_STATUSES),
+        'phase_kind': _trace_enum(metadata.get('phase_kind'), _TRACE_PHASE_KINDS),
+        'reply_state': _trace_enum(metadata.get('reply_state'), _TRACE_REPLY_STATES),
+    }
+
+
+def _trace_context_allocation(context_pack):
+    try:
+        allocation = getattr(context_pack, 'allocation', None) or {}
+    except Exception:
+        allocation = {}
+    if not isinstance(allocation, dict):
+        return {}
+    return {
+        channel: _trace_number(allocation.get(channel))
+        for channel in (
+            'hot', 'pinned', 'summary', 'recall', 'relationship', 'cognitive',
+            'diary', 'aux',
+        )
+        if channel in allocation
+    }
+
+
+def _trace_response_field(response, field):
+    try:
+        return getattr(response, field, None)
+    except Exception:
+        return None
+
+
+def _build_generation_trace_payload(
+    *, model, max_tokens, system_blocks, messages, attempt, attempts,
+    trace_context, response=None, error=None, outcome='accepted',
+    will_retry=False, retry_reason=None,
+):
+    """Build one bounded, content-free audit record for a Generator attempt."""
+    trace_context = trace_context if isinstance(trace_context, dict) else {}
+    message_rows = _trace_messages(messages)
+    response_request_id = _trace_response_field(response, '_request_id')
+    if response_request_id is None:
+        response_request_id = _trace_response_field(response, 'request_id')
+    response_model = _trace_response_field(response, 'model')
+    normalized_outcome = _trace_enum(outcome, _TRACE_OUTCOMES)
+    if normalized_outcome in (None, 'unknown'):
+        normalized_outcome = 'provider_error'
+    retrying = bool(will_retry)
+    episodes = _trace_selected_episodes(trace_context.get('context_pack'))
+    return {
+        'endpoint': '/chat/text',
+        'attempt': attempt,
+        'max_attempts': attempts,
+        'source_event_ref': _trace_ref(trace_context.get('source_event_id')),
+        'assistant_turn_ref': _trace_ref(trace_context.get('assistant_turn_id')),
+        'provider': _trace_enum(
+            trace_context.get('provider'), _TRACE_PROVIDERS) or 'anthropic',
+        'requested_model': _trace_token(model),
+        'resolved_model': _trace_token(response_model),
+        'response': {
+            'model': _trace_token(response_model),
+            'id': _trace_token(_trace_response_field(response, 'id')),
+            'provider_request_id': _trace_token(response_request_id),
+            'stop_reason': _trace_enum(
+                _trace_response_field(response, 'stop_reason'), _TRACE_STOP_REASONS),
+        },
+        'outcome': normalized_outcome,
+        'will_retry': retrying,
+        'retry_reason': (
+            _trace_enum(retry_reason, _TRACE_RETRY_REASONS)
+            if retrying else None
+        ),
+        'error_type': (
+            _trace_error_type(error)
+            if normalized_outcome == 'provider_error' else None
+        ),
+        'max_tokens': max_tokens,
+        'system_block_count': len(system_blocks or []),
+        'system_blocks': _trace_system_blocks(system_blocks),
+        'message_count': len(message_rows),
+        'messages': message_rows,
+        'current_user_is_last': bool(
+            message_rows and message_rows[-1].get('role') == 'user'),
+        'selected_episode_count': len(episodes),
+        'selected_episodes': episodes[:20],
+        'selected_episodes_truncated': max(0, len(episodes) - 20),
+        'schedule_context': _trace_schedule_context(trace_context.get('context_pack')),
+        'context_budget_allocation': _trace_context_allocation(
+            trace_context.get('context_pack')),
+    }
+
+
+def _emit_generation_trace(**kwargs):
+    """Best-effort INFO audit logging; diagnostics must never affect generation."""
+    if not kwargs.get('trace_context'):
+        return
+    try:
+        payload = _build_generation_trace_payload(**kwargs)
+        print('[generation_trace] ' + json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+    except Exception:
+        try:
+            print('[generation_trace] event=emit_failed')
+        except Exception:
+            pass
+
+
+def _emit_generation_turn_link(source_event_id, assistant_turn_id):
+    """Link the pre-generation correlation id to the eventual assistant turn."""
+    try:
+        payload = {
+            'endpoint': '/chat/text',
+            'event': 'assistant_turn_link',
+            'source_event_ref': _trace_ref(source_event_id),
+            'assistant_turn_ref': _trace_ref(assistant_turn_id),
+        }
+        print('[generation_trace] ' + json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+    except Exception:
+        pass
 
 
 # 共享校验（utils）在本模块保留旧名，避免调用点大面积改名。
@@ -201,6 +506,7 @@ def _parsed_ready(parsed, min_messages=1) -> bool:
 def _generate_or_none(
     model, max_tokens, system_blocks, messages, *,
     attempts, log_tag, cache_tag, min_messages=1, salvage=False, reject_fn=None,
+    generation_trace=None,
 ):
     """LLM → parse → validate → retry。成功返回 (parsed, state)，失败 (None, None)。"""
     result = None
@@ -216,16 +522,50 @@ def _generate_or_none(
                 last_visible = visible
             elif raw:
                 last_visible = sanitize_user_reply(raw)
-            if _parsed_ready(parsed, min_messages):
-                if reject_fn:
-                    reason = reject_fn(parsed)
-                    if reason:
-                        last_visible = ''
-                        continue
-                result = parsed
-                committed_state = state
-                break
+            if not _parsed_ready(parsed, min_messages):
+                _emit_generation_trace(
+                    model=model, max_tokens=max_tokens, system_blocks=system_blocks,
+                    messages=messages, attempt=attempt + 1, attempts=attempts,
+                    trace_context=generation_trace, response=response,
+                    outcome='parse_invalid',
+                    will_retry=attempt + 1 < attempts,
+                    retry_reason='parse_invalid',
+                )
+                continue
+            if reject_fn:
+                reason = reject_fn(parsed)
+                if reason:
+                    trace_reason = _trace_enum(reason, _TRACE_RETRY_REASONS)
+                    if trace_reason in (None, 'unknown'):
+                        trace_reason = 'candidate_rejected'
+                    _emit_generation_trace(
+                        model=model, max_tokens=max_tokens, system_blocks=system_blocks,
+                        messages=messages, attempt=attempt + 1, attempts=attempts,
+                        trace_context=generation_trace, response=response,
+                        outcome='candidate_rejected',
+                        will_retry=attempt + 1 < attempts,
+                        retry_reason=trace_reason,
+                    )
+                    last_visible = ''
+                    continue
+            result = parsed
+            committed_state = state
+            _emit_generation_trace(
+                model=model, max_tokens=max_tokens, system_blocks=system_blocks,
+                messages=messages, attempt=attempt + 1, attempts=attempts,
+                trace_context=generation_trace, response=response,
+                outcome='accepted', will_retry=False,
+            )
+            break
         except Exception as e:
+            _emit_generation_trace(
+                model=model, max_tokens=max_tokens, system_blocks=system_blocks,
+                messages=messages, attempt=attempt + 1, attempts=attempts,
+                trace_context=generation_trace, error=e,
+                outcome='provider_error',
+                will_retry=attempt + 1 < attempts,
+                retry_reason='provider_error',
+            )
             print(f'[{log_tag}] attempt {attempt+1} error: {e}')
     if not result and salvage and last_visible:
         salvaged = _salvage_japanese(last_visible)
@@ -793,6 +1133,13 @@ async def chat_text(data: dict):
     def reject_reply(parsed):
         return reject_calendar(parsed) or reject_schedule(parsed)
 
+    generation_trace = {
+        'source_event_id': source_event_id,
+        'turn_correlation_id': source_event_id,
+        'provider': 'anthropic',
+        'context_pack': pack,
+    }
+
     from db_generation_receipt import GenerationHeartbeat
     with GenerationHeartbeat(
             user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT, claim_token):
@@ -803,6 +1150,7 @@ async def chat_text(data: dict):
             cache_tag=f'chat:{character_id}',
             salvage=True,
             reject_fn=reject_reply,
+            generation_trace=generation_trace,
         )
     llm_ms = (_time.perf_counter() - _tmark) * 1000.0
     _trace.mark('llm', llm_ms)
@@ -905,6 +1253,8 @@ async def chat_text(data: dict):
     effect_state = commit_and_run_effects(
         user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
         claim_token, resp, ctx=effect_ctx)
+    if effect_state.get('completed'):
+        _emit_generation_turn_link(source_event_id, turn_id)
     pending = pending_client_effects(
         user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
         effect_state.get('client_effects'))
