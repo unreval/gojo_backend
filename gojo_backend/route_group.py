@@ -9,9 +9,9 @@
   POST   /group/chat/continue   逐条互动（前端轮询，支持打断）
 
 第二步已完成：
-  - ★ 记忆互通：角色在群里读真实 user_id 的长期记忆（含 shared 共享桶），
-    群里用户透露的新事实由 extract_and_save_group_memory 提取并存入 shared 桶，
-    私聊立刻可用；反之私聊提取的事实群里也能读到。
+  - 群消息与 canonical 原始事件、记忆任务在同一事务落盘，再按明确范围进入确定性裁决。
+    未指向特定角色的明确用户自述可进入 shared 桶；角色话语只保留实际说过的记录。
+    私聊与群聊读取长期记忆时都核对当前来源，生成性记忆没有事实权威。
   - ★ 修复：原来 build_system_prompt 传的是 'group_<gid>' 假 user_id，
     导致角色在群里读的是空记忆桶（记忆混乱的根源），现已改为真实群主 user_id。
 
@@ -29,7 +29,6 @@ from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
 from user_memory import update_chat_days
-from memory_jobs import enqueue_group_extraction
 from temporal_awareness import record_assistant_message, record_turn
 
 router = APIRouter()
@@ -188,7 +187,8 @@ def _looks_japanese(text):
     return bool(_KANA.search(text or ''))
 
 
-def _save_group_message(gid, sender_type, sender_id, jp, zh, emotion='平静'):
+def _save_group_message(gid, sender_type, sender_id, jp, zh, emotion='平静',
+                        target_character_id=None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -197,9 +197,19 @@ def _save_group_message(gid, sender_type, sender_id, jp, zh, emotion='平静'):
         (gid, sender_type, sender_id, jp, zh, emotion)
     )
     mid = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
+    from raw_events import append_group_raw_event
+    try:
+        append_group_raw_event(cur, group_id=gid, message_id=mid,
+            sender_type=sender_type, sender_id=sender_id,
+            content=(jp or zh) if sender_type == 'character' else zh,
+            subtitle=zh if jp else '', target_character_id=target_character_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
     return mid
 
 
@@ -650,6 +660,7 @@ async def clear_group_messages(gid: int):
     """★ 只清空聊天记录，群和成员保留（前端"清空"按钮用）。"""
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute("UPDATE chat_log SET status='deleted' WHERE chat_id=%s", (f'group:{gid}',))
     cur.execute('DELETE FROM group_messages WHERE group_id = %s', (gid,))
     deleted = cur.rowcount
     conn.commit()
@@ -663,6 +674,7 @@ async def clear_group_messages(gid: int):
 async def delete_group(gid: int):
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute("UPDATE chat_log SET status='deleted' WHERE chat_id=%s", (f'group:{gid}',))
     cur.execute('DELETE FROM group_messages WHERE group_id = %s', (gid,))
     cur.execute('DELETE FROM group_members WHERE group_id = %s', (gid,))
     cur.execute('DELETE FROM groups WHERE id = %s', (gid,))
@@ -700,7 +712,8 @@ async def group_chat(data: dict):
 
     # 1) 存用户这句话
     display_text = user_text or '📷 [图片]'
-    _save_group_message(gid, 'user', user_id, '', display_text)
+    _save_group_message(gid, 'user', owner_id, '', display_text,
+                        target_character_id=mentioned_id)
     update_chat_days(owner_id)   # ★ 群聊也算陪伴（以前只有单聊才更新，天数会停住）
 
     # 2) 智能调度：这一句该谁开口
@@ -813,15 +826,7 @@ async def group_chat(data: dict):
     if not replies:
         return JSONResponse({'replies': [], 'note': '这轮没人接话'})
 
-    # 5) ★ 后台提取记忆:从群主这句话里抽用户事实(shared)和定向告知(目标角色的 told 桶)
-    if user_text and replies:
-        round_transcript = f'群主：{user_text}\n' + '\n'.join(
-            f"{r['sender_name']}：{r['zh']}" for r in replies
-        )
-        enqueue_group_extraction(
-            owner_id, user_text, round_transcript,
-            [{'id': m['id'], 'name': m['name']} for m in members],
-        )
+    # Each committed message already has canonical evidence and a durable job.
 
     print(f'[group][{gid}] 本轮共 {len(replies)} 条回复')
     return JSONResponse({'group_id': gid, 'replies': replies})

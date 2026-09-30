@@ -32,6 +32,9 @@ def init_bond_table():
                    ON bond_memory (user_id, character_id, kind)''')
     cur.execute("ALTER TABLE bond_memory ADD COLUMN IF NOT EXISTS recall_status TEXT DEFAULT 'active'")
     cur.execute(BOND_EXPIRES_AT_DDL)
+    from memory_authority import MEMORY_AUTHORITY_DDL
+    for ddl in MEMORY_AUTHORITY_DDL:
+        cur.execute(ddl)
     conn.commit()
     cur.close()
     conn.close()

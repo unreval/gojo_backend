@@ -102,7 +102,7 @@ def generate_from_promise(promise, now):
 【最近对话】
 {recent}
 
-【关系背景】
+【当前来源有效的话语/约定——不推断关系，不把承诺当成兑现】
 {bond_text}
 
 {cognition}

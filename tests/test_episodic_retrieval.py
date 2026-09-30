@@ -480,7 +480,8 @@ class EpisodicRetrievalTests(unittest.TestCase):
 
     def test_existing_fact_and_lifecycle_recall_stays_available_when_episode_empty(self):
         fact = {
-            'id': 'fact-1', 'content': '用户喜欢抹茶', 'timestamp': NOW,
+            'id': 1, 'content': '用户明确自述：我喜欢「抹茶」', 'timestamp': NOW,
+            'authority': 'canonical_evidence_v1',
             'category': '偏好', 'score': 0.9, 'bonds': [],
         }
         lifecycle = {
@@ -489,14 +490,15 @@ class EpisodicRetrievalTests(unittest.TestCase):
         }
         with patch.object(smart_recall, 'two_level_recall', return_value={
             'facts': [fact], 'lifecycle_memories': [lifecycle],
-        }), patch.object(episodic_index, 'recall_episodes', return_value=[]):
+        }), patch.object(episodic_index, 'recall_episodes', return_value=[]), \
+             patch('memory_authority.filter_recall_authority', side_effect=lambda result, *_: result):
             pack = context_layer.assemble_from_events(
                 [_event('hot', minutes_ago=1)],
                 user_id='u', character_id='gojo', user_message='抹茶和考试',
                 now=NOW, include_recall=True,
             )
 
-        self.assertIn('用户喜欢抹茶', pack.memory_text)
+        self.assertIn('用户明确自述：我喜欢「抹茶」', pack.memory_text)
         self.assertIn('近期正在准备考试', pack.memory_text)
         self.assertEqual(pack.episode_prompt_text, '')
         self.assertEqual(pack.relationship_prompt_text, '')
@@ -510,7 +512,8 @@ class EpisodicRetrievalTests(unittest.TestCase):
         self.assertNotIn('save_long_memory(', episode_source)
         self.assertNotIn('save_bond_memory(', episode_source)
         self.assertNotIn('relationship_', episode_source)
-        self.assertNotIn('cognitive_', episode_source)
+        self.assertIn('sources_current_for_derivation', episode_source)
+        self.assertNotRegex(episode_source, r'(?:INSERT INTO|UPDATE|DELETE FROM)\s+cognitive_')
         self.assertIn('recall_episodes', context_source)
         self.assertNotIn('save_episode(', context_source)
 

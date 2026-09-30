@@ -189,13 +189,16 @@ def infer_hypothesis_relation(supporting_refs, contradicting_refs) -> str:
 SHARED_FRAME_KEY = SHARED_RELATIONSHIP_FRAME_KEY
 
 
-# This is a deliberately closed grammar of literal self-reports, not a
-# sentiment/sarcasm classifier. Quoted objects extend the vocabulary without
-# allowing arbitrary trailing prose to be interpreted as part of an object.
-_REPORT = re.compile(
-    r'(?:在(?P<day>\d{4}-\d{2}-\d{2})，)?我'
-    r'(?P<value>不喜欢|喜欢|讨厌)'
-    r'(?P<object>咖啡|茶|甜食|辣食|独处|聊天|你|「[^「」\n]{1,40}」)[。.!！]?')
+# A compositional literal grammar, not a sentiment or irony classifier.
+# Free-form values must be explicitly delimited. Only the witnessed report is
+# committed; reported facts are not independently verified real-world facts.
+_DATE_PREFIX = re.compile(r'在(?P<start>\d{4}-\d{2}-\d{2})(?:至(?P<end>\d{4}-\d{2}-\d{2}))?，(?P<body>.+)')
+_REPORT = re.compile(r'我(?P<value>不喜欢|喜欢|讨厌)(?P<object>咖啡|茶|甜食|辣食|独处|聊天|你|「[^「」\n]{1,80}」)')
+_ATTRIBUTE = re.compile(r'我的(?P<object>名字|职业|居住地|状态|「[^「」\n]{1,40}」)是「(?P<value>[^「」\n]{1,120})」')
+_CHOICE = re.compile(r'我(?P<value>拒绝|接受)「(?P<object>[^「」\n]{1,80})」')
+_BOUNDARY = re.compile(r'(?P<value>不要|可以)「(?P<object>[^「」\n]{1,80})」')
+_PROMISE = re.compile(r'我承诺在(?P<deadline>\d{4}-\d{2}-\d{2})前完成「(?P<object>[^「」\n]{1,80})」')
+_FULFILLMENT = re.compile(r'我已兑现截至(?P<deadline>\d{4}-\d{2}-\d{2})的承诺「(?P<object>[^「」\n]{1,80})」')
 _CORRECTION = re.compile(
     r'更正(?:事件「(?P<source>[^「」\n]{1,200})」)?：'
     r'「(?P<old>.+)」不对，应为「(?P<new>.+)」[。.!！]?')
@@ -206,28 +209,69 @@ def _digest(value):
 
 
 def parse_explicit_report(text, user_id, character_id):
-    """Return only what the speaker explicitly reported, with exact scope."""
-    match = _REPORT.fullmatch(str(text or '').strip())
-    if not match:
-        return None
-    day = match['day']
-    if day:
-        from datetime import date
+    """Bind a complete literal report to an exact subject, object and scope."""
+    from datetime import date
+    original = str(text or '').strip().rstrip('。.!！')
+    body = original
+    time_scope = 'unspecified'
+    dated = _DATE_PREFIX.fullmatch(body)
+    if dated:
         try:
-            date.fromisoformat(day)
+            first = date.fromisoformat(dated['start'])
+            last = date.fromisoformat(dated['end'] or dated['start'])
         except ValueError:
             return None
+        if last < first:
+            return None
+        time_scope = dated['start'] + ('/' + dated['end'] if dated['end'] else '')
+        body = dated['body']
+    match = _REPORT.fullmatch(body)
+    predicate = 'reported_preference'
+    value = None
+    deadline = None
+    if not match:
+        match = _ATTRIBUTE.fullmatch(body)
+        if match:
+            predicate = ('reported_state' if match['object'] == '状态' else
+                         'reported_identity' if match['object'] in ('名字', '职业', '居住地')
+                         else 'reported_fact')
+    if not match:
+        match = _CHOICE.fullmatch(body)
+        predicate = 'explicit_refusal'
+    if not match:
+        match = _BOUNDARY.fullmatch(body)
+        predicate = 'explicit_boundary'
+    if not match:
+        match = _PROMISE.fullmatch(body) or _FULFILLMENT.fullmatch(body)
+        predicate = 'explicit_promise'
+        if match:
+            # A deadline already defines the promise's time scope; accepting a
+            # second date prefix would leave the verification interval unclear.
+            if dated:
+                return None
+            try:
+                date.fromisoformat(match['deadline'])
+            except ValueError:
+                return None
+            deadline = match['deadline']
+            time_scope = 'deadline:' + deadline
+            value = '承诺' if body.startswith('我承诺') else '已兑现'
+    if not match:
+        return None
     object_id = match['object'].strip('「」')
     if object_id == '你':
+        if character_id == 'shared':
+            return None
         object_id = 'character:' + character_id
-    scope = {
-        'subject': 'user:' + user_id, 'predicate': 'reported_preference',
-        'object': object_id, 'time_scope': day or 'unspecified',
-        'source': 'canonical_user_turn',
-    }
+    if character_id == 'shared' and predicate in ('explicit_boundary', 'explicit_refusal', 'explicit_promise'):
+        return None  # An unaddressed group statement cannot invent a recipient.
+    scope = {'subject': 'user:' + user_id, 'predicate': predicate,
+             'object': object_id, 'time_scope': time_scope, 'source': 'canonical_user_turn'}
     key = 'report.' + _digest(json.dumps(scope, sort_keys=True, ensure_ascii=False))
-    return {**scope, 'value': match['value'], 'question_key': key,
-            'text': str(text).strip().rstrip('。.!！')}
+    result = {**scope, 'value': value or match['value'], 'question_key': key, 'text': original}
+    if deadline:
+        result['deadline'] = deadline
+    return result
 
 
 def parse_cognitive_evidence(text, user_id, character_id):
@@ -365,6 +409,11 @@ def _invalidate_dependents(cur, user_id, character_id, target_id, event_id, cycl
         (event_id, user_id, character_id, ref, user_id, character_id, event_id))
     cur.execute('SELECT source_event_id FROM cognitive_events WHERE id=%s', (target_id,))
     raw_ref = json.dumps([cur.fetchone()[0]])
+    for table in ('long_memory', 'bond_memory'):
+        cur.execute(f"""UPDATE {table} SET recall_status='superseded'
+                        WHERE user_id=%s AND character_id=%s
+                          AND (authority_event_id=%s OR authority_belief_key=ANY(%s))""",
+                    (user_id, character_id, target_id, keys))
     # These are existing optional context tables, not a parallel memory store.
     for table in ('rolling_summaries', 'pinned_context', 'episodic_memory_index'):
         cur.execute('SELECT to_regclass(%s)', (table,))
@@ -382,7 +431,7 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
     A caller's proposed judgments are never authority. Reload both the evidence
     and its canonical source; process in source order, exactly once per event.
     """
-    from raw_events import get_active_events_by_ids
+    from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
     from cognitive_predictions import create_prediction, settle_pending_predictions
 
     ids = [r['event_id'] for r in output['evidence_refs']]
@@ -402,14 +451,28 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
             settled = settle_pending_predictions(cur.connection, user_id=user_id,
                 character_id=character_id, event_id=event_id, occurred_at=now)
             decision.update(status='applied', action='deadline_check', settled=settled)
+        elif event_type == 'canonical_assistant_turn':
+            raw = get_active_events_by_ids(user_id, payload.get('source_chat_id') or character_id,
+                [source_id], conn=cur.connection, lock=True)
+            if (len(raw) != 1 or raw[0]['role'] != 'assistant'
+                    or raw[0]['content'] != payload.get('content')
+                    or not cognitive_source_matches_scope(raw[0], character_id, payload.get('source_chat_id') or character_id)):
+                decision.update(status='pending', action='pending', reason='source_not_active_or_changed')
+            else:
+                from memory_authority import project_canonical_memory
+                content = '角色实际说过：' + json.dumps(raw[0]['content'], ensure_ascii=False) + '（仅为话语记录，不证明话中内容或关系）'
+                decision.update(status='applied', action='quoted')
+                decision.update(project_canonical_memory(cur, user_id=user_id, character_id=character_id,
+                    event_id=event_id, source_id=source_id, content=content, occurred_at=occurred_at))
         elif event_type != 'canonical_user_turn':
             # Historical model signals, self-claims and extracted labels have
             # no authority, even if their old payload claimed high confidence.
             decision.update(status='pending', action='pending', reason='untrusted_derived_evidence')
         else:
-            raw = get_active_events_by_ids(user_id, character_id, [source_id], conn=cur.connection, lock=True)
+            raw = get_active_events_by_ids(user_id, payload.get('source_chat_id') or character_id, [source_id], conn=cur.connection, lock=True)
             if (len(raw) != 1 or raw[0]['role'] != 'user'
-                    or raw[0]['content'] != payload.get('content')):
+                    or raw[0]['content'] != payload.get('content')
+                    or not cognitive_source_matches_scope(raw[0], character_id, payload.get('source_chat_id') or character_id)):
                 decision.update(status='pending', action='pending', reason='source_not_active_or_changed')
                 parsed = {'operation': 'pending'}
             else:
@@ -421,23 +484,25 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                         (user_id, character_id, qkey))
             previous = cur.fetchone()
             meta = dict(_json(previous[1], {}) if previous else {})
-            old = meta.get('current_judgment') or {}
+            old = meta.get('current_judgment') or (
+                meta.get('prior_judgment') if (meta.get('pending') or {}).get('reason') == 'conflicting_report_requires_confirmation' else None) or {}
             if parsed['operation'] == 'correction':
                 cur.execute(
                     '''SELECT id, source_event_id, payload FROM cognitive_events
                        WHERE user_id=%s AND character_id=%s
                          AND source_event_type='canonical_user_turn'
+                         AND COALESCE(payload->>'source_chat_id', character_id)=%s
                          AND payload->'claim'->>'question_key'=%s
                          AND payload->'claim'->>'text'=%s
                          AND adjudication->>'status'='applied' AND occurred_at<=%s
                          AND (CAST(%s AS text) IS NULL OR source_event_id=%s)
                        ORDER BY occurred_at, id LIMIT 2 FOR UPDATE''',
-                    (user_id, character_id, qkey, parsed['old_claim']['text'], occurred_at,
+                    (user_id, character_id, payload.get('source_chat_id') or character_id, qkey, parsed['old_claim']['text'], occurred_at,
                      parsed['target_source_id'], parsed['target_source_id']))
                 targets = cur.fetchall()
                 if len(targets) == 1:
                     target_id, target_source, target_payload = targets[0]
-                    target_raw = get_active_events_by_ids(user_id, character_id, [target_source], conn=cur.connection, lock=True)
+                    target_raw = get_active_events_by_ids(user_id, _json(target_payload, {}).get('source_chat_id') or character_id, [target_source], conn=cur.connection, lock=True)
                     target_content = _json(target_payload, {}).get('content')
                     target_claim = parse_cognitive_evidence(target_content, user_id, character_id).get('claim')
                     if (not target_raw or target_raw[0]['role'] != 'user'
@@ -461,6 +526,21 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                     meta['revision_history'] = history
                     old = {}
                     decision['withdrawn_beliefs'] = withdrawn
+            if parsed['operation'] == 'report' and claim['predicate'] == 'explicit_promise' and claim['value'] == '已兑现':
+                if old and (old.get('source_chat_id') or character_id) != (payload.get('source_chat_id') or character_id):
+                    parsed = {'operation': 'pending', 'reason': 'fulfillment_source_scope_mismatch'}
+                    qkey = evidence_question_key(parsed, source_id)
+                    meta, old = {}, {}
+                elif not old or old.get('value') not in {'承诺', '已兑现'}:
+                    parsed = {'operation': 'pending', 'reason': 'fulfillment_requires_matching_promise'}
+                elif old.get('value') == '承诺':
+                    # Keep the original commitment as historical evidence; its
+                    # prediction can now settle from this independent report.
+                    cur.execute("""UPDATE bond_memory SET recall_status='completed'
+                                   WHERE user_id=%s AND character_id=%s AND authority_belief_key=%s""",
+                                (user_id, character_id, old.get('belief_key')))
+                    meta['prior_commitment'] = old
+                    old = {}
             if parsed['operation'] == 'report' and old and old.get('value') != claim['value']:
                 parsed = {'operation': 'pending', 'reason': 'conflicting_report_requires_confirmation'}
                 cur.execute('''UPDATE cognitive_beliefs SET metadata=metadata || %s::jsonb
@@ -488,7 +568,8 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                 bkey = old.get('belief_key') or qkey + f'.e{event_id}'
                 meta.pop('pending', None)
                 meta['current_judgment'] = {'value': claim['value'], 'content': statement,
-                    'status': 'committed', 'belief_key': bkey, 'evidence_event_ids': [source_id]}
+                    'status': 'committed', 'belief_key': bkey, 'evidence_event_ids': [source_id],
+                    'source_chat_id': payload.get('source_chat_id') or character_id}
                 meta['claim_scope'] = {k: claim[k] for k in ('subject', 'predicate', 'object', 'time_scope', 'source')}
                 decision.update(status='applied', action='corrected' if parsed['operation'] == 'correction' else 'reported', belief_key=bkey)
             meta['updated_by'] = 'deterministic_evidence_policy_v1'
@@ -531,17 +612,27 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                        VALUES (%s,%s,%s,%s,0.8,'active','user_model',%s::jsonb,%s,%s::jsonb,%s,%s)''',
                     (user_id, character_id, bkey, statement, json.dumps(refs), hypothesis_id,
                      json.dumps(provenance), cycle_id, cycle_id))
-                from datetime import timedelta
-                create_prediction(user_id=user_id, character_id=character_id,
-                    prediction_key=bkey + '.next', resolver_name='explicit_report_outcome',
-                    fulfillment_operator='>=', fulfillment_value=1,
-                    violation_operator='<=', violation_value=-1,
-                    expires_at=now + timedelta(days=30), question_id=question_id,
-                    hypothesis_id=hypothesis_id, created_by_cycle_id=cycle_id,
-                    metadata={'claim_scope': meta['claim_scope'], 'expected_value': claim['value'],
-                              'basis_belief_keys': [bkey], 'evidence_refs': refs,
-                              'description': '相同范围内下一次明确自述是否一致；不预测隐含心理'},
-                    conn=cur.connection)
+                if claim['predicate'] == 'reported_preference' or (claim['predicate'] == 'explicit_promise' and claim['value'] == '承诺'):
+                    from datetime import datetime, timedelta, timezone
+                    is_promise = claim['predicate'] == 'explicit_promise'
+                    deadline = (datetime.fromisoformat(claim['deadline']).replace(tzinfo=timezone(timedelta(hours=8)))
+                                + timedelta(days=1)) if is_promise else now + timedelta(days=30)
+                    create_prediction(user_id=user_id, character_id=character_id,
+                        prediction_key=bkey + '.next', resolver_name='explicit_report_outcome',
+                        fulfillment_operator='>=', fulfillment_value=1,
+                        violation_operator='<=', violation_value=-1,
+                        expires_at=deadline, question_id=question_id,
+                        hypothesis_id=hypothesis_id, created_by_cycle_id=cycle_id,
+                        metadata={'claim_scope': meta['claim_scope'], 'expected_value': '已兑现' if is_promise else claim['value'],
+                                  'source_chat_id': payload.get('source_chat_id') or character_id,
+                                  'basis_belief_keys': [bkey], 'evidence_refs': refs,
+                                  'description': '承诺在截止日期前是否有明确兑现报告；不证明现实完成' if is_promise else '相同范围内下一次明确自述是否一致；不预测隐含心理'},
+                        conn=cur.connection)
+            if decision['status'] == 'applied':
+                from memory_authority import project_canonical_memory
+                decision.update(project_canonical_memory(cur, user_id=user_id, character_id=character_id,
+                    event_id=event_id, source_id=source_id, content=statement, claim=claim,
+                    belief_key=bkey, occurred_at=occurred_at))
             if parsed['operation'] == 'report' or decision.get('reason') == 'conflicting_report_requires_confirmation':
                 decision['settled'] = settle_pending_predictions(cur.connection, user_id=user_id,
                     character_id=character_id, event_id=event_id, occurred_at=occurred_at)

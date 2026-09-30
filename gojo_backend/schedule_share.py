@@ -155,7 +155,7 @@ def _generate_share(character_id, user_id, activity):
 【最近对话】
 {recent}
 
-【关系背景】
+【当前来源有效的话语/约定——不推断关系，不把承诺当成兑现】
 {bond_text}
 
 【判断规则】

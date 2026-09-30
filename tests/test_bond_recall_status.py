@@ -133,7 +133,7 @@ class BondRecallStore:
             row for row in self.bonds
             if row['user_id'] == user_id and row['character_id'] == character_id
         ]
-        if 'COALESCE(recall_status' in compact:
+        if 'recall_status' in compact:
             rows = [row for row in rows if self._active(row)]
         if "kind = 'told'" in compact:
             rows = [row for row in rows if row['kind'] == 'told']
@@ -217,7 +217,8 @@ class BondRecallStatusTests(unittest.TestCase):
         result = smart_recall.two_level_recall('u1', 'gojo', '抽谷子抽到了')
         self.assertEqual(result['loose_bonds'], [])
         sql = '\n'.join(item[0] for item in self.store.executed)
-        self.assertIn("COALESCE(recall_status, 'active') = 'active'", sql)
+        self.assertIn("COALESCE(bond_memory.recall_status, 'active') = 'active'", sql)
+        self.assertIn("bond_memory.authority", sql)
 
     def test_superseded_told_is_not_recalled(self):
         self.store.bonds = [self._bond(
@@ -379,13 +380,15 @@ class BondRecallStatusTests(unittest.TestCase):
         self.assertEqual(active, [])
 
     def test_extractor_prompt_forbids_merge_for_outcomes(self):
-        source = Path(BACKEND, 'user_memory.py').read_text(encoding='utf-8')
-        self.assertIn('bond_resolution', source)
-        self.assertIn('旧事件状态变化', source)
-        self.assertIn('禁止用 bond_merge 把旧的"待发生条件"继续保留成 active', source)
-        self.assertIn("recall_status = 'superseded'", source)
-        self.assertNotIn('DELETE FROM bond_memory WHERE id = %s', source.split(
-            'def resolve_bond_memories')[1].split('def get_bond_memories')[0])
+        """Outcome authority now belongs to canonical revision, not a prompt."""
+        import inspect
+        source=inspect.getsource(user_memory.extract_and_save_memory)
+        self.assertIn('ingest_canonical_turn',source)
+        self.assertNotIn('invoke_structured_llm',source)
+        self.assertNotIn('merge_bond_memories',source)
+        revision=Path(BACKEND,'cognitive_revision.py').read_text(encoding='utf-8')
+        self.assertIn("recall_status='superseded'",revision)
+        self.assertIn('settle_pending_predictions',revision)
 
     def test_startup_has_no_incident_hardcode(self):
         source = Path(BACKEND, 'db_bond.py').read_text(encoding='utf-8')
@@ -402,51 +405,20 @@ class BondRecallStatusTests(unittest.TestCase):
 
 class BondExtractorResolutionTests(unittest.TestCase):
     def test_extract_uses_bond_resolution_and_does_not_resave_pending(self):
-        store = BondRecallStore()
-        store.bonds = [{
-            'id': 1842,
-            'user_id': 'u1',
-            'character_id': 'gojo',
-            'kind': 'between',
-            'content': OLD_GACHA_BOND,
-            'timestamp': NOW,
-            'linked_fact_id': None,
-            'recall_status': 'active',
-            'expires_at': None,
-        }]
-        payload = json.dumps({
-            'user_fact': None,
-            'bond': {'content': OLD_GACHA_BOND},
-            'told': None,
-            'character_self_claim': None,
-            'bond_merge': None,
-            'bond_resolution': {
-                'replaces': [OLD_GACHA_BOND],
-                'content': None,
-                'reason': 'completed',
-                'evidence_quote': '我抽到了两个系列',
-            },
-        }, ensure_ascii=False)
-        with patch.object(user_memory, 'plan_memory_corrections', return_value=[]), \
-             patch.object(user_memory, 'get_long_memory', return_value=[]), \
-             patch.object(user_memory, 'get_bond_memories',
-                          return_value=[(1842, OLD_GACHA_BOND, NOW)]), \
-             patch.object(user_memory, '_all_character_names', return_value=[]), \
-             patch.object(user_memory, 'get_relations_text', return_value=''), \
-             patch.object(user_memory, 'get_conn', return_value=store), \
-             patch('ai_client.create_chat', return_value=(payload, None)), \
-             patch('characters.get_character', return_value={'name': '五条'}), \
-             patch('memory_lifecycle.reactivate_lifecycle_memories', return_value=0), \
-             patch('smart_recall.reinforce_mentioned_facts'):
-            ok = user_memory.extract_and_save_memory(
-                'u1', '我抽到了两个系列', '抽到了啊', 'gojo')
-        self.assertTrue(ok)
-        self.assertEqual(store.bonds[0]['recall_status'], 'superseded')
-        active = [
-            row for row in store.bonds
-            if (row.get('recall_status') or 'active') == 'active'
-        ]
-        self.assertEqual(active, [])
+        """An ungrounded model outcome cannot retire or revive an existing bond.
+
+        Supported literal completion is covered by the real SQL promise test;
+        this old free-form gacha outcome remains unsupported without a source.
+        """
+        payload={'bond_resolution':{'replaces':[OLD_GACHA_BOND],'reason':'completed'}}
+        with patch('ai_client.create_chat',side_effect=AssertionError('model called')) as model, \
+             patch.object(user_memory,'resolve_bond_memories') as resolve, \
+             patch.object(user_memory,'save_bond_memory') as save:
+            self.assertFalse(user_memory.extract_and_save_memory('u1','我抽到了两个系列','抽到了啊',
+                'gojo',parsed_override=payload))
+        model.assert_not_called()
+        resolve.assert_not_called()
+        save.assert_not_called()
 
 
 OLD_BOND_COLUMNS = {

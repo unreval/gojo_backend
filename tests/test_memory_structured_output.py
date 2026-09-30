@@ -40,13 +40,11 @@ class MemoryStructuredOutputTests(unittest.TestCase):
         self.assertEqual(result['claims'], [])
 
     def test_correction_scan_does_not_silently_convert_failure_to_none(self):
-        for raw in ('broken', '{"action":"delete","ids":"7"}',
-                    '{"action":"delete","ids":[7]} {"action":"none","ids":[]}'):
-            with self.subTest(raw=raw), \
-                    patch.object(user_memory, '_get_memories_with_id', return_value=[(7, 'old')]), \
-                    patch('ai_client.create_chat', return_value=(raw, None)):
-                with self.assertRaises(StructuredOutputError):
-                    user_memory.plan_memory_corrections('u', '其实我喜欢寿司', 'gojo')
+        """The removed model correction scanner cannot delete any memory."""
+        for raw in ('broken', '{"action":"delete","ids":[7]}'):
+            with self.subTest(raw=raw), patch('ai_client.create_chat',return_value=(raw,None)) as model:
+                self.assertEqual(user_memory.plan_memory_corrections('u','其实我喜欢寿司','gojo'),[])
+                model.assert_not_called()
 
     def test_group_failure_does_not_reactivate_delete_or_save(self):
         for raw in ('broken', json.dumps({

@@ -60,6 +60,11 @@ class RecallDatabase:
                     self.rows = database.reflections
                 elif 'FROM char_diary' in compact:
                     self.rows = database.diaries
+                elif compact.startswith('SELECT id, content FROM long_memory'):
+                    # This fixture contains only current authoritative facts;
+                    # SQL provenance behavior has separate real database tests.
+                    assert 'long_memory.authority' in compact
+                    self.rows = [(row[0], row[1]) for row in database.facts]
                 elif 'FROM long_memory' in compact:
                     self.rows = database.facts
                 else:
@@ -183,7 +188,7 @@ class DiaryRecallTests(unittest.TestCase):
             self.assertEqual(rules.args[1:], (0, 0))
         self.assertEqual(self.database.commits, 0)
         self.assertTrue(all(sql.startswith('SELECT') for sql, _ in self.database.executed))
-        self.assertFalse(any('cognitive_events' in sql or 'rel_state' in sql
+        self.assertFalse(any('INSERT INTO cognitive_events' in sql or 'UPDATE rel_state' in sql
                              or 'relationship_model' in sql
                              for sql, _ in self.database.executed))
 

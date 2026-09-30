@@ -1647,6 +1647,9 @@ def assemble_from_events(
         trimmed = _recall_result_from_items(recall_kept, recall_result)
         try:
             from smart_recall import format_recall_for_prompt
+            from memory_authority import filter_recall_authority
+            trimmed = filter_recall_authority(trimmed, user_id, character_id)
+            pack.recall_result = trimmed
             memory_text, bond_text, told_text = format_recall_for_prompt(trimmed)
         except Exception:
             memory_text, bond_text, told_text = '', '', ''

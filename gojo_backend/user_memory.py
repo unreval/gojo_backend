@@ -17,7 +17,7 @@
 #     — pub 用另一份文件 PUB_user_memory.py
 # ═══════════════════════════════════════════════════════════════════
 
-"""用户记忆 v3（短期 + 长期 + 羁绊 + 统一三桶提取 + 自动纠错）
+"""用户记忆（原始事件 + 确定性自述投影 + 历史生成性记忆）
 
 记忆四层结构：
   1. 她的事实      long_memory (character_id='shared')  —— 关于用户本人，全角色共享
@@ -29,7 +29,8 @@ short_memory 只是近窗 compatibility cache / LLM recent view，不是 canonic
 新的 conversational 事实以 chat_log event_id 为准，经 append_raw_event 写入。
 get_short_memory(n) 保留兼容读取（优先 ledger，再合并 cache）。
 
-提取只用一次 Haiku 调用，同时产出 1/2/3 三类，成本和原来一样。
+私聊与群聊都只提交 canonical raw evidence，不调用模型提取事实或关系。
+long/bond 的事实读取要求当前原始来源与确定性裁决；历史生成性记录不自动取得权威。
 """
 import anthropic
 import hashlib
@@ -40,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
+from memory_authority import authoritative_memory_sql
 from structured_output import (
     StructuredOutputError,
     invoke_structured_llm,
@@ -753,9 +755,9 @@ def get_long_memory(user_id, character_id=DEFAULT_CHARACTER_ID):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        '''SELECT content, timestamp, category FROM long_memory
+        f'''SELECT content, timestamp, category FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
-             AND COALESCE(recall_status, 'active') = 'active'
+             AND {authoritative_memory_sql('long_memory')}
              AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
            ORDER BY timestamp DESC LIMIT 40''',
         (user_id, character_id, SHARED_CHARACTER_ID)
@@ -770,9 +772,9 @@ def _get_memories_with_id(user_id, character_id=DEFAULT_CHARACTER_ID):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        '''SELECT id, content FROM long_memory
+        f'''SELECT id, content FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
-             AND COALESCE(recall_status, 'active') = 'active'
+             AND {authoritative_memory_sql('long_memory')}
              AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
            ORDER BY timestamp DESC LIMIT 40''',
         (user_id, character_id, SHARED_CHARACTER_ID)
@@ -1017,6 +1019,7 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content,
             '''SELECT id, content FROM bond_memory
                WHERE user_id=%s AND character_id=%s AND kind=%s
                  AND COALESCE(recall_status, 'active') = 'active'
+                 AND authority IS DISTINCT FROM 'canonical_evidence_v1'
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
             (user_id, character_id, kind)
         )
@@ -1145,7 +1148,8 @@ def resolve_bond_memories(user_id, character_id, kind, replaces,
         cur.execute(
             '''SELECT id, content FROM bond_memory
                WHERE user_id=%s AND character_id=%s AND kind=%s
-                 AND COALESCE(recall_status, 'active') = 'active' ''',
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND authority IS DISTINCT FROM 'canonical_evidence_v1' ''',
             (user_id, character_id, kind)
         )
         rows = cur.fetchall()
@@ -1169,7 +1173,8 @@ def resolve_bond_memories(user_id, character_id, kind, replaces,
             '''UPDATE bond_memory
                SET recall_status = 'superseded'
                WHERE id = ANY(%s)
-                 AND COALESCE(recall_status, 'active') = 'active' ''',
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND authority IS DISTINCT FROM 'canonical_evidence_v1' ''',
             (ids,),
         )
         conn.commit()
@@ -1218,7 +1223,8 @@ def invalidate_bond_memories(user_id, character_id, kind, memory_ids,
             '''SELECT id, content FROM bond_memory
                WHERE user_id=%s AND character_id=%s AND kind=%s
                  AND id = ANY(%s)
-                 AND COALESCE(recall_status, 'active') = 'active' ''',
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND authority IS DISTINCT FROM 'canonical_evidence_v1' ''',
             (user_id, character_id, kind, ids),
         )
         rows = cur.fetchall()
@@ -1228,7 +1234,8 @@ def invalidate_bond_memories(user_id, character_id, kind, memory_ids,
             '''UPDATE bond_memory
                SET recall_status = 'deleted'
                WHERE id = ANY(%s)
-                 AND COALESCE(recall_status, 'active') = 'active' ''',
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND authority IS DISTINCT FROM 'canonical_evidence_v1' ''',
             ([memory_id for memory_id, _content in rows],),
         )
         conn.commit()
@@ -1253,18 +1260,18 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
     cur = conn.cursor()
     if kind:
         cur.execute(
-            '''SELECT id, content, timestamp FROM bond_memory
+            f'''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
-                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, kind, limit)
         )
     else:
         cur.execute(
-            '''SELECT id, content, timestamp FROM bond_memory
+            f'''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s
-                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, limit)
@@ -1292,10 +1299,10 @@ def get_first_interaction_days(user_id, character_id):
     依据：持久时间账本 + 羁绊记忆 + 角色专属长期记忆 + 短期记忆，取最早时间。"""
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('''SELECT LEAST(
+    cur.execute(f'''SELECT LEAST(
         COALESCE((SELECT MIN(first_interaction_at) FROM temporal_awareness WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp),
-        COALESCE((SELECT MIN(timestamp) FROM bond_memory  WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp),
-        COALESCE((SELECT MIN(timestamp) FROM long_memory  WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp),
+        COALESCE((SELECT MIN(timestamp) FROM bond_memory  WHERE user_id=%s AND character_id=%s AND {authoritative_memory_sql('bond_memory')}), 'infinity'::timestamp),
+        COALESCE((SELECT MIN(timestamp) FROM long_memory  WHERE user_id=%s AND character_id=%s AND {authoritative_memory_sql('long_memory')}), 'infinity'::timestamp),
         COALESCE((SELECT MIN(timestamp) FROM short_memory WHERE user_id=%s AND character_id=%s), 'infinity'::timestamp)
     )''', (user_id, character_id, user_id, character_id,
             user_id, character_id, user_id, character_id))
@@ -2509,7 +2516,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
         return False
     for event_id in ids:
         result = ingest_canonical_turn(user_id=user_id, character_id=character_id,
-                                       source_event_id=event_id)
+                                       source_event_id=event_id, allow_assistant=event_id != ids[0])
         if event_id == ids[0] and result['status'] not in {'inserted', 'duplicate'}:
             return False
     return True
@@ -2517,177 +2524,28 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
 
 # ────────── ★ 群聊统一提取（用户事实 + 定向告知）──────────
 
-_GROUP_RELATIONSHIP_CONCLUSION_TERMS = (
-    '喜欢', '不喜欢', '心动', '爱情', '恋爱', '浪漫', '暧昧', '表白',
-    '告白', '爱上', '恋人', '男女朋友', '确认关系', '关系升级', '在乎',
-    '关心', '老夫老妻',
-)
+def extract_and_save_group_memory(user_id, user_text, round_transcript, members,
+                                  *, source_event_id=None, source_chat_id=None):
+    """Compatibility signature; copied prose and model labels are never evidence.
 
-
-def _group_bond_is_neutral_continuity(content):
-    """Generated group recollections may retain events, never conclusions."""
-    text = str(content or '').casefold()
-    return bool(text) and not any(
-        term.casefold() in text for term in _GROUP_RELATIONSHIP_CONCLUSION_TERMS
-    )
-
-def extract_and_save_group_memory(user_id, user_text, round_transcript, members):
-    """群聊版提取（bond 在群里语义模糊，只做 A 和 C 两类）：
-    A user_fact —— 她的新事实 → long_memory(shared)
-    C told      —— 她在群里告诉【某个具体角色】的关于他/他世界的信息 → 该角色的 bond_memory(told)
-
-    members: [{'id','name'}, ...] 群里全部角色。
+    Missing historical source ids cannot be reconstructed from an LLM summary.
+    Supported literal reports and unsupported messages enter the same queue.
     """
-    try:
-        pending_corrections = plan_memory_corrections(user_id, user_text, SHARED_CHARACTER_ID)
-        correction_hint = ''
-        if pending_corrections:
-            listed = '\n'.join(f'- [ID:{mid}] {content}' for mid, content in pending_corrections)
-            correction_hint = (
-                '\n【提示】用户刚纠正了之前说错的信息。下面这些旧记忆将在本轮提取成功后删除，'
-                '请提取她这次给出的正确事实（不要再复述旧的错误信息）：\n'
-                f'{listed}'
-            )
-
-        character_names = [m['name'] for m in members]
-        name_to_id = {m['name']: m['id'] for m in members}
-        names_str = '、'.join(character_names)
-        char_names_all = _all_character_names()
-
-        now = datetime.now(CN_TZ)
-        today_str = now.strftime('%Y-%m-%d')
-        weekday_cn = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][now.weekday()]
-        tomorrow_str = (now + timedelta(days=1)).strftime('%Y-%m-%d')
-        yesterday_str = (now - timedelta(days=1)).strftime('%Y-%m-%d')
-
-        existing = get_long_memory(user_id, SHARED_CHARACTER_ID)
-        existing_text = '\n'.join(f'- {m[0]}' for m in existing) if existing else '（暂无）'
-
-        # ★ 群聊记忆提取:纯中文结构化任务,走 MODEL_CN_AUX
-        from ai_client import create_chat
-        from config import MODEL_CN_AUX
-        group_prompt = f'''你是记忆整理助手。下面是一个群聊的一轮对话记录。
-
-【群里的说话人】
-- "群主" = 用户本人（她）——你【只能】从她的发言里提取
-- {names_str} = 虚构角色——他们说的任何话都不得提取
-
-【今天日期】{today_str}（{weekday_cn}）{correction_hint}
-
-【已记录的她的事实】
-{existing_text}
-
-【群主这一轮说的话】
-{user_text}
-
-【本轮完整对话（仅供理解语境）】
-{round_transcript}
-
-【三类记忆——各自独立判断】
-A. user_fact：她透露的、关于她自己的新事实。内容里不许出现角色名。
-B. told：她在这句话里告诉【某个具体角色】的、关于那个角色本人或他世界的信息（含剧情/未来）。
-   - target 必须是这些名字之一：{names_str}
-   - content 用"她说过..."开头的转述。她是泛泛对全群说的、没有明确对象时，target 填 null。
-C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回忆的互动——角色之间的交流、角色和群主之间的重要往来都算。
-   - 为每个相关角色各写一条（0~3条），以【该角色的第一人称】写，"我"=该角色本人。
-   - target 是这条回忆属于谁；content 例："我和杰在群里为说话方式拌了几句嘴，她在旁边看着"（存进五条悟）、
-     "我和悟斗了几句嘴，她说我们像老夫老妻"（存进夏油杰）。
-   - 日常寒暄不记，只记有内容的互动。char_bonds 只能记录可观察动作/话语连续性，不能作为关心或浪漫关系的新证据。
-
-【通用规则】
-1. 【事实只信群主】：user_fact 和 told 只能来自群主的发言；角色说的话（哪怕角色说"她喜欢XX"）不得作为这两类的来源。
-   但 char_bonds 记录的是互动事件本身，谁参与了、发生了什么，可以基于完整对话判断。
-2. 撒娇/调侃/提问/简单回应不算 user_fact 和 told。
-3. 时间换算绝对日期："明天"→{tomorrow_str}，"昨天"→{yesterday_str}。
-4. user_fact 和 told 以"她"开头；char_bonds 以"我"或"我们"开头。与已有记录重复的不提。没有就填 null。
-5. ★【词汇中性化——同样重要】跟单聊记忆一样，你在描述"男女互动"时训练数据默认走言情风，
-   必须【主动对抗】。char_bonds 里只用中性动词（问/说/告诉/约/答应/劝/催/提醒），
-   禁用关系结论或言情腔词（关心/在乎/试探/心思/心动/暗示/直言/坦言/表白/引导/情愫/心事）。
-   写完自查：是否像言情小说旁白？像就重写成流水账。宁可平实无聊，也不要暧昧文艺。
-
-【输出格式——严格 JSON，只输出一行】
-{{"user_fact":{{"content":"她XXX","category":"喜好"}},"told":{{"target":"角色名","content":"她说过XXX"}},"char_bonds":[{{"target":"角色名","content":"我XXX"}}]}}
-没有的类填 null（char_bonds 没有就填 []）。category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
-        call = invoke_structured_llm(
-            domain='group_memory_extractor',
-            create_chat_fn=create_chat,
-            model=MODEL_CN_AUX, max_tokens=2000,
-            messages=[{'role': 'user', 'content': group_prompt}],
-            schema_name='group_memory_extractor',
-            schema_validator=_validate_group_memory_output,
-        )
-        if not call.parsed.ok:
-            print(f'[{user_id}][group] ❌ structured memory output rejected')
-            return False
-        parsed = call.parsed.value
-
-        try:
-            from memory_lifecycle import reactivate_lifecycle_memories
-            reactivated = reactivate_lifecycle_memories(
-                user_id, SHARED_CHARACTER_ID, user_text)
-            if reactivated:
-                print(f'[{user_id}][group] 🔁 重新激活 {reactivated} 条生命周期记忆')
-        except Exception as _e:
-            print(f'[{user_id}][group] 生命周期记忆激活跳过:{_e}')
-
-        if pending_corrections:
-            apply_memory_corrections(
-                user_id, [mid for mid, _ in pending_corrections], SHARED_CHARACTER_ID
-            )
-
-        # A. 用户事实 → shared
-        uf = parsed.get('user_fact')
-        if isinstance(uf, dict):
-            content = _clean_content(uf.get('content'))
-            category = (uf.get('category') or '其他').strip()
-            category = _norm_category(category)
-            if _valid_user_fact(user_id, content, char_names_all):
-                try:
-                    from memory_lifecycle import apply_user_fact_lifecycle
-                    lifecycle = apply_user_fact_lifecycle(
-                        user_id, SHARED_CHARACTER_ID, user_text, content, category)
-                except Exception as _e:
-                    print(f'[{user_id}][group] ⚠️ 记忆生命周期处理失败,按旧逻辑保留:{_e}')
-                    lifecycle = {
-                        'should_save_long_memory': True,
-                        'long_memory_kwargs': {},
-                    }
-                if lifecycle.get('should_save_long_memory'):
-                    kwargs = lifecycle.get('long_memory_kwargs') or {}
-                    if save_long_memory(user_id, content, category, SHARED_CHARACTER_ID, **kwargs):
-                        print(f'[{user_id}][group] ✅ 用户事实 [{category}]：{content}')
-                else:
-                    cls = lifecycle.get('classification') or {}
-                    if lifecycle.get('consolidated'):
-                        print(f'[{user_id}][group] ✅ 状态候选已巩固：{lifecycle["consolidated"]["content"]}')
-                    print(f'[{user_id}][group] 🧠 生命周期记忆 [{cls.get("memory_kind")}/{cls.get("reason")}]: {content}')
-
-        # C. 定向告知 → 目标角色的 told 桶
-        td = parsed.get('told')
-        if isinstance(td, dict):
-            content = _clean_content(td.get('content'))
-            target_name = (td.get('target') or '').strip()
-            target_id = name_to_id.get(target_name)
-            if target_id and _valid_told(user_id, content):
-                if save_bond_memory(user_id, target_id, 'told', content):
-                    print(f'[{user_id}][group] ✅ 告知记忆（{target_id}）：{content}')
-
-        # D. ★ 角色互动回忆 → 各自的 bond 桶（第一人称）
-        cbs = parsed.get('char_bonds')
-        if isinstance(cbs, list):
-            for cb in cbs[:3]:
-                if not isinstance(cb, dict):
-                    continue
-                content = _clean_content(cb.get('content'))
-                target_name = (cb.get('target') or '').strip()
-                target_id = name_to_id.get(target_name)
-                if (target_id and _valid_bond(user_id, content)
-                        and _group_bond_is_neutral_continuity(content)):
-                    if save_bond_memory(user_id, target_id, 'between', content):
-                        print(f'[{user_id}][group] ✅ 互动记忆（{target_id}）：{content}')
-
-        return True
-
-    except Exception as e:
-        print(f'群聊记忆提取失败：{e}')
+    if not source_event_id or not str(source_chat_id or '').startswith('group:'):
         return False
+    from raw_events import get_active_events_by_ids
+    from cognitive_events import ingest_canonical_turn
+    events = get_active_events_by_ids(user_id, source_chat_id, [source_event_id])
+    if len(events) != 1 or events[0]['metadata'].get('canonical_group') is not True:
+        return False
+    raw = events[0]
+    meta = raw['metadata']
+    if raw['role'] == 'user':
+        target = meta.get('target_character_id') or SHARED_CHARACTER_ID
+    else:
+        target = meta.get('speaker_character_id')
+        if target not in meta.get('audience', []):
+            return False
+    result = ingest_canonical_turn(user_id=user_id, character_id=target,
+        source_event_id=source_event_id, source_chat_id=source_chat_id, allow_assistant=True)
+    return result['status'] in {'inserted', 'duplicate'}

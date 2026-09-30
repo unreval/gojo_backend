@@ -1220,3 +1220,58 @@ def backfill_raw_events_from_short_memory(conn=None):
         cur.close()
         if own:
             conn.close()
+
+
+def cognitive_source_matches_scope(raw, character_id, source_chat_id):
+    """Recheck audience/speaker scope at ingress and at the commit boundary."""
+    if source_chat_id == character_id:
+        return not source_chat_id.startswith('group:')
+    meta = raw.get('metadata') or {}
+    if (not source_chat_id.startswith('group:') or meta.get('canonical_group') is not True
+            or not raw.get('event_id', '').startswith(source_chat_id + ':message:')):
+        return False
+    if raw.get('role') == 'user':
+        target = meta.get('target_character_id') or 'shared'
+    else:
+        target = meta.get('speaker_character_id')
+    return target == character_id and (target == 'shared' or target in meta.get('audience', []))
+
+
+def append_group_raw_event(cur, *, group_id, message_id, sender_type,
+                           sender_id, content, subtitle='', target_character_id=None):
+    """Called inside the group-message transaction, before any generation.
+
+    Source identity comes from the committed group and sender, not a generated
+    transcript. Audience is a snapshot; later membership edits cannot relabel it.
+    """
+    cur.execute('SELECT owner_user_id FROM groups WHERE id=%s', (group_id,))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        raise ValueError('group_owner_missing')
+    owner = row[0]
+    cur.execute("SELECT member_id FROM group_members WHERE group_id=%s AND member_type='character'",
+                (group_id,))
+    audience = [item[0] for item in cur.fetchall()]
+    if sender_type == 'user' and sender_id != owner:
+        raise ValueError('group_sender_does_not_match_owner')
+    if sender_type == 'character' and sender_id not in audience:
+        raise ValueError('group_speaker_not_member')
+    if sender_type not in ('user', 'character'):
+        raise ValueError('group_sender_type_invalid')
+    source_id = f'group:{group_id}:message:{message_id}'
+    chat_id = f'group:{group_id}'
+    metadata = {'canonical_group': True, 'audience': audience,
+                'speaker_character_id': sender_id if sender_type == 'character' else None,
+                'target_character_id': target_character_id if target_character_id in audience else None}
+    cur.execute("""INSERT INTO chat_log
+        (user_id,chat_id,event_id,client_msg_id,role,text,subtitle,extra,created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)""",
+        (owner, chat_id, source_id, source_id,
+         'user' if sender_type == 'user' else 'gojo', content, subtitle,
+         json.dumps(metadata, ensure_ascii=False)))
+    extra = json.dumps({'source_chat_id': chat_id}, ensure_ascii=False)
+    cur.execute("""INSERT INTO memory_jobs
+        (kind,user_id,character_id,user_text,extra_json,status,source_event_id)
+        VALUES ('group',%s,%s,%s,%s,'pending',%s)""",
+        (owner, chat_id, content if sender_type == 'user' else '', extra, source_id))
+    return source_id

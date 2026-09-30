@@ -28,6 +28,7 @@ import time
 import threading
 import requests
 from db import get_conn
+from memory_authority import authoritative_memory_sql
 
 # ── 开关 ──
 USE_RAG = os.environ.get('USE_RAG', '0') == '1'
@@ -290,8 +291,9 @@ def search_long_memory(user_id, character_id, shared_id, query_text, top_k=8):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            '''SELECT id, content, timestamp, category FROM long_memory
-               WHERE user_id = %s AND character_id IN (%s, %s)''',
+            f'''SELECT id, content, timestamp, category FROM long_memory
+               WHERE user_id = %s AND character_id IN (%s, %s)
+                 AND {authoritative_memory_sql('long_memory')}''',
             (user_id, character_id, shared_id)
         )
         rows = cur.fetchall()
@@ -325,9 +327,9 @@ def search_bond_memory(user_id, character_id, kind, query_text, top_k=6):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            '''SELECT id, content, timestamp FROM bond_memory
+            f'''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
-                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
             (user_id, character_id, kind)
         )

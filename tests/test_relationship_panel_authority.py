@@ -252,63 +252,32 @@ class RelationshipLegacyBypassTests(unittest.TestCase):
         save.assert_not_called()
 
     def test_retreat_boundary_is_not_removed_by_numeric_scores_or_care(self):
-        retreat_at = NOW - timedelta(days=2)
-        care_at = NOW - timedelta(days=1)
-        stances = [
-            {'id': 10, 'type': 'retreat_boundary', 'content': '先保持距离',
-             'declared_at': retreat_at},
-            {'id': 11, 'type': 'care_admission', 'content': '我会照看你',
-             'declared_at': care_at},
-        ]
-        revoke = Mock()
-        with patch('relationship_state.list_active_stances', return_value=stances), \
-             patch('relationship_state.revoke_stance', revoke), \
-             patch('cognitive_reader.read_relationship_semantic_state', return_value={
-                 'romantic_label': None,
-             }):
-            relationship_engine.check_retreat_boundary_superseded('u', 'gojo')
-
+        with patch('cognitive_events.ingest_canonical_turn',return_value={'status':'pending_canonical_source'}), \
+             patch('relationship_state.revoke_stance') as revoke:
+            result=relationship_engine.process_turn('u','gojo','关心你',source_event_id='source')
         revoke.assert_not_called()
+        self.assertEqual(result['applied'],[])
+        self.assertFalse(hasattr(relationship_engine,'check_retreat_boundary_superseded'))
 
     def test_retreat_boundary_requires_a_later_explicit_or_source_valid_resolution(self):
-        retreat_at = NOW - timedelta(days=2)
-        stances = [
-            {'id': 10, 'type': 'retreat_boundary', 'content': '先保持距离',
-             'declared_at': retreat_at},
-            {'id': 11, 'type': 'relationship_confirm', 'content': '我明确改变了表态',
-             'declared_at': NOW - timedelta(days=1)},
-        ]
-        revoke = Mock()
-        with patch('relationship_state.list_active_stances', return_value=stances), \
-             patch('relationship_state.revoke_stance', revoke), \
-             patch('cognitive_reader.read_relationship_semantic_state', return_value={
-                 'romantic_label': None,
-             }):
-            relationship_engine.check_retreat_boundary_superseded('u', 'gojo')
-
-        revoke.assert_called_once()
-        self.assertEqual(revoke.call_args.args[2], 10)
+        """Legacy stances cannot substitute for an actual scoped correction."""
+        from cognitive_revision import parse_cognitive_evidence
+        changed=parse_cognitive_evidence('更正：「不要「亲密称呼」」不对，应为「可以「亲密称呼」」。','u','gojo')
+        self.assertEqual(changed['operation'],'correction')
+        unrelated=parse_cognitive_evidence('更正：「不要「亲密称呼」」不对，应为「可以「深夜来电」」。','u','gojo')
+        self.assertEqual(unrelated['operation'],'pending')
+        self.assertFalse(hasattr(relationship_engine,'check_retreat_boundary_superseded'))
 
     def test_passion_gate_requires_distinct_sessions_as_configured(self):
-        def result_for(rows):
-            cursor = _Cursor(rows)
-            connection = _Connection(cursor)
-            with patch.object(relationship_engine, 'get_conn', return_value=connection):
-                return relationship_engine._passion_diversity_ok('u', 'gojo')
-
-        same_session = [
-            (NOW, 'session-a'),
-            (NOW - timedelta(hours=3), 'session-a'),
-            (NOW - timedelta(hours=7), 'session-a'),
-        ]
-        distinct_sessions = [
-            (NOW, 'session-b'),
-            (NOW - timedelta(hours=3), 'session-a'),
-            (NOW - timedelta(hours=7), 'session-a'),
-        ]
-
-        self.assertFalse(result_for(same_session))
-        self.assertTrue(result_for(distinct_sessions))
+        """Session counts and repeated model labels no longer grant authority."""
+        with patch('cognitive_events.ingest_canonical_turn',return_value={'status':'duplicate'}), \
+             patch('relationship_state.apply_passion') as passion:
+            for session in ('session-a','session-a','session-b'):
+                result=relationship_engine.process_turn('u','gojo','copied flirt',
+                    session_id=session,source_event_id='same-source')
+                self.assertEqual(result['signals_applied'],0)
+        passion.assert_not_called()
+        self.assertFalse(hasattr(relationship_engine,'_passion_diversity_ok'))
 
     def test_provenance_context_carries_source_event_id_without_new_table(self):
         cursor = _Cursor([])
@@ -326,12 +295,13 @@ class RelationshipLegacyBypassTests(unittest.TestCase):
 
 class RelationshipCognitiveContractTests(unittest.TestCase):
     def test_worker_documents_the_stable_relationship_semantic_keys(self):
-        prompt = cognitive_worker._SYSTEM_PROMPT
-        self.assertIn('relationship.engagement_style', prompt)
-        self.assertIn('relationship.romantic_label', prompt)
-        self.assertIn('relationship.romantic_openness', prompt)
-        self.assertIn('unresolved', prompt)
-        self.assertNotIn('0.89', prompt)
+        """Semantic vocabulary remains stable without a model judgment prompt."""
+        from relationship_semantics import PANEL_SEMANTIC_KEYS, ROMANTIC_LABEL_VALUES
+        self.assertIn('relationship.engagement_style',PANEL_SEMANTIC_KEYS)
+        self.assertIn('relationship.romantic_label',PANEL_SEMANTIC_KEYS)
+        self.assertIn('relationship.romantic_openness',PANEL_SEMANTIC_KEYS)
+        self.assertIn('unresolved',ROMANTIC_LABEL_VALUES)
+        self.assertFalse(hasattr(cognitive_worker,'_SYSTEM_PROMPT'))
 
     def test_semantic_keys_keep_their_independent_cognitive_lifecycles(self):
         cognitive_output._validate_relationship_semantic_contract(
@@ -389,7 +359,12 @@ class RelationshipCognitiveContractTests(unittest.TestCase):
         self.assertIn('不构成 relationship evidence', source['schedule_share.py'])
         self.assertIn('不是新的关系证据', source['diary_engine.py'])
         self.assertIn('不是新的关系证据', source['diary_scheduler.py'])
-        self.assertIn('不能作为关心或浪漫关系的新证据', source['user_memory.py'])
+        import inspect
+        import user_memory
+        group_ingress = inspect.getsource(user_memory.extract_and_save_group_memory)
+        self.assertIn('ingest_canonical_turn', group_ingress)
+        for old_writer in ('invoke_structured_llm(', 'save_long_memory(', 'save_bond_memory('):
+            self.assertNotIn(old_writer, group_ingress)
 
 
 if __name__ == '__main__':

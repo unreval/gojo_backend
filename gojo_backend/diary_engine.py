@@ -122,8 +122,11 @@ def generate_char_diary(character_id, user_id, topic=None):
         bond_text = '\n'.join(f'- {b[1]}' for b in bonds) if bonds else '（还没什么共同的事）'
         tolds = get_bond_memories(user_id, character_id, kind='told', limit=6)
         told_text = '\n'.join(f'- {t[1]}' for t in tolds) if tolds else '（她还没告诉过你什么）'
-        if pack is not None and getattr(pack, 'memory_text', ''):
-            facts_text = pack.memory_text
+        if pack is not None and getattr(pack, 'recall_result', None) is not None:
+            from memory_authority import filter_recall_authority
+            from smart_recall import format_recall_for_prompt
+            verified = filter_recall_authority(pack.recall_result, user_id, character_id)
+            facts_text, _, _ = format_recall_for_prompt(verified)
         else:
             try:
                 long_mems = get_long_memory(user_id, character_id) or []
@@ -177,7 +180,7 @@ def generate_char_diary(character_id, user_id, topic=None):
 
 【你们相处的真实状况】
 - {days_line}
-- 共同经历累计 {bond_count} 条，你了解她的事 {fact_count} 件（都列在下方，那是全部）。
+- 可核对的话语/约定 {bond_count} 条，当前可用的自述 {fact_count} 条（都列在下方，那是全部）。
 
 【重要设定】
 - 写"当下的你"，不要写漫画里既定的命运剧情（不写牺牲、不写和夏油的宿命）。
@@ -190,13 +193,13 @@ def generate_char_diary(character_id, user_id, topic=None):
 【最近和她的对话】
 {recent_chat}
 
-【你们之间的事（共同经历）】
+【当前来源有效的话语和明确约定——说过不等于已实现】
 {bond_text}
 
 【她告诉过你的事】
 {told_text}
 
-【关于她的事实（你了解的她的情况）】
+【她的明确自述——保留对象、日期和自述限定】
 {facts_text}{topic_hint}
 
 【输出格式——严格 JSON，只输出一行】

@@ -1803,7 +1803,8 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
 class RelationshipGateTests(unittest.TestCase):
     def test_process_turn_has_event_gate(self):
         src = Path(BACKEND, 'relationship_engine.py').read_text(encoding='utf-8')
-        self.assertIn("skipped='already_processed'", src)
+        self.assertIn("ingest_canonical_turn", src)
+        self.assertNotIn("extract_signals", src)
         chat = Path(BACKEND, 'route_chat.py').read_text(encoding='utf-8')
         self.assertIn("relationship_update", chat)
         self.assertIn('commit_and_run_effects', chat)

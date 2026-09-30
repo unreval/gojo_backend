@@ -82,12 +82,14 @@ def enqueue_kind(kind, user_id, character_id, source_event_id=None, extra=None,
     )
 
 
-def enqueue_group_extraction(user_id, user_text, round_transcript, members):
+def enqueue_group_extraction(user_id, user_text, round_transcript, members,
+                             *, source_event_id=None, source_chat_id=None):
     extra = json.dumps(
-        {'round_transcript': round_transcript, 'members': members},
+        {'source_chat_id': source_chat_id},
         ensure_ascii=False,
     )
-    return _enqueue('group', user_id, None, user_text, None, extra)
+    return _enqueue('group', user_id, source_chat_id, user_text, None, extra,
+                    source_event_id=source_event_id)
 
 
 def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
@@ -258,6 +260,8 @@ def _run_job(row):
                 user_text or '',
                 extra.get('round_transcript') or '',
                 extra.get('members') or [],
+                source_event_id=source_event_id,
+                source_chat_id=extra.get('source_chat_id'),
             )
         else:
             from user_memory import extract_and_save_memory

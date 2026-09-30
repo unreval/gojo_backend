@@ -87,7 +87,8 @@ class StructuredOutputArchitectureTests(unittest.TestCase):
 
     def test_memory_extractor_uses_the_shared_wrapper_not_utils_extract_json(self):
         source = inspect.getsource(user_memory.extract_and_save_memory)
-        self.assertIn('invoke_structured_llm', source)
+        self.assertIn('ingest_canonical_turn', source)
+        self.assertNotIn('invoke_structured_llm', source)
         self.assertNotIn('extract_json(', source)
         self.assertEqual(_direct_json_parser_calls(user_memory.extract_and_save_memory), [])
 
@@ -103,7 +104,8 @@ class StructuredOutputArchitectureTests(unittest.TestCase):
         parser_source = inspect.getsource(cognitive_output.parse_slow_loop_output)
         worker_source = inspect.getsource(cognitive_worker.generate_cycle_output)
         self.assertIn('parse_structured_output', parser_source)
-        self.assertIn('invoke_structured_llm', worker_source)
+        self.assertIn('deterministic_cycle_output', worker_source)
+        self.assertNotIn('invoke_structured_llm', worker_source)
         self.assertNotIn('json.JSONDecoder', parser_source)
         self.assertEqual(_direct_json_parser_calls(cognitive_output.parse_slow_loop_output), [])
         self.assertEqual(_direct_json_parser_calls(cognitive_worker.generate_cycle_output), [])

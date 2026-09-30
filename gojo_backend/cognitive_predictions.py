@@ -198,9 +198,10 @@ def validate_signal_prediction_contract(
         scope = value.get('claim_scope') or {}
         if (set(scope) != {'subject', 'predicate', 'object', 'time_scope', 'source'}
                 or any(not isinstance(v, str) or not v for v in scope.values())
-                or scope['predicate'] != 'reported_preference'
+                or scope['predicate'] not in {'reported_preference', 'explicit_promise'}
                 or scope['source'] != 'canonical_user_turn'
-                or value.get('expected_value') not in {'喜欢', '不喜欢', '讨厌'}):
+                or value.get('expected_value') not in (
+                    {'已兑现'} if scope.get('predicate') == 'explicit_promise' else {'喜欢', '不喜欢', '讨厌'})):
             raise ValueError('explicit_prediction_scope_invalid')
         return dict(value)
     return normalize_signal_prediction_metadata(metadata)
@@ -272,11 +273,12 @@ def _resolve_current_event_signal_outcome(
 
 def _resolve_explicit_report_outcome(cur, prediction, event_id, occurred_at):
     from cognitive_revision import parse_cognitive_evidence
-    from raw_events import get_active_events_by_ids
+    from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
     cur.execute(
         '''SELECT source_event_id, payload, occurred_at FROM cognitive_events
            WHERE id=%s AND user_id=%s AND character_id=%s
-             AND source_event_type='canonical_user_turn' ''',
+             AND source_event_type='canonical_user_turn'
+             AND adjudication->>'status' IS DISTINCT FROM 'superseded' ''',
         (event_id, prediction['user_id'], prediction['character_id']))
     row = cur.fetchone()
     if not row or _as_utc(row[2]) <= _as_utc(prediction['created_at']):
@@ -284,17 +286,24 @@ def _resolve_explicit_report_outcome(cur, prediction, event_id, occurred_at):
     source_id, payload, _ = row
     if any(ref.get('event_id') == event_id for ref in (prediction.get('metadata') or {}).get('evidence_refs', [])):
         return None
-    raw = get_active_events_by_ids(prediction['user_id'], prediction['character_id'],
-                                  [source_id], conn=cur.connection)
-    if not raw or raw[0]['role'] != 'user' or raw[0]['content'] != _json_value(payload, {}).get('content'):
+    payload = _json_value(payload, {})
+    metadata = _json_value(prediction.get('metadata'), {})
+    chat_id = payload.get('source_chat_id') or prediction['character_id']
+    if chat_id != (metadata.get('source_chat_id') or prediction['character_id']):
+        return None
+    raw = get_active_events_by_ids(prediction['user_id'], chat_id,
+                                  [source_id], conn=cur.connection, lock=True)
+    if (not raw or raw[0]['role'] != 'user' or raw[0]['content'] != payload.get('content')
+            or not cognitive_source_matches_scope(raw[0], prediction['character_id'], chat_id)):
         return None
     parsed = parse_cognitive_evidence(raw[0]['content'], prediction['user_id'], prediction['character_id'])
     if parsed['operation'] != 'report':
         return None
     claim = parsed['claim']
-    metadata = _json_value(prediction.get('metadata'), {})
     if any(claim.get(k) != v for k, v in metadata['claim_scope'].items()):
         return None
+    if claim['predicate'] == 'explicit_promise' and claim['value'] == '承诺':
+        return None  # Repeating a commitment is neither fulfillment nor breach.
     return 1.0 if claim['value'] == metadata['expected_value'] else -1.0
 
 

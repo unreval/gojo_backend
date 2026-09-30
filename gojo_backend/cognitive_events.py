@@ -266,13 +266,16 @@ def ingest_v4_signals(*, user_id, character_id, source_event_id, signals,
                                  source_event_id=source_event_id, conn=conn, aggregate=aggregate)
 
 
-def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, aggregate=True):
+def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, aggregate=True,
+                          source_chat_id=None, allow_assistant=False):
     """Use the existing Evidence Store / trigger queue, without any model call."""
-    from raw_events import get_active_events_by_ids
+    from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
     from cognitive_revision import parse_cognitive_evidence, evidence_question_key
     from cognitive_queue import aggregate_pending_triggers, stable_advisory_lock_key
 
-    if not source_event_id or is_nonrelationship_generated_source(source_event_id):
+    group_candidate = (str(source_chat_id or '').startswith('group:')
+                       and str(source_event_id or '').startswith(str(source_chat_id) + ':message:'))
+    if not source_event_id or (is_nonrelationship_generated_source(source_event_id) and not group_candidate):
         return {'status': 'pending_canonical_source'}
     database = conn
     owns_connection = database is None
@@ -283,16 +286,22 @@ def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, 
     try:
         cur.execute('SELECT pg_advisory_xact_lock(%s)',
                     (stable_advisory_lock_key(user_id, character_id),))
-        events = get_active_events_by_ids(user_id, character_id, [source_event_id], conn=database)
-        if len(events) != 1 or events[0]['role'] != 'user':
+        chat_id = source_chat_id or character_id
+        events = get_active_events_by_ids(user_id, chat_id, [source_event_id], conn=database, lock=True)
+        allowed_roles = {'user', 'assistant'} if allow_assistant else {'user'}
+        if len(events) != 1 or events[0]['role'] not in allowed_roles:
             return {'status': 'pending_canonical_source'}
         raw = events[0]
-        parsed = parse_cognitive_evidence(raw['content'], user_id, character_id)
+        if not cognitive_source_matches_scope(raw, character_id, chat_id):
+            return {'status': 'pending_canonical_source'}
+        parsed = (parse_cognitive_evidence(raw['content'], user_id, character_id)
+                  if raw['role'] == 'user' else {'operation': 'quote'})
         qkey = evidence_question_key(parsed, source_event_id)
         event_id = record_source_event(database, user_id=user_id, character_id=character_id,
-            source_event_type='canonical_user_turn', source_event_id=source_event_id,
+            source_event_type='canonical_user_turn' if raw['role'] == 'user' else 'canonical_assistant_turn',
+            source_event_id=source_event_id,
             source='deterministic_evidence_policy_v1', occurred_at=raw['timestamp'],
-            payload={'content': raw['content'], **parsed})
+            payload={'content': raw['content'], 'source_chat_id': chat_id, **parsed})
         if event_id is None:
             if owns_connection:
                 database.commit()

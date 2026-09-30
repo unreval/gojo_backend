@@ -52,6 +52,8 @@ class OfflineDatabaseTests(unittest.TestCase):
             event_id TEXT, client_msg_id TEXT, role TEXT, text TEXT, kind TEXT DEFAULT 'text',
             extra TEXT DEFAULT '{}', created_at TIMESTAMPTZ, subtitle TEXT DEFAULT '',
             status TEXT DEFAULT 'active', reply_to_event_id TEXT)''')
+        from tests.memory_schema import create_memory_tables
+        create_memory_tables(cur)
         self.database.commit()
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

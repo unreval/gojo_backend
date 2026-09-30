@@ -14,7 +14,7 @@ if BACKEND not in sys.path:
 import raw_events  # noqa: E402
 import relationship_engine  # noqa: E402
 import relationship_reader  # noqa: E402
-from relationship_engine import aggregate_user_flirt_response  # noqa: E402
+from relationship_legacy_readonly import aggregate_user_flirt_response  # noqa: E402
 from relationship_config import FLIRT_RESPONSE_WINDOW_SIZE  # noqa: E402
 
 

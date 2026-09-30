@@ -416,10 +416,11 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     recent_event_ids = list(getattr(context_pack, 'recent_event_ids', None) or [])
 
     if context_pack is not None and getattr(context_pack, 'recall_ready', False):
-        memory_text = getattr(context_pack, 'memory_text', '') or ''
-        bond_text = getattr(context_pack, 'bond_text', '') or ''
-        told_text = getattr(context_pack, 'told_text', '') or ''
-        _recall_result = getattr(context_pack, 'recall_result', None)
+        from memory_authority import filter_recall_authority
+        from smart_recall import format_recall_for_prompt
+        _recall_result = filter_recall_authority(
+            getattr(context_pack, 'recall_result', None) or {}, user_id, character_id)
+        memory_text, bond_text, told_text = format_recall_for_prompt(_recall_result)
     else:
         try:
             from smart_recall import two_level_recall, format_recall_for_prompt
@@ -439,6 +440,8 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
                 _recall_result = exclude_recall_covered_by_recent(
                     _recall_result, recent_event_ids)
             if _recall_result is not None:
+                from memory_authority import filter_recall_authority
+                _recall_result = filter_recall_authority(_recall_result, user_id, character_id)
                 memory_text, bond_text, told_text = format_recall_for_prompt(_recall_result)
         except Exception as _e:
             print(f'[prompt] 两级召回失败，退回旧逻辑：{_e}')
@@ -472,7 +475,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
             pass
         if long_memories:
             memory_lines = [f'- [{ts.strftime("%Y-%m-%d") if ts else "?"}] {c}{"（当时的状态，仅当天有效）" if cat == "状态" else ""}' for c, ts, cat in long_memories]
-            memory_text = f'\n\n【关于对方的已确认事实——这些都是真实发生过的，你必须当作确实知道】\n{chr(10).join(memory_lines)}\n\n使用规则：\n1. 当作真的、不要质疑。\n2. 自然融入回复，不要刻意背诵清单。\n3. 列表里有的事必须当作记得，没有的可以说不记得。'
+            memory_text = f'\n\n【有当前原始来源的明确自述——确认的是说过，不是独立核实了现实】\n{chr(10).join(memory_lines)}\n\n使用规则：\n1. 保留自述、对象和日期范围；不得从原话扩写隐含心理或已核实的现实事实。\n2. 自然融入回复，不要刻意背诵清单。\n3. 列表里有的事必须当作记得，没有的可以说不记得。'
 
         bonds = None
         if memory_search.is_vector_ready():
@@ -481,7 +484,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
             bonds = get_bond_memories(user_id, character_id, kind='between', limit=30)
         if bonds:
             bond_lines = [f'- [{ts.strftime("%Y-%m-%d") if ts else "?"}] {c}' for _bid, c, ts in bonds]
-            bond_text = f'\n\n【你们之间的事——你和她共同的回忆】\n{chr(10).join(bond_lines)}'
+            bond_text = f'\n\n【有当前原始来源的话语和明确约定——按条目标明的说话人理解】\n{chr(10).join(bond_lines)}'
 
         tolds = None
         if memory_search.is_vector_ready():

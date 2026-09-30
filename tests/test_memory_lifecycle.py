@@ -278,7 +278,7 @@ class MemoryLifecycleTests(unittest.TestCase):
             }],
         })
 
-        self.assertIn('有生命周期，不等于永久事实', memory_text)
+        self.assertIn('未经权威证据确认，仅作表达参考', memory_text)
         self.assertIn('便利贴备忘', memory_text)
         self.assertIn('不是长期记忆', memory_text)
         self.assertEqual(bond_text, '')

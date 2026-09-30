@@ -10,6 +10,7 @@ from cognitive_config import (
 )
 from cognitive_output import sticky_emotion_tag
 from cognitive_revision import current_belief_display, is_stable_reader_belief
+from memory_authority import current_literal_belief_sql
 from relationship_semantics import (
     ENGAGEMENT_STYLE_KEY,
     INTERNAL_CONFLICT_KEY,
@@ -269,13 +270,20 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
         cycle_row = cur.fetchone()
 
         cur.execute(
-            '''SELECT question_key, question_text, status, updated_at,
+            f'''SELECT question_key, question_text, status, updated_at,
                       metadata, source_event_refs
                FROM cognitive_questions
                WHERE user_id = %s AND character_id = %s
                  AND (status IN ('active', 'dormant')
                       OR (status = 'resolved' AND
                           (metadata ? 'resolution' OR metadata ? 'current_judgment')))
+                 AND (metadata->>'updated_by' IS DISTINCT FROM 'deterministic_evidence_policy_v1'
+                      OR status <> 'resolved'
+                      OR EXISTS (SELECT 1 FROM cognitive_beliefs b
+                          WHERE b.user_id=cognitive_questions.user_id
+                            AND b.character_id=cognitive_questions.character_id
+                            AND b.belief_key=cognitive_questions.metadata->'current_judgment'->>'belief_key'
+                            AND b.status='active' AND {current_literal_belief_sql('b')}))
                ORDER BY updated_at DESC, id DESC
                LIMIT 6''',
             (user_id, character_id),
@@ -293,11 +301,13 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
         ]
 
         cur.execute(
-            '''SELECT belief_key, statement, confidence, belief_type,
+            f'''SELECT belief_key, statement, confidence, belief_type,
                       updated_at, metadata, evidence_refs
                FROM cognitive_beliefs
                WHERE user_id = %s AND character_id = %s
                  AND status = 'active'
+                 AND (metadata->>'authority' IS DISTINCT FROM 'literal_self_report_only'
+                      OR {current_literal_belief_sql('cognitive_beliefs')})
                ORDER BY confidence DESC, updated_at DESC, id DESC
                LIMIT 12''',
             (user_id, character_id),
@@ -317,11 +327,17 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
         ]
 
         cur.execute(
-            '''SELECT hypothesis_key, statement, status, hypothesis_type,
+            f'''SELECT hypothesis_key, statement, status, hypothesis_type,
                       confidence, updated_at, supporting_evidence_refs
                FROM cognitive_hypotheses
                WHERE user_id = %s AND character_id = %s
                  AND status IN ('open', 'supported')
+                 AND (metadata->>'authority' IS DISTINCT FROM 'literal_self_report_only'
+                      OR EXISTS (SELECT 1 FROM cognitive_beliefs b
+                          WHERE b.user_id=cognitive_hypotheses.user_id
+                            AND b.character_id=cognitive_hypotheses.character_id
+                            AND b.belief_key=cognitive_hypotheses.hypothesis_key
+                            AND b.status='active' AND {current_literal_belief_sql('b')}))
                ORDER BY updated_at DESC, id DESC
                LIMIT 6''',
             (user_id, character_id),

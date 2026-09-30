@@ -5,6 +5,7 @@ creates its internal wakeup socket with a local socketpair. It denies every
 other address and blocks psycopg2 connection creation.
 """
 import argparse
+import json
 import os
 from pathlib import Path
 import socket
@@ -77,13 +78,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--full", action="store_true")
-    parser.add_argument("--pattern")
+    parser.add_argument("--pattern", action="append")
+    parser.add_argument("--report", help="Write machine-readable regression results")
     args = parser.parse_args()
     root = Path(args.repo).resolve()
     os.chdir(root)
     sys.path[:0] = [str(root / "gojo_backend"), str(root / "tests"), str(root)]
     _install_guards()
-    patterns = [args.pattern] if args.pattern else (
+    patterns = args.pattern if args.pattern else (
         ["test_*.py"] if args.full else [
             "test_cognitive*.py",
             "test_structured_output*.py",
@@ -94,7 +96,19 @@ def main():
     suite = unittest.TestSuite()
     for pattern in patterns:
         suite.addTests(unittest.defaultTestLoader.discover(str(root / "tests"), pattern=pattern))
+    if suite.countTestCases() == 0:
+        parser.error("No tests matched; refusing to report an empty suite as passing")
     result = unittest.TextTestRunner(verbosity=1).run(suite)
+    if args.report:
+        Path(args.report).write_text(json.dumps({
+            "tests_run": result.testsRun,
+            "failures": [{"test": str(test), "traceback": tb} for test, tb in result.failures],
+            "errors": [{"test": str(test), "traceback": tb} for test, tb in result.errors],
+            "skipped": [{"test": str(test), "reason": why} for test, why in result.skipped],
+            "expected_failures": len(result.expectedFailures),
+            "unexpected_successes": len(result.unexpectedSuccesses),
+            "successful": result.wasSuccessful(),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
         "offline_guard=external-network-and-real-psycopg2-disabled "
         f"tests_run={result.testsRun} failures={len(result.failures)} errors={len(result.errors)}"

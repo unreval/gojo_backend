@@ -432,8 +432,9 @@ class CharacterInitiativeTests(unittest.TestCase):
 
     def test_user_response_still_enters_v4_via_process_turn_signals(self):
         source = inspect.getsource(relationship_engine.process_turn)
-        self.assertIn('extract_signals', source)
-        self.assertIn('_route_signal', source)
+        self.assertIn('ingest_canonical_turn', source)
+        self.assertNotIn('extract_signals', source)
+        self.assertFalse(hasattr(relationship_engine, '_route_signal'))
 
     def test_different_policies_allow_different_initiative(self):
         state = _state(passion=20)
@@ -453,8 +454,9 @@ class SalientEventTests(unittest.TestCase):
             salience='high',
         )
         self.assertTrue(allowed)
-        source = inspect.getsource(relationship_engine._maybe_mark_romantic_reappraisal)
-        self.assertIn('romantic_reappraisal', source)
+        # Historical pure effect calculations survive; their mutating router does not.
+        self.assertFalse(hasattr(relationship_engine, '_maybe_mark_romantic_reappraisal'))
+        source = inspect.getsource(relationship_engine)
         self.assertNotIn('apply_passion', source)
         self.assertNotIn('update_pending_passion', source)
 

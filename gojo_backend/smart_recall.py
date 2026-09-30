@@ -24,6 +24,7 @@ import time as _time
 from datetime import datetime, timezone
 
 from db import get_conn
+from memory_authority import authoritative_memory_sql
 from config import CN_TZ
 from cognitive_config import COGNITIVE_DIARY_RECALL_LIMIT
 
@@ -251,7 +252,7 @@ def two_level_recall(user_id, character_id, user_message,
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            '''SELECT id, content, timestamp, category,
+            f'''SELECT id, content, timestamp, category,
                       COALESCE(mention_count, 1) as mention_count,
                       last_mentioned,
                       COALESCE(pinned, FALSE) as pinned,
@@ -260,7 +261,7 @@ def two_level_recall(user_id, character_id, user_message,
                       source_event_refs
                FROM long_memory
                WHERE user_id = %s AND character_id IN (%s, %s)
-                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND {authoritative_memory_sql('long_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC''',
             (user_id, character_id, shared_id)
@@ -312,7 +313,7 @@ def two_level_recall(user_id, character_id, user_message,
                     continue
 
             entry = {
-                'id': fid, 'content': content, 'timestamp': ts,
+                'authority': 'canonical_evidence_v1', 'id': fid, 'content': content, 'timestamp': ts,
                 'category': category, 'pinned': bool(is_pinned),
                 'mention_count': mention_count,
                 'last_mentioned': last_mentioned,
@@ -372,7 +373,7 @@ def two_level_recall(user_id, character_id, user_message,
                     WHERE user_id = %s AND character_id = %s
                       AND kind = 'between'
                       AND linked_fact_id IN ({placeholders})
-                      AND {ACTIVE_BOND_SQL}
+                      AND {authoritative_memory_sql('bond_memory')}
                     ORDER BY timestamp DESC''',
                 (user_id, character_id, *fact_ids)
             )
@@ -381,7 +382,7 @@ def two_level_recall(user_id, character_id, user_message,
                     linked_bonds[linked_id] = []
                 if len(linked_bonds[linked_id]) < BOND_PER_FACT:
                     linked_bonds[linked_id].append({
-                        'id': bid, 'content': bcontent, 'timestamp': bts
+                        'authority': 'canonical_evidence_v1', 'id': bid, 'content': bcontent, 'timestamp': bts
                     })
 
         try:
@@ -412,7 +413,7 @@ def two_level_recall(user_id, character_id, user_message,
             f'''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = 'between'
                   AND (linked_fact_id IS NULL OR linked_fact_id = 0)
-                  AND {ACTIVE_BOND_SQL}
+                  AND {authoritative_memory_sql('bond_memory')}
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, LOOSE_BOND_CANDIDATE_LIMIT)
         )
@@ -444,7 +445,7 @@ def two_level_recall(user_id, character_id, user_message,
             if score <= 0:
                 continue
             loose_bonds.append({
-                'id': bid, 'content': bcontent, 'timestamp': bts,
+                'authority': 'canonical_evidence_v1', 'id': bid, 'content': bcontent, 'timestamp': bts,
                 'score': score, 'relevance_score': relevance,
             })
 
@@ -467,7 +468,7 @@ def two_level_recall(user_id, character_id, user_message,
         cur.execute(
             f'''SELECT id, content, timestamp FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = 'told'
-                  AND {ACTIVE_BOND_SQL}
+                  AND {authoritative_memory_sql('bond_memory')}
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, TOLD_CANDIDATE_LIMIT)
         )
@@ -483,7 +484,7 @@ def two_level_recall(user_id, character_id, user_message,
             if score <= 0:
                 continue
             tolds.append({
-                'id': tid, 'content': tcontent, 'timestamp': tts,
+                'authority': 'canonical_evidence_v1', 'id': tid, 'content': tcontent, 'timestamp': tts,
                 'score': score, 'relevance_score': relevance,
             })
         tolds.sort(
@@ -684,9 +685,12 @@ def format_recall_for_prompt(recall_result):
     if not recall_result:
         return '', '', ''
 
-    facts = recall_result.get('facts', [])
-    loose_bonds = recall_result.get('loose_bonds', [])
-    tolds = recall_result.get('tolds', [])
+    from memory_authority import AUTHORITY
+    facts = [dict(row) for row in recall_result.get('facts', []) if row.get('authority') == AUTHORITY]
+    for fact in facts:
+        fact['bonds'] = [row for row in fact.get('bonds', []) if row.get('authority') == AUTHORITY]
+    loose_bonds = [row for row in recall_result.get('loose_bonds', []) if row.get('authority') == AUTHORITY]
+    tolds = [row for row in recall_result.get('tolds', []) if row.get('authority') == AUTHORITY]
     lifecycle_memories = recall_result.get('lifecycle_memories', [])
     # Episode index entries are rendered by context_layer in their own derived
     # history block.  Count them here only to avoid the misleading "no memory"
@@ -716,11 +720,11 @@ def format_recall_for_prompt(recall_result):
 
         memory_text = f'''{memory_text}
 
-【关于对方的已确认事实——这些都是真实发生过的，你必须当作确实知道】
+【有当前原始来源的明确自述——确认的是说过，不是独立核实了现实】
 {chr(10).join(lines)}
 
 使用规则：
-1. 这些是关于【对方/用户本人】的事实，当作真的、不要质疑。但它们只约束"你对用户的了解"，绝不能拿来推翻或补充角色自己的原作设定——一旦涉及角色设定，一律以上面的【设定铁律】为准。
+1. 这些是【对方/用户本人】明确说过的话，保留原话中的对象、时间和自述限定，不扩写隐含心理。但它们只约束"你对用户的了解"，绝不能拿来推翻或补充角色自己的原作设定——一旦涉及角色设定，一律以上面的【设定铁律】为准。
 2. 自然融入回复，不要刻意背诵清单。
 3. 列表里有的事必须当作记得，没有的可以说不记得。
 4. 标着"（当时的状态）"的条目只代表记录当天的情况——不代表此刻仍然成立。她说过已经好了/过去了，就是过去了。
@@ -742,14 +746,14 @@ def format_recall_for_prompt(recall_result):
             lifecycle_lines.append(f'- [{date_str}] [{kind}] {item["content"]}')
         block = f'''
 
-【当前可想起的短期/候选记忆——有生命周期，不等于永久事实】
+【生成的短期/候选回忆——未经权威证据确认，仅作表达参考】
 {chr(10).join(lifecycle_lines)}
 
 使用规则：
 1. 这些内容只是当前仍有召回资格的状态、候选或情节线索。
 2. 短期状态只按当时/近期状态理解，不要说成她一直如此。
 3. 候选记忆没有巩固前，不要把它扩写成稳定人格或长期事实。
-4. 已巩固摘要可以自然当作近期趋势，但不要逐条复读旧碎片。
+4. 生成摘要即使被标记为巩固，也不得当作已确认事实、近期趋势或主动行为依据。
 5. 优先级仍服从上方统一证据顺序：当前消息/直接事件 > 较新事实 > active lifecycle/bond > 历史回忆。'''
         memory_text = f'{memory_text}{block}' if memory_text else block
 
@@ -815,8 +819,8 @@ def format_recall_for_prompt(recall_result):
             bond_lines.append(f'- [{bdate}] {b["content"]}')
         bond_text = f'''
 
-【你们之间的事——你和她共同的回忆】
-（这些是以你自己的视角记下的回忆——条目里的"我"就是你本人。）
+【有当前原始来源的话语和明确约定】
+（逐条按标注的说话人理解；角色说过某事，不证明话中事实或关系成立。）
 {chr(10).join(bond_lines)}
 
 使用规则：

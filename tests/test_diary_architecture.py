@@ -117,16 +117,18 @@ class DiaryArchitectureTests(unittest.TestCase):
                 self._many = []
 
         persist_cur = _Cur([])
-        cognitive_output.persist_slow_loop_output(
-            persist_cur, cycle_id=3, user_id='u', character_id='gojo',
-            output=output, now=NOW)
-        self.assertEqual(len(persist_cur.inserted), 1)
-        self.assertEqual(persist_cur.inserted[0][2], 'exam.noticed')
-        self.assertNotIn('char_diary', persist_cur.inserted[0])
+        # Model-authored reflection cannot be written as cognitive output.
+        # Daily expression has its separate diary storage, never belief authority.
+        with self.assertRaisesRegex(cognitive_output.SlowLoopOutputError,
+                                    'external_judgment_candidates_not_authoritative'):
+            cognitive_output.persist_slow_loop_output(
+                persist_cur, cycle_id=3, user_id='u', character_id='gojo',
+                output=output, now=NOW)
+        self.assertEqual(persist_cur.inserted, [])
 
     def test_important_thought_does_not_use_daily_diary_quota(self):
         src = Path(BACKEND, 'cognitive_output.py').read_text(encoding='utf-8')
-        self.assertIn('INSERT INTO cognitive_diary_entries', src)
+        self.assertNotIn('INSERT INTO cognitive_diary_entries', src)
         self.assertNotIn('add_char_diary', src)
         self.assertNotIn('count_char_diaries_since', src)
         daily = Path(BACKEND, 'diary_scheduler.py').read_text(encoding='utf-8')
