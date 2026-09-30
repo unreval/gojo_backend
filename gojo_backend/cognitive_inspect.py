@@ -31,7 +31,8 @@ def fetch_cognitive_snapshot(
                       belief_commit_decisions, hypothesis_updates,
                       new_predictions, evidence_refs, reflection_note,
                       sticky_note_updates, diary_entries, worker_model,
-                      failure_code, queued_at, started_at, completed_at
+                      failure_code, queued_at, started_at, completed_at,
+                      invalidated_by_event_id
                FROM cognitive_cycles
                WHERE user_id = %s AND character_id = %s
                ORDER BY id DESC
@@ -61,6 +62,7 @@ def fetch_cognitive_snapshot(
                 'queued_at': row[17],
                 'started_at': row[18],
                 'completed_at': row[19],
+                'invalidated_by_event_id': row[20] if len(row) > 20 else None,
             })
 
         cur.execute(
@@ -192,7 +194,7 @@ def fetch_cognitive_snapshot(
         ]
         cur.execute(
             '''SELECT diary_key, content, reflection_kind,
-                      source_event_refs, occurred_at, created_at
+                      source_event_refs, occurred_at, created_at, invalidated_by_event_id
                FROM cognitive_diary_entries
                WHERE user_id = %s AND character_id = %s
                ORDER BY occurred_at DESC, id DESC''',
@@ -206,6 +208,7 @@ def fetch_cognitive_snapshot(
                 'source_event_refs': _json_value(row[3], []),
                 'occurred_at': row[4],
                 'created_at': row[5],
+                'invalidated_by_event_id': row[6] if len(row) > 6 else None,
             }
             for row in cur.fetchall()
         ]

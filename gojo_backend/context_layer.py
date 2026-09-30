@@ -347,6 +347,9 @@ def save_rolling_summary(
     conn = get_conn()
     cur = conn.cursor()
     try:
+        from cognitive_revision import sources_current_for_derivation
+        if not sources_current_for_derivation(cur, user_id, character_id, payload['source_event_ids']):
+            payload['status'] = 'superseded'
         cur.execute(
             '''INSERT INTO rolling_summaries
                (summary_id, user_id, character_id, text, source_event_ids,
@@ -465,6 +468,9 @@ def upsert_pin(
     conn = get_conn()
     cur = conn.cursor()
     try:
+        from cognitive_revision import sources_current_for_derivation
+        if not sources_current_for_derivation(cur, user_id, character_id, payload['source_event_ids']):
+            payload['status'] = 'superseded'
         cur.execute(
             '''INSERT INTO pinned_context
                (pin_id, user_id, character_id, text, pin_type, source_event_ids,

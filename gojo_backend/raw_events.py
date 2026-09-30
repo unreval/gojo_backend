@@ -295,7 +295,7 @@ def sources_are_active(event_ids, user_id=None, character_id=None, conn=None):
     return True
 
 
-def get_active_events_by_ids(user_id, character_id, event_ids, conn=None):
+def get_active_events_by_ids(user_id, character_id, event_ids, conn=None, *, lock=False):
     """Return active canonical chat_log events for the requested ids.
 
     This is a provenance read, not a second ledger. Derived-memory callers use
@@ -318,7 +318,8 @@ def get_active_events_by_ids(user_id, character_id, event_ids, conn=None):
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s
                  AND COALESCE(status, 'active') = 'active'
-                 AND COALESCE(NULLIF(event_id, ''), client_msg_id) = ANY(%s)''',
+                 AND COALESCE(NULLIF(event_id, ''), client_msg_id) = ANY(%s)'''
+            + (' FOR SHARE' if lock else ''),
             (user_id, character_id, ids),
         )
         rows = cur.fetchall()

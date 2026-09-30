@@ -999,6 +999,7 @@ def recall_diary_memories(user_id, character_id, user_message='', limit=3):
             '''SELECT id, diary_key, content, reflection_kind, source_event_refs, occurred_at
                FROM cognitive_diary_entries
                WHERE user_id = %s AND character_id = %s
+                 AND invalidated_by_event_id IS NULL
                  AND EXISTS (
                      SELECT 1 FROM unnest(%s::text[]) AS term(value)
                      WHERE strpos(lower(content), term.value) > 0)

@@ -187,12 +187,22 @@ def validate_signal_prediction_contract(
     violation_value,
     metadata,
 ):
-    if resolver_name != 'current_event_signal_outcome':
+    if resolver_name not in {'current_event_signal_outcome', 'explicit_report_outcome'}:
         raise ValueError('semantic_prediction_resolver_required')
     if fulfillment_operator != '>=' or float(fulfillment_value) != 1.0:
         raise ValueError('semantic_prediction_fulfillment_rule_invalid')
     if violation_operator != '<=' or float(violation_value) != -1.0:
         raise ValueError('semantic_prediction_violation_rule_invalid')
+    if resolver_name == 'explicit_report_outcome':
+        value = _json_value(metadata, {})
+        scope = value.get('claim_scope') or {}
+        if (set(scope) != {'subject', 'predicate', 'object', 'time_scope', 'source'}
+                or any(not isinstance(v, str) or not v for v in scope.values())
+                or scope['predicate'] != 'reported_preference'
+                or scope['source'] != 'canonical_user_turn'
+                or value.get('expected_value') not in {'喜欢', '不喜欢', '讨厌'}):
+            raise ValueError('explicit_prediction_scope_invalid')
+        return dict(value)
     return normalize_signal_prediction_metadata(metadata)
 
 
@@ -256,37 +266,41 @@ def _selector_matches(signal, selector):
 def _resolve_current_event_signal_outcome(
     cur, prediction, event_id, occurred_at,
 ):
+    # Model-labelled historical signals cannot settle cognitive predictions.
+    return None
+
+
+def _resolve_explicit_report_outcome(cur, prediction, event_id, occurred_at):
+    from cognitive_revision import parse_cognitive_evidence
+    from raw_events import get_active_events_by_ids
     cur.execute(
-        '''SELECT payload
-           FROM cognitive_events
-           WHERE id = %s AND user_id = %s AND character_id = %s''',
-        (
-            event_id, prediction['user_id'], prediction['character_id'],
-        ),
-    )
+        '''SELECT source_event_id, payload, occurred_at FROM cognitive_events
+           WHERE id=%s AND user_id=%s AND character_id=%s
+             AND source_event_type='canonical_user_turn' ''',
+        (event_id, prediction['user_id'], prediction['character_id']))
     row = cur.fetchone()
-    if not row:
+    if not row or _as_utc(row[2]) <= _as_utc(prediction['created_at']):
         return None
-    payload = _json_value(row[0], {})
-    signals = payload.get('signals', []) if isinstance(payload, dict) else []
-    metadata = normalize_signal_prediction_metadata(prediction.get('metadata'))
-    if any(
-        _selector_matches(signal, selector)
-        for signal in signals
-        for selector in metadata['violation_signals']
-    ):
-        return -1.0
-    if any(
-        _selector_matches(signal, selector)
-        for signal in signals
-        for selector in metadata['fulfillment_signals']
-    ):
-        return 1.0
-    return 0.0
+    source_id, payload, _ = row
+    if any(ref.get('event_id') == event_id for ref in (prediction.get('metadata') or {}).get('evidence_refs', [])):
+        return None
+    raw = get_active_events_by_ids(prediction['user_id'], prediction['character_id'],
+                                  [source_id], conn=cur.connection)
+    if not raw or raw[0]['role'] != 'user' or raw[0]['content'] != _json_value(payload, {}).get('content'):
+        return None
+    parsed = parse_cognitive_evidence(raw[0]['content'], prediction['user_id'], prediction['character_id'])
+    if parsed['operation'] != 'report':
+        return None
+    claim = parsed['claim']
+    metadata = _json_value(prediction.get('metadata'), {})
+    if any(claim.get(k) != v for k, v in metadata['claim_scope'].items()):
+        return None
+    return 1.0 if claim['value'] == metadata['expected_value'] else -1.0
 
 
 _RESOLVERS = {
     'current_event_signal_outcome': _resolve_current_event_signal_outcome,
+    'explicit_report_outcome': _resolve_explicit_report_outcome,
 }
 
 

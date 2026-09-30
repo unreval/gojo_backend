@@ -1,11 +1,9 @@
 """Idempotent scheduled-reflection ingress; it never creates a cycle."""
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from cognitive_config import (
-    COGNITIVE_REFLECTION_ACTIVE_DAYS,
     COGNITIVE_REFLECTION_INTERVAL_SECONDS,
     COGNITIVE_REFLECTION_SCAN_BATCH,
-    COGNITIVE_REFLECTION_SUPPRESSION_SECONDS,
 )
 from cognitive_events import record_source_event
 from cognitive_predictions import settle_pending_predictions
@@ -33,138 +31,64 @@ def scheduled_source_event_id(user_id, character_id, scheduled_for=None):
     return f'reflection:{bucket.isoformat()}:{user_id}:{character_id}'
 
 
-def enqueue_scheduled_reflection(
-    user_id,
-    character_id,
-    *,
-    scheduled_for=None,
-    conn=None,
-):
-    """Write one source event and one occurrence, with no queue inspection."""
+def enqueue_scheduled_reflection(user_id, character_id, *, scheduled_for=None, conn=None):
+    """Only a due deadline justifies a timer event; idle time is not evidence."""
+    import hashlib
     database = conn
     owns_connection = database is None
-    if database is None:
+    if owns_connection:
         from db import get_conn
         database = get_conn()
-    event_time = _as_utc(scheduled_for)
-    source_event_id = scheduled_source_event_id(
-        user_id, character_id, event_time,
-    )
+    now = _as_utc(scheduled_for)
+    cur = database.cursor()
     try:
-        cur = database.cursor()
-        try:
-            cur.execute(
-                'SELECT pg_advisory_xact_lock(%s)',
-                (stable_advisory_lock_key(user_id, character_id),),
-            )
-        finally:
-            cur.close()
-
-        event_id = record_source_event(
-            database,
-            user_id=user_id,
-            character_id=character_id,
-            source_event_type='scheduled_reflection',
-            source_event_id=source_event_id,
-            source='cognitive_scheduler',
-            occurred_at=event_time,
-            payload={'scheduled_for': event_time.isoformat()},
-        )
+        cur.execute('SELECT pg_advisory_xact_lock(%s)',
+                    (stable_advisory_lock_key(user_id, character_id),))
+        cur.execute("""SELECT id FROM cognitive_predictions
+                       WHERE user_id=%s AND character_id=%s AND status='pending'
+                         AND expires_at<=%s ORDER BY id FOR UPDATE""", (user_id, character_id, now))
+        due = [row[0] for row in cur.fetchall()]
+        if not due:
+            return {'status': 'idle', 'event_id': None, 'trigger_id': None}
+        key = hashlib.sha256(','.join(map(str, due)).encode()).hexdigest()[:24]
+        event_id = record_source_event(database, user_id=user_id, character_id=character_id,
+            source_event_type='scheduled_reflection', source_event_id='deadline:' + key,
+            source='cognitive_scheduler', occurred_at=now, payload={'due_prediction_ids': due})
         if event_id is None:
-            database.commit()
             return {'status': 'duplicate', 'event_id': None, 'trigger_id': None}
-
-        settled_predictions = settle_pending_predictions(
-            database,
-            user_id=user_id,
-            character_id=character_id,
-            event_id=event_id,
-            occurred_at=event_time,
-        )
-
-        cur = database.cursor()
-        try:
-            suppression_floor = event_time - timedelta(
-                seconds=COGNITIVE_REFLECTION_SUPPRESSION_SECONDS,
-            )
-            cur.execute(
-                '''SELECT id FROM cognitive_cycles
-                   WHERE user_id = %s AND character_id = %s
-                     AND status = 'succeeded'
-                     AND completed_at >= %s AND completed_at <= %s
-                   ORDER BY completed_at DESC LIMIT 1''',
-                (
-                    user_id, character_id, suppression_floor, event_time,
-                ),
-            )
-            recent_success = cur.fetchone()
-        finally:
-            cur.close()
-
-        if recent_success:
-            trigger_id = create_trigger_occurrence(
-                database,
-                event_id=event_id,
-                user_id=user_id,
-                character_id=character_id,
-                trigger_class='scheduled_reflection',
-                occurrence_key='scheduled',
-                payload={'scheduled_for': event_time.isoformat()},
-                status='suppressed',
-                suppressed_reason='recent_success',
-                suppressed_at=event_time,
-            )
-            status = 'suppressed'
-        else:
-            trigger_id = create_trigger_occurrence(
-                database,
-                event_id=event_id,
-                user_id=user_id,
-                character_id=character_id,
-                trigger_class='scheduled_reflection',
-                occurrence_key='scheduled',
-                payload={'scheduled_for': event_time.isoformat()},
-            )
-            status = 'pending'
+        settled = settle_pending_predictions(database, user_id=user_id, character_id=character_id,
+                                              event_id=event_id, occurred_at=now)
+        trigger_id = create_trigger_occurrence(database, event_id=event_id, user_id=user_id,
+            character_id=character_id, trigger_class='scheduled_reflection',
+            occurrence_key='deadline', payload={'due_prediction_ids': due})
         database.commit()
-        return {
-            'status': status,
-            'event_id': event_id,
-            'trigger_id': trigger_id,
-            'settled_predictions': settled_predictions,
-        }
+        return {'status': 'pending', 'event_id': event_id, 'trigger_id': trigger_id,
+                'settled_predictions': settled}
     except Exception:
         database.rollback()
         raise
     finally:
+        cur.close()
         if owns_connection:
             database.close()
 
 
 def enqueue_due_reflections(*, scheduled_for=None, conn=None):
-    """Discover recently active pairs and enqueue their current time bucket."""
+    """Discover only pairs with due prediction deadlines."""
     database = conn
     owns_connection = database is None
     if database is None:
         from db import get_conn
         database = get_conn()
     event_time = _as_utc(scheduled_for)
-    activity_floor = event_time - timedelta(
-        days=COGNITIVE_REFLECTION_ACTIVE_DAYS,
-    )
     try:
         cur = database.cursor()
         try:
             cur.execute(
-                '''SELECT user_id, character_id,
-                          MAX(occurred_at) AS last_event_at
-                   FROM cognitive_events
-                   WHERE source_event_type <> 'scheduled_reflection'
-                     AND occurred_at >= %s AND occurred_at <= %s
-                   GROUP BY user_id, character_id
-                   ORDER BY last_event_at DESC
-                   LIMIT %s''',
-                (activity_floor, event_time, COGNITIVE_REFLECTION_SCAN_BATCH),
+                """SELECT user_id, character_id, MIN(expires_at)
+                   FROM cognitive_predictions WHERE status='pending' AND expires_at<=%s
+                   GROUP BY user_id, character_id ORDER BY MIN(expires_at) LIMIT %s""",
+                (event_time, COGNITIVE_REFLECTION_SCAN_BATCH),
             )
             pairs = [(row[0], row[1]) for row in cur.fetchall()]
         finally:

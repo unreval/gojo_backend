@@ -184,10 +184,25 @@ def _suppress_daily_limited_triggers(cur, user_id, character_id, now):
                suppressed_at = %s
            WHERE user_id = %s AND character_id = %s AND status = 'pending'
              AND last_error_code IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM cognitive_events event
+                 WHERE event.id=cognitive_event_triggers.event_id
+                   AND event.source_event_type='canonical_user_turn')
              AND payload->>'reason' IS DISTINCT FROM 'pending_answer' ''',
         (now, user_id, character_id),
     )
     return cur.rowcount
+
+
+def _has_unprocessed_canonical_trigger(cur, user_id, character_id):
+    cur.execute('''SELECT trigger.id FROM cognitive_event_triggers trigger
+                   JOIN cognitive_events event ON event.id=trigger.event_id
+                   WHERE trigger.user_id=%s AND trigger.character_id=%s
+                     AND trigger.status='pending'
+                     AND event.source_event_type='canonical_user_turn'
+                     AND event.adjudication->>'processed_by_cycle_id' IS NULL
+                   LIMIT 1''', (user_id, character_id))
+    return cur.fetchone() is not None
 
 
 def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
@@ -232,7 +247,8 @@ def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
             ),
         )
         completed_today = int(cur.fetchone()[0])
-        if completed_today >= COGNITIVE_DAILY_CYCLE_LIMIT:
+        if (completed_today >= COGNITIVE_DAILY_CYCLE_LIMIT
+                and not _has_unprocessed_canonical_trigger(cur, user_id, character_id)):
             suppressed = _suppress_daily_limited_triggers(cur, user_id, character_id, current_time)
             database.commit()
             return {
@@ -253,7 +269,8 @@ def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
             cooldown_until = latest_completion[0] + timedelta(
                 seconds=COGNITIVE_COOLDOWN_SECONDS,
             )
-            if cooldown_until > current_time:
+            if (cooldown_until > current_time
+                    and not _has_unprocessed_canonical_trigger(cur, user_id, character_id)):
                 database.commit()
                 return {
                     'status': 'cooldown',
@@ -521,6 +538,8 @@ def commit_cycle_success(
                 persist_slow_loop_output,
                 validate_slow_loop_output,
             )
+            if {r['event_id'] for r in structured_output.get('evidence_refs', [])} != current_event_ids:
+                raise ValueError('deterministic_cycle_requires_exact_current_evidence')
             normalized_output = validate_slow_loop_output(
                 structured_output,
                 allowed_event_ids=allowed_event_ids,
@@ -533,6 +552,7 @@ def commit_cycle_success(
                 character_id=character_id,
                 output=normalized_output,
                 now=current_time,
+                deterministic=True,
             )
         context_json = (
             json.dumps(
@@ -778,244 +798,21 @@ def build_reasoning_context(cycle_id, *, conn=None):
                     'reason': payload.get('reason'),
                 })
 
-        settled_predictions = []
-        if event_ids:
-            cur.execute(
-                '''SELECT prediction.id, prediction.prediction_key,
-                          prediction.status, prediction.resolver_name,
-                          prediction.observed_value,
-                          prediction.settled_by_event_id,
-                          prediction.settled_at, prediction.metadata,
-                          hypothesis.hypothesis_key
-                   FROM cognitive_predictions AS prediction
-                   LEFT JOIN cognitive_hypotheses AS hypothesis
-                     ON hypothesis.id = prediction.hypothesis_id
-                   WHERE prediction.settled_by_event_id = ANY(%s)
-                   ORDER BY prediction.settled_at, prediction.id''',
-                (event_ids,),
-            )
-            settled_predictions = [
-                {
-                    'prediction_id': row[0],
-                    'prediction_key': row[1],
-                    'status': row[2],
-                    'resolver_name': row[3],
-                    'observed_value': row[4],
-                    'settled_by_event_id': row[5],
-                    'settled_at': row[6],
-                    'metadata': _json_value(row[7], {}),
-                    'hypothesis_key': row[8],
-                }
-                for row in cur.fetchall()
-            ]
-
-        if reactivated_questions:
-            question_ids = [
-                item['question_id'] for item in reactivated_questions
-                if item['question_id'] is not None
-            ]
-            if question_ids:
-                cur.execute(
-                    '''SELECT id, question_key, question_text
-                       FROM cognitive_questions WHERE id = ANY(%s)''',
-                    (question_ids,),
-                )
-                question_facts = {
-                    row[0]: {'question_key': row[1], 'question_text': row[2]}
-                    for row in cur.fetchall()
-                }
-                for item in reactivated_questions:
-                    item.update(question_facts.get(item['question_id'], {}))
-
-        cur.execute(
-            '''SELECT question_key, question_text, status,
-                      source_event_refs, updated_at, metadata
-               FROM cognitive_questions
-               WHERE user_id = %s AND character_id = %s
-                 AND status IN ('active', 'dormant')
-               ORDER BY updated_at DESC, id DESC
-               LIMIT %s''',
-            (user_id, character_id, COGNITIVE_MAX_QUESTIONS_IN_CONTEXT),
-        )
-        current_questions = [
-            {
-                'question_key': row[0],
-                'question_text': row[1],
-                'status': row[2],
-                'source_event_refs': _json_value(row[3], []),
-                'updated_at': row[4],
-                'lifecycle': 'separate_from_prediction_status',
-                'metadata': _json_value(row[5], {}) if len(row) > 5 else {},
-            }
-            for row in cur.fetchall()
-        ]
-
-        cur.execute(
-            '''SELECT question_key, question_text, metadata, source_event_refs
-               FROM cognitive_questions
-               WHERE user_id = %s AND character_id = %s
-                 AND status = 'resolved' AND metadata ? 'resolution'
-               ORDER BY updated_at DESC, id DESC LIMIT 6''',
-            (user_id, character_id),
-        )
-        explicit_resolutions = [
-            {'question_key': row[0], 'question_text': row[1],
-             'resolution': _json_value(row[2], {}).get('resolution'),
-             'source_event_refs': _json_value(row[3], [])}
-            for row in cur.fetchall()
-            if isinstance(_json_value(row[2], {}), dict)
-            and _json_value(row[2], {}).get('resolution')
-        ]
-
-        cur.execute(
-            '''SELECT belief_key, statement, confidence, status,
-                      evidence_refs, updated_at
-               FROM cognitive_beliefs
-               WHERE user_id = %s AND character_id = %s
-                 AND status = 'active'
-               ORDER BY updated_at DESC, id DESC
-               LIMIT %s''',
-            (user_id, character_id, COGNITIVE_MAX_BELIEFS_IN_CONTEXT),
-        )
-        current_beliefs = [
-            {
-                'belief_key': row[0],
-                'statement': row[1],
-                'confidence': row[2],
-                'status': row[3],
-                'evidence_refs': _json_value(row[4], []),
-                'updated_at': row[5],
-            }
-            for row in cur.fetchall()
-        ]
-
-        cur.execute(
-            '''SELECT hypothesis_key, statement, status, hypothesis_type,
-                      confidence, supporting_evidence_refs,
-                      contradicting_evidence_refs, evidence, updated_at
-               FROM cognitive_hypotheses
-               WHERE user_id = %s AND character_id = %s
-                 AND status <> 'archived'
-               ORDER BY updated_at DESC, id DESC
-               LIMIT %s''',
-            (user_id, character_id, COGNITIVE_MAX_HYPOTHESES_IN_CONTEXT),
-        )
-        current_hypotheses = [
-            {
-                'hypothesis_key': row[0],
-                'statement': row[1],
-                'status': row[2],
-                'hypothesis_type': row[3],
-                'confidence': row[4],
-                'supporting_evidence_refs': _json_value(row[5], []),
-                'contradicting_evidence_refs': _json_value(row[6], []),
-                'evidence': _json_value(row[7], []),
-                'updated_at': row[8],
-            }
-            for row in cur.fetchall()
-        ]
-
-        cur.execute(
-            '''SELECT prediction.prediction_key, prediction.resolver_name,
-                      prediction.fulfillment_operator,
-                      prediction.fulfillment_value,
-                      prediction.violation_operator,
-                      prediction.violation_value,
-                      prediction.expires_at, prediction.observed_value,
-                      prediction.metadata, prediction.created_at,
-                      question.question_key, hypothesis.hypothesis_key
-               FROM cognitive_predictions AS prediction
-               LEFT JOIN cognitive_questions AS question
-                 ON question.id = prediction.question_id
-               LEFT JOIN cognitive_hypotheses AS hypothesis
-                 ON hypothesis.id = prediction.hypothesis_id
-               WHERE prediction.user_id = %s AND prediction.character_id = %s
-                 AND prediction.status = 'pending'
-               ORDER BY prediction.created_at DESC, prediction.id DESC
-               LIMIT %s''',
-            (user_id, character_id, COGNITIVE_MAX_PREDICTIONS_IN_CONTEXT),
-        )
-        pending_predictions = [
-            {
-                'prediction_key': row[0],
-                'resolver_name': row[1],
-                'fulfillment_operator': row[2],
-                'fulfillment_value': row[3],
-                'violation_operator': row[4],
-                'violation_value': row[5],
-                'expires_at': row[6],
-                'observed_value': row[7],
-                'metadata': _json_value(row[8], {}),
-                'created_at': row[9],
-                'question_key': row[10],
-                'hypothesis_key': row[11],
-            }
-            for row in cur.fetchall()
-        ]
-
-        cur.execute(
-            '''SELECT note_key, content, status, source_event_refs,
-                      expires_at, updated_at
-               FROM cognitive_sticky_notes
-               WHERE user_id = %s AND character_id = %s
-                 AND status = 'active'
-                 AND source = %s
-                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-               ORDER BY updated_at DESC, id DESC
-               LIMIT %s''',
-            (
-                user_id, character_id,
-                USER_FACING_STICKY_SOURCE,
-                COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
-            ),
-        )
-        current_sticky_notes = [
-            {
-                'note_key': row[0],
-                'content': row[1],
-                'status': row[2],
-                'source_event_refs': _json_value(row[3], []),
-                'expires_at': row[4],
-                'updated_at': row[5],
-                'lifecycle': 'short_term_visible_note_not_relationship_evidence',
-            }
-            for row in cur.fetchall()
-        ]
-
-        cur.execute(
-            '''SELECT diary_key, content, source_event_refs, occurred_at
-               FROM cognitive_diary_entries
-               WHERE user_id = %s AND character_id = %s
-               ORDER BY occurred_at DESC, id DESC
-               LIMIT 12''',
-            (user_id, character_id),
-        )
-        prior_diary_entries = [
-            {
-                'diary_key': row[0],
-                'content': row[1],
-                'source_event_refs': _json_value(row[2], []),
-                'occurred_at': row[3],
-                'note': 'already written; do not rewrite the same evidence/topic',
-            }
-            for row in cur.fetchall()
-        ]
-
         event_times = [item['occurred_at'] for item in events_by_id.values()]
         return {
             'cycle_id': cycle_id,
             'input_state_version': input_version,
             'events': [events_by_id[event_id] for event_id in event_ids],
             'triggers': triggers,
-            'settled_predictions': settled_predictions,
+            'settled_predictions': [],
             'reactivated_questions': reactivated_questions,
-            'current_questions': current_questions,
-            'explicit_resolutions': explicit_resolutions,
-            'current_beliefs': current_beliefs,
-            'current_hypotheses': current_hypotheses,
-            'pending_predictions': pending_predictions,
-            'current_sticky_notes': current_sticky_notes,
-            'prior_diary_entries': prior_diary_entries,
+            'current_questions': [],
+            'explicit_resolutions': [],
+            'current_beliefs': [],
+            'current_hypotheses': [],
+            'pending_predictions': [],
+            'current_sticky_notes': [],
+            'prior_diary_entries': [],
             'temporal': {
                 'queued_at': queued_at,
                 'first_event_at': min(event_times) if event_times else None,
@@ -1023,7 +820,7 @@ def build_reasoning_context(cycle_id, *, conn=None):
             },
             'pair': {'user_id': user_id, 'character_id': character_id},
             'primary_trigger_class': primary_class,
-            'behavior_anomalies': _read_behavior_anomalies(user_id, character_id),
+            'behavior_anomalies': [],
         }
     finally:
         cur.close()

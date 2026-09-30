@@ -1232,9 +1232,19 @@ def _json_refs(value):
 
 
 def persist_slow_loop_output(
-    cur, *, cycle_id, user_id, character_id, output, now,
+    cur, *, cycle_id, user_id, character_id, output, now, deterministic=True,
 ):
     """Apply durable questions, hypotheses, predictions, and gated beliefs."""
+    if deterministic is not True:
+        raise SlowLoopOutputError('model_judgment_persistence_disabled')
+    if deterministic:
+        from cognitive_revision import apply_rule_evidence
+        if any(output.get(key) for key in (
+                'question_updates', 'belief_updates', 'hypothesis_updates',
+                'new_predictions', 'sticky_note_updates', 'diary_entries')):
+            raise SlowLoopOutputError('external_judgment_candidates_not_authoritative')
+        return apply_rule_evidence(cur, cycle_id=cycle_id, user_id=user_id,
+                                   character_id=character_id, output=output, now=now)
     from cognitive_events import question_transition_status
     refs_by_id = {
         item['event_id']: item for item in output['evidence_refs']

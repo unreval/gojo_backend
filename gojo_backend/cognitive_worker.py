@@ -1,485 +1,28 @@
-"""Background Slow Loop worker for auditable cognitive consolidation."""
-import json
+"""Event-driven cognitive worker. Decisions come only from program rules."""
 import re
 import threading
 from datetime import datetime, timezone
 
 from cognitive_config import (
-    COGNITIVE_REFLECTION_SCAN_SECONDS,
-    COGNITIVE_WORKER_ENABLED,
-    COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS,
-    COGNITIVE_WORKER_MAX_TOKENS,
-    COGNITIVE_WORKER_MODEL,
-    COGNITIVE_WORKER_MODEL_ATTEMPTS,
-    COGNITIVE_WORKER_POLL_SECONDS,
+    COGNITIVE_REFLECTION_SCAN_SECONDS, COGNITIVE_WORKER_ENABLED,
+    COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS, COGNITIVE_WORKER_POLL_SECONDS,
     PREDICTION_RESOLVER_WHITELIST,
-    get_sticky_note_ttl_config,
-)
-from cognitive_output import (
-    SlowLoopOutputError,
-    STICKY_NOTE_EMOTIONS,
-    STICKY_NOTE_TONES,
-    parse_slow_loop_output,
-    validate_slow_loop_output,
 )
 from cognitive_queue import (
-    aggregate_pending_triggers,
-    build_reasoning_context,
-    claim_next_cycle,
-    commit_cycle_success,
-    fail_cycle,
+    aggregate_pending_triggers, build_reasoning_context, claim_next_cycle,
+    commit_cycle_success, fail_cycle,
 )
 from cognitive_scheduler import enqueue_due_reflections
-from cognitive_predictions import PREDICTION_STANCE_TYPES
-from structured_output import invoke_structured_llm
-from cognitive_request_budget import (
-    MAX_MODEL_ATTEMPTS, MAX_OUTPUT_TOKENS, OUTPUT_INSTRUCTION,
-    check_request_budget, compact_json, project_request_context,
-    retry_output_budget, validate_output_budget,
-)
-
+from cognitive_output import validate_slow_loop_output
+from cognitive_revision import deterministic_cycle_output
 
 _THREAD = None
 _STOP = threading.Event()
 _LAST_REFLECTION_SCAN_AT = None
 
 
-_SYSTEM_PROMPT = '''You are the Slow Loop consolidation worker for a fictional
-character memory system. You receive only auditable facts, prior beliefs,
-hypotheses, and deterministic prediction results.
-
-Your job is to consolidate evidence. Do not write dialogue, choose a next
-response, prescribe a chat-response emotion, modify relationship scores, or
-claim access to hidden mental states. Distinguish direct evidence from
-hypotheses. A user saying
-something about the character does not prove the character reciprocates it.
-Behavioral anomalies (faster/slower reply, defer counts) are measurable
-observations only. They are not motives, not liking/anger, and must not become
-relationship deltas. Recalling an anomaly is not new evidence.
-
-Return one JSON object and no markdown. It must contain these root keys:
-cycle_summary, question_updates, belief_updates, hypothesis_updates,
-new_predictions, evidence_refs, reflection_note.
-It may also contain optional root keys sticky_note_updates and diary_entries.
-
-Schema:
-{
-  "cycle_summary": {
-    "summary": "concise Chinese audit synthesis; not a belief",
-    "salient_change": "what changed from prior knowledge, or empty string",
-    "uncertainty": "what remains unknown, or empty string",
-    "confidence": "low|medium|high"
-  },
-  "question_updates": [{
-    "question_key": "stable.lowercase.key",
-    "question_text": "unresolved question in Chinese",
-    "status": "active|dormant|resolved|archived",
-    "evidence_refs": [123]
-  }],
-  "belief_updates": [{
-    "belief_key": "stable.lowercase.key",
-    "statement": "candidate durable belief in Chinese",
-    "confidence": 0.0,
-    "status": "active|retracted",
-    "belief_type": "general|self_model|relationship_observation|user_model|interaction_pattern",
-    "from_hypothesis_key": "stable.lowercase.key",
-    "evidence_refs": [123]
-  }],
-  "hypothesis_updates": [{
-    "hypothesis_key": "stable.lowercase.key",
-    "statement": "testable interpretation in Chinese",
-    "hypothesis_type": "self_model|relationship|user_model|interaction_pattern",
-    "confidence": 0.0,
-    "status": "open|supported|rejected|archived",
-    "question_key": "stable.lowercase.key",
-    "supporting_evidence_refs": [123],
-    "contradicting_evidence_refs": []
-  }],
-  "new_predictions": [{
-    "prediction_key": "stable.lowercase.key",
-    "resolver_name": "current_event_signal_outcome",
-    "fulfillment_operator": ">=",
-    "fulfillment_value": 1,
-    "violation_operator": "<=",
-    "violation_value": -1,
-    "expires_in_seconds": 86400,
-    "question_key": "stable.lowercase.key",
-    "hypothesis_key": "stable.lowercase.key",
-    "metadata": {
-      "description": "falsifiable expectation",
-      "fulfillment_signals": [{
-        "signal_type": "character_reciprocal",
-        "actor": "character"
-      }],
-      "violation_signals": [{
-        "signal_type": "character_stance_declared",
-        "actor": "character",
-        "attributes": {"stance_type": "retreat_boundary"}
-      }]
-    },
-    "evidence_refs": [123]
-  }],
-  "evidence_refs": [{"event_id": 123, "reason": "why it supports output"}],
-  "reflection_note": {
-    "content": "compact internal note for next generator prompt, or empty string",
-    "evidence_refs": [123]
-  }
-}
-
-Question rules:
-- Create or update questions when current evidence exposes conflict,
-  prediction error, repeated behavior, self-model uncertainty, or relationship
-  ambiguity. A question is "what remains unresolved"; it is not an answer.
-- Do not resolve a question merely because a prediction was fulfilled or
-  violated. Use prediction settlement only as evidence for or against a
-  hypothesis; question lifecycle is separate.
-
-Hypothesis rules:
-- Hypotheses answer questions provisionally. Every confidence value must be
-  grounded in current-cycle evidence, with supporting and contradicting refs
-  separated.
-- A character_self_claim event is only evidence that the character said a
-  self-explanation. It does not prove the self-model. Use hypothesis_type
-  "self_model" for "I may be the kind of person who..." claims, keep initial
-  confidence low unless there is independent behavioral evidence.
-- Never raise confidence because an older hypothesis, diary, summary, or memory
-  says the same thing. Prior state is context, not new proof.
-
-Belief commit rules:
-- belief_updates are commit candidates, not guaranteed writes. The application
-  code will hold any candidate below the evidence threshold.
-- Only propose an active belief when it comes from a named hypothesis, has high
-  confidence, and cites multiple independent evidence events including current
-  evidence. If the evidence is still thin, leave belief_updates empty and keep
-  the idea as a hypothesis.
-- Do not turn cycle_summary, reflection_note, diary text, or a single generated
-  self-explanation into a belief.
-
-Reflection note rules:
-- reflection_note is a compact internal note for the next generator prompt.
-  It is not a database belief, not relationship state, and not proof.
-- If there is no useful next-turn note, set content to "" and evidence_refs to
-  [].
-
-Optional sticky_note_updates schema:
-[{
-  "note_key": "stable.lowercase.key",
-  "content": "short first-person Chinese private sticky note the character would jot down",
-  "emotion": "one display label from the allowed sticky emotion list",
-  "tone": "optional attitude label from the allowed sticky tone list",
-  "trigger_snippet": "short triggering user quote, not a recap",
-  "tag": "optional tiny right-corner mark such as ♡, hah, .., !, ~",
-  "status": "active|completed|expired|archived",
-  "expires_in_seconds": __STICKY_TTL_DEFAULT_SECONDS__,
-  "evidence_refs": [123]
-}]
-
-Sticky notes are the user-facing presentation of Slow Loop working state
-(便利贴). A sticky is the one sentence the character did not say out loud
-but is still hanging on their mind (没有说出口、但心里还挂着的一句话).
-Sticky content is the character's own private inner note: written in
-FIRST PERSON / natural personal shorthand, short, with attitude and
-character voice. It can be tsundere, self-mocking, helpless, smitten,
-wary, or serious. It must sound like something the character themselves
-would jot down in the moment, not an analyst, database, observer, or system
-summary, fact recap, or third-person narration. Ground only in cited
-current-cycle events.
-
-Sticky emotion rules:
-- Every active sticky must include emotion. This is a UI/display label for
-  the sticky card only. It is not proof of a durable hidden feeling, and it
-  is not a chat-response emotion / not the next reply's spoken emotion.
-  Do not prescribe what the next spoken line should feel like.
-- Prefer specific labels such as 心动 / 自嘲 / 无奈 / 嘴硬 / 在意 / 认真 /
-  警惕 / 烦躁 / 别扭 / 松了口气 when the cited evidence supports them.
-  Use 弱情绪 only for a mild but still character-voiced reaction. Do not
-  invent a strong emotion that the evidence does not support. If there is
-  no clear inner reaction, omit the sticky_note_update entirely.
-- trigger_snippet must be the short triggering user utterance shown under
-  关于:「...」. Put only that original snippet there, not a summary.
-
-Voice examples (tone only, not a template; wording must follow the current
-character identity and cited evidence):
-- 心动: "还特意回来确认一遍。啧，真会让人分心。"
-- 自嘲: "刚才那句是不是太硬了。算了，我也就这德行。"
-- 无奈/嘴硬: "高兴？没有。只是她记得这事，勉强算不错。"
-- 认真/警惕: "这句不像随口说的。先别急着给答案。"
-- Better inner notes: "话说得倒是认真。偏偏喜欢上的还是最不会领这种情的人……先看看她能坚持多久吧。" / "连这种事都记着，还特地回来确认。……行吧，多少有点期待。"
-
-Forbidden voice: audit / system / database narrator. Do not write like
-用户…… / 角色…… / 本轮…… / 构成…… / 验证…… / 观察到…… /
-需观察…… / 应关注…… / 关系状态…… / 预测…… / 证据…… /
-互动周期…… / self_disclosure / character_reciprocal /
-relationship_confirm / or other system taxonomy.
-
-Also do not write event-report summaries like "她说了什么 / 我说了什么 /
-后来怎样" / "她做了……然后我……" / "之前……后来……" /
-"她告诉我……我告诉她……". A sticky should be one or two short,
-attitude-bearing inner sentences, not a recap of the conversation.
-Bad output: "她说因为satoru才知道喜欢和爱是什么意思，还说要变强，我告诉她那个人不会领情。"
-
-They are not a second per-turn roleplay pass, not relationship proof, and
-not system-operator instructions such as "下次回复前记得...".
-reflection_note remains internal for the next generator prompt and is not
-shown on 便利贴. Use stickies for unresolved threads, near-future concerns,
-and short-lived working thoughts that have an actual inner reaction. Mark a
-note completed/expired only when current evidence supports that lifecycle
-change. Every note must cite source events.
-
-Optional diary_entries schema:
-[{
-  "diary_key": "stable.lowercase.key",
-  "content": "first-person Chinese reflection grounded only in cited events",
-  "reflection_kind": "event|periodic|repair|uncertainty",
-  "evidence_refs": [123]
-}]
-
-Diary entries are cognitive output and later memory input only. They must not
-modify relationship_model, rel_state, or relationship scores. They are not
-evidence for themselves; do not use prior diary wording to prove a new belief.
-Write only when cited events justify a reflective record.
-If prior_diary_entries already cover the same evidence set or topic,
-omit diary_entries (reuse the existing diary_key; do not emit a near-duplicate).
-reflection_note is internal working memory for the next generator, not a diary.
-
-Every referenced event_id must exist in the supplied context. Historical IDs
-may be reused only when they already appear in a prior belief, hypothesis, or
-prediction evidence_refs. Every question update, hypothesis update, belief
-candidate, prediction, reflection note, sticky note, and diary entry must cite
-at least one current cycle event declared in top-level evidence_refs. A
-scheduled_reflection event is a clock tick, not factual evidence by itself. Use
-empty update arrays when the evidence does not justify a change. Never invent
-IDs.
-
-The only prediction resolver is current_event_signal_outcome. It checks the
-next extracted relationship signals against declarative selectors. Use exactly
-fulfillment >= 1 and violation <= -1. Each selector must contain signal_type
-and actor; confidence and a subset of attributes are optional. Both selector
-lists must be non-empty. Every prediction must bind both question_key and
-hypothesis_key. Predict an observable future signal, not a hidden feeling,
-message count, elapsed time, relationship score, or final romantic outcome.
-Omit predictions that cannot be represented this way.
-
-When settled_predictions are present, use their linked hypothesis_key,
-description, selectors, status, and the settling event as a feedback signal.
-A fulfillment may support a hypothesis and a violation may weaken or reject
-it, but one observation is not automatically conclusive. Preserve uncertainty
-and cite the actual event, not the prediction record, as evidence.
-
-Belief vs event:
-- Do not commit a single episode, quoted utterance, or "tonight/just now/this
-  turn" recap as a stable belief. Keep it as event, diary, sticky note, or
-  hypothesis.
-- Beliefs are abstract, revisable patterns supported by multiple evidences.
-
-Belief revision:
-- Optional belief fields: evidence_relation (support|contradiction|scope_limiter|irrelevant),
-  evidence_strength (weak|normal|strong), scope, independent_contexts, revision_reason,
-  frame_kind.
-- When current evidence relates to an existing belief, you MUST set evidence_relation.
-  Application code applies a bounded confidence delta; do not jump confidence to 0.95.
-- contradiction lowers confidence. scope_limiter narrows the statement.
-- Sticky notes are short follow-ups only. Never put "old judgment may be wrong"
-  only in a sticky note; that must be a contradiction/scope_limiter belief update
-  plus a question/hypothesis.
-
-Scope:
-- one topic: topic or relationship_context. Two independent contexts: cross_context
-  hypothesis at most. Three or more long-consistent contexts: general_tendency.
-- Describe behavior patterns. Do not stamp global personality labels.
-
-Questions:
-- Every open/supported hypothesis must keep a real unresolved question_key.
-- Reuse the same question_key instead of creating near-duplicates.
-- Resolved questions stay resolved. Ordinary output/retry/pending_answer cannot
-  reopen them or replace their answer; no explicit reopen protocol is enabled.
-- metadata.pending_answer is a witnessed promise to answer, not an answer.
-  Reflect on that question in this cycle even without a new inbound message.
-  Keep it open until a supported judgment/explicit resolution exists; never
-  infer yes/no merely because an answer was promised.
-- You own the narrow current answer, not the Generator. When the evidence
-  supports one, include optional question_updates[].current_judgment:
-  {"value":"yes|no|other narrow decision", "content":"the current answer",
-   "status":"current|committed"}. It inherits that question update's cited
-  evidence_refs. This is a scoped current decision, NOT a stable personality
-  belief and does not require promoting one episode to a durable trait.
-  The Generator must express this decision without deciding yes/no again.
-  Keep the pending question active until the promised answer is expressed.
-  If still uncertain, omit the judgment; if current evidence invalidates an
-  earlier judgment, explicitly set current_judgment:null. A clock tick or the
-  mere existence of a promise is not evidence for choosing yes or no.
-- Explicit resolution evidence is authoritative for that narrow question.
-  Do not reopen it from an older uncertain hypothesis or general persona.
-- A sticky about an unresolved question must include optional question_key
-  so resolving that question can retire its obsolete reminder.
-
-Shared relationship frame:
-- Maintain belief_key shared.relationship.frame when evidence supports how both
-  sides currently treat the relationship (friends, playful_ambiguous, probing,
-  serious_unconfirmed, committed_romantic, frame_shifting).
-- Friendship frames are revisable. Later romantic evidence can challenge them.
-- This broad frame never substitutes for relationship.romantic_label. Do not
-  write committed_romantic unless the same cycle has source-valid evidence for
-  an affirmed narrow romantic label; no frame can turn unresolved into affirmed.
-
-Relationship semantic keys (use only when the cited evidence warrants them):
-- relationship.engagement_style is a relationship_observation belief or a
-  relationship hypothesis about how the character handles relationship topics
-  (for example, immediate avoidance changing to a deferred but direct answer).
-  Confidence must pass the ordinary evidence gate; never assign a fixed number.
-- relationship.romantic_label belongs only to its narrow question. Its current
-  judgment value is exactly unresolved, affirmed, declined, or other. Unknown
-  is unresolved, not false; do not put this key in a belief or hypothesis.
-- relationship.romantic_openness belongs only to a relationship hypothesis.
-  A promise, flirt, passion telemetry, or Generator's ambiguous line cannot
-  promote it into a romantic conclusion.
-- relationship.internal_conflict is optional and only belongs in a
-  relationship_observation belief or relationship hypothesis with direct
-  evidence. Do not manufacture it from mixed numeric signals.
-- These items have independent lifecycles. An engagement-style change cannot
-  affirm a romantic label, and a label does not settle openness or conflict.
-
-High-salience events may open a romantic reappraisal question/hypothesis.
-They must not be treated as a direct passion or relationship-score change.
-Time elapsed is a significance modifier, not romantic evidence by itself.'''
-
-_SYSTEM_PROMPT += (
-    '\nAllowed sticky emotions: '
-    + ', '.join(sorted(STICKY_NOTE_EMOTIONS))
-    + '. Allowed sticky tones: '
-    + ', '.join(sorted(STICKY_NOTE_TONES))
-    + '. Use only these labels for sticky_note_updates emotion/tone.'
-)
-
-_SYSTEM_PROMPT += (
-    '\nFor character_stance_declared selectors, actor must be character and '
-    'attributes.stance_type must be exactly one of: '
-    + ', '.join(sorted(PREDICTION_STANCE_TYPES))
-    + '. This applies to BOTH fulfillment_signals and violation_signals. '
-    'Do not invent synonyms or combine multiple stance types into one string. '
-    'If no allowed selector expresses the prediction, omit that prediction '
-    '(new_predictions may be []). Do not remove a restrictive attribute just '
-    'to bypass validation; that would change what the prediction means.'
-)
-
-_SYSTEM_PROMPT_TEMPLATE = _SYSTEM_PROMPT
-
-
-def _build_system_prompt():
-    ttl = get_sticky_note_ttl_config()
-    prompt = _SYSTEM_PROMPT_TEMPLATE.replace(
-        '__STICKY_TTL_DEFAULT_SECONDS__', str(ttl['default']),
-    )
-    return prompt + (
-        '\nSticky note TTL runtime contract (authoritative): '
-        f'unit=seconds; default={ttl["default"]}; explicit active TTL inclusive '
-        f'range [{ttl["minimum"]}, {ttl["maximum"]}]. '
-        'For status=active, omit expires_in_seconds or use null to select the '
-        'default; otherwise use a JSON integer (never boolean, string, or float) '
-        'inside that range. Do not clamp 0, negative, or oversized values. '
-        'For status=completed|expired|archived, omit expires_in_seconds or use '
-        'null because status ends the lifecycle. For backward compatibility, '
-        'an explicit integer 0 or a positive JSON integer in the same inclusive '
-        'range is also accepted for those inactive statuses and normalized to '
-        'null; the redundant TTL is ignored and never extends the lifecycle. '
-        'Booleans, strings, floats, and other out-of-range integers are invalid.'
-    )
-
-
-_SYSTEM_PROMPT = _build_system_prompt()
-
-
 def _utc_now():
     return datetime.now(timezone.utc)
-
-
-def _serialize_context(context):
-    return compact_json(context)
-
-
-def _event_ids(context):
-    result = set()
-
-    def visit(value):
-        if isinstance(value, dict):
-            event_id = value.get('event_id')
-            if isinstance(event_id, int) and not isinstance(event_id, bool):
-                result.add(int(event_id))
-            for child in value.values():
-                visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
-
-    visit(context)
-    return result
-
-
-def _safe_ttl_numeric(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    rendered = str(value)
-    return rendered if len(rendered) <= 32 else 'numeric_value_too_long'
-
-
-def _log_ttl_diagnostic(context, attempt, details):
-    if not details or not details.get('error_category'):
-        return
-    cycle_id = context.get('cycle_id') if isinstance(context, dict) else None
-    if isinstance(cycle_id, bool) or not isinstance(cycle_id, int):
-        cycle_id = '-'
-    fields = [
-        f'cycle={cycle_id}',
-        f'attempt={int(attempt)}',
-        f'update_index={int(details.get("update_index", -1))}',
-        f'status={details.get("status") or "unknown"}',
-        f'ttl_source={details.get("ttl_source") or "unknown"}',
-        f'ttl_type={details.get("ttl_type") or "unknown"}',
-        f'ttl_min={int(details.get("ttl_min", 0))}',
-        f'ttl_max={int(details.get("ttl_max", 0))}',
-        f'error_category={details.get("error_category")}',
-        f'field_path={details.get("field_path") or "unknown"}',
-    ]
-    numeric = _safe_ttl_numeric(details.get('ttl_value'))
-    if numeric is not None:
-        fields.insert(6, f'ttl_value={numeric}')
-    print('[cognitive_worker][sticky_ttl] ' + ' '.join(fields), flush=True)
-
-
-def _validation_retry_instruction(exc):
-    details = getattr(exc, 'details', None) or {}
-    if not details.get('error_category'):
-        return (
-            f'Validation failed: {exc}. Produce a fresh JSON object from the '
-            'original context; do not quote, edit, or repair the prior response.'
-        )
-    status = details.get('status') or 'unknown'
-    numeric = _safe_ttl_numeric(details.get('ttl_value'))
-    value_text = numeric if numeric is not None else '<value not logged; use type>'
-    minimum = int(details.get('ttl_min', 0))
-    maximum = int(details.get('ttl_max', 0))
-    if status == 'active':
-        allowed = (
-            f'For status=active, omit/null uses default='
-            f'{get_sticky_note_ttl_config()["default"]}; otherwise provide a '
-            f'non-boolean JSON integer in inclusive range [{minimum}, {maximum}].'
-        )
-    else:
-        allowed = (
-            f'For status={status}, omit expires_in_seconds or use null. '
-            'For backward compatibility, integer 0 or a non-boolean positive '
-            f'JSON integer in inclusive range [{minimum}, {maximum}] is also '
-            'accepted and ignored (normalized to null); it never extends the lifecycle.'
-        )
-    return (
-        f'Validation failed: {exc}. '
-        f'field_path={details.get("field_path")}; status={status}; '
-        f'ttl_source={details.get("ttl_source")}; '
-        f'ttl_type={details.get("ttl_type")}; ttl_value={value_text}; '
-        f'unit=seconds; ttl_min={minimum}; ttl_max={maximum}. {allowed} '
-        'Produce one fresh JSON object from the original context matching the '
-        'entire schema; do not quote, edit, or repair the prior response.'
-    )
 
 
 def _worker_error_code(exc):
@@ -548,86 +91,11 @@ def maintain_scheduled_reflections(now=None):
 
 
 def generate_cycle_output(context, *, create_chat_fn=None):
-    """Call the model outside any database lock and validate its output."""
-    if create_chat_fn is None:
-        # Keep maintenance and test imports independent from production model
-        # client dependencies until a cycle actually needs the model.
-        from ai_client import create_chat
-
-        def call_model(**kwargs):
-            # SDK retries must not multiply this worker's explicit retry budget.
-            return create_chat(**kwargs, max_retries=0)
-    else:
-        call_model = create_chat_fn
-    context = project_request_context(context)
-    allowed_event_ids = _event_ids(context)
-    current_event_ids = {
-        int(event.get('event_id'))
-        for event in context.get('events', [])
-        if isinstance(event, dict)
-        and isinstance(event.get('event_id'), int)
-        and not isinstance(event.get('event_id'), bool)
-    }
-    messages = [{
-        'role': 'user',
-        'content': 'Consolidate this cognitive cycle:\n' + _serialize_context(context),
-    }]
-    system_prompt = _build_system_prompt() + OUTPUT_INSTRUCTION
-    last_error = None
-    output_tokens = min(COGNITIVE_WORKER_MAX_TOKENS, MAX_OUTPUT_TOKENS)
-    attempts = min(COGNITIVE_WORKER_MODEL_ATTEMPTS, MAX_MODEL_ATTEMPTS)
-    for attempt in range(attempts):
-        diagnostics = []
-
-        def _validate_output(value):
-            output = validate_slow_loop_output(
-                value,
-                allowed_event_ids=allowed_event_ids,
-                current_event_ids=current_event_ids,
-                diagnostics=diagnostics,
-            )
-            return validate_output_budget(output)
-
-        # Check the entire request again on retry, including retry instructions.
-        request_bytes = check_request_budget(system_prompt, messages)
-        print('[cognitive_budget] '
-              f'cycle={context.get("cycle_id", "-")} attempt={attempt + 1} '
-              f'request_bytes={request_bytes} max_tokens={output_tokens}', flush=True)
-        call = invoke_structured_llm(
-            domain='slow_loop',
-            create_chat_fn=call_model,
-            model=COGNITIVE_WORKER_MODEL,
-            messages=messages,
-            system=system_prompt,
-            max_tokens=output_tokens,
-            schema_validator=_validate_output,
-            schema_name='slow_loop_output',
-            attempt=attempt + 1,
-        )
-        try:
-            output = parse_slow_loop_output(parse_result=call.parsed)
-            for diagnostic in diagnostics:
-                _log_ttl_diagnostic(context, attempt + 1, diagnostic)
-            return output, call.usage
-        except SlowLoopOutputError as exc:
-            last_error = exc
-            _log_ttl_diagnostic(
-                context, attempt + 1, getattr(exc, 'details', None),
-            )
-            if attempt + 1 >= attempts:
-                break
-            if call.parsed.error_code == 'truncated_response':
-                larger_budget = retry_output_budget(output_tokens)
-                if larger_budget <= output_tokens:
-                    break
-                output_tokens = larger_budget
-            messages.extend([
-                {
-                    'role': 'user',
-                    'content': _validation_retry_instruction(exc),
-                },
-            ])
-    raise last_error or SlowLoopOutputError('model_output_validation_failed')
+    """No model authority, including when a legacy caller supplies a client."""
+    output = deterministic_cycle_output(context)
+    ids = [r['event_id'] for r in output['evidence_refs']]
+    return validate_slow_loop_output(output, allowed_event_ids=ids,
+        current_event_ids=ids), {'model_calls': 0, 'input_tokens': 0, 'output_tokens': 0}
 
 
 def run_worker_once(*, create_chat_fn=None, now=None):
@@ -657,11 +125,11 @@ def run_worker_once(*, create_chat_fn=None, now=None):
             cycle_id,
             reasoning_context=context,
             structured_output=output,
-            worker_model=COGNITIVE_WORKER_MODEL,
+            worker_model='deterministic_evidence_policy_v1',
             worker_usage=usage,
             now=now,
         )
-        summary = output['cycle_summary']['summary'][:120]
+        summary = (result.get('output') or output)['cycle_summary']['summary'][:120]
         print(
             f'[cognitive_worker] cycle #{cycle_id} succeeded: {summary}',
             flush=True,
@@ -719,7 +187,7 @@ def start_cognitive_worker():
     _THREAD.start()
     print(
         '[cognitive_worker] started '
-        f'(model={COGNITIVE_WORKER_MODEL}, '
+        '(policy=deterministic_evidence_policy_v1, '
         f'resolvers={sorted(PREDICTION_RESOLVER_WHITELIST)})',
         flush=True,
     )

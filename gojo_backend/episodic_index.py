@@ -1098,6 +1098,10 @@ def save_episode(
     conn = get_conn()
     cur = conn.cursor()
     try:
+        from cognitive_revision import sources_current_for_derivation
+        if not sources_current_for_derivation(cur, user_id, character_id, payload['source_event_ids']):
+            payload['status'] = 'superseded'
+            payload['rebuild_required'] = False
         cur.execute(
             '''INSERT INTO episodic_memory_index
                (episode_id, user_id, character_id, title, what_happened,

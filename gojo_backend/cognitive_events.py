@@ -5,11 +5,8 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 
-from cognitive_predictions import settle_pending_predictions
-from cognitive_reactivation import reactivate_dormant_questions
 from cognitive_triggers import (
     create_trigger_occurrence,
-    high_weight_trigger_specs,
 )
 from relationship_semantics import (
     ROMANTIC_LABEL_KEY,
@@ -29,22 +26,6 @@ def _embedding_text(embedding):
     if embedding is None or isinstance(embedding, str):
         return embedding
     return json.dumps(embedding)
-
-
-def _embed_v4_evidence(signals):
-    """Reuse the existing embedding path; failure never blocks event ingress."""
-    factual_briefs = [
-        str(signal.get('brief', '')).strip()
-        for signal in signals or []
-        if isinstance(signal, dict) and str(signal.get('brief', '')).strip()
-    ]
-    if not factual_briefs:
-        return None
-    try:
-        from memory_search import embed
-        return embed('\n'.join(factual_briefs))
-    except Exception:
-        return None
 
 
 def record_source_event(
@@ -271,25 +252,28 @@ def ingest_question_update(
     *, user_id, character_id, update, canonical_events, occurred_at=None,
     conn=None, aggregate=True,
 ):
-    """Apply extracted explicit evidence to the EXISTING question lifecycle.
+    """Compatibility ingress: ignore extracted judgments, reload canonical text."""
+    results = [ingest_canonical_turn(user_id=user_id, character_id=character_id,
+                source_event_id=e['event_id'], conn=conn, aggregate=aggregate)
+               for e in canonical_events if e.get('role') == 'user' and e.get('event_id')]
+    return results[-1] if results else {'status': 'pending_canonical_source'}
 
-    Extraction identifies the witnessed answer/promise; this deterministic
-    ingress never chooses a relationship answer or infers one from prose.
-    """
-    update_type = update.get('type') or update.get('kind')
-    if update_type not in {'pending_answer', 'resolution'}:
-        raise ValueError('question_update_type_invalid')
-    content = str(update.get('content') or '').strip()
-    question_text = str(update.get('question_text') or '').strip()
-    question_key = str(update.get('question_key') or '').strip()
-    if not content or not (question_key or question_text):
-        raise ValueError('question_update_requires_content_and_question')
-    if update_type == 'resolution' and update.get('value') in (None, ''):
-        raise ValueError('question_resolution_requires_value')
-    evidence_ids, evidence, source_id = validate_question_operation_evidence(update, canonical_events)
-    if is_nonrelationship_generated_source(source_id):
-        return {'status': 'skipped_nonrelationship_generated_source'}
-    event_time = _utc_now(occurred_at)
+
+def ingest_v4_signals(*, user_id, character_id, source_event_id, signals,
+                      occurred_at=None, embedding_json=None, conn=None, aggregate=True):
+    """Legacy bridge: model labels/embeddings never become evidence authority."""
+    return ingest_canonical_turn(user_id=user_id, character_id=character_id,
+                                 source_event_id=source_event_id, conn=conn, aggregate=aggregate)
+
+
+def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, aggregate=True):
+    """Use the existing Evidence Store / trigger queue, without any model call."""
+    from raw_events import get_active_events_by_ids
+    from cognitive_revision import parse_cognitive_evidence, evidence_question_key
+    from cognitive_queue import aggregate_pending_triggers, stable_advisory_lock_key
+
+    if not source_event_id or is_nonrelationship_generated_source(source_event_id):
+        return {'status': 'pending_canonical_source'}
     database = conn
     owns_connection = database is None
     if owns_connection:
@@ -297,302 +281,34 @@ def ingest_question_update(
         database = get_conn()
     cur = database.cursor()
     try:
-        import raw_events
-        from cognitive_queue import aggregate_pending_triggers, stable_advisory_lock_key
-
         cur.execute('SELECT pg_advisory_xact_lock(%s)',
                     (stable_advisory_lock_key(user_id, character_id),))
-        if not raw_events.sources_are_active(evidence_ids, user_id, character_id, conn=database):
-            database.rollback()
-            return {'status': 'skipped_deleted'}
-        cur.execute(
-            '''SELECT id, question_key, question_text, status, metadata, source_event_refs
-               FROM cognitive_questions
-               WHERE user_id = %s AND character_id = %s
-                 AND (question_key = %s OR question_text = %s)
-               ORDER BY (question_key = %s) DESC, updated_at DESC
-               LIMIT 1 FOR UPDATE''',
-            (user_id, character_id, question_key, question_text, question_key),
-        )
-        previous = cur.fetchone()
-        if previous:
-            question_key = previous[1]
-            question_text = previous[2]
-        elif not question_text:
-            raise ValueError('question_update_unknown_key_without_question_text')
-        if not question_key:
-            question_key = 'explicit.' + hashlib.sha256(question_text.encode('utf-8')).hexdigest()[:24]
-        resolution_value = update.get('value')
-        if update_type == 'resolution' and question_key == ROMANTIC_LABEL_KEY:
-            resolution_value = normalize_romantic_label(resolution_value)
-            if resolution_value is None:
-                raise ValueError('relationship_romantic_label_resolution_invalid')
-        metadata = dict(_question_json(previous[4], {}) if previous else {})
-        # A postponed answer is not evidence that a prior explicit yes/no vanished.
-        status = question_transition_status(
-            previous[3] if previous else None,
-            'active' if update_type == 'pending_answer' else 'resolved',
-            metadata=metadata, operation=update_type)
-        if update_type == 'pending_answer' and status == 'resolved':
-            database.commit()
-            return {'status': 'already_resolved', 'question_id': previous[0],
-                    'question_status': 'resolved'}
-        event_id = record_source_event(
-            database, user_id=user_id, character_id=character_id,
-            source_event_type=f'question_{update_type}:{question_key}',
-            source_event_id=source_id, source='memory_extraction', occurred_at=event_time,
-            payload={'question_key': question_key, 'question_text': question_text,
-                     'type': update_type, 'content': content,
-                     'value': resolution_value,
-                     'evidence_event_ids': evidence_ids,
-                     'canonical_turns': [{'event_id': e['event_id'], 'role': e['role'],
-                                          'content': e.get('content', '')} for e in evidence]},
-        )
+        events = get_active_events_by_ids(user_id, character_id, [source_event_id], conn=database)
+        if len(events) != 1 or events[0]['role'] != 'user':
+            return {'status': 'pending_canonical_source'}
+        raw = events[0]
+        parsed = parse_cognitive_evidence(raw['content'], user_id, character_id)
+        qkey = evidence_question_key(parsed, source_event_id)
+        event_id = record_source_event(database, user_id=user_id, character_id=character_id,
+            source_event_type='canonical_user_turn', source_event_id=source_event_id,
+            source='deterministic_evidence_policy_v1', occurred_at=raw['timestamp'],
+            payload={'content': raw['content'], **parsed})
         if event_id is None:
+            if owns_connection:
+                database.commit()
+            return {'status': 'duplicate', 'event_id': None}
+        trigger = create_trigger_occurrence(database, event_id=event_id, user_id=user_id,
+            character_id=character_id, trigger_class='question_reactivation',
+            occurrence_key=qkey, payload={'question_key': qkey, 'reason': 'new_canonical_evidence'})
+        if owns_connection:
             database.commit()
-            return {'status': 'duplicate', 'question_id': previous[0] if previous else None}
-        refs = list(_question_json(previous[5], []) if previous else [])
-        refs.append({'event_id': event_id, 'source': 'memory_extraction', 'source_id': source_id})
-        history = list(metadata.get('lifecycle_history') or [])
-        history.append({'previous_status': previous[3] if previous else None,
-                        'previous_resolution': metadata.get('resolution'),
-                        'previous_judgment': metadata.get('current_judgment'),
-                        'event_id': event_id, 'type': update_type, 'at': event_time.isoformat()})
-        metadata['lifecycle_history'] = history
-        metadata['updated_by'] = 'explicit_question_evidence'
-        if update_type == 'pending_answer':
-            metadata['pending_answer'] = {'status': 'pending', 'content': content,
-                                         'promised_at': event_time.isoformat(),
-                                         'evidence_event_ids': evidence_ids}
-        else:
-            metadata['resolution'] = {'value': resolution_value, 'content': content,
-                                      'actor': update.get('actor', 'character'),
-                                      'evidence_event_ids': evidence_ids,
-                                      'resolved_at': event_time.isoformat()}
-            if (update.get('novel') is True and update.get('kind') in {
-                    'explicit_acceptance', 'explicit_rejection', 'explicit_correction',
-                    'explicit_decision', 'relationship_resolution',
-                    'answer_to_unresolved_question'}):
-                metadata['resolution']['bond_delta'] = {
-                    'kind': update['kind'], 'content': content, 'value': resolution_value,
-                    'actor': update.get('actor', 'character'),
-                    'question_key': question_key, 'question_text': question_text,
-                    'replaces': [item for item in update.get('replaces', []) if isinstance(item, str)],
-                    'evidence_quote': update['evidence_quote'],
-                    'evidence_event_ids': evidence_ids, 'novel': True,
-                }
-            metadata.pop('current_judgment', None)
-            if metadata.get('pending_answer'):
-                metadata['pending_answer'] = dict(metadata['pending_answer'], status='fulfilled')
-        cur.execute(
-            '''INSERT INTO cognitive_questions (
-                   user_id, character_id, question_key, question_text, status,
-                   metadata, source_event_refs, updated_at
-               ) VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
-               ON CONFLICT (user_id, character_id, question_key) DO UPDATE
-               SET status = EXCLUDED.status, metadata = EXCLUDED.metadata,
-                   source_event_refs = EXCLUDED.source_event_refs,
-                   updated_at = EXCLUDED.updated_at
-               RETURNING id''',
-            (user_id, character_id, question_key, question_text, status,
-             json.dumps(metadata, ensure_ascii=False), json.dumps(refs, ensure_ascii=False), event_time),
-        )
-        question_id = cur.fetchone()[0]
-        if status == 'resolved':
-            cur.execute(
-                '''UPDATE cognitive_beliefs
-                   SET metadata = metadata || %s::jsonb, updated_at = %s
-                   WHERE user_id = %s AND character_id = %s AND status = 'active'
-                     AND (metadata->>'question_key' = %s
-                          OR committed_from_hypothesis_id IN (
-                              SELECT id FROM cognitive_hypotheses
-                              WHERE user_id = %s AND character_id = %s
-                                AND question_id = %s))''',
-                (json.dumps({'review_status': 'under_review',
-                             'review_reason': 'question_explicitly_resolved',
-                             'resolution_event_id': event_id}),
-                 event_time, user_id, character_id, question_key,
-                 user_id, character_id, question_id),
-            )
-            cur.execute(
-                '''UPDATE cognitive_hypotheses SET status = 'archived', updated_at = %s
-                   WHERE user_id = %s AND character_id = %s AND question_id = %s
-                     AND status IN ('open', 'supported')''',
-                (event_time, user_id, character_id, question_id),
-            )
-            cur.execute(
-                '''UPDATE cognitive_predictions
-                   SET status = 'expired', settled_at = %s, settled_by_event_id = %s,
-                       last_error_code = 'question_explicitly_resolved'
-                   WHERE user_id = %s AND character_id = %s AND question_id = %s
-                     AND status = 'pending' ''',
-                (event_time, event_id, user_id, character_id, question_id),
-            )
-            cur.execute(
-                '''UPDATE cognitive_sticky_notes
-                   SET status = 'completed', completed_at = %s, updated_at = %s
-                   WHERE user_id = %s AND character_id = %s AND status = 'active'
-                     AND (note_key = %s OR metadata->>'question_key' = %s)''',
-                (event_time, event_time, user_id, character_id, question_key, question_key),
-            )
-        trigger_id = create_trigger_occurrence(
-            database, event_id=event_id, user_id=user_id, character_id=character_id,
-            trigger_class='question_reactivation', occurrence_key=f'question:{question_id}',
-            payload={'question_id': question_id, 'question_key': question_key,
-                     'reason': update_type, 'relation': 'explicit_evidence'},
-        )
-        database.commit()
         cycle = aggregate_pending_triggers(user_id, character_id, conn=database) if aggregate else None
-        print('[cognitive_trace] '
-              f'question_id={question_id} trigger=question_reactivation '
-              f'cycle_id={(cycle or {}).get("cycle_id")} '
-              f'status={"open" if status == "active" else status}', flush=True)
-        return {'status': 'inserted', 'question_id': question_id,
-                'question_key': question_key, 'question_status': status,
-                'event_id': event_id, 'trigger_id': trigger_id, 'cycle': cycle}
+        return {'status': 'inserted', 'event_id': event_id, 'trigger_id': trigger,
+                'question_key': qkey, 'cycle': cycle}
     except Exception:
         database.rollback()
         raise
     finally:
         cur.close()
-        if owns_connection:
-            database.close()
-
-
-def ingest_v4_signals(
-    *,
-    user_id,
-    character_id,
-    source_event_id,
-    signals,
-    occurred_at=None,
-    embedding_json=None,
-    conn=None,
-    aggregate=True,
-):
-    """Ingest the existing relationship v4 signal list without reshaping it."""
-    if is_nonrelationship_generated_source(source_event_id):
-        return {
-            'status': 'skipped_nonrelationship_generated_source',
-            'event_id': None,
-            'trigger_ids': [],
-            'settled_predictions': [],
-            'reactivated_questions': [],
-            'cycle': None,
-        }
-    database = conn
-    owns_connection = database is None
-    if database is None:
-        from db import get_conn
-        database = get_conn()
-    event_time = _utc_now(occurred_at)
-    try:
-        if source_event_id:
-            import raw_events
-            try:
-                if not raw_events.sources_are_active(
-                        [source_event_id], user_id, character_id, conn=database):
-                    if owns_connection:
-                        database.rollback()
-                    return {
-                        'status': 'skipped_deleted',
-                        'event_id': None,
-                        'trigger_ids': [],
-                        'settled_predictions': [],
-                        'reactivated_questions': [],
-                        'cycle': None,
-                    }
-            except raw_events.SourceValidityError:
-                if owns_connection:
-                    database.rollback()
-                return {
-                    'status': 'failed_source_validity',
-                    'event_id': None,
-                    'trigger_ids': [],
-                    'settled_predictions': [],
-                    'reactivated_questions': [],
-                    'cycle': None,
-                }
-        event_id = record_source_event(
-            database,
-            user_id=user_id,
-            character_id=character_id,
-            source_event_type='relationship_v4_signal',
-            source_event_id=source_event_id,
-            source='relationship_engine_v4',
-            occurred_at=event_time,
-            payload={'signals': signals},
-            embedding_json=embedding_json,
-        )
-        if event_id is None:
-            database.commit()
-            return {
-                'status': 'duplicate',
-                'event_id': None,
-                'trigger_ids': [],
-                'settled_predictions': [],
-                'reactivated_questions': [],
-                'cycle': None,
-            }
-
-        if embedding_json is None:
-            embedding_json = _embed_v4_evidence(signals)
-        if embedding_json is not None:
-            cur = database.cursor()
-            try:
-                cur.execute(
-                    '''UPDATE cognitive_events SET embedding_json = %s
-                       WHERE id = %s''',
-                    (_embedding_text(embedding_json), event_id),
-                )
-            finally:
-                cur.close()
-
-        trigger_ids = []
-        for spec in high_weight_trigger_specs(signals):
-            trigger_id = create_trigger_occurrence(
-                database,
-                event_id=event_id,
-                user_id=user_id,
-                character_id=character_id,
-                **spec,
-            )
-            if trigger_id is not None:
-                trigger_ids.append(trigger_id)
-
-        settled = settle_pending_predictions(
-            database,
-            user_id=user_id,
-            character_id=character_id,
-            event_id=event_id,
-            occurred_at=event_time,
-        )
-        reactivated = reactivate_dormant_questions(
-            database,
-            user_id=user_id,
-            character_id=character_id,
-            event_id=event_id,
-            evidence_embedding=embedding_json,
-        )
-        database.commit()
-
-        cycle = None
-        if aggregate:
-            from cognitive_queue import aggregate_pending_triggers
-            cycle = aggregate_pending_triggers(
-                user_id, character_id, conn=database,
-            )
-        return {
-            'status': 'inserted',
-            'event_id': event_id,
-            'trigger_ids': trigger_ids,
-            'settled_predictions': settled,
-            'reactivated_questions': reactivated,
-            'cycle': cycle,
-        }
-    except Exception:
-        database.rollback()
-        raise
-    finally:
         if owns_connection:
             database.close()

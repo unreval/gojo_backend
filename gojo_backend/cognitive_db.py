@@ -17,6 +17,11 @@ COGNITIVE_DDL = (
     )''',
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_events_pair_time
        ON cognitive_events (user_id, character_id, occurred_at DESC)''',
+    '''ALTER TABLE cognitive_events ADD COLUMN IF NOT EXISTS
+       adjudication JSONB NOT NULL DEFAULT '{}'::jsonb''',
+    '''CREATE INDEX IF NOT EXISTS idx_cognitive_report_scope ON cognitive_events
+       (user_id, character_id, (payload->'claim'->>'question_key'))
+       WHERE source_event_type='canonical_user_turn' ''',
     '''CREATE TABLE IF NOT EXISTS cognitive_cycles (
         id BIGSERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -55,6 +60,7 @@ COGNITIVE_DDL = (
        ON cognitive_cycles (user_id, character_id, completed_at DESC)''',
     '''ALTER TABLE cognitive_cycles
        ADD COLUMN IF NOT EXISTS cycle_summary JSONB''',
+    '''ALTER TABLE cognitive_cycles ADD COLUMN IF NOT EXISTS invalidated_by_event_id BIGINT''',
     '''ALTER TABLE cognitive_cycles
        ADD COLUMN IF NOT EXISTS belief_updates JSONB NOT NULL DEFAULT '[]'::jsonb''',
     '''ALTER TABLE cognitive_cycles
@@ -293,6 +299,9 @@ COGNITIVE_DDL = (
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_predictions_pending
        ON cognitive_predictions (user_id, character_id, status, created_at)
        WHERE status = 'pending' ''',
+    '''CREATE INDEX IF NOT EXISTS idx_cognitive_predictions_due
+       ON cognitive_predictions (expires_at, user_id, character_id)
+       WHERE status='pending' AND expires_at IS NOT NULL''',
     '''CREATE TABLE IF NOT EXISTS cognitive_sticky_notes (
         id BIGSERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -350,6 +359,7 @@ COGNITIVE_DDL = (
     )''',
     '''CREATE INDEX IF NOT EXISTS idx_cognitive_diary_recent
        ON cognitive_diary_entries (user_id, character_id, occurred_at DESC)''',
+    '''ALTER TABLE cognitive_diary_entries ADD COLUMN IF NOT EXISTS invalidated_by_event_id BIGINT''',
     '''CREATE TABLE IF NOT EXISTS cognitive_worker_migrations (
         migration_key TEXT PRIMARY KEY,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP

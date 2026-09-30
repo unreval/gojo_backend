@@ -105,7 +105,7 @@ COGNITIVE_REFLECTION_SCAN_BATCH = _int_env(
 COGNITIVE_ESTIMATED_TOKENS_PER_SLOW_CYCLE = _int_env(
     'COGNITIVE_ESTIMATED_TOKENS_PER_SLOW_CYCLE', 1200, 1,
 )
-COGNITIVE_WORKER_ENABLED = _bool_env('COGNITIVE_WORKER_ENABLED', True)
+COGNITIVE_WORKER_ENABLED = _bool_env('COGNITIVE_WORKER_ENABLED', False)
 COGNITIVE_WORKER_MODEL = (
     os.environ.get('COGNITIVE_WORKER_MODEL')
     or os.environ.get('MODEL_MAIN')
@@ -205,6 +205,7 @@ TRIGGER_PRIORITIES = {
 
 PREDICTION_RESOLVER_WHITELIST = frozenset({
     'current_event_signal_outcome',
+    'explicit_report_outcome',
 })
 
 PREDICTION_NUMERIC_OPERATORS = frozenset({'<', '<=', '>', '>='})

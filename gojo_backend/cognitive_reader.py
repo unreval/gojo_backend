@@ -261,6 +261,7 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                FROM cognitive_cycles
                WHERE user_id = %s AND character_id = %s
                  AND status = 'succeeded' AND cycle_summary IS NOT NULL
+                 AND invalidated_by_event_id IS NULL
                ORDER BY completed_at DESC, id DESC
                LIMIT 1''',
             (user_id, character_id),
@@ -975,6 +976,7 @@ def list_day_cycle_notes(user_id, character_id, day_start, *, limit=8, conn=None
                FROM cognitive_cycles
                WHERE user_id = %s AND character_id = %s
                  AND status = 'succeeded' AND cycle_summary IS NOT NULL
+                 AND invalidated_by_event_id IS NULL
                  AND completed_at >= %s AND completed_at < %s
                ORDER BY completed_at ASC, id ASC
                LIMIT %s''',
@@ -1049,6 +1051,7 @@ def list_diary_entries(user_id, character_id, *, limit=30, conn=None):
                       source_event_refs, occurred_at, created_at
                FROM cognitive_diary_entries
                WHERE user_id = %s AND character_id = %s
+                 AND invalidated_by_event_id IS NULL
                ORDER BY occurred_at DESC, id DESC
                LIMIT %s''',
             (user_id, character_id, max(1, min(int(limit), 100))),
