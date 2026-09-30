@@ -316,6 +316,29 @@ class ChatCommitGateTests(unittest.TestCase):
         self.save_short.assert_called()
         self.jobs.assert_not_called()
 
+    def test_structured_bracket_bodies_pass_without_translation(self):
+        for jp, zh in (('配列の a[0] を見て。', '明天复习 [第三章]。'),
+                       ('集合 {1, 2} を見て。', '补充说明 [可选]，集合 {甲, 乙}。')):
+            with self.subTest(jp=jp):
+                response, body = self.send([chat_reply(jp, zh)])
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual((body['messages'][0]['jp'], body['messages'][0]['zh']), (jp, zh))
+                self.assertEqual(self.route._create_json.call_count, 1)
+                self.route._quick_translate.assert_not_called()
+                self.state.assert_not_called()
+
+    def test_safe_raw_bracket_notes_keep_existing_plaintext_path(self):
+        for text in ('配列の a[0] を見て。', '补充说明（可选）[第三章]，集合 {甲, 乙}。'):
+            with self.subTest(text=text):
+                self.route._quick_translate.reset_mock()
+                response, body = self.send([text])
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(body['messages'][0]['jp'], text)
+                self.assertEqual(body['messages'][0]['zh'], '译文')
+                self.assertEqual(self.route._create_json.call_count, 1)
+                self.route._quick_translate.assert_called_once_with(text)
+                self.state.assert_not_called()
+
     def test_json_debris_as_visible_text_is_rejected(self):
         debris = '{"jp":"...","zh":"..."}'
         response, body = self.send([chat_reply(debris, debris)])
@@ -471,6 +494,10 @@ class ChatCommitGateTests(unittest.TestCase):
 
     def test_malformed_json_and_internal_debris_are_never_salvaged(self):
         for raw in ('{"jp":"こんにちは"', '{"messages":[',
+                    '{"unknown"', '["hello",', '[1,', '[true,',
+                    '{unknown: broken}', '[{"jp":"こんにちは"}',
+                    '[[1, 2]', '说明：{"unknown"', '说明：["hello",', '说明：[1,',
+                    '{broken', '[broken', '[[broken]',
                     'jp: こんにちは', '"unknown_field": "秘密"', 'state: thinking',
                     'pending_transaction: 100', '{"inner":"秘密","intent":"待つ"}',
                     '🥺... <<<OFFLINE_CHARACTER_STATES>>> {"inner":"x"}',

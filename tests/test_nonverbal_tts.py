@@ -8,14 +8,67 @@ from unittest.mock import Mock, patch
 
 import tts
 import db_generation_receipt as receipt
+from utils import classify_reply_content, has_visible_text, ingest_model_output, valid_reply_msg
 from tests import test_receipt_windows as windows
 from tests import test_voice_stream_commit_gate as voice
 
 REAL_TTS = tts.tts_to_b64
-SILENT = ('🥺', '🥺...？！', '...', '…', '……', '👩🏽‍💻', '❤️', '🇯🇵', '1️⃣')
+SILENT = ('🥺', '🥺...？！', '...', '…', '……', '👩🏽‍💻', '❤️', '🇯🇵', '1️⃣',
+          '・', '・・・', '…・…', '... ・ ……', '・…🥺')
+BRACKET_TEXT = ('明天复习 [第三章]。', '配列の a[0] を見て。',
+                '补充说明（可选）[第三章]，集合 {甲, 乙}。',
+                '[第三章] 明天复习。', '集合 {1, 2} を見て。', '[[第三章]] 明天复习。')
+PROTOCOL_TEXT = ('{"messages":[', '{"jp":"こんにちは"', '{"unknown"',
+                 '["hello",', '[1,', '[true,', '[{"jp":"こんにちは"}',
+                 '{unknown: broken}', '["hello"]', '{}', '[]', '[[1, 2]',
+                 '说明：{"unknown"', '说明：["hello",', '说明：[1,',
+                 '{broken', '[broken', '[[broken]',
+                 'jp: こんにちは', '"unknown_field": "秘密"',
+                 '<<<OFFLINE_CHARACTER_STATES>>>', 'OFFLINE_CHARACTER_STATES',
+                 '{"inner":"秘密","intent":"待つ"}', 'state: thinking',
+                 '<thinking>private</thinking>', '[angry]')
 
 
 class NonverbalTTSTests(unittest.TestCase):
+    def test_bracket_bodies_and_protocol_envelopes_are_distinct(self):
+        for text in BRACKET_TEXT:
+            with self.subTest(text=text):
+                raw = json.dumps({'messages': [{'jp': text, 'zh': text}]}, ensure_ascii=False)
+                self.assertEqual(classify_reply_content(raw), 'invalid')
+                _, parsed, state = ingest_model_output(raw)
+                self.assertIsNone(state)
+                self.assertEqual(parsed['messages'], [{'jp': text, 'zh': text}])
+                self.assertTrue(valid_reply_msg(parsed['messages'][0]))
+                self.assertEqual(classify_reply_content(text), 'text')
+
+    def test_protocol_fragments_never_reach_tts_or_http(self):
+        with patch.object(tts, 'fish_tts', wraps=tts.fish_tts) as provider, patch.object(
+                tts.requests, 'post', side_effect=AssertionError('provider HTTP called')) as http:
+            for text in PROTOCOL_TEXT:
+                with self.subTest(text=text):
+                    self.assertEqual(classify_reply_content(text), 'invalid')
+                    self.assertFalse(valid_reply_msg({'jp': text, 'zh': text}))
+                    self.assertEqual(REAL_TTS(text, '平静'), '')
+                    provider.assert_not_called()
+                    self.assertEqual(tts.fish_tts(text), b'')
+                    provider.reset_mock()
+                    http.assert_not_called()
+
+    def test_middle_dots_are_nonverbal_without_tts_failure(self):
+        with patch.object(tts, 'fish_tts', wraps=tts.fish_tts) as provider, patch.object(
+                tts.requests, 'post', side_effect=AssertionError('provider HTTP called')) as http, patch(
+                'builtins.print') as log:
+            for text in ('・', '・・・', '…・…', '... ・ ……'):
+                with self.subTest(text=text):
+                    self.assertFalse(has_visible_text(text))
+                    self.assertEqual(classify_reply_content(text), 'nonverbal')
+                    self.assertEqual(REAL_TTS(text, '愤怒'), '')
+                    provider.assert_not_called()
+                    self.assertEqual(tts.fish_tts(text), b'')
+                    provider.reset_mock()
+                    http.assert_not_called()
+                    log.assert_not_called()
+
     def test_nonverbal_never_calls_provider_or_any_model_or_database(self):
         with patch.object(tts, 'fish_tts', wraps=tts.fish_tts) as provider, patch.object(
                 tts.requests, 'post', side_effect=AssertionError('provider HTTP called')) as http, patch(
@@ -43,7 +96,9 @@ class NonverbalTTSTests(unittest.TestCase):
         with patch.object(tts.requests, 'post', return_value=response) as http, patch.object(
                 tts, 'fish_tts', wraps=tts.fish_tts) as provider:
             for text, spoken in (('……你过来。🥺', '你过来。'), ('等一下…🥺', '等一下'),
-                                 ('🥺来て。', '来て。'), ('ん？', 'ん？')):
+                                 ('🥺来て。', '来て。'), ('ん？', 'ん？'),
+                                 ('ジョン・スミス', 'ジョン・スミス'), ('コーヒー', 'コーヒー'),
+                                 *((value, value) for value in BRACKET_TEXT)):
                 with self.subTest(text=text):
                     provider.reset_mock()
                     http.reset_mock()
@@ -53,6 +108,26 @@ class NonverbalTTSTests(unittest.TestCase):
                     self.assertEqual(http.call_count, 1)
                     self.assertIn(spoken, http.call_args.kwargs['json']['text'])
                     self.assertEqual(text, original)
+
+    def test_bracket_receipt_hydration_preserves_body_and_regenerates_audio(self):
+        response = Mock(status_code=200)
+        response.iter_content.return_value = [b'offline-mp3']
+        with patch('characters.get_character', return_value={'voice_id': 'offline'}), patch.object(
+                tts.requests, 'post', return_value=response) as http, patch.object(
+                tts, 'fish_tts', wraps=tts.fish_tts) as provider:
+            for text in BRACKET_TEXT:
+                with self.subTest(text=text):
+                    body = {'messages': [{'jp': text, 'zh': text, 'audio_b64': 'old-audio'}]}
+                    replay = receipt.hydrate_replay(body, 'c')
+                    self.assertEqual(replay['messages'][0]['jp'], text)
+                    self.assertEqual(replay['messages'][0]['zh'], text)
+                    self.assertTrue(replay['messages'][0]['audio_b64'])
+                    self.assertNotEqual(replay['messages'][0]['audio_b64'], 'old-audio')
+                    self.assertEqual(body['messages'][0]['audio_b64'], 'old-audio')
+                    self.assertEqual(provider.call_count, 1)
+                    self.assertEqual(http.call_count, 1)
+                    provider.reset_mock()
+                    http.reset_mock()
 
     def test_receipt_replay_discards_cached_audio_even_if_hydration_fails(self):
         with patch.object(tts, 'fish_tts') as provider:
@@ -139,6 +214,23 @@ class VoiceStreamSilentTests(unittest.TestCase):
             self.assertTrue(next(e for e in events if e['type'] == 'audio')['audio_b64'])
             provider.assert_called_once_with(text, '平静', 'v1')
 
+    def test_bracket_stream_keeps_body_and_calls_real_provider_once(self):
+        response = Mock(status_code=200)
+        response.iter_content.return_value = [b'offline-mp3']
+        with patch.object(tts.requests, 'post', return_value=response) as http, patch.object(
+                tts, 'fish_tts', wraps=tts.fish_tts) as provider:
+            for text in BRACKET_TEXT:
+                with self.subTest(text=text):
+                    events = self.events(f'JP: {text}\nZH: {text}\n')
+                    self.assertEqual(events[-1]['type'], 'done')
+                    segment = next(e for e in events if e['type'] == 'audio')
+                    self.assertEqual((segment['jp'], segment['zh']), (text, text))
+                    self.assertTrue(segment['audio_b64'])
+                    self.assertEqual(provider.call_count, 1)
+                    self.assertEqual(http.call_count, 1)
+                    provider.reset_mock()
+                    http.reset_mock()
+
 
 class NonverbalDeliveryTests(unittest.TestCase):
     setUpClass = classmethod(windows.ReceiptWindowTests.setUpClass.__func__)
@@ -197,6 +289,16 @@ class NonverbalDeliveryTests(unittest.TestCase):
             provider.assert_not_called()
         self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 0)
         self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0], 0)
+
+    def test_bracket_proactive_cache_preserves_text_and_audio(self):
+        import proactive_msg
+        self.stack.enter_context(patch.object(proactive_msg, 'get_conn', return_value=self.database))
+        proactive_msg.init_proactive_table()
+        for text in BRACKET_TEXT:
+            proactive_msg.add_proactive_msg('c', 'u', 'promise', text, text, audio_b64='cached-audio')
+        messages = proactive_msg.get_pending('u', 'c')
+        self.assertEqual([(m['jp'], m['zh'], m['audio_b64']) for m in messages],
+                         [(text, text, 'cached-audio') for text in BRACKET_TEXT])
 
     def test_proactive_generator_calls_once_and_keeps_silent_raw_source(self):
         import proactive_msg

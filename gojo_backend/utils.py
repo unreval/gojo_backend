@@ -15,9 +15,11 @@ def _try_parse_json(text):
 
 
 def _slice_balanced_object(s, start):
-    """从 s[start] 的 '{' 起，按括号配平切出完整 JSON 对象（忽略字符串里的括号）。"""
-    if start < 0 or start >= len(s) or s[start] != '{':
+    """从 s[start] 的 '{' / '[' 起切出配平容器（忽略字符串里的括号）。"""
+    if start < 0 or start >= len(s) or s[start] not in '{[':
         return None
+    opening = s[start]
+    closing = '}' if opening == '{' else ']'
     depth = 0
     in_str = False
     escape = False
@@ -33,9 +35,9 @@ def _slice_balanced_object(s, start):
             continue
         if ch == '"':
             in_str = True
-        elif ch == '{':
+        elif ch == opening:
             depth += 1
-        elif ch == '}':
+        elif ch == closing:
             depth -= 1
             if depth == 0:
                 return s[start:i + 1]
@@ -245,7 +247,8 @@ def has_visible_text(text) -> bool:
     s = str(text).strip()
     if not s:
         return False
-    return bool(VISIBLE_CONTENT_RE.search(s))
+    # Unicode blocks also contain punctuation (notably katakana middle dot).
+    return any(ch.isalnum() for ch in VISIBLE_CONTENT_RE.findall(s))
 
 
 def msg_has_json_debris(m: dict) -> bool:
@@ -268,7 +271,14 @@ def classify_reply_content(text) -> str:
         return 'invalid'
     text = text.strip()
     if (contains_offline_marker(text) or 'OFFLINE_CHARACTER_STATES' in text.upper()
-            or any(ch in text for ch in '{}[]')
+            # Reject serialized envelopes/fragments, not brackets in prose.
+            or _try_parse_json(text) is not None
+            or (text[0] in '{[' and _slice_balanced_object(text, 0) is None)
+            or re.search(r'[\[{]\s*["\']', text)
+            or re.match(r'\[\s*(?:\[\s*)*(?:-?\d|true\b|false\b|null\b)', text)
+            or re.search(r'\[\s*(?:-?\d|true\b|false\b|null\b)[^\]]*$', text)
+            or re.search(r'\{\s*[\w.-]+\s*:', text)
+            or re.fullmatch(r'(?:\[angry\]\s*)+', text, re.I)
             or '```' in text
             or re.search(r'<\s*/?\s*(?:analysis|thinking|tool_call)\b', text, re.I)
             or re.search(r'["\'][\w.-]+["\']\s*:', text)
@@ -276,7 +286,7 @@ def classify_reply_content(text) -> str:
                          r'state|intent|reminder|accounting|pending_transaction|schedule_intent|memory_metadata|'
                          r'relationship|belief|cognitive_state)["\']?\s*:', text, re.I)):
         return 'invalid'
-    if is_emoji_only(text) or re.fullmatch(r'(?:\.{3,}|…+)', text):
+    if is_emoji_only(text) or re.fullmatch(r'(?:(?:\.{3,}|[…・])\s*)+', text):
         return 'nonverbal'
     return 'text' if has_visible_text(text) else 'invalid'
 
