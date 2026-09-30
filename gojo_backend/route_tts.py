@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from characters import get_character
 from tts import tts_to_b64
+from utils import classify_reply_content
 import memory_search
 
 router = APIRouter()
@@ -31,6 +32,9 @@ async def resynth(data: dict):
     char = get_character(character_id)
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
+
+    if classify_reply_content(text) != 'text':
+        return JSONResponse({'audio_b64': '', 'emotion': emotion})
 
     voice_id = char.get('voice_id')
     if not voice_id:

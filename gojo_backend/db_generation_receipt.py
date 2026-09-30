@@ -976,6 +976,9 @@ def hydrate_replay(body, character_id, user_id=None, chat_id=None,
             payload.pop(key, None)
     emotion = payload.get('emotion') or '平静'
     msgs = list(payload.get('messages') or [])
+    # Historical payload audio must not survive silence or failed hydration.
+    for item in msgs:
+        item['audio_b64'] = ''
     try:
         from characters import get_character
         from tts import tts_to_b64

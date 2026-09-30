@@ -276,7 +276,7 @@ def classify_reply_content(text) -> str:
                          r'state|intent|reminder|accounting|pending_transaction|schedule_intent|memory_metadata|'
                          r'relationship|belief|cognitive_state)["\']?\s*:', text, re.I)):
         return 'invalid'
-    if is_emoji_only(text) or re.fullmatch(r'(?:\.{3,}|…{2,})', text):
+    if is_emoji_only(text) or re.fullmatch(r'(?:\.{3,}|…+)', text):
         return 'nonverbal'
     return 'text' if has_visible_text(text) else 'invalid'
 

@@ -9,6 +9,7 @@ import requests
 import tempfile
 
 from config import FISH_KEY, FISH_VOICE_ID, GROQ_KEY
+from utils import classify_reply_content
 
 
 # ═══════════════════════════════════════
@@ -148,6 +149,8 @@ EMOTION_PROSODY = {
 
 
 def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
+    if classify_reply_content(text) != 'text':
+        return b''
     # ★ 修:去掉开头的省略号/连续句号,Fish 会把它读成怪声
     #   开头的 "。。。。。。" / "……" / "..." / "・・・" → 静音处理
     #   长句中间的省略号保留(Fish 会自然停顿,不会发怪声)
@@ -206,6 +209,9 @@ def fish_tts(text: str, emotion: str = '平静', voice_id: str = None) -> bytes:
 _TTS_LOCK = threading.Semaphore(1)
 
 def tts_to_b64(text: str, emotion: str, voice_id: str = None) -> str:
+    # Intentional silence exits before providers, reference voices or retries.
+    if classify_reply_content(text) != 'text':
+        return ''
     for attempt in range(5):
         try:
             with _TTS_LOCK:

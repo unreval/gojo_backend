@@ -55,6 +55,9 @@ def canonical_event_id(kind, msg_id):
 def add_proactive_msg(character_id, user_id, kind, jp, zh='', emotion='平静',
                       audio_b64='', created_at=None, event_id=None,
                       assistant_turn_id=None, segment_index=None):
+    from utils import classify_reply_content
+    if classify_reply_content(jp) != 'text':
+        audio_b64 = ''
     conn = get_conn()
     cur = conn.cursor()
     if created_at is not None:
@@ -86,6 +89,7 @@ def add_proactive_msg(character_id, user_id, kind, jp, zh='', emotion='平静',
 
 def get_pending(user_id, character_id=None):
     """取未读的主动消息（按时间正序，先发的先显示）。"""
+    from utils import classify_reply_content
     conn = get_conn()
     cur = conn.cursor()
     if character_id:
@@ -117,7 +121,7 @@ def get_pending(user_id, character_id=None):
         pending.append({
             'id': r[0], 'character_id': r[1], 'kind': r[2],
             'jp': r[3], 'zh': r[4],
-            'emotion': r[5], 'audio_b64': r[6],
+            'emotion': r[5], 'audio_b64': r[6] if classify_reply_content(r[3]) == 'text' else '',
             'created_at': str(r[7]) if r[7] else None,
             'event_id': event_id,
             'assistant_turn_id': stored_turn_id or event_id,

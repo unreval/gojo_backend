@@ -323,3 +323,33 @@ per fixture. Existing receipt owner/two-worker/heartbeat tests use Python
 threads and a process-local locked store. Independent PostgreSQL connections
 racing on source/job/receipt/effect boundaries remain unaccepted before release.
 No mock or single-connection result is a concurrent PostgreSQL acceptance claim.
+
+
+## Nonverbal TTS closeout (separate change)
+
+The existing deterministic content classifier gates both TTS entry points.
+Emoji-only, emoji with punctuation and intentional ellipses return empty audio
+before provider calls, emotion tags, reference voices or retries. A single
+Unicode ellipsis is also classified as intentional nonverbal content. Mixed
+text such as “……你过来。🥺” still reaches TTS. Display text, subtitles and raw
+evidence are preserved; TTS does not infer an emotion or write cognitive state.
+
+Receipt hydration clears stale audio before trying TTS. Proactive cache writes
+and reads use the same classifier so old cached audio cannot bypass silence.
+Resynthesis reports successful silence even without a reference voice. Streaming
+keeps the existing segment envelope with empty audio and always emits done.
+No additional translation or dialogue generation was introduced.
+
+Combined final acceptance: 429 targeted tests pass, including all 52 deterministic
+hard acceptance tests. Full suite: 975 test methods, 44 failure records, 62 error
+records, zero skips/xfails. Against the pre-closeout 956-test snapshot, the one
+historical fixture is resolved, 106 records persist, and no new failing record
+or failure/error transition appears. Against the original 933-test HEAD, 49
+records resolve, 97 persist with the same failure kind, and nine failures become
+errors. There are 42 new methods since HEAD, 19 in this closeout, with the five
+previously documented intentional-silence renames retained.
+
+Eleven new TTS tests execute the real shared TTS entry and count the provider
+boundary, with external requests intercepted. All nine tested nonverbal inputs
+have zero provider calls. Four mixed/text controls have one provider invocation
+and one intercepted HTTP request each. No paid network request is made.
