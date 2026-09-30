@@ -28,6 +28,7 @@ PROCESSOR_VISION = 'vision_summary'
 PROCESSOR_VISION_VERSION = 'v1'
 PROCESSOR_RELATIONSHIP = 'relationship_v4'
 PROCESSOR_RELATIONSHIP_VERSION = 'v1'
+COMMUNICATION_CONVENTION_MARKER = '【交流约定】'
 
 RAW_EVENT_DDL = (
     '''ALTER TABLE chat_log ADD COLUMN IF NOT EXISTS event_id TEXT''',
@@ -367,6 +368,7 @@ def any_source_inactive(event_ids, user_id=None, character_id=None, conn=None):
 
 _MAX_PREVIOUS_USER_EVIDENCE_EVENTS = 2
 _MAX_PREVIOUS_USER_EVIDENCE_HOURS = 24
+_MAX_PREVIOUS_CONVENTION_CONTEXT_EVENTS = 6
 
 
 def get_previous_active_user_events(user_id, character_id, event_id, n=2,
@@ -427,6 +429,89 @@ def get_previous_active_user_events(user_id, character_id, event_id, n=2,
                 pass
         raise SourceValidityError(
             str(e) or 'previous canonical evidence lookup failed') from e
+    finally:
+        cur.close()
+        if owned:
+            database.close()
+
+    out = []
+    for prior_id, role, text, kind, extra, ts, subtitle in reversed(rows):
+        meta = {}
+        if extra:
+            try:
+                parsed = json.loads(extra)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except Exception:
+                pass
+        out.append({
+            'event_id': prior_id or '',
+            'role': _prompt_role(role),
+            'content': text or '',
+            'kind': kind or 'text',
+            'metadata': meta,
+            'timestamp': ts,
+            'subtitle': subtitle or '',
+        })
+    return out
+
+
+def get_previous_active_turn_events(user_id, character_id, event_id, n=6,
+                                    hours=24, conn=None):
+    """Return a small canonical turn window immediately before a user event.
+
+    This is intentionally narrower than general history retrieval.  It lets a
+    derived record verify a nearby user/assistant exchange (for example, a
+    user-confirmed reply symbol) without turning the hot-context cache into
+    factual evidence or allowing arbitrary older assistant text as a source.
+    """
+    event_id = _normalize_event_id(event_id)
+    if not event_id:
+        return []
+    n = max(1, min(int(n or _MAX_PREVIOUS_CONVENTION_CONTEXT_EVENTS),
+                   _MAX_PREVIOUS_CONVENTION_CONTEXT_EVENTS))
+    hours = max(1, min(int(hours or _MAX_PREVIOUS_USER_EVIDENCE_HOURS),
+                       _MAX_PREVIOUS_USER_EVIDENCE_HOURS))
+
+    database, owned = _borrow_conn(conn)
+    cur = database.cursor()
+    try:
+        cur.execute(
+            '''WITH anchor AS (
+                   SELECT id, created_at
+                   FROM chat_log
+                   WHERE user_id=%s AND chat_id=%s
+                     AND COALESCE(status, 'active') = 'active'
+                     AND role='user'
+                     AND COALESCE(NULLIF(event_id, ''), client_msg_id)=%s
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT 1
+               )
+               SELECT COALESCE(NULLIF(prior.event_id, ''), prior.client_msg_id),
+                      prior.role, prior.text, prior.kind, prior.extra,
+                      prior.created_at, prior.subtitle
+               FROM chat_log AS prior
+               CROSS JOIN anchor
+               WHERE prior.user_id=%s AND prior.chat_id=%s
+                 AND COALESCE(prior.status, 'active') = 'active'
+                 AND prior.created_at >= anchor.created_at
+                     - (%s * INTERVAL '1 hour')
+                 AND (prior.created_at, prior.id) < (anchor.created_at, anchor.id)
+               ORDER BY prior.created_at DESC, prior.id DESC
+               LIMIT %s''',
+            (user_id, character_id, event_id, user_id, character_id, hours, n),
+        )
+        rows = cur.fetchall()
+    except SourceValidityError:
+        raise
+    except Exception as e:
+        if owned:
+            try:
+                database.rollback()
+            except Exception:
+                pass
+        raise SourceValidityError(
+            str(e) or 'previous canonical turn lookup failed') from e
     finally:
         cur.close()
         if owned:
@@ -943,7 +1028,7 @@ def _ref_event_ids(refs):
 
 
 def invalidate_memories_for_deleted_event(event_id, user_id=None, character_id=None):
-    """If a derived memory loses all remaining active sources, mark it stale."""
+    """Invalidate exhausted derivations; convention evidence is conjunctive."""
     event_id = _normalize_event_id(event_id)
     if not event_id:
         return {'invalidated': 0, 'unlinked': 0}
@@ -963,6 +1048,22 @@ def invalidate_memories_for_deleted_event(event_id, user_id=None, character_id=N
         unlinked = cur.rowcount
 
         for memory_type, memory_id in mapped:
+            if memory_type == 'bond_memory':
+                # A communication convention needs both the user's explicit
+                # authorization and its cited payload event.  Unlike an
+                # ordinary multi-source summary, one deleted source leaves no
+                # complete convention evidence, so it must leave active recall
+                # immediately rather than waiting for every source to vanish.
+                cur.execute(
+                    '''UPDATE bond_memory
+                       SET recall_status='deleted'
+                       WHERE id=%s
+                         AND content LIKE %s
+                         AND COALESCE(recall_status, 'active') = 'active' ''',
+                    (memory_id, f'%{COMMUNICATION_CONVENTION_MARKER}%'))
+                if cur.rowcount:
+                    invalidated += cur.rowcount
+                    continue
             cur.execute(
                 '''SELECT COUNT(*) FROM memory_source_events
                    WHERE memory_type=%s AND memory_id=%s''',

@@ -40,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
-from utils import extract_json
+from utils import extract_json, is_emoji_only
 from character_relations import get_relations_text
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -858,6 +858,20 @@ def _too_similar(a: str, b: str) -> bool:
     if a == b:
         return True
 
+    # A convention's visible payload is its identity.  Its fixed semantic
+    # wrapper otherwise makes distinct symbols look nearly identical to this
+    # low-level duplicate guard, which would block an explicit replacement.
+    a_payload = _communication_convention_payload(a)
+    b_payload = _communication_convention_payload(b)
+    if a_payload and b_payload:
+        if a_payload != b_payload:
+            return False
+        # The same visible symbol can legitimately serve two separately
+        # user-grounded rules; an embedded slot distinguishes those records.
+        if (_clean_for_compare(_communication_convention_slot(a))
+                != _clean_for_compare(_communication_convention_slot(b))):
+            return False
+
     ca, cb = _clean_for_compare(a), _clean_for_compare(b)
     if not ca or not cb:
         return False
@@ -1175,6 +1189,57 @@ def resolve_bond_memories(user_id, character_id, kind, replaces,
     elif summary:
         print(f'[{user_id}] 跳过把已结束条件再写成 active bond:{summary[:40]}')
     return True, targets
+
+
+def invalidate_bond_memories(user_id, character_id, kind, memory_ids,
+                             *, reason='invalid'):
+    """Retire unsupported derived bonds without deleting their history or sources."""
+    ids = []
+    for memory_id in memory_ids or []:
+        try:
+            value = int(memory_id)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in ids:
+            ids.append(value)
+    if not ids:
+        return False, []
+
+    conn = get_conn()
+    cur = conn.cursor()
+    rows = []
+    try:
+        cur.execute(
+            '''SELECT id, content FROM bond_memory
+               WHERE user_id=%s AND character_id=%s AND kind=%s
+                 AND id = ANY(%s)
+                 AND COALESCE(recall_status, 'active') = 'active' ''',
+            (user_id, character_id, kind, ids),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return False, []
+        cur.execute(
+            '''UPDATE bond_memory
+               SET recall_status = 'deleted'
+               WHERE id = ANY(%s)
+                 AND COALESCE(recall_status, 'active') = 'active' ''',
+            ([memory_id for memory_id, _content in rows],),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+    for memory_id, content in rows:
+        print(
+            f'[{user_id}] bond #{memory_id} recall_status=deleted '
+            f'({reason}): {content[:40]}'
+        )
+    return True, rows
 
 
 def get_bond_memories(user_id, character_id, kind=None, limit=30):
@@ -1651,6 +1716,340 @@ def _valid_durable_bond(user_id, content, char_name, item,
     return evidence
 
 
+# A communication convention is still a normal ``bond_memory(kind='between')``.
+# The marker makes its semantic payload available to the existing recall scorer;
+# it does not introduce another memory store or relationship model.
+COMMUNICATION_CONVENTION_MARKER = '【交流约定】'
+_COMMUNICATION_CONVENTION_PAYLOAD_RE = re.compile(
+    rf'{re.escape(COMMUNICATION_CONVENTION_MARKER)}.*?「([^」]{{1,32}})」')
+_COMMUNICATION_CONVENTION_SLOT_RE = re.compile(
+    rf'{re.escape(COMMUNICATION_CONVENTION_MARKER)}(?:（槽位：([^）]{{1,32}})）)?')
+_CONVENTION_SET_CUE_RE = re.compile(
+    r'(约定|约好|说好|(?:当|作|用).{0,8}(暗号|信号)|'
+    r'(我们|咱们).{0,12}(暗号|信号|专属).{0,12}(是|用|回|回复)|'
+    r'固定.{0,8}(回|回复|符号|表情|用)|'
+    r'以后.{0,12}(回|回复|用|发)|记住.{0,12}(回|回复|符号|这个)|'
+    r'約束|from now on|set\s+(?:a\s+)?(?:symbol|signal))', re.I)
+_CONVENTION_REPLACE_CUE_RE = re.compile(
+    r'(改成|换成|改用|换用|替换|从.{0,16}(改|换)|変更|change(?:d)?\s+to)', re.I)
+_CONVENTION_REVOKE_CUE_RE = re.compile(
+    r'(取消|撤销|作废|不算|不要再用|别再用|不再(用|算)|废除|やめ|'
+    r'revoke|cancel)', re.I)
+_CONVENTION_SET_NEGATION_RE = re.compile(
+    r'(?:不(?:是|算).{0,12}(?:约定|约好|说好|暗号|信号|专属|固定|规则)|'
+    r'(?:别|不要|不用).{0,12}(?:记|记住|约定|当作.{0,4}约定|这个|它)|'
+    r'(?:这|这个).{0,8}(?:不是|不算).{0,6}(?:约定|暗号|规则))', re.I)
+
+
+def _normalize_convention_symbol(raw):
+    """Accept a short visible symbol payload without naming any one emoji."""
+    if not isinstance(raw, str):
+        return ''
+    symbol = raw.strip()
+    if not symbol or len(symbol) > 32 or any(ch in symbol for ch in '\r\n「」'):
+        return ''
+    if is_emoji_only(symbol):
+        return symbol
+    has_symbol = False
+    for char in symbol:
+        category = unicodedata.category(char)
+        codepoint = ord(char)
+        if category.startswith(('S', 'P')):
+            has_symbol = True
+            continue
+        if category in ('Mn', 'Me', 'Sk') or codepoint in (0x200D, 0xFE0E, 0xFE0F):
+            continue
+        return ''
+    return symbol if has_symbol else ''
+
+
+def _normalize_convention_slot(raw):
+    """Keep a short, user-grounded rule label without adding a schema column."""
+    if not isinstance(raw, str):
+        return ''
+    slot = re.sub(r'\s+', ' ', unicodedata.normalize('NFKC', raw).strip())
+    if (not slot or len(slot) > 32
+            or any(ch in slot for ch in '\r\n【】（）「」')):
+        return ''
+    return slot if any(ch.isalnum() for ch in slot) else ''
+
+
+def _communication_convention_content(symbol, slot=''):
+    slot = _normalize_convention_slot(slot)
+    slot_label = f'（槽位：{slot}）' if slot else ''
+    return (
+        f'我和她的{COMMUNICATION_CONVENTION_MARKER}{slot_label}：在私聊中，「{symbol}」是我们'
+        '约定好的专属交流回复符号'
+    )
+
+
+def _communication_convention_payload(content):
+    match = _COMMUNICATION_CONVENTION_PAYLOAD_RE.search(str(content or ''))
+    return match.group(1) if match else ''
+
+
+def _communication_convention_slot(content):
+    match = _COMMUNICATION_CONVENTION_SLOT_RE.search(str(content or ''))
+    return _normalize_convention_slot(match.group(1) if match else '')
+
+
+def _is_communication_convention(content):
+    return COMMUNICATION_CONVENTION_MARKER in str(content or '')
+
+
+def _convention_event_map(*event_groups):
+    events = {}
+    for group in event_groups:
+        for event in group or []:
+            if not isinstance(event, dict):
+                continue
+            event_id = str(event.get('event_id') or '').strip()
+            if event_id and event.get('content'):
+                events[event_id] = event
+    return events
+
+
+def _valid_convention_user_evidence(user_id, item, canonical_user_events,
+                                    primary_event_id):
+    candidate = {
+        'evidence_quote': item.get('user_evidence_quote'),
+        'evidence_event_ids': item.get('user_evidence_event_ids'),
+    }
+    return _has_faithful_evidence(
+        user_id, candidate, canonical_user_events,
+        'communication_convention', primary_event_id)
+
+
+def _explicit_convention_action(action, evidence):
+    text = ''.join(str(event.get('content') or '') for event in evidence['events'])
+    if action == 'set':
+        return (not _CONVENTION_SET_NEGATION_RE.search(text)
+                and bool(_CONVENTION_SET_CUE_RE.search(text)))
+    if action == 'replace':
+        return bool(_CONVENTION_REPLACE_CUE_RE.search(text))
+    if action == 'revoke':
+        return bool(_CONVENTION_REVOKE_CUE_RE.search(text))
+    return False
+
+
+def _convention_symbol_source(item, symbol, event_map, user_evidence):
+    event_id = str(item.get('symbol_event_id') or '').strip()
+    quote = str(item.get('symbol_evidence_quote') or '').strip()
+    event = event_map.get(event_id)
+    if not event or not quote:
+        return None
+    content = str(event.get('content') or '')
+    if quote not in content or symbol not in content:
+        return None
+    role = str(event.get('role') or '')
+    if role == 'user' and event_id not in user_evidence['event_ids']:
+        return None
+    if role not in ('user', 'assistant'):
+        return None
+    return event_id
+
+
+def _convention_slot_is_grounded(slot, user_evidence):
+    """A candidate slot is metadata only when its wording is in user evidence."""
+    slot_key = _compact_evidence(slot)
+    if len(slot_key) < 2:
+        return False
+    evidence_text = ''.join(
+        str(event.get('content') or '') for event in user_evidence['events'])
+    return slot_key in _compact_evidence(evidence_text)
+
+
+def _convention_replacement_targets(item, existing_bond, user_evidence, slot=''):
+    """Resolve one explicitly identified active convention, never a vague batch."""
+    requested = item.get('replaces')
+    if not isinstance(requested, list) or len(requested) != 1:
+        return []
+    active = [
+        row[1] for row in existing_bond or []
+        if len(row) > 1 and _is_communication_convention(row[1])
+    ]
+    want = requested[0]
+    if not isinstance(want, str) or not want.strip():
+        return []
+    matches = [
+        content for content in active
+        if _clean_for_compare(want) == _clean_for_compare(content)
+    ]
+    if len(matches) != 1:
+        return []
+
+    target = matches[0]
+    target_slot = _communication_convention_slot(target)
+    if (slot and target_slot
+            and _clean_for_compare(slot) != _clean_for_compare(target_slot)):
+        return []
+
+    evidence_text = _compact_evidence(''.join(
+        str(event.get('content') or '') for event in user_evidence['events']))
+    payload = _communication_convention_payload(target)
+    mentions_payload = bool(
+        payload and _compact_evidence(payload) in evidence_text)
+    mentions_slot = bool(
+        target_slot and _compact_evidence(target_slot) in evidence_text)
+    # A vague "that one" is only resolvable when there is exactly one active
+    # convention.  In a multi-convention state the extractor cannot choose.
+    if not (mentions_payload or mentions_slot or len(active) == 1):
+        return []
+    return [target]
+
+
+def _apply_communication_convention(
+        user_id, character_id, item, canonical_user_events, primary_event_id,
+        canonical_turn_events, convention_context_events, existing_bond,
+        *, dry_run=False, outcome=None):
+    """Persist a user-confirmed symbol convention through the existing bond path."""
+    outcome = outcome if isinstance(outcome, dict) else {}
+
+    def reject(reason, message):
+        outcome.update({'status': 'rejected', 'reason': reason})
+        print(f'[{user_id}] communication convention rejected: {message}')
+        return False
+
+    if not isinstance(item, dict):
+        return reject('invalid_candidate', 'invalid candidate')
+    action = str(item.get('action') or '').strip().lower()
+    if action not in ('set', 'replace', 'revoke'):
+        return reject('invalid_action', 'invalid action')
+    user_evidence = _valid_convention_user_evidence(
+        user_id, item, canonical_user_events, primary_event_id)
+    if not user_evidence or not _explicit_convention_action(action, user_evidence):
+        return reject('no_explicit_user_action', 'no explicit user action')
+
+    slot = _normalize_convention_slot(item.get('slot'))
+    if item.get('slot') is not None and not slot:
+        return reject('invalid_slot', 'invalid slot')
+    if slot and not _convention_slot_is_grounded(slot, user_evidence):
+        return reject('ungrounded_slot', 'ungrounded slot')
+
+    symbol = ''
+    source_ids = list(user_evidence['event_ids'])
+    if action != 'revoke':
+        symbol = _normalize_convention_symbol(item.get('symbol'))
+        event_map = _convention_event_map(
+            convention_context_events, canonical_turn_events)
+        symbol_event_id = _convention_symbol_source(
+            item, symbol, event_map, user_evidence) if symbol else None
+        if not symbol_event_id:
+            return reject('unverified_symbol_payload', 'unverified symbol payload')
+        if symbol_event_id not in source_ids:
+            source_ids.append(symbol_event_id)
+
+    targets = []
+    active_conventions = [
+        row[1] for row in existing_bond or []
+        if len(row) > 1 and _is_communication_convention(row[1])
+    ]
+    content = _communication_convention_content(symbol, slot) if symbol else ''
+    if action == 'set' and symbol:
+        already_active = any(
+            _clean_for_compare(existing) == _clean_for_compare(content)
+            for existing in active_conventions)
+        if not already_active and active_conventions and not slot:
+            return reject('slot_required_for_second_convention',
+                          'slot required for a second convention')
+        if (not already_active and slot and any(
+                _clean_for_compare(slot)
+                == _clean_for_compare(_communication_convention_slot(existing))
+                for existing in active_conventions
+                if _communication_convention_slot(existing))):
+            return reject('replacement_target_required',
+                          'replacement target required')
+    if action in ('replace', 'revoke'):
+        targets = _convention_replacement_targets(
+            item, existing_bond, user_evidence, slot)
+        if not targets:
+            return reject('no_exact_active_target', 'no exact active target')
+        if action == 'replace' and not slot:
+            # The target has already been resolved deterministically (by its
+            # payload/slot or because it is the sole active convention).  Keep
+            # its stored, previously user-grounded slot instead of asking the
+            # extractor to recreate it from a vague current reference.
+            slot = _communication_convention_slot(targets[0])
+            content = _communication_convention_content(symbol, slot)
+
+    try:
+        import raw_events
+        if source_ids and not raw_events.sources_are_active(
+                source_ids, user_id, character_id):
+            return reject('source_deleted', 'source deleted')
+    except Exception as e:
+        return reject('source_validity_unknown', f'source check failed:{e}')
+
+    already_active = bool(content) and any(
+        _clean_for_compare(row[1]) == _clean_for_compare(content)
+        for row in existing_bond or [] if len(row) > 1
+    )
+    if action == 'replace' and targets and _clean_for_compare(content) == _clean_for_compare(targets[0]):
+        # Replaying an already-applied replacement must not retire its only
+        # active row merely because the new payload equals the target payload.
+        already_active = True
+        targets = []
+
+    status = {
+        'set': 'unchanged' if already_active else 'would_add',
+        'replace': 'unchanged' if not targets else 'would_replace',
+        'revoke': 'would_revoke',
+    }[action]
+    outcome.update({
+        'status': status,
+        'action': action,
+        'symbol': symbol or None,
+        'slot': slot or None,
+        'content': content or None,
+        'source_event_ids': list(source_ids),
+        'target_contents': list(targets),
+    })
+    if dry_run:
+        print(f'[{user_id}] communication convention dry-run: {status}')
+        return True
+
+    if status == 'unchanged':
+        print(f'[{user_id}] communication convention unchanged')
+        return True
+
+    if action != 'revoke':
+        saved = already_active or save_bond_memory(
+            user_id, character_id, 'between', content,
+            source_event_ids=source_ids,
+            atomic_sources=True,
+        )
+        if not saved:
+            # Retry after a crash between saving the new record and retiring the
+            # old one: an already-active identical record is enough to finish.
+            try:
+                saved = any(
+                    _clean_for_compare(row[1]) == _clean_for_compare(content)
+                    for row in get_bond_memories(user_id, character_id, 'between', limit=100)
+                )
+            except Exception:
+                saved = False
+        if not saved:
+            print(f'[{user_id}] communication convention was not saved')
+            return False
+
+    if targets:
+        reason = 'cancelled' if action == 'revoke' else 'superseded'
+        resolved, rows = resolve_bond_memories(
+            user_id, character_id, 'between', targets,
+            reason=reason, exact=True)
+        if not resolved:
+            raise ValueError('communication_convention_resolution_failed')
+        try:
+            import raw_events
+            for memory_id, _content in rows:
+                raw_events.link_memory_sources('bond_memory', memory_id, source_ids)
+        except Exception as e:
+            print(f'[{user_id}] communication convention revision provenance skipped:{e}')
+
+    print(f'[{user_id}] communication convention {action}: {symbol or "revoked"}')
+    return True
+
+
 def _valid_stable_character_self_claim(user_id, content, item, assistant_text):
     """Keep only explicit, general self-model evidence; never a one-turn excuse."""
     if not _looks_like_character_self_claim(content):
@@ -1676,6 +2075,7 @@ def _canonical_turn_sources(user_id, character_id, source_event_ids,
         'assistant_is_canonical': False,
         'canonical_user_events': [],
         'canonical_turn_events': [],
+        'convention_context_events': [],
     }
     if not source_event_ids:
         result['canonical_user_events'] = [
@@ -1753,6 +2153,18 @@ def _canonical_turn_sources(user_id, character_id, source_event_ids,
         known_ids.add(event_id)
     canonical_users = prior + canonical_users
     result['canonical_user_events'] = canonical_users
+    nearby_getter = getattr(raw_events, 'get_previous_active_turn_events', None)
+    if callable(nearby_getter):
+        try:
+            result['convention_context_events'] = nearby_getter(
+                user_id, character_id, primary_event_id, n=6,
+                hours=_CANONICAL_USER_EVIDENCE_HOURS,
+            )
+        except Exception as e:
+            # This optional context must never weaken ordinary fact extraction.
+            # A convention candidate simply cannot use neighbouring dialogue
+            # until the canonical reader is available again.
+            print(f'[{user_id}] convention context unavailable:{e}')
     return result
 
 
@@ -2068,7 +2480,10 @@ def _norm_category(cat: str) -> str:
 def extract_and_save_memory(user_id, user_text, assistant_text,
                             character_id=DEFAULT_CHARACTER_ID,
                             temporal_context=None, source_event_id=None,
-                            source_event_ids=None):
+                            source_event_ids=None, *,
+                            convention_only=False, dry_run=False,
+                            backfill_result=None, parsed_override=None,
+                            processor_type=None, processor_version=None):
     """一次 Haiku 调用同时提取三类记忆和一类 self-claim 证据：
     A user_fact —— 她透露的关于她自己的新事实 → long_memory(shared)
     B bond      —— 她和这个角色之间发生的事/约定/共同经历 → bond_memory(between)
@@ -2085,30 +2500,40 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
             source_ids.insert(0, val)
     primary_event_id = source_ids[0] if source_ids else None
     required_source_ids = [primary_event_id] if primary_event_id else []
+    if convention_only and not primary_event_id:
+        if isinstance(backfill_result, dict):
+            backfill_result.update({
+                'status': 'rejected',
+                'reason': 'canonical_primary_event_required',
+            })
+        print(f'[{user_id}] convention-only extraction needs a canonical primary event')
+        return False
 
-    processor = None
-    processor_version = None
+    processor_name = None
+    processor_revision = None
     source_key = None
     proc_id = None
 
     def _finish_extract(status, error=None):
-        if not proc_id or not processor:
+        if dry_run or not proc_id or not processor_name:
             return
         try:
             import raw_events
             raw_events.finish_processor(
-                proc_id, processor, processor_version, status, last_error=error)
+                proc_id, processor_name, processor_revision, status, last_error=error)
             if status == 'succeeded' and source_key:
                 raw_events.record_derived(
-                    processor, processor_version, source_key,
-                    'memory_extractor', None)
+                    processor_name, processor_revision, source_key,
+                    ('communication_convention_backfill'
+                     if convention_only else 'memory_extractor'), None)
         except Exception:
             pass
 
     try:
         import raw_events
-        processor = raw_events.PROCESSOR_MEMORY_EXTRACTOR
-        processor_version = raw_events.PROCESSOR_MEMORY_EXTRACTOR_VERSION
+        processor_name = processor_type or raw_events.PROCESSOR_MEMORY_EXTRACTOR
+        processor_revision = (
+            processor_version or raw_events.PROCESSOR_MEMORY_EXTRACTOR_VERSION)
         source_key = raw_events.derivation_source_key(source_ids)
         proc_id = source_key or primary_event_id
         if required_source_ids:
@@ -2122,15 +2547,16 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
                 print(f'[{user_id}] skip extract: source validity unknown:{e}')
                 _finish_extract('failed', 'source_validity_unknown')
                 return False
-        if source_key and raw_events.already_derived(
-                processor, processor_version, source_key):
-            print(f'[{user_id}] skip extract: already derived {source_key}')
-            return True
-        if proc_id:
-            state = raw_events.claim_processor(
-                proc_id, processor, processor_version)
-            if state == 'already_succeeded':
+        if not dry_run:
+            if source_key and raw_events.already_derived(
+                    processor_name, processor_revision, source_key):
+                print(f'[{user_id}] skip extract: already derived {source_key}')
                 return True
+            if proc_id:
+                state = raw_events.claim_processor(
+                    proc_id, processor_name, processor_revision)
+                if state == 'already_succeeded':
+                    return True
     except Exception as e:
         try:
             import raw_events as _raw_events
@@ -2157,6 +2583,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
     assistant_text = source_view['assistant_text']
     canonical_user_events = source_view['canonical_user_events']
     canonical_turn_events = source_view['canonical_turn_events']
+    convention_context_events = source_view['convention_context_events']
     canonical_user_evidence = _canonical_user_evidence_prompt(canonical_user_events)
     user_source_label = (
         'canonical chat_log user event(s)' if source_view['user_is_canonical']
@@ -2211,6 +2638,17 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
             speaker = '她说' if message.get('role') == 'user' else f'{char_name}回复'
             recent_lines.append(f'{speaker}：{message.get("content") or ""}')
         recent_text = '\n'.join(recent_lines) if recent_lines else '（暂无）'
+        convention_context_lines = []
+        for event in convention_context_events:
+            event_id = str(event.get('event_id') or '').strip()
+            content = str(event.get('content') or '').strip()
+            if not event_id or not content:
+                continue
+            speaker = '她说' if event.get('role') == 'user' else f'{char_name}回复'
+            convention_context_lines.append(
+                f'- [event_id:{event_id}] {speaker}：{content[:400]}')
+        convention_context_text = (
+            '\n'.join(convention_context_lines) if convention_context_lines else '（暂无）')
 
         # ★ 该角色世界里的重要人物 —— 让 Haiku 知道名字对应的身份,别把"杰"猜成学生
         relations_block = get_relations_text(character_id)
@@ -2227,7 +2665,7 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
         # ★ 记忆提取:纯中文结构化任务,走 MODEL_CN_AUX(默认 deepseek-chat 便宜好用)
         from ai_client import create_chat
         from config import MODEL_CN_AUX
-        prompt_content = f'''你是记忆整理助手。从下面这轮对话中提取值得长期记住的信息，分成四类。
+        prompt_content = f'''你是记忆整理助手。从下面这轮对话中提取值得长期记住的信息，分成五类。
 
 【对话双方】
 - "她" = 用户
@@ -2247,6 +2685,10 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
 【最近对话上下文】
 （仅包含当前 turn 之前最近约 3 轮对话）
 {recent_text}
+
+【紧邻 canonical 对话上下文——只用于交流约定字段】
+（当前用户事件前至多 6 条真实 Raw Event；可验证谁实际发过某个符号，不能给普通事实补证据）
+{convention_context_text}
 
 【上下文使用边界】
 1. 最近对话上下文可以用于解析当前 turn 的省略和指代，例如“这个”“那个”“明天拍给你看”“刚才那个”。
@@ -2275,8 +2717,10 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
    一次具体情境里的理由、否认、嘴硬或 roleplay 台词一律填 null。
 6. 已记录的事实或 bond 只能用于查重、merge、resolution；它们不能独自证明新的 user_fact/told/bond。
    对 bond_merge，可以在 current evidence 的锚定下保守压缩已存在且被 replaces 指向的旧片段，但不得丢失其中任何片段。
+7. communication_convention 是窄例外：只能记录用户明确建立、确认、修改或撤销的私聊交流规则。
+   角色事件只能证明符号 payload 确实发出过，不能单独建立规则；必须同时有当前用户事件的明确动作。
 
-【四类记忆/证据的定义——每类独立判断，可以同时有，也可以都没有】
+【五类记忆/证据的定义——每类独立判断，可以同时有，也可以都没有】
 A. user_fact：她透露的、关于她自己的新事实（生日/喜好/近况/经历等）。
    - 内容里【不许】出现角色名字，只写她自己的事。
    - 【只记她本人】：她在讲别人（朋友/同事/家人）的事时，不属于 user_fact，填 null。见通用规则第 9 条。
@@ -2298,6 +2742,14 @@ D. character_self_claim：{char_name}对"我是什么样的人/我为什么这�
    - 例："我就是这种性格"、"被人说想念就直接应一声是我的风格"、"我不擅长直接表达"。
    - 只有稳定、概括性的自我模型才可提取；单次反应、辩解、否认或 roleplay 一律 null。
    - content 用第一人称简短转述，evidence_quote 必须逐字摘自角色文本。
+E. communication_convention：双方明确约定的短符号/emoji 交流规则，存到已有的双方 bond，不是用户事实。
+    - 只有当前用户明确说在约定/确认/修改/撤销这种规则时才输出；普通提问、角色单独发 emoji、随手表情都填 null。
+    - action 只能是 set / replace / revoke。set 可以建立与旧规则不同的槽位；同一槽位更新必须用 replace，不能悄悄覆盖。
+    - slot 是可选的短规则名（如“专属回复”“固定反应”），必须逐字出现在当前用户 canonical evidence 中。已有其他 active 约定时，set 必须给出 slot；无法区分规则就填 null。
+    - replace/revoke 的 replaces 必须只列一条现有交流约定原文。已有多条时，当前用户原文必须直接提到旧 payload 或旧 slot；“刚才那个/这个”无法唯一确定时填 null。
+    - symbol 是不带解释的实际短 emoji/符号；它必须逐字出现在 symbol_event_id 指向的本轮或紧邻 canonical 事件里。
+   - user_evidence_quote / user_evidence_event_ids 必须来自用户 canonical evidence，且必须包含当前 user event。
+   - symbol_evidence_quote 必须是 symbol_event_id 对应事件的逐字片段。没有完整证据就填 null。
 
 【通用规则】
 
@@ -2482,9 +2934,9 @@ D. character_self_claim：{char_name}对"我是什么样的人/我为什么这�
     → 未满足的分支不能继续当 future plan。reason 填 cancelled 或 superseded。
 
 【输出格式——严格 JSON，只输出一行】
-{{"user_fact":{{"content":"她XXX","category":"喜好","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"bond":{{"content":"我和她XXX 或 她对我XXX","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"told":{{"content":"她说过XXX","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"character_self_claim":{{"content":"我一向XXX","evidence_quote":"角色原文连续片段"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"bond_resolution":{{"replaces":["旧 bond 原文"],"content":null,"reason":"completed","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}}}}
+{{"user_fact":{{"content":"她XXX","category":"喜好","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"bond":{{"content":"我和她XXX 或 她对我XXX","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"told":{{"content":"她说过XXX","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"character_self_claim":{{"content":"我一向XXX","evidence_quote":"角色原文连续片段"}},"bond_merge":{{"replaces":["旧记忆原文"],"content":"合并后的完整版","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"bond_resolution":{{"replaces":["旧 bond 原文"],"content":null,"reason":"completed","evidence_quote":"用户原文连续片段","evidence_event_ids":["当前用户event_id"]}},"communication_convention":{{"action":"set|replace|revoke","slot":"用户原文中的短规则名或null","symbol":"emoji/符号或null","user_evidence_quote":"用户原文连续片段","user_evidence_event_ids":["当前用户event_id"],"symbol_event_id":"含 symbol 的 canonical event_id","symbol_evidence_quote":"该事件中的原文 symbol","replaces":["现有交流约定原文"]}}}}
 没有的类填 null，例如全都没有：
-{{"user_fact":null,"bond":null,"told":null,"character_self_claim":null,"bond_merge":null,"bond_resolution":null}}
+{{"user_fact":null,"bond":null,"told":null,"character_self_claim":null,"bond_merge":null,"bond_resolution":null,"communication_convention":null}}
 category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
         # Extend the existing extractor, not a second relationship decision LLM.
         # Only explicit already-observed changes qualify; never infer yes/no.
@@ -2521,39 +2973,49 @@ actor=user，仅引用当前 canonical user event；不得把用户答案写成�
             {'event_id': event['event_id'], 'role': event['role']}
             for event in canonical_turn_events], ensure_ascii=False)
         prompt_content += '\n【现有问题及结果（只供匹配/查重）】\n' + json.dumps(question_state, ensure_ascii=False, default=str)
-        raw, _usage = create_chat(
-            model=MODEL_CN_AUX, max_tokens=2000,
-            messages=[{'role': 'user', 'content': prompt_content}],
-        )
-        raw = raw.strip()
-        print(f'[{user_id}][{character_id}] 提取器({MODEL_CN_AUX}) 完整输出: {raw}')
+        if parsed_override is None:
+            raw, _usage = create_chat(
+                model=MODEL_CN_AUX, max_tokens=2000,
+                messages=[{'role': 'user', 'content': prompt_content}],
+            )
+            raw = raw.strip()
+            print(f'[{user_id}][{character_id}] 提取器({MODEL_CN_AUX}) 完整输出: {raw}')
 
-        parsed = extract_json(raw)
+            parsed = extract_json(raw)
 
-        # ★ 解析失败重试一次:一次抽风就丢掉整轮记忆太亏。
-        #   重试时加一句硬约束,压掉推理模型的思考冲动。
-        if not parsed:
-            print(f'[{user_id}] ⚠️ 首次解析失败,重试一次...')
-            try:
-                raw2, _u2 = create_chat(
-                    model=MODEL_CN_AUX, max_tokens=2000,
-                    messages=[{
-                        'role': 'user',
-                        'content': prompt_content +
-                        '\n\n【⚠️ 重要】不要输出任何思考过程、解释、markdown 代码块标记。'
-                        '直接输出那一行 JSON,第一个字符必须是 {,最后一个字符必须是 }。'
-                    }],
-                )
-                raw2 = raw2.strip()
-                print(f'[{user_id}] 重试输出: {raw2}')
-                parsed = extract_json(raw2)
-            except Exception as _re:
-                print(f'[{user_id}] 重试也失败:{_re}')
+            # ★ 解析失败重试一次:一次抽风就丢掉整轮记忆太亏。
+            #   重试时加一句硬约束,压掉推理模型的思考冲动。
+            if not parsed:
+                print(f'[{user_id}] ⚠️ 首次解析失败,重试一次...')
+                try:
+                    raw2, _u2 = create_chat(
+                        model=MODEL_CN_AUX, max_tokens=2000,
+                        messages=[{
+                            'role': 'user',
+                            'content': prompt_content +
+                            '\n\n【⚠️ 重要】不要输出任何思考过程、解释、markdown 代码块标记。'
+                            '直接输出那一行 JSON,第一个字符必须是 {,最后一个字符必须是 }。'
+                        }],
+                    )
+                    raw2 = raw2.strip()
+                    print(f'[{user_id}] 重试输出: {raw2}')
+                    parsed = extract_json(raw2)
+                except Exception as _re:
+                    print(f'[{user_id}] 重试也失败:{_re}')
+
+        else:
+            raw = json.dumps(parsed_override, ensure_ascii=False)
+            parsed = extract_json(raw)
 
         if not parsed:
             print(f'[{user_id}] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢（纠错删除已取消，旧记忆保留）: {raw[:200]}')
             _finish_extract('failed', 'unparsed')
             return False
+
+        if isinstance(backfill_result, dict):
+            backfill_result['candidate'] = (
+                parsed.get('communication_convention')
+                if isinstance(parsed, dict) else None)
 
         if required_source_ids:
             try:
@@ -2567,6 +3029,28 @@ actor=user，仅引用当前 canonical user event；不得把用户答案写成�
                 print(f'[{user_id}] extract pre-commit source check failed:{e}')
                 _finish_extract('failed', 'source_validity_unknown')
                 return False
+
+        if convention_only:
+            decision = {}
+            convention = parsed.get('communication_convention')
+            if isinstance(convention, dict):
+                _apply_communication_convention(
+                    user_id, character_id, convention,
+                    canonical_user_events, primary_event_id,
+                    canonical_turn_events, convention_context_events,
+                    existing_bond, dry_run=dry_run, outcome=decision,
+                )
+            else:
+                decision.update({'status': 'no_candidate'})
+            if isinstance(backfill_result, dict):
+                backfill_result.update({
+                    'source_event_id': primary_event_id,
+                    'source_key': source_key,
+                    'dry_run': bool(dry_run),
+                    'decision': decision,
+                })
+            _finish_extract('succeeded')
+            return True
 
         # 提取 JSON 成功后再删旧记忆，避免先删后存失败导致两边都空
         if pending_corrections:
@@ -2616,6 +3100,15 @@ actor=user，仅引用当前 canonical user event；不得把用户答案写成�
                     if lifecycle.get('consolidated'):
                         print(f'[{user_id}] ✅ 状态候选已巩固：{lifecycle["consolidated"]["content"]}')
                     print(f'[{user_id}] 🧠 生命周期记忆 [{cls.get("memory_kind")}/{cls.get("reason")}]: {content}')
+
+        convention = parsed.get('communication_convention')
+        if isinstance(convention, dict):
+            _apply_communication_convention(
+                user_id, character_id, convention,
+                canonical_user_events, primary_event_id,
+                canonical_turn_events, convention_context_events,
+                existing_bond,
+            )
 
         resolved_texts = []
         br = parsed.get('bond_resolution')

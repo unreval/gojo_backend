@@ -25,6 +25,7 @@ def empty_payload(**overrides):
         'character_self_claim': None,
         'bond_merge': None,
         'bond_resolution': None,
+        'communication_convention': None,
     }
     payload.update(overrides)
     return payload
@@ -34,12 +35,15 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
     def extract(self, payload, user_text, assistant_text, *, source_event_id=None,
                 canonical_events=None, canonical_context_events=None,
                 source_event_ids=None, merge_result=None, source_active=True,
-                canonical_error=None):
+                canonical_error=None, convention_context_events=None,
+                existing_bonds=None, resolve_result=None,
+                **extract_kwargs):
         captured = {'prompt': ''}
         chat_calls = []
         bonds = []
         claims = []
         facts = []
+        resolutions = []
 
         def fake_chat(*_args, **kwargs):
             chat_calls.append(kwargs)
@@ -64,7 +68,7 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
             stack.enter_context(patch.object(
                 user_memory, 'get_long_memory', return_value=[]))
             stack.enter_context(patch.object(
-                user_memory, 'get_bond_memories', return_value=[]))
+                user_memory, 'get_bond_memories', return_value=existing_bonds or []))
             stack.enter_context(patch.object(
                 user_memory, 'get_short_memory_for_prompt', return_value=[]))
             stack.enter_context(patch.object(
@@ -81,6 +85,12 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
             merge = stack.enter_context(patch.object(
                 user_memory, 'merge_bond_memories',
                 return_value=merge_result if merge_result is not None else (True, 1)))
+            if resolve_result is not None:
+                def resolve_bond(*args, **kwargs):
+                    resolutions.append((args, kwargs))
+                    return resolve_result
+                stack.enter_context(patch.object(
+                    user_memory, 'resolve_bond_memories', side_effect=resolve_bond))
             stack.enter_context(patch('ai_client.create_chat', side_effect=fake_chat))
             stack.enter_context(patch(
                 'characters.get_character', return_value={'name': '五条'}))
@@ -94,14 +104,17 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
             stack.enter_context(patch('smart_recall.reinforce_mentioned_facts'))
             stack.enter_context(patch('cognitive_events.question_extraction_state', return_value=[]))
             if source_event_id:
+                active_kwargs = (
+                    {'side_effect': source_active}
+                    if callable(source_active) else {'return_value': source_active})
                 stack.enter_context(patch.object(
-                    raw_events, 'sources_are_active', return_value=source_active))
+                    raw_events, 'sources_are_active', **active_kwargs))
                 stack.enter_context(patch.object(
                     raw_events, 'already_derived', return_value=False))
-                stack.enter_context(patch.object(
+                claim = stack.enter_context(patch.object(
                     raw_events, 'claim_processor', return_value='claimed'))
                 finish = stack.enter_context(patch.object(raw_events, 'finish_processor'))
-                stack.enter_context(patch.object(raw_events, 'record_derived'))
+                record = stack.enter_context(patch.object(raw_events, 'record_derived'))
                 stack.enter_context(patch.object(
                     raw_events, 'get_active_events_by_ids',
                     side_effect=canonical_error
@@ -110,8 +123,16 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
                 stack.enter_context(patch.object(
                     raw_events, 'get_previous_active_user_events',
                     return_value=canonical_context_events or []))
+                stack.enter_context(patch.object(
+                    raw_events, 'get_previous_active_turn_events',
+                    return_value=convention_context_events or []))
+                link_sources = stack.enter_context(patch.object(
+                    raw_events, 'link_memory_sources', return_value=0))
             else:
                 finish = Mock()
+                link_sources = Mock()
+                claim = Mock()
+                record = Mock()
             ok = user_memory.extract_and_save_memory(
                 'u1', user_text, assistant_text, 'gojo',
                 source_event_id=source_event_id,
@@ -119,6 +140,7 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
                     source_event_ids if source_event_ids is not None
                     else [source_event_id] if source_event_id else None
                 ),
+                **extract_kwargs,
             )
         return {
             'ok': ok,
@@ -127,8 +149,12 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
             'claims': claims,
             'facts': facts,
             'merge_calls': merge.call_args_list,
+            'resolutions': resolutions,
+            'link_source_calls': link_sources.call_args_list,
             'chat_calls': chat_calls,
             'finish_calls': finish.call_args_list,
+            'claim_calls': claim.call_args_list,
+            'record_calls': record.call_args_list,
         }
 
     def test_real_roleplay_denial_fixture_does_not_persist(self):
@@ -182,6 +208,571 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
         )
         self.assertTrue(result['ok'])
         self.assertEqual(result['bonds'], [])
+
+    def test_confirmed_nearby_emoji_reply_becomes_semantic_convention(self):
+        result = self.extract(
+            empty_payload(communication_convention={
+                'action': 'set',
+                'symbol': '🦖',
+                'user_evidence_quote': '我们约定好了',
+                'user_evidence_event_ids': ['evt-ask', 'evt-confirm'],
+                'symbol_event_id': 'chat_reply:evt-ask',
+                'symbol_evidence_quote': '🦖',
+                'replaces': [],
+            }),
+            '对，就是这个，我们约定好了，以后你就这样回我。', '记住了。',
+            source_event_id='evt-confirm',
+            canonical_events=[
+                {
+                    'event_id': 'evt-confirm', 'role': 'user',
+                    'content': '对，就是这个，我们约定好了，以后你就这样回我。',
+                },
+                {
+                    'event_id': 'chat_reply:evt-confirm', 'role': 'assistant',
+                    'content': '记住了。',
+                },
+            ],
+            canonical_context_events=[{
+                'event_id': 'evt-ask', 'role': 'user', 'content': '那你该回我什么？',
+            }],
+            convention_context_events=[
+                {'event_id': 'evt-ask', 'role': 'user', 'content': '那你该回我什么？'},
+                {
+                    'event_id': 'chat_reply:evt-ask', 'role': 'assistant',
+                    'content': '🦖',
+                },
+            ],
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['bonds']), 1)
+        args, kwargs = result['bonds'][0]
+        self.assertEqual(args[2], 'between')
+        self.assertEqual(
+            args[3], user_memory._communication_convention_content('🦖'))
+        self.assertEqual(
+            kwargs['source_event_ids'],
+            ['evt-ask', 'evt-confirm', 'chat_reply:evt-ask'],
+        )
+        self.assertIn('[event_id:chat_reply:evt-ask]', result['prompt'])
+
+    def test_compound_emoji_can_be_a_convention_payload(self):
+        symbol = '🧑🏽‍💻'
+        user_text = f'我们约定好了，以后你就用{symbol}回我。'
+        result = self.extract(
+            empty_payload(communication_convention={
+                'action': 'set',
+                'symbol': symbol,
+                'user_evidence_quote': '我们约定好了',
+                'user_evidence_event_ids': ['evt-compound'],
+                'symbol_event_id': 'evt-compound',
+                'symbol_evidence_quote': symbol,
+                'replaces': [],
+            }),
+            user_text, '好。',
+            source_event_id='evt-compound',
+            canonical_events=[
+                {'event_id': 'evt-compound', 'role': 'user', 'content': user_text},
+                {
+                    'event_id': 'chat_reply:evt-compound', 'role': 'assistant',
+                    'content': '好。',
+                },
+            ],
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['bonds']), 1)
+        self.assertEqual(
+            result['bonds'][0][0][3],
+            user_memory._communication_convention_content(symbol),
+        )
+
+    def test_unrelated_emoji_reply_is_not_auto_promoted_to_convention(self):
+        result = self.extract(
+            empty_payload(communication_convention={
+                'action': 'set',
+                'symbol': '😒',
+                'user_evidence_quote': '今天天气怎么样',
+                'user_evidence_event_ids': ['evt-weather'],
+                'symbol_event_id': 'chat_reply:evt-weather',
+                'symbol_evidence_quote': '😒',
+                'replaces': [],
+            }),
+            '今天天气怎么样？', '😒',
+            source_event_id='evt-weather',
+            canonical_events=[
+                {'event_id': 'evt-weather', 'role': 'user', 'content': '今天天气怎么样？'},
+                {
+                    'event_id': 'chat_reply:evt-weather', 'role': 'assistant',
+                    'content': '😒',
+                },
+            ],
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['bonds'], [])
+
+    def test_hallucinated_convention_needs_positive_user_authorization(self):
+        cases = (
+            ('laugh', '哈哈哈'),
+            ('complaint', '你怎么又发这个'),
+            ('denial', '不是约定，别记这个'),
+            ('possessive', '这是我的专属表情'),
+        )
+        for label, user_text in cases:
+            with self.subTest(label=label):
+                event_id = f'evt-{label}'
+                result = self.extract(
+                    empty_payload(communication_convention={
+                        'action': 'set',
+                        'symbol': '🦖',
+                        'user_evidence_quote': user_text,
+                        'user_evidence_event_ids': [event_id],
+                        'symbol_event_id': 'reply-symbol',
+                        'symbol_evidence_quote': '🦖',
+                        'replaces': [],
+                    }),
+                    user_text, '知道了。',
+                    source_event_id=event_id,
+                    canonical_events=[{
+                        'event_id': event_id, 'role': 'user',
+                        'content': user_text,
+                    }],
+                    convention_context_events=[{
+                        'event_id': 'reply-symbol', 'role': 'assistant',
+                        'content': '🦖',
+                    }],
+                )
+
+                self.assertTrue(result['ok'])
+                self.assertEqual(result['bonds'], [])
+
+    def test_convention_rejects_deleted_symbol_source_before_save(self):
+        def sources_are_active(event_ids, *_args, **_kwargs):
+            return 'reply-symbol' not in event_ids
+
+        result = self.extract(
+            empty_payload(communication_convention={
+                'action': 'set',
+                'symbol': '🦖',
+                'user_evidence_quote': '我们约定好了',
+                'user_evidence_event_ids': ['evt-confirm'],
+                'symbol_event_id': 'reply-symbol',
+                'symbol_evidence_quote': '🦖',
+                'replaces': [],
+            }),
+            '我们约定好了，以后你就用🦖回我。', '知道了。',
+            source_event_id='evt-confirm',
+            source_active=sources_are_active,
+            canonical_events=[{
+                'event_id': 'evt-confirm', 'role': 'user',
+                'content': '我们约定好了，以后你就用🦖回我。',
+            }],
+            convention_context_events=[{
+                'event_id': 'reply-symbol', 'role': 'assistant',
+                'content': '🦖',
+            }],
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['bonds'], [])
+
+    def test_distinct_convention_slots_stay_independent(self):
+        reply_slot = '专属回复'
+        reaction_slot = '固定反应'
+        old_reply = user_memory._communication_convention_content('🦖', reply_slot)
+        reaction = user_memory._communication_convention_content('😒', reaction_slot)
+
+        first = self.extract(
+            empty_payload(communication_convention={
+                'action': 'set',
+                'slot': reply_slot,
+                'symbol': '🦖',
+                'user_evidence_quote': '专属回复',
+                'user_evidence_event_ids': ['evt-reply'],
+                'symbol_event_id': 'evt-reply',
+                'symbol_evidence_quote': '🦖',
+                'replaces': [],
+            }),
+            '🦖是我们的专属回复，我们约定好了。', '好。',
+            source_event_id='evt-reply',
+            canonical_events=[{
+                'event_id': 'evt-reply', 'role': 'user',
+                'content': '🦖是我们的专属回复，我们约定好了。',
+            }],
+        )
+        self.assertEqual(first['bonds'][0][0][3], old_reply)
+
+        second = self.extract(
+            empty_payload(communication_convention={
+                'action': 'set',
+                'slot': reaction_slot,
+                'symbol': '😒',
+                'user_evidence_quote': '固定反应',
+                'user_evidence_event_ids': ['evt-reaction'],
+                'symbol_event_id': 'evt-reaction',
+                'symbol_evidence_quote': '😒',
+                'replaces': [],
+            }),
+            '😒是另一种固定反应，我们说好了。', '好。',
+            source_event_id='evt-reaction',
+            canonical_events=[{
+                'event_id': 'evt-reaction', 'role': 'user',
+                'content': '😒是另一种固定反应，我们说好了。',
+            }],
+            existing_bonds=[(41, old_reply, None)],
+        )
+        self.assertEqual(second['bonds'][0][0][3], reaction)
+
+        current_reply = user_memory._communication_convention_content('🥺', reply_slot)
+        replacement = self.extract(
+            empty_payload(communication_convention={
+                'action': 'replace',
+                'slot': reply_slot,
+                'symbol': '🥺',
+                'user_evidence_quote': '专属回复',
+                'user_evidence_event_ids': ['evt-replace-slot'],
+                'symbol_event_id': 'evt-replace-slot',
+                'symbol_evidence_quote': '🥺',
+                'replaces': [old_reply],
+            }),
+            '把专属回复的🦖改成🥺，以后用🥺。', '好。',
+            source_event_id='evt-replace-slot',
+            canonical_events=[{
+                'event_id': 'evt-replace-slot', 'role': 'user',
+                'content': '把专属回复的🦖改成🥺，以后用🥺。',
+            }],
+            existing_bonds=[(41, old_reply, None), (42, reaction, None)],
+            resolve_result=(True, [(41, old_reply)]),
+        )
+        self.assertEqual(replacement['bonds'][0][0][3], current_reply)
+        self.assertEqual(replacement['resolutions'][0][0][3], [old_reply])
+        self.assertNotIn(reaction, replacement['resolutions'][0][0][3])
+
+        revoked = self.extract(
+            empty_payload(communication_convention={
+                'action': 'revoke',
+                'slot': reply_slot,
+                'symbol': None,
+                'user_evidence_quote': '专属回复',
+                'user_evidence_event_ids': ['evt-revoke-slot'],
+                'symbol_event_id': None,
+                'symbol_evidence_quote': None,
+                'replaces': [current_reply],
+            }),
+            '专属回复的🥺约定取消，不再用了。', '知道了。',
+            source_event_id='evt-revoke-slot',
+            canonical_events=[{
+                'event_id': 'evt-revoke-slot', 'role': 'user',
+                'content': '专属回复的🥺约定取消，不再用了。',
+            }],
+            existing_bonds=[(43, current_reply, None), (42, reaction, None)],
+            resolve_result=(True, [(43, current_reply)]),
+        )
+        self.assertEqual(revoked['bonds'], [])
+        self.assertEqual(revoked['resolutions'][0][0][3], [current_reply])
+        self.assertNotIn(reaction, revoked['resolutions'][0][0][3])
+
+    def test_ambiguous_multi_convention_reference_does_not_replace(self):
+        reply = user_memory._communication_convention_content('🦖', '专属回复')
+        reaction = user_memory._communication_convention_content('😒', '固定反应')
+        result = self.extract(
+            empty_payload(communication_convention={
+                'action': 'replace',
+                'symbol': '🥺',
+                'user_evidence_quote': '改成🥺',
+                'user_evidence_event_ids': ['evt-ambiguous'],
+                'symbol_event_id': 'evt-ambiguous',
+                'symbol_evidence_quote': '🥺',
+                'replaces': [reply],
+            }),
+            '把刚才那个改成🥺，以后用🥺。', '好。',
+            source_event_id='evt-ambiguous',
+            canonical_events=[{
+                'event_id': 'evt-ambiguous', 'role': 'user',
+                'content': '把刚才那个改成🥺，以后用🥺。',
+            }],
+            existing_bonds=[(51, reply, None), (52, reaction, None)],
+            resolve_result=(True, [(51, reply)]),
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['bonds'], [])
+        self.assertEqual(result['resolutions'], [])
+
+    def test_unique_convention_reference_inherits_its_verified_slot(self):
+        old_reply = user_memory._communication_convention_content('🦖', '专属回复')
+        current_reply = user_memory._communication_convention_content('🥺', '专属回复')
+        result = self.extract(
+            empty_payload(communication_convention={
+                'action': 'replace',
+                'symbol': '🥺',
+                'user_evidence_quote': '改成🥺',
+                'user_evidence_event_ids': ['evt-unique'],
+                'symbol_event_id': 'evt-unique',
+                'symbol_evidence_quote': '🥺',
+                'replaces': [old_reply],
+            }),
+            '把刚才那个改成🥺，以后用🥺。', '好。',
+            source_event_id='evt-unique',
+            canonical_events=[{
+                'event_id': 'evt-unique', 'role': 'user',
+                'content': '把刚才那个改成🥺，以后用🥺。',
+            }],
+            existing_bonds=[(61, old_reply, None)],
+            resolve_result=(True, [(61, old_reply)]),
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['bonds'][0][0][3], current_reply)
+        self.assertEqual(result['resolutions'][0][0][3], [old_reply])
+
+    def test_convention_replace_and_revoke_keep_the_existing_bond_lifecycle(self):
+        old = user_memory._communication_convention_content('🦖')
+        self.assertFalse(
+            user_memory._too_similar(
+                old, user_memory._communication_convention_content('😒')))
+        replacement = self.extract(
+            empty_payload(communication_convention={
+                'action': 'replace',
+                'symbol': '😒',
+                'user_evidence_quote': '改成😒',
+                'user_evidence_event_ids': ['evt-replace'],
+                'symbol_event_id': 'evt-replace',
+                'symbol_evidence_quote': '😒',
+                'replaces': [old],
+            }),
+            '把我们约定的🦖改成😒，以后就用😒。', '好。',
+            source_event_id='evt-replace',
+            canonical_events=[
+                {
+                    'event_id': 'evt-replace', 'role': 'user',
+                    'content': '把我们约定的🦖改成😒，以后就用😒。',
+                },
+                {
+                    'event_id': 'chat_reply:evt-replace', 'role': 'assistant',
+                    'content': '好。',
+                },
+            ],
+            existing_bonds=[(41, old, None)],
+            resolve_result=(True, [(41, old)]),
+        )
+
+        self.assertTrue(replacement['ok'])
+        self.assertEqual(
+            replacement['bonds'][0][0][3],
+            user_memory._communication_convention_content('😒'),
+        )
+        replace_args, replace_kwargs = replacement['resolutions'][0]
+        self.assertEqual(replace_args[3], [old])
+        self.assertEqual(replace_kwargs['reason'], 'superseded')
+        self.assertTrue(replace_kwargs['exact'])
+        self.assertEqual(
+            replacement['link_source_calls'][0].args,
+            ('bond_memory', 41, ['evt-replace']),
+        )
+
+        current = user_memory._communication_convention_content('😒')
+        revoked = self.extract(
+            empty_payload(communication_convention={
+                'action': 'revoke',
+                'symbol': None,
+                'user_evidence_quote': '约定取消',
+                'user_evidence_event_ids': ['evt-revoke'],
+                'symbol_event_id': None,
+                'symbol_evidence_quote': None,
+                'replaces': [current],
+            }),
+            '我们之前的符号约定取消，不再用了。', '知道了。',
+            source_event_id='evt-revoke',
+            canonical_events=[
+                {
+                    'event_id': 'evt-revoke', 'role': 'user',
+                    'content': '我们之前的符号约定取消，不再用了。',
+                },
+                {
+                    'event_id': 'chat_reply:evt-revoke', 'role': 'assistant',
+                    'content': '知道了。',
+                },
+            ],
+            existing_bonds=[(42, current, None)],
+            resolve_result=(True, [(42, current)]),
+        )
+
+        self.assertTrue(revoked['ok'])
+        self.assertEqual(revoked['bonds'], [])
+        revoke_args, revoke_kwargs = revoked['resolutions'][0]
+        self.assertEqual(revoke_args[3], [current])
+        self.assertEqual(revoke_kwargs['reason'], 'cancelled')
+        self.assertTrue(revoke_kwargs['exact'])
+        self.assertEqual(
+            revoked['link_source_calls'][0].args,
+            ('bond_memory', 42, ['evt-revoke']),
+        )
+
+    def test_convention_only_backfill_plans_then_applies_with_atomic_provenance(self):
+        symbol = '😒'
+        slot = '固定反应'
+        content = user_memory._communication_convention_content(symbol, slot)
+        user_text = f'{symbol}是我们的{slot}，我们约定好了，以后你就用{symbol}回我。'
+        candidate = {
+            'action': 'set',
+            'slot': slot,
+            'symbol': symbol,
+            'user_evidence_quote': '固定反应',
+            'user_evidence_event_ids': ['legacy-confirm'],
+            'symbol_event_id': 'legacy-confirm',
+            'symbol_evidence_quote': symbol,
+            'replaces': [],
+        }
+        plan = {}
+        planned = self.extract(
+            empty_payload(
+                user_fact={
+                    'content': '她喜欢寿司',
+                    'category': '喜好',
+                    'evidence_quote': '喜欢寿司',
+                },
+                communication_convention=candidate,
+            ),
+            user_text, '好。',
+            source_event_id='legacy-confirm',
+            canonical_events=[{
+                'event_id': 'legacy-confirm', 'role': 'user', 'content': user_text,
+            }],
+            convention_only=True,
+            dry_run=True,
+            backfill_result=plan,
+            processor_type='communication_convention_backfill',
+            processor_version='v1',
+        )
+
+        self.assertTrue(planned['ok'])
+        self.assertEqual(planned['bonds'], [])
+        self.assertEqual(planned['facts'], [])
+        self.assertEqual(planned['claim_calls'], [])
+        self.assertEqual(planned['record_calls'], [])
+        self.assertEqual(plan['candidate'], candidate)
+        self.assertEqual(plan['decision']['status'], 'would_add')
+        self.assertEqual(plan['decision']['source_event_ids'], ['legacy-confirm'])
+
+        applied_report = {}
+        applied = self.extract(
+            empty_payload(), user_text, '好。',
+            source_event_id='legacy-confirm',
+            canonical_events=[{
+                'event_id': 'legacy-confirm', 'role': 'user', 'content': user_text,
+            }],
+            convention_only=True,
+            backfill_result=applied_report,
+            parsed_override={'communication_convention': plan['candidate']},
+            processor_type='communication_convention_backfill',
+            processor_version='v1',
+        )
+
+        self.assertTrue(applied['ok'])
+        self.assertEqual(applied['chat_calls'], [])
+        self.assertEqual(len(applied['bonds']), 1)
+        args, kwargs = applied['bonds'][0]
+        self.assertEqual(args[3], content)
+        self.assertEqual(kwargs['source_event_ids'], ['legacy-confirm'])
+        self.assertTrue(kwargs['atomic_sources'])
+
+        replay_report = {}
+        replay = self.extract(
+            empty_payload(), user_text, '好。',
+            source_event_id='legacy-confirm',
+            canonical_events=[{
+                'event_id': 'legacy-confirm', 'role': 'user', 'content': user_text,
+            }],
+            existing_bonds=[(71, content, None)],
+            convention_only=True,
+            backfill_result=replay_report,
+            parsed_override={'communication_convention': plan['candidate']},
+            processor_type='communication_convention_backfill',
+            processor_version='v1',
+        )
+
+        self.assertTrue(replay['ok'])
+        self.assertEqual(replay['chat_calls'], [])
+        self.assertEqual(replay['bonds'], [])
+        self.assertEqual(replay_report['decision']['status'], 'unchanged')
+
+    def test_convention_only_backfill_does_not_replace_active_rule_from_assistant_only_reassignment(self):
+        old = user_memory._communication_convention_content('😒', '固定反应')
+        candidate = {
+            'action': 'set',
+            'slot': '固定反应',
+            'symbol': '🥺',
+            'user_evidence_quote': '你怎么又发这个',
+            'user_evidence_event_ids': ['assistant-reassign-user'],
+            'symbol_event_id': 'assistant-reassign',
+            'symbol_evidence_quote': '🥺',
+            'replaces': [],
+        }
+        report = {}
+        result = self.extract(
+            empty_payload(communication_convention=candidate),
+            '你怎么又发这个？', '🥺',
+            source_event_id='assistant-reassign-user',
+            canonical_events=[{
+                'event_id': 'assistant-reassign-user',
+                'role': 'user', 'content': '你怎么又发这个？',
+            }],
+            convention_context_events=[{
+                'event_id': 'assistant-reassign', 'role': 'assistant', 'content': '🥺',
+            }],
+            existing_bonds=[(72, old, None)],
+            convention_only=True,
+            dry_run=True,
+            backfill_result=report,
+            processor_type='communication_convention_backfill',
+            processor_version='v1',
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['bonds'], [])
+        self.assertEqual(result['resolutions'], [])
+        self.assertEqual(report['decision']['status'], 'rejected')
+        self.assertEqual(report['decision']['reason'], 'no_explicit_user_action')
+
+    def test_convention_only_backfill_supersedes_only_user_confirmed_target(self):
+        slot = '固定反应'
+        old = user_memory._communication_convention_content('😒', slot)
+        new = user_memory._communication_convention_content('🥺', slot)
+        user_text = f'把{slot}的😒改成🥺，以后用🥺。'
+        candidate = {
+            'action': 'replace',
+            'slot': slot,
+            'symbol': '🥺',
+            'user_evidence_quote': '固定反应',
+            'user_evidence_event_ids': ['confirmed-replace'],
+            'symbol_event_id': 'confirmed-replace',
+            'symbol_evidence_quote': '🥺',
+            'replaces': [old],
+        }
+        report = {}
+        result = self.extract(
+            empty_payload(), user_text, '好。',
+            source_event_id='confirmed-replace',
+            canonical_events=[{
+                'event_id': 'confirmed-replace', 'role': 'user', 'content': user_text,
+            }],
+            existing_bonds=[(73, old, None)],
+            resolve_result=(True, [(73, old)]),
+            convention_only=True,
+            backfill_result=report,
+            parsed_override={'communication_convention': candidate},
+            processor_type='communication_convention_backfill',
+            processor_version='v1',
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['bonds'][0][0][3], new)
+        self.assertTrue(result['bonds'][0][1]['atomic_sources'])
+        self.assertEqual(result['resolutions'][0][0][3], [old])
+        self.assertEqual(result['resolutions'][0][1]['reason'], 'superseded')
+        self.assertEqual(report['decision']['status'], 'would_replace')
 
     def test_semantic_rewrite_is_rejected_but_faithful_summary_saves(self):
         malformed = self.extract(

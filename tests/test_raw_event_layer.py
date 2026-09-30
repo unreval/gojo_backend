@@ -27,6 +27,7 @@ class LayerStore:
         self.derived = {}
         self.source_map = []
         self.long_memory = []
+        self.bond_memory = []
         self.lifecycle = []
         self.sql = []
 
@@ -288,6 +289,7 @@ class FakeCursor:
         if compact.startswith('WITH anchor AS'):
             (anchor_user_id, anchor_chat_id, anchor_event_id,
              prior_user_id, prior_chat_id, hours, limit) = params
+            user_only = "prior.role='user'" in compact
             anchors = [
                 row for row in self.store.chat_log
                 if row['user_id'] == anchor_user_id
@@ -305,7 +307,7 @@ class FakeCursor:
                 if row['user_id'] == prior_user_id
                 and row['chat_id'] == prior_chat_id
                 and row.get('status', 'active') == 'active'
-                and row['role'] == 'user'
+                and (not user_only or row['role'] == 'user')
                 and row['created_at'] >= cutoff
                 and (row['created_at'], row['id']) < (
                     anchor['created_at'], anchor['id'])
@@ -620,6 +622,18 @@ class FakeCursor:
                     self.rowcount = 1
             return
 
+        if compact.startswith('UPDATE bond_memory'):
+            row_id = params[0]
+            marker = params[1].strip('%') if len(params) > 1 else ''
+            for row in self.store.bond_memory:
+                if (row['id'] == row_id
+                        and row.get('recall_status', 'active') == 'active'
+                        and (not marker or marker in row.get('content', ''))):
+                    row['recall_status'] = 'deleted'
+                    self.rowcount = 1
+                    break
+            return
+
         if compact.startswith('UPDATE memory_lifecycle_items'):
             if "status = 'reactivated'" in compact:
                 _expires, user_id, character_id, topic_key = params[:4]
@@ -843,6 +857,26 @@ class RawEventLayerTests(unittest.TestCase):
         self.assertEqual(
             [event['event_id'] for event in events], ['plan', 'detail'])
 
+    def test_previous_turn_context_keeps_nearby_assistant_symbol(self):
+        now = datetime.now(timezone.utc)
+        self.append_user_event_at(
+            'u', 'gojo', 'ask', '那你该回我什么？', now - timedelta(minutes=2))
+        self.raw_events.append_raw_event(
+            'u', 'gojo', event_id='chat_reply:ask', role='assistant', content='🦖')
+        self.store.chat_log[-1]['created_at'] = now - timedelta(minutes=1)
+        self.append_user_event_at('u', 'gojo', 'confirm', '对，我们约定好了。', now)
+
+        events = self.raw_events.get_previous_active_turn_events(
+            'u', 'gojo', 'confirm')
+
+        self.assertEqual(
+            [(event['event_id'], event['role'], event['content']) for event in events],
+            [
+                ('ask', 'user', '那你该回我什么？'),
+                ('chat_reply:ask', 'assistant', '🦖'),
+            ],
+        )
+
     def test_voice_same_user_text_is_one_raw_event(self):
         self.user_memory.save_user_short_memory_once(
             'u', '语音一句', 'gojo', source_event_id='voice-1')
@@ -1047,6 +1081,27 @@ class RawEventLayerTests(unittest.TestCase):
             item for item in self.store.source_map if item[2] == 'src-b'
         ]
         self.assertEqual(len(leftover), 1)
+
+    def test_convention_is_invalidated_when_any_required_source_is_deleted(self):
+        convention = self.user_memory._communication_convention_content(
+            '🦖', '专属回复')
+        self.store.bond_memory.append({
+            'id': 77,
+            'content': convention,
+            'recall_status': 'active',
+        })
+        self.store.source_map.extend([
+            ('bond_memory', 77, 'convention-user'),
+            ('bond_memory', 77, 'convention-symbol'),
+        ])
+
+        result = self.raw_events.invalidate_memories_for_deleted_event(
+            'convention-symbol', 'u', 'gojo')
+
+        self.assertEqual(result['invalidated'], 1)
+        self.assertEqual(self.store.bond_memory[0]['recall_status'], 'deleted')
+        self.assertEqual(
+            self.store.source_map, [('bond_memory', 77, 'convention-user')])
 
     def test_migration_is_idempotent(self):
         self.user_memory.save_user_short_memory_once(

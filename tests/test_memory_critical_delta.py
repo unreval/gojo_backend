@@ -65,6 +65,7 @@ class CriticalBondDeltaTests(unittest.TestCase):
                 ('sources_are_active', sources_active), ('already_derived', False),
                 ('claim_processor', 'claimed'), ('get_active_events_by_ids', events),
                 ('get_previous_active_user_events', []),
+                ('get_previous_active_turn_events', []),
             ):
                 stack.enter_context(patch.object(raw_events, name, return_value=result))
             stack.enter_context(patch.object(raw_events, 'finish_processor'))

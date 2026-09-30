@@ -1,6 +1,7 @@
 """工具函数"""
 import json
 import re
+import unicodedata
 
 
 def _try_parse_json(text):
@@ -188,6 +189,53 @@ VISIBLE_CONTENT_RE = re.compile(
     r']'
 )
 _JSON_DEBRIS_KEYS = ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"')
+
+_EMOJI_RANGES = (
+    (0x1F000, 0x1FAFF),
+    (0x2600, 0x27BF),
+)
+_EMOJI_SINGLETONS = frozenset({
+    0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139,
+    0x3030, 0x303D, 0x3297, 0x3299,
+})
+_EMOJI_KEYCAP_RE = re.compile(r'[0-9#*]\ufe0f?\u20e3')
+
+
+def _is_emoji_codepoint(codepoint: int) -> bool:
+    return (
+        codepoint in _EMOJI_SINGLETONS
+        or any(start <= codepoint <= end for start, end in _EMOJI_RANGES)
+    )
+
+
+def _has_emoji_content(text: str) -> bool:
+    return bool(
+        _EMOJI_KEYCAP_RE.search(text)
+        or any(_is_emoji_codepoint(ord(ch)) for ch in text)
+    )
+
+
+def is_emoji_only(text) -> bool:
+    """Whether text is an emoji/pictograph reply with only separators around it."""
+    if text is None:
+        return False
+    s = str(text).strip()
+    if not s or not _has_emoji_content(s):
+        return False
+    s = _EMOJI_KEYCAP_RE.sub('', s)
+    for ch in s:
+        codepoint = ord(ch)
+        category = unicodedata.category(ch)
+        if _is_emoji_codepoint(codepoint):
+            continue
+        if codepoint in (0x200D, 0xFE0E, 0xFE0F):
+            continue
+        if 0xE0020 <= codepoint <= 0xE007F:
+            continue
+        if ch.isspace() or category.startswith('P') or category in ('Mn', 'Me'):
+            continue
+        return False
+    return True
 
 
 def has_visible_text(text) -> bool:

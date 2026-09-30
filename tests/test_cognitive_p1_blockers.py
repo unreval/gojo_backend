@@ -231,7 +231,8 @@ class OperationEvidenceTests(unittest.TestCase):
     def test_explicit_reply_link_cannot_be_overridden_by_deterministic_event_id(self):
         events = [memory_tests.EVENTS[0], dict(memory_tests.EVENTS[1], reply_to_event_id='wrong')]
         with patch('raw_events.get_active_events_by_ids', return_value=events), \
-                patch('raw_events.get_previous_active_user_events', return_value=[]):
+                patch('raw_events.get_previous_active_user_events', return_value=[]), \
+                patch('raw_events.get_previous_active_turn_events', return_value=[]):
             view = user_memory._canonical_turn_sources(
                 'u', 'gojo', ['u1', 'chat_reply:u1'], 'u1', 'copied user', 'copied assistant')
         self.assertEqual(len(view['canonical_turn_events']), 1)
