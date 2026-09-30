@@ -910,6 +910,20 @@ class SlowLoopWorkerTests(unittest.TestCase):
         self.assertEqual(output['cycle_summary']['confidence'], 'high')
         self.assertEqual(usage['input_tokens'], 1)
 
+    def test_distinct_json_objects_fail_closed_before_cognitive_write(self):
+        first = json.dumps(valid_output(), ensure_ascii=False)
+        second = json.dumps({**valid_output(), 'reflection_note': {
+            'content': 'different', 'evidence_refs': [27],
+        }}, ensure_ascii=False)
+        call_model = Mock(return_value=(first + '\n' + second, {}))
+
+        with self.assertRaisesRegex(
+                cognitive_output.SlowLoopOutputError,
+                'model_output_ambiguous_json'):
+            cognitive_worker.generate_cycle_output(
+                {'events': [{'event_id': 27}]}, create_chat_fn=call_model)
+        self.assertEqual(call_model.call_count, 2)
+
     def test_worker_claims_builds_calls_and_commits(self):
         with patch.object(cognitive_worker, 'maintain_scheduled_reflections'), \
              patch.object(cognitive_worker, 'maintain_pending_cycles'), \
@@ -948,6 +962,57 @@ class SlowLoopWorkerTests(unittest.TestCase):
             result = cognitive_worker.run_worker_once(now=NOW)
         self.assertEqual(result['status'], 'failed')
         self.assertIn('bad_schema', fail.call_args.args[1])
+        self.assertTrue(fail.call_args.kwargs['preserve_raw_evidence'])
+
+    def test_parser_schema_and_provider_failures_never_commit_cognition(self):
+        for response, usage in (
+            ('not-json', {}),
+            (json.dumps(valid_output()) + '\n{"metadata":true}', {}),
+            ('{}', {}),
+            (RuntimeError('provider_unavailable'), {}),
+            (json.dumps(valid_output()), {'stop_reason': 'max_tokens'}),
+            (json.dumps(valid_output()), {'stop_reason': 'refusal'}),
+        ):
+            with self.subTest(response_type=type(response).__name__, usage=usage):
+                call_model = (
+                    Mock(side_effect=response) if isinstance(response, Exception)
+                    else Mock(return_value=(response, usage))
+                )
+                with patch.object(cognitive_worker, 'maintain_scheduled_reflections'), \
+                     patch.object(cognitive_worker, 'maintain_pending_cycles'), \
+                     patch.object(cognitive_worker, 'claim_next_cycle', return_value={
+                         'status': 'running', 'cycle_id': 7,
+                     }), \
+                     patch.object(cognitive_worker, 'build_reasoning_context', return_value={
+                         'events': [{'event_id': 27}],
+                     }), \
+                     patch.object(cognitive_worker, 'commit_cycle_success') as commit, \
+                     patch.object(cognitive_worker, 'fail_cycle', return_value={
+                         'status': 'failed', 'triggers': [{'status': 'pending'}],
+                     }) as fail, \
+                     patch('builtins.print'):
+                    result = cognitive_worker.run_worker_once(
+                        create_chat_fn=call_model, now=NOW,
+                    )
+                self.assertEqual(result['status'], 'failed')
+                commit.assert_not_called()
+                fail.assert_called_once()
+                self.assertTrue(fail.call_args.kwargs['preserve_raw_evidence'])
+
+    def test_failed_worker_result_uses_existing_error_backoff(self):
+        for status, expected_wait in (
+            ('failed', cognitive_worker.COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS),
+            ('idle', cognitive_worker.COGNITIVE_WORKER_POLL_SECONDS),
+        ):
+            with self.subTest(status=status):
+                stop = Mock()
+                stop.is_set.side_effect = [False, True]
+                with patch.object(cognitive_worker, '_STOP', stop), \
+                     patch.object(cognitive_worker, 'run_worker_once', return_value={
+                         'status': status,
+                     }):
+                    cognitive_worker._loop()
+                stop.wait.assert_called_once_with(expected_wait)
 
     def test_invalid_ttl_releases_then_corrected_retry_commits_once(self):
         config = cognitive_config.get_sticky_note_ttl_config()

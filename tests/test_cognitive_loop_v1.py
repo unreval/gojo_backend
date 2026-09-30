@@ -91,15 +91,19 @@ class AggregateCursor:
 
 
 class RecoverCursor:
-    def __init__(self):
+    def __init__(self, last_error=None):
         self.many = []
         self.executed = []
+        self.last_error = last_error
 
     def execute(self, sql, params=None):
         compact = ' '.join(sql.split())
         self.executed.append((compact, params))
         if compact.startswith('SELECT id, claimed_by_cycle_id, attempt_count'):
-            self.many = [(1, 50, 1), (2, 50, cognitive_config.COGNITIVE_MAX_RETRY)]
+            self.many = [
+                (1, 50, 1, self.last_error),
+                (2, 50, cognitive_config.COGNITIVE_MAX_RETRY, self.last_error),
+            ]
 
     def fetchall(self):
         return list(self.many)
@@ -597,6 +601,27 @@ class QueueLifecycleTests(unittest.TestCase):
         self.assertIn('output_state_version = NULL', sql)
         self.assertNotIn("status = 'consumed'", sql)
 
+    def test_structured_output_failure_keeps_raw_evidence_pending_after_retry_budget(self):
+        cursor = CycleCursor(success=False)
+        connection = TransactionConnection(cursor)
+        result = cognitive_queue.fail_cycle(
+            5, 'slow_loop_slowloopoutputerror:model_output_invalid_json',
+            preserve_raw_evidence=True, conn=connection, now=NOW)
+
+        self.assertTrue(result['raw_evidence_preserved'])
+        self.assertEqual(
+            [item['status'] for item in result['triggers']],
+            ['pending', 'pending'],
+        )
+        sql = '\n'.join(item[0] for item in cursor.executed)
+        self.assertNotIn("status = 'consumed'", sql)
+        updates = [params for sql, params in cursor.executed
+                   if sql.startswith('UPDATE cognitive_event_triggers')]
+        self.assertEqual(
+            [params[1] for params in updates],
+            [0, cognitive_config.COGNITIVE_MAX_RETRY - 1],
+        )
+
     def test_success_rejects_an_expired_or_missing_claim(self):
         cursor = CycleCursor(success=True, valid_claims=False)
         connection = TransactionConnection(cursor)
@@ -615,6 +640,37 @@ class QueueLifecycleTests(unittest.TestCase):
         updates = [params for sql, params in cursor.executed
                    if sql.startswith('UPDATE cognitive_event_triggers')]
         self.assertEqual([params[0] for params in updates], ['pending', 'dead_letter'])
+
+    def test_retry_evidence_survives_later_lease_expiry_without_retry_charge(self):
+        error = 'slow_loop_slowloopoutputerror:model_output_invalid_json'
+        cursor = RecoverCursor(last_error=error)
+        connection = TransactionConnection(cursor)
+        cognitive_queue.recover_expired_claims(
+            'u', 'gojo', conn=connection, now=NOW,
+        )
+        updates = [params for sql, params in cursor.executed
+                   if sql.startswith('UPDATE cognitive_event_triggers')]
+        self.assertEqual([params[0] for params in updates], ['pending', 'pending'])
+        self.assertEqual(
+            [params[1] for params in updates],
+            [0, cognitive_config.COGNITIVE_MAX_RETRY - 1],
+        )
+        self.assertTrue(all(params[2] == error for params in updates))
+
+    def test_pending_retry_evidence_is_excluded_from_daily_limit_suppression(self):
+        cursor = Mock(rowcount=0)
+        cognitive_queue._suppress_daily_limited_triggers(cursor, 'u', 'gojo', NOW)
+        sql = ' '.join(cursor.execute.call_args.args[0].split())
+        self.assertIn('AND last_error_code IS NULL', sql)
+
+        cursor = AggregateCursor()
+        cognitive_queue.aggregate_pending_triggers(
+            'u', 'gojo', conn=TransactionConnection(cursor), now=NOW,
+        )
+        claims = [sql for sql, _ in cursor.executed
+                  if sql.startswith('UPDATE cognitive_event_triggers')]
+        self.assertTrue(claims)
+        self.assertTrue(all('last_error_code = NULL' not in sql for sql in claims))
 
     def test_only_success_function_sets_non_null_consumed_cycle(self):
         queue_source = inspect.getsource(cognitive_queue)

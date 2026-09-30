@@ -31,6 +31,7 @@ from cognitive_queue import (
 )
 from cognitive_scheduler import enqueue_due_reflections
 from cognitive_predictions import PREDICTION_STANCE_TYPES
+from structured_output import invoke_structured_llm
 
 
 _THREAD = None
@@ -444,8 +445,8 @@ def _validation_retry_instruction(exc):
     details = getattr(exc, 'details', None) or {}
     if not details.get('error_category'):
         return (
-            f'Validation failed: {exc}. Return a corrected JSON object '
-            'matching the schema exactly.'
+            f'Validation failed: {exc}. Produce a fresh JSON object from the '
+            'original context; do not quote, edit, or repair the prior response.'
         )
     status = details.get('status') or 'unknown'
     numeric = _safe_ttl_numeric(details.get('ttl_value'))
@@ -471,7 +472,8 @@ def _validation_retry_instruction(exc):
         f'ttl_source={details.get("ttl_source")}; '
         f'ttl_type={details.get("ttl_type")}; ttl_value={value_text}; '
         f'unit=seconds; ttl_min={minimum}; ttl_max={maximum}. {allowed} '
-        'Return one corrected JSON object matching the entire schema exactly.'
+        'Produce one fresh JSON object from the original context matching the '
+        'entire schema; do not quote, edit, or repair the prior response.'
     )
 
 
@@ -563,24 +565,32 @@ def generate_cycle_output(context, *, create_chat_fn=None):
     system_prompt = _build_system_prompt()
     last_error = None
     for attempt in range(COGNITIVE_WORKER_MODEL_ATTEMPTS):
-        raw, usage = call_model(
-            model=COGNITIVE_WORKER_MODEL,
-            messages=messages,
-            system=system_prompt,
-            max_tokens=COGNITIVE_WORKER_MAX_TOKENS,
-        )
-        try:
-            parsed = parse_slow_loop_output(raw)
-            diagnostics = []
-            output = validate_slow_loop_output(
-                parsed,
+        diagnostics = []
+
+        def _validate_output(value):
+            return validate_slow_loop_output(
+                value,
                 allowed_event_ids=allowed_event_ids,
                 current_event_ids=current_event_ids,
                 diagnostics=diagnostics,
             )
+
+        call = invoke_structured_llm(
+            domain='slow_loop',
+            create_chat_fn=call_model,
+            model=COGNITIVE_WORKER_MODEL,
+            messages=messages,
+            system=system_prompt,
+            max_tokens=COGNITIVE_WORKER_MAX_TOKENS,
+            schema_validator=_validate_output,
+            schema_name='slow_loop_output',
+            attempt=attempt + 1,
+        )
+        try:
+            output = parse_slow_loop_output(parse_result=call.parsed)
             for diagnostic in diagnostics:
                 _log_ttl_diagnostic(context, attempt + 1, diagnostic)
-            return output, usage
+            return output, call.usage
         except SlowLoopOutputError as exc:
             last_error = exc
             _log_ttl_diagnostic(
@@ -588,8 +598,6 @@ def generate_cycle_output(context, *, create_chat_fn=None):
             )
             if attempt + 1 >= COGNITIVE_WORKER_MODEL_ATTEMPTS:
                 break
-            if raw and str(raw).strip():
-                messages.append({'role': 'assistant', 'content': str(raw)[:12000]})
             messages.extend([
                 {
                     'role': 'user',
@@ -639,7 +647,10 @@ def run_worker_once(*, create_chat_fn=None, now=None):
     except Exception as exc:
         error_code = _worker_error_code(exc)
         try:
-            result = fail_cycle(cycle_id, error_code, now=now)
+            result = fail_cycle(
+                cycle_id, error_code, now=now,
+                preserve_raw_evidence=True,
+            )
         except Exception as fail_exc:
             print(
                 f'[cognitive_worker] cycle #{cycle_id} failed and could not '
@@ -661,6 +672,8 @@ def _loop():
             result = run_worker_once()
             if result.get('status') == 'succeeded':
                 continue
+            if result.get('status') == 'failed':
+                wait_seconds = COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS
         except Exception as exc:
             wait_seconds = COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS
             print(f'[cognitive_worker] loop error: {exc}', flush=True)

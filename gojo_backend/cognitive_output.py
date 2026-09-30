@@ -33,6 +33,7 @@ from cognitive_revision import (
     review_status_after_confidence,
     scope_exceeds_evidence,
 )
+from structured_output import parse_structured_output
 
 
 ROOT_FIELDS = frozenset({
@@ -144,6 +145,7 @@ def sticky_emotion_tag(emotion):
 class SlowLoopOutputError(ValueError):
     def __init__(self, message, *, details=None):
         super().__init__(message)
+        self.code = message
         self.details = dict(details or {})
 
 
@@ -259,24 +261,35 @@ def is_user_facing_sticky_content(text):
     return True
 
 
-def parse_slow_loop_output(raw):
-    """Parse the first complete JSON object without retaining model reasoning."""
-    text = str(raw or '').strip()
-    if text.startswith('```'):
-        first_newline = text.find('\n')
-        text = text[first_newline + 1:] if first_newline >= 0 else ''
-        if text.rstrip().endswith('```'):
-            text = text.rstrip()[:-3]
-    start = text.find('{')
-    if start < 0:
-        raise SlowLoopOutputError('model_output_missing_json')
-    try:
-        value, _end = json.JSONDecoder().raw_decode(text[start:])
-    except (TypeError, ValueError) as exc:
-        raise SlowLoopOutputError('model_output_invalid_json') from exc
-    if not isinstance(value, dict):
-        raise SlowLoopOutputError('model_output_root_not_object')
-    return value
+def _slow_loop_parse_error(result):
+    code = result.error_code or 'structured_output_failed'
+    public_code = {
+        'empty_response': 'model_output_missing_json',
+        'no_top_level_json_object': 'model_output_missing_json',
+        'incomplete_json': 'model_output_invalid_json',
+        'invalid_json': 'model_output_invalid_json',
+        'root_not_object': 'model_output_root_not_object',
+        'multiple_distinct_json_objects': 'model_output_ambiguous_json',
+        'truncated_response': 'model_output_truncated',
+        'model_refused': 'model_output_refused',
+    }.get(code)
+    if code == 'schema_validation_failed':
+        public_code = result.error_detail or 'model_output_schema_invalid'
+    if not public_code:
+        public_code = 'model_output_invalid_json'
+    details = {'structured_output': result.telemetry()}
+    if result.schema_details:
+        details.update(result.schema_details)
+    return SlowLoopOutputError(public_code, details=details)
+
+
+def parse_slow_loop_output(raw=None, *, parse_result=None):
+    """Use the canonical parser and never select one of several model roots."""
+    result = parse_result or parse_structured_output(
+        raw, schema_name='slow_loop_output')
+    if not result.ok:
+        raise _slow_loop_parse_error(result)
+    return result.value
 
 
 def _object(value, field):

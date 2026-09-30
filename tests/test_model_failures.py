@@ -607,6 +607,25 @@ class ObserverFailureTests(unittest.TestCase):
 
 
 class ClientMetadataTests(unittest.TestCase):
+    def test_reasoning_json_is_never_promoted_to_final_response(self):
+        client_module = load_client()
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            'id': 'response-1',
+            'choices': [{'message': {
+                'content': '',
+                'reasoning_content': '{"signals":[]} {"signals":[{}]}',
+            }, 'finish_reason': 'stop'}],
+        }
+        with patch.object(client_module, 'DEEPSEEK_KEY', 'test-key'), \
+             patch.object(client_module.requests, 'post', create=True,
+                          return_value=response), \
+             patch('builtins.print') as log:
+            text, usage = client_module._call_deepseek('deepseek-test', [], None, 400, None)
+        self.assertEqual(text, '')
+        self.assertEqual(usage['response_id'], 'response-1')
+        self.assertNotIn('signals', str(log.call_args_list))
+
     def test_anthropic_metadata_preserves_stop_reason_without_thinking_text(self):
         client_module = load_client()
         client = Mock()

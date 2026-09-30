@@ -119,7 +119,7 @@ def _lock_pair(cur, user_id, character_id):
 
 def _recover_expired_claims(cur, user_id, character_id, now):
     cur.execute(
-        '''SELECT id, claimed_by_cycle_id, attempt_count
+        '''SELECT id, claimed_by_cycle_id, attempt_count, last_error_code
            FROM cognitive_event_triggers
            WHERE user_id = %s AND character_id = %s
              AND status = 'claimed' AND claim_expires_at <= %s
@@ -136,17 +136,23 @@ def _recover_expired_claims(cur, user_id, character_id, now):
                WHERE id = %s AND status IN ('queued', 'running')''',
             (now, cycle_id),
         )
-    for trigger_id, _cycle_id, attempt_count in expired:
-        status = retry_status(attempt_count)
+    for trigger_id, _cycle_id, attempt_count, last_error in expired:
+        preserve_raw_evidence = str(last_error or '').startswith('slow_loop_')
+        next_attempt_count = (
+            max(0, attempt_count - 1) if preserve_raw_evidence else attempt_count
+        )
+        status = 'pending' if preserve_raw_evidence else retry_status(attempt_count)
         cur.execute(
             '''UPDATE cognitive_event_triggers
-               SET status = %s,
+               SET status = %s, attempt_count = %s,
                    claimed_by_cycle_id = NULL, claimed_at = NULL,
                    claim_expires_at = NULL,
                    consumed_cycle_id = NULL, consumed_at = NULL,
-                   last_error_code = 'claim_lease_expired'
+                   last_error_code = %s
                WHERE id = %s''',
-            (status, trigger_id),
+            (status, next_attempt_count,
+             last_error if preserve_raw_evidence else 'claim_lease_expired',
+             trigger_id),
         )
     return {'recovered': len(expired), 'failed_cycle_ids': cycle_ids}
 
@@ -172,12 +178,13 @@ def recover_expired_claims(user_id, character_id, *, conn=None, now=None):
 
 
 def _suppress_daily_limited_triggers(cur, user_id, character_id, now):
-    """One quota policy at aggregation AND success cleanup; promises stay pending."""
+    """Quota cleanup defers promises and unprocessed retry evidence until tomorrow."""
     cur.execute(
         '''UPDATE cognitive_event_triggers
            SET status = 'suppressed', slow_cycle_suppressed_reason = 'daily_limit',
                suppressed_at = %s
            WHERE user_id = %s AND character_id = %s AND status = 'pending'
+             AND last_error_code IS NULL
              AND payload->>'reason' IS DISTINCT FROM 'pending_answer' ''',
         (now, user_id, character_id),
     )
@@ -321,8 +328,7 @@ def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
                 '''UPDATE cognitive_event_triggers
                    SET status = 'claimed', claimed_by_cycle_id = %s,
                        claimed_at = %s, claim_expires_at = %s,
-                       attempt_count = attempt_count + 1,
-                       last_error_code = NULL
+                       attempt_count = attempt_count + 1
                    WHERE id = %s AND status = 'pending' ''',
                 (cycle_id, current_time, lease_expires, trigger_id),
             )
@@ -631,7 +637,8 @@ def commit_cycle_success(
             database.close()
 
 
-def fail_cycle(cycle_id, error_code, *, conn=None, now=None):
+def fail_cycle(cycle_id, error_code, *, preserve_raw_evidence=False,
+               conn=None, now=None):
     database, owns_connection = _get_connection(conn)
     current_time = _utc_now(now)
     cur = database.cursor()
@@ -671,15 +678,24 @@ def fail_cycle(cycle_id, error_code, *, conn=None, now=None):
         )
         released = []
         for trigger_id, attempt_count in cur.fetchall():
-            next_status = retry_status(attempt_count)
+            # A failed worker transaction has produced no cognitive writes.
+            # Keep its input eligible without charging a completed attempt.
+            next_status = (
+                'pending' if preserve_raw_evidence
+                else retry_status(attempt_count)
+            )
+            next_attempt_count = (
+                max(0, attempt_count - 1)
+                if preserve_raw_evidence else attempt_count
+            )
             cur.execute(
                 '''UPDATE cognitive_event_triggers
-                   SET status = %s, claimed_by_cycle_id = NULL,
+                   SET status = %s, attempt_count = %s, claimed_by_cycle_id = NULL,
                        claimed_at = NULL, claim_expires_at = NULL,
                        consumed_cycle_id = NULL, consumed_at = NULL,
                        last_error_code = %s
                    WHERE id = %s''',
-                (next_status, error_code, trigger_id),
+                (next_status, next_attempt_count, error_code, trigger_id),
             )
             released.append({'trigger_id': trigger_id, 'status': next_status})
         database.commit()
@@ -687,6 +703,7 @@ def fail_cycle(cycle_id, error_code, *, conn=None, now=None):
             'status': 'failed',
             'output_state_version': failed_output_version(0),
             'triggers': released,
+            'raw_evidence_preserved': bool(preserve_raw_evidence),
         }
     except Exception:
         database.rollback()
