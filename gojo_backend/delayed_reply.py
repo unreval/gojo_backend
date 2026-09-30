@@ -178,7 +178,6 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
         get_short_memory, SHORT_MEMORY_MAX,
         commit_visible_assistant_message, update_chat_days,
     )
-    from memory_jobs import enqueue_private_extraction
     from temporal_awareness import get_temporal_snapshot, record_turn
     from prompt import build_system_blocks
     from tts import tts_to_b64
@@ -287,11 +286,6 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
         user_id, character_id, source='chat_delayed',
         prior_snapshot=temporal_snapshot,
     )
-    enqueue_private_extraction(
-        user_id, pending_text, full_jp, character_id,
-        temporal_context=temporal_snapshot,
-        source_event_id=bundle.get('last_source_event_id') or None,
-    )
     try:
         from behavior_evidence import record_reply_cycle
         record_reply_cycle(
@@ -308,10 +302,6 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
     except Exception as exc:
         print(f'[{user_id}] delayed behavior observation skipped:{exc}')
 
-    helpers._start_relationship_update(
-        user_id, character_id, pending_text, full_jp,
-        char, short_memories, temporal_snapshot,
-        bundle.get('last_source_event_id'), pack=pack)
     _push_delayed_reply(user_id, character_id, char.get('name') or character_id, msgs)
     update_chat_days(user_id)
     return {

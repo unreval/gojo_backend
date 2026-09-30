@@ -688,8 +688,9 @@ class QueueLifecycleTests(unittest.TestCase):
             "'settled_predictions'", "'reactivated_questions'", "'temporal'",
         ):
             self.assertIn(field, source)
-        self.assertIn("'hypothesis_key'", source)
-        self.assertIn("'metadata'", source)
+        self.assertIn("'payload'", source)
+        self.assertNotIn('FROM cognitive_beliefs', source)
+        self.assertNotIn('FROM cognitive_hypotheses', source)
         for phrase in ('应该冷淡', '应该生气', '收短回复', '可以暧昧'):
             self.assertNotIn(phrase, source)
 
@@ -699,8 +700,8 @@ class QueueLifecycleTests(unittest.TestCase):
             reader_source = handle.read()
         with open(os.path.join(BACKEND, 'memory_lifecycle.py'), encoding='utf-8') as handle:
             lifecycle_source = handle.read()
-        self.assertIn("AND source = %s", queue_source)
-        self.assertIn('USER_FACING_STICKY_SOURCE', queue_source)
+        self.assertNotIn('FROM cognitive_sticky_notes', queue_source)
+        self.assertNotIn('create_chat', queue_source)
         self.assertIn("AND source = %s", reader_source)
         self.assertIn('USER_FACING_STICKY_SOURCE', reader_source)
         sticky_reader = lifecycle_source.split(
@@ -814,7 +815,7 @@ class ReplayAndBoundaryTests(unittest.TestCase):
             with open(os.path.join(BACKEND, filename), encoding='utf-8') as handle:
                 if 'from ai_client import create_chat' in handle.read():
                     model_callers.append(filename)
-        self.assertEqual(model_callers, ['cognitive_worker.py'])
+        self.assertEqual(model_callers, [])
 
     def test_wrong_deterministic_response_guidance_is_absent(self):
         self.assertFalse(os.path.exists(

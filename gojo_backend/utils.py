@@ -262,16 +262,32 @@ def msg_has_json_debris(m: dict) -> bool:
     return False
 
 
+def classify_reply_content(text) -> str:
+    """Deterministic chat content gate; never repair machine output into speech."""
+    if not isinstance(text, str) or not text.strip():
+        return 'invalid'
+    text = text.strip()
+    if (contains_offline_marker(text) or 'OFFLINE_CHARACTER_STATES' in text.upper()
+            or any(ch in text for ch in '{}[]')
+            or '```' in text
+            or re.search(r'<\s*/?\s*(?:analysis|thinking|tool_call)\b', text, re.I)
+            or re.search(r'["\'][\w.-]+["\']\s*:', text)
+            or re.search(r'["\']?\b(?:jp|zh|messages|emotion|moodshift|anchor|inner|'
+                         r'state|intent|reminder|accounting|pending_transaction|schedule_intent|memory_metadata|'
+                         r'relationship|belief|cognitive_state)["\']?\s*:', text, re.I)):
+        return 'invalid'
+    if is_emoji_only(text) or re.fullmatch(r'(?:\.{3,}|…{2,})', text):
+        return 'nonverbal'
+    return 'text' if has_visible_text(text) else 'invalid'
+
+
 def valid_reply_msg(m: dict) -> bool:
-    """统一验证：jp/zh 都有真正可见正文 + 没 JSON 残骸。
-    「ん？」「え？」可通过；「...」「……」以及 {"jp":"..."} 残骸不能通过。"""
+    """Both languages must contain safe text or an intentional nonverbal reply."""
     if not isinstance(m, dict):
         return False
     if msg_has_json_debris(m):
         return False
-    jp = sanitize_user_reply(str(m.get('jp', '') or ''))
-    zh = sanitize_user_reply(str(m.get('zh', '') or ''))
-    return has_visible_text(jp) and has_visible_text(zh)
+    return all(classify_reply_content(m.get(key)) != 'invalid' for key in ('jp', 'zh'))
 
 
 def valid_reply_pair(jp, zh) -> bool:
@@ -394,7 +410,9 @@ def merge_only_extreme_short(msgs):
     i = 0
     while i < len(msgs):
         cur = msgs[i]
-        if len(cur.get('jp', '')) < 6 and i + 1 < len(msgs):
+        if (len(cur.get('jp', '')) < 6 and i + 1 < len(msgs)
+                and all(classify_reply_content(m.get(k)) != 'nonverbal'
+                        for m in (cur, msgs[i + 1]) for k in ('jp', 'zh'))):
             nxt = msgs[i + 1]
             merged = {
                 'jp': cur['jp'].rstrip('。') + '。' + nxt['jp'],
@@ -415,7 +433,9 @@ def finalize_user_messages(msgs):
     for m in msgs or []:
         if not isinstance(m, dict):
             continue
-        jp = sanitize_jp(sanitize_user_reply(str(m.get('jp', '') or '')))
+        jp = sanitize_user_reply(str(m.get('jp', '') or ''))
+        if classify_reply_content(jp) == 'text':
+            jp = sanitize_jp(jp)
         zh = sanitize_user_reply(str(m.get('zh', '') or ''))
         if not jp.strip() and not zh.strip():
             continue

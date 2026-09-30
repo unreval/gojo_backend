@@ -105,12 +105,13 @@ def init_chatlog_table():
     print('[init] 聊天记录表已就绪：chat_log / chat_log_tombstone')
 
 
-def append_messages(user_id, chat_id, msgs):
+def append_messages(user_id, chat_id, msgs, *, conn=None):
     """批量追加。msgs = [{client_msg_id, role, text, subtitle, emotion, kind, extra, has_audio}]
     重复的 client_msg_id 自动跳过。返回实际写入条数。"""
     if not msgs:
         return 0
-    conn = get_conn()
+    owns_connection = conn is None
+    conn = get_conn() if owns_connection else conn
     cur = conn.cursor()
     written = 0
     try:
@@ -183,10 +184,16 @@ def append_messages(user_id, chat_id, msgs):
                      bool(m.get('has_audio')), event_id, reply_to_event_id)
                 )
             written += cur.rowcount
-        conn.commit()
+        if owns_connection:
+            conn.commit()
+    except Exception:
+        if owns_connection:
+            conn.rollback()
+        raise
     finally:
         cur.close()
-        conn.close()
+        if owns_connection:
+            conn.close()
     return written
 
 

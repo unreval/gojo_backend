@@ -252,10 +252,10 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(self.save_user_once.call_count, 1)
         self.assertEqual(self.save_short.call_count, 1)
         self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
-        self.jobs.assert_called_once()
+        self.jobs.assert_not_called()
         self.record_turn.assert_called_once()
         self.tts.assert_called()
-        self.rel.assert_called_once()
+        self.rel.assert_not_called()
         self.assertEqual(self.route._create_json.call_count, 1)
         self.grumble.assert_not_called()
 
@@ -275,30 +275,37 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertIn('【引用回复】', sent_messages[-1]['content'])
         self.assertIn('刚才那杯水别碰。', sent_messages[-1]['content'])
         self.assertEqual(self.short_rows[0]['content'], '我接着说')
-        self.rel.assert_called_once()
-        self.assertEqual(self.rel.call_args.args[2], '我接着说')
+        self.rel.assert_not_called()
+        self.assertEqual(self.save_user_once.call_args.args[1], '我接着说')
 
     def test_empty_raw_retries_then_generation_failed(self):
         response, body = self.send(['', '', ''])
         self.assert_generation_failed(response, body)
 
-    def test_ellipsis_is_not_a_character_reply(self):
+    def test_ellipsis_is_an_intentional_reply(self):
         response, body = self.send([chat_reply('...', '...')])
-        self.assert_generation_failed(response, body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['messages'][0]['jp'], '...')
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.route._quick_translate.assert_not_called()
 
-    def test_fullwidth_ellipsis_is_not_a_character_reply(self):
+    def test_fullwidth_ellipsis_is_an_intentional_reply(self):
         response, body = self.send([chat_reply('……', '……')])
-        self.assert_generation_failed(response, body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['messages'][0]['jp'], '……')
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.route._quick_translate.assert_not_called()
 
     def test_offline_state_only_does_not_commit(self):
         raw = '<<<OFFLINE_CHARACTER_STATES>>> {"inner":"wait","intent":"silent","moodshift":"none"}'
         response, body = self.send([raw, raw, raw])
         self.assert_generation_failed(response, body)
 
-    def test_ellipsis_json_payload_is_rejected(self):
+    def test_ellipsis_json_payload_is_accepted(self):
         raw = '{"emotion":"平静","messages":[{"jp":"...","zh":"..."}]}'
-        response, body = self.send([raw, raw, raw])
-        self.assert_generation_failed(response, body)
+        response, body = self.send([raw])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['messages'][0]['jp'], '...')
 
     def test_short_kana_reply_is_accepted(self):
         response, body = self.send([chat_reply('ん？', '嗯？')])
@@ -307,7 +314,7 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(body['messages'][0]['zh'], '嗯？')
         self.save_user_once.assert_called()
         self.save_short.assert_called()
-        self.jobs.assert_called_once()
+        self.jobs.assert_not_called()
 
     def test_json_debris_as_visible_text_is_rejected(self):
         debris = '{"jp":"...","zh":"..."}'
@@ -326,7 +333,7 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertTrue(self.route._has_visible_text('ん？'))
         self.assertTrue(self.route._has_visible_text('え？'))
         self.assertTrue(self.route._has_visible_text('そうだね'))
-        self.assertFalse(self.route._valid_msg({'jp': '...', 'zh': '...'}))
+        self.assertTrue(self.route._valid_msg({'jp': '...', 'zh': '...'}))
         self.assertFalse(self.route._valid_msg({'jp': '{"jp":"...","zh":"..."}', 'zh': '...'}))
         self.assertTrue(self.route._valid_msg({'jp': 'ん？', 'zh': '嗯？'}))
         self.assertTrue(self.route._valid_msg({'jp': 'え？', 'zh': '诶？'}))
@@ -375,8 +382,8 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
         self.assertEqual(self.save_user_once.call_count, 2)
         self.assertEqual(self.save_short.call_count, 1)
-        self.jobs.assert_called_once()
-        self.rel.assert_called_once()
+        self.jobs.assert_not_called()
+        self.rel.assert_not_called()
         self.tts.assert_called()
 
     def test_parse_generation_does_not_write_offline_state(self):
@@ -401,7 +408,7 @@ class ChatCommitGateTests(unittest.TestCase):
         response, body = self.send([raw], handler=self.route.chat_story)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
-        self.jobs.assert_called_once()
+        self.jobs.assert_not_called()
         self.tts.assert_called()
         self.state.assert_not_called()
 
@@ -436,6 +443,62 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertTrue(body['generation_failed'])
         self.assertEqual(self.user_memory_roles(), [])
+        self.assert_assistant_commit_skipped()
+
+
+    def test_raw_nonverbal_accepts_first_attempt_without_translation(self):
+        for token in ('🥺', '🥺...', '...', '……'):
+            with self.subTest(token=token):
+                response, body = self.send([token])
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.route._create_json.call_count, 1)
+                self.assertEqual(body['messages'][0]['jp'], token)
+                self.assertEqual(body['messages'][0]['zh'], token)
+                self.route._quick_translate.assert_not_called()
+                self.state.assert_not_called()
+                self.rel.assert_not_called()
+                self.jobs.assert_not_called()
+                for field in ('pending_transaction', 'reminder', 'schedule_transition'):
+                    self.assertNotIn(field, body)
+
+    def test_structured_nonverbal_preserves_tokens_and_separate_bubbles(self):
+        raw = json.dumps({'messages': [{'jp': t, 'zh': t} for t in ('🥺...', '...', '……')]})
+        response, body = self.send([raw])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([m['jp'] for m in body['messages']], ['🥺...', '...', '……'])
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.route._quick_translate.assert_not_called()
+
+    def test_malformed_json_and_internal_debris_are_never_salvaged(self):
+        for raw in ('{"jp":"こんにちは"', '{"messages":[',
+                    'jp: こんにちは', '"unknown_field": "秘密"', 'state: thinking',
+                    'pending_transaction: 100', '{"inner":"秘密","intent":"待つ"}',
+                    '🥺... <<<OFFLINE_CHARACTER_STATES>>> {"inner":"x"}',
+                    '<thinking>private</thinking>', '   '):
+            with self.subTest(raw=raw):
+                response, body = self.send([raw, raw, raw])
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(self.route._create_json.call_count, 3)
+                self.route._quick_translate.assert_not_called()
+                self.assert_assistant_commit_skipped()
+
+    def test_plaintext_salvage_runs_truth_guard_before_acceptance(self):
+        reject = Mock(side_effect=['candidate_rejected', None])
+        self.route._create_json = Mock(side_effect=[('🥺...', Mock()), ('……', Mock())])
+        result, state = self.route._generate_or_none(
+            'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',
+            salvage=True, reject_fn=reject)
+        self.assertEqual(self.route._create_json.call_count, 2)
+        self.assertEqual(result, {'emotion': '平静', 'messages': [{'jp': '……', 'zh': '……'}], '_acceptance_mode': 'nonverbal'})
+        self.assertIsNone(state)
+        self.route._quick_translate.assert_not_called()
+
+    def test_source_failure_stops_before_generator(self):
+        self.save_user_once.side_effect = RuntimeError('private failure text')
+        response, body = self.send([chat_reply('こんにちは', '你好')])
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(body['error'], 'canonical_source_unavailable')
+        self.route._create_json.assert_not_called()
         self.assert_assistant_commit_skipped()
 
 

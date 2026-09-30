@@ -298,21 +298,12 @@ class PersistRevisionTests(unittest.TestCase):
             '用户只有 Gojo 一个长期目标。',
             0.90, 'active', json.dumps({'scope': 'legacy'}),
         ))
-        decisions = cognitive_output.persist_slow_loop_output(
-            cursor, cycle_id=9, user_id='u', character_id='gojo',
-            output=normalized, now=NOW,
-        )
-        self.assertEqual(decisions[0]['action'], 'under_review')
-        belief_insert = next(
-            params for sql, params in cursor.executed
-            if sql.startswith('INSERT INTO cognitive_beliefs')
-        )
-        blob = json.dumps(belief_insert, ensure_ascii=False, default=str)
-        self.assertIn('revision_history', blob)
-        self.assertIn('用户只有 Gojo 一个长期目标。', blob)
-        self.assertIn('under_review', blob)
-        sql = '\n'.join(item[0] for item in cursor.executed)
-        self.assertNotIn('rel_state', sql)
+        with self.assertRaisesRegex(cognitive_output.SlowLoopOutputError,
+                                    'external_judgment_candidates_not_authoritative'):
+            cognitive_output.persist_slow_loop_output(
+                cursor, cycle_id=9, user_id='u', character_id='gojo',
+                output=normalized, now=NOW)
+        self.assertEqual(cursor.executed, [])
 
 
 class SharedFrameAndFlirtTests(unittest.TestCase):

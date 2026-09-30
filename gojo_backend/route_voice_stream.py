@@ -30,7 +30,6 @@ from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
 from tts import tts_to_b64
 from prompt import build_system_blocks
 from user_memory import save_short_memory, save_user_short_memory_once, get_short_memory
-from memory_jobs import enqueue_private_extraction
 from characters import get_character
 from temporal_awareness import get_temporal_snapshot, record_turn
 from utils import has_visible_text, valid_reply_pair
@@ -318,12 +317,6 @@ async def chat_voice_stream(data: dict):
             )
         except Exception as e:
             print(f'[voice_stream] short_memory 保存失败:{e}')
-        enqueue_private_extraction(
-            user_id, user_text, full_jp, character_id,
-            temporal_context=temporal_snapshot,
-            source_event_id=source_event_id,
-            assistant_event_id=assistant_event_id,
-        )
         print(f'[voice_stream] ✅ {character_id} 流式回复完成,共 {seq} 段')
 
     return StreamingResponse(event_stream(), media_type='application/x-ndjson')

@@ -319,6 +319,15 @@ def sources_current_for_derivation(cur, user_id, character_id, source_ids):
     from cognitive_queue import stable_advisory_lock_key
     cur.execute('SELECT pg_advisory_xact_lock(%s)',
                 (stable_advisory_lock_key(user_id, character_id),))
+    if not source_ids:
+        return False
+    cur.execute("""SELECT COALESCE(NULLIF(event_id, ''), client_msg_id)
+                   FROM chat_log WHERE user_id=%s AND chat_id=%s
+                   AND COALESCE(status, 'active')='active'
+                   AND COALESCE(NULLIF(event_id, ''), client_msg_id)=ANY(%s)
+                   FOR SHARE""", (user_id, character_id, list(source_ids)))
+    if {row[0] for row in cur.fetchall()} != set(source_ids):
+        return False
     cur.execute('''SELECT id FROM cognitive_events WHERE user_id=%s AND character_id=%s
                    AND source_event_id=ANY(%s) AND adjudication->>'status'='superseded'
                    LIMIT 1''', (user_id, character_id, list(source_ids)))

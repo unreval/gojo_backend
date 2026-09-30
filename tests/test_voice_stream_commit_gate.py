@@ -190,18 +190,15 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
     def types(self, events):
         return [e.get('type') for e in events]
 
-    def test_ellipsis_pair_does_not_yield_audio_or_save_assistant(self):
+    def test_ellipsis_pair_commits_intentional_silence(self):
         events = self.events('EMOTION: 平静\nJP: ...\nZH: ...\n')
-        self.assertNotIn('audio', self.types(events))
-        self.assertIn('generation_failed', self.types(events))
-        failed = next(e for e in events if e['type'] == 'generation_failed')
-        self.assertTrue(failed['generation_failed'])
-        self.assertEqual(failed['messages'], [])
-        self.save_short.assert_not_called()
+        self.assertNotIn('generation_failed', self.types(events))
+        reply = next(e for e in events if e['type'] == 'audio')
+        self.assertEqual(reply['jp'], '...')
+        self.assertEqual(reply['zh'], '...')
+        self.save_short.assert_called_once()
         self.jobs.assert_not_called()
-        self.record_turn.assert_not_called()
-        self.tts.assert_not_called()
-        self.assertEqual([r['role'] for r in self.short_rows], ['user'])
+        self.assertEqual([r['role'] for r in self.short_rows], ['user', 'assistant'])
 
     def test_short_kana_pair_yields_audio(self):
         events = self.events('EMOTION: 平静\nJP: ん？\nZH: 嗯？\n')
@@ -212,7 +209,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.assertNotIn('generation_failed', self.types(events))
         self.save_short.assert_called_once()
         self.assertEqual(self.save_short.call_args.args[1], 'assistant')
-        self.jobs.assert_called_once()
+        self.jobs.assert_not_called()
         self.record_turn.assert_called_once()
         self.tts.assert_called()
         self.assertEqual([r['role'] for r in self.short_rows], ['user', 'assistant'])
@@ -226,15 +223,15 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.record_turn.assert_not_called()
 
     def test_user_event_saved_even_when_generation_fails(self):
-        self.events('JP: ...\nZH: ...\n', source_event_id='voice-1')
+        self.events('JP: \nZH: \n', source_event_id='voice-1')
         self.save_user_once.assert_called()
         self.assertEqual(self.save_user_once.call_args.kwargs['source_event_id'], 'voice-1')
         self.assertEqual([r['role'] for r in self.short_rows], ['user'])
         self.save_short.assert_not_called()
 
     def test_same_source_event_id_retry_does_not_duplicate_user(self):
-        self.events('JP: ...\nZH: ...\n', source_event_id='voice-dup')
-        self.events('JP: ...\nZH: ...\n', source_event_id='voice-dup')
+        self.events('JP: \nZH: \n', source_event_id='voice-dup')
+        self.events('JP: \nZH: \n', source_event_id='voice-dup')
         self.assertEqual(self.save_user_once.call_count, 2)
         self.assertEqual([r['role'] for r in self.short_rows], ['user'])
         self.assertEqual(self.short_rows[0]['source_event_id'], 'voice-dup')
@@ -251,7 +248,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
             'character_id': 'gojo', 'source_event_id': 'old',
         })
         events = self.events(
-            'EMOTION: 平静\nJP: ...\nZH: ...\n',
+            'EMOTION: 平静\nJP: \nZH: \n',
             text='你好啊',
             source_event_id='voice-now',
         )
@@ -273,7 +270,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         user_text = 'retry this voice turn'
         source_event_id = 'voice-retry-1'
         first_events = self.events(
-            'JP: ...\nZH: ...\n',
+            'JP: \nZH: \n',
             text=user_text,
             source_event_id=source_event_id,
         )
@@ -307,7 +304,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.assertNotIn('generation_failed', self.types(second_events))
         self.assertIn('audio', self.types(second_events))
         self.save_short.assert_called_once()
-        self.jobs.assert_called_once()
+        self.jobs.assert_not_called()
         self.record_turn.assert_called_once()
         self.tts.assert_called_once()
 

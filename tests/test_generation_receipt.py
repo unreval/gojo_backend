@@ -938,8 +938,8 @@ class RouteIdempotencyTests(unittest.TestCase):
         self.assertEqual(body2['assistant_turn_id'], body1['assistant_turn_id'])
         self.assertEqual(body1['messages'][0]['event_id'], 'chat_reply:dup-1:0')
         self.assertEqual(body2['messages'][0]['jp'], body1['messages'][0]['jp'])
-        self.assertEqual(self.jobs.call_count, 1)
-        self.assertEqual(self.rel.call_count, 1)
+        self.jobs.assert_not_called()
+        self.rel.assert_not_called()
         self.assertEqual(self.promise_detect.call_count, 1)
         self.assertEqual(self.save_short.call_count, 1)
         self.assertEqual(self.record_turn.call_count, 1)
@@ -1120,42 +1120,46 @@ class RouteIdempotencyTests(unittest.TestCase):
 
     def test_crash_before_private_extraction_then_replay_once(self):
         raw = chat_reply('そうだね', '是啊')
-        receipt.CRASH_BEFORE_EFFECT = 'private_extraction'
+        receipt.CRASH_BEFORE_EFFECT = 'assistant_short_memory'
         with self.assertRaises(RuntimeError):
-            self.send([raw], 'crash-pe')
+            self.send([raw], 'crash-source')
         receipt.CRASH_BEFORE_EFFECT = None
-        self.assertEqual(self.jobs.call_count, 0)
-        second, _body = self.send([chat_reply('違うよ', '不同')], 'crash-pe')
-        self.assertEqual(second.status_code, 200)
+        self.save_short.assert_not_called()
+        response, _body = self.send([raw], 'crash-source')
+        self.assertEqual(response.status_code, 200)
+        self.save_short.assert_called_once()
+        self.jobs.assert_not_called()
+        self.rel.assert_not_called()
         self.assertEqual(self.route._create_json.call_count, 1)
-        self.assertEqual(self.jobs.call_count, 1)
 
     def test_crash_before_relationship_then_replay_once(self):
         raw = chat_reply('そうだね', '是啊')
-        receipt.CRASH_BEFORE_EFFECT = 'relationship_update'
+        receipt.CRASH_BEFORE_EFFECT = 'assistant_short_memory'
         with self.assertRaises(RuntimeError):
-            self.send([raw], 'crash-rel')
+            self.send([raw], 'crash-source')
         receipt.CRASH_BEFORE_EFFECT = None
-        self.assertEqual(self.rel.call_count, 0)
-        second, _body = self.send([raw], 'crash-rel')
-        self.assertEqual(second.status_code, 200)
-        self.assertEqual(self.rel.call_count, 1)
-        self.assertEqual(self.applied_rel, ['crash-rel'])
+        self.save_short.assert_not_called()
+        response, _body = self.send([raw], 'crash-source')
+        self.assertEqual(response.status_code, 200)
+        self.save_short.assert_called_once()
+        self.jobs.assert_not_called()
+        self.rel.assert_not_called()
         self.assertEqual(self.route._create_json.call_count, 1)
 
     def test_relationship_applied_then_crash_before_effect_completed(self):
         raw = chat_reply('そうだね', '是啊')
-        receipt.CRASH_AFTER_EFFECT = 'relationship_update'
+        receipt.CRASH_AFTER_EFFECT = 'assistant_short_memory'
         with self.assertRaises(RuntimeError):
-            self.send([raw], 'crash-rel-after')
+            self.send([raw], 'crash-source-after')
         receipt.CRASH_AFTER_EFFECT = None
-        self.assertEqual(self.applied_rel, ['crash-rel-after'])
-        self._expire_effect('crash-rel-after', 'relationship_update')
-        second, _body = self.send([raw], 'crash-rel-after')
-        self.assertEqual(second.status_code, 200)
-        self.assertEqual(self.rel.call_count, 2)
-        self.assertEqual(self.applied_rel, ['crash-rel-after'])
-        row = self.store.effects[('u', 'gojo', 'crash-rel-after', 'chat_text', 'relationship_update')]
+        self._expire_effect('crash-source-after', 'assistant_short_memory')
+        response, _body = self.send([raw], 'crash-source-after')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.save_short.call_count, 2)
+        self.assertEqual({call.kwargs['source_event_id'] for call in self.save_short.call_args_list}, {'chat_reply:crash-source-after'})
+        self.rel.assert_not_called()
+        self.jobs.assert_not_called()
+        row = self.store.effects[('u','gojo','crash-source-after','chat_text','assistant_short_memory')]
         self.assertEqual(row['status'], 'completed')
 
     def test_reminder_create_then_crash_before_effect_completed(self):
@@ -1201,100 +1205,50 @@ class RouteIdempotencyTests(unittest.TestCase):
 
     def test_completed_replay_repairs_pending_without_llm(self):
         raw = chat_reply('そうだね', '是啊')
-        first, _body1 = self.send([raw], 'repair-1')
+        first, _body = self.send([raw], 'repair-1')
         self.assertEqual(first.status_code, 200)
-        key = ('u', 'gojo', 'repair-1', 'chat_text', 'private_extraction')
+        key = ('u', 'gojo', 'repair-1', 'chat_text', 'assistant_short_memory')
         self.store.effects[key]['status'] = 'pending'
         self.store.effects[key]['claim_token'] = None
-        self.jobs.reset_mock()
-        second, _body2 = self.send([chat_reply('違うよ', '不同')], 'repair-1')
+        self.save_short.reset_mock()
+        second, _body = self.send([chat_reply('違うよ', '不同')], 'repair-1')
         self.assertEqual(second.status_code, 200)
         self.assertEqual(self.route._create_json.call_count, 1)
-        self.assertEqual(self.jobs.call_count, 1)
+        self.save_short.assert_called_once()
+        self.jobs.assert_not_called()
+        self.rel.assert_not_called()
 
     def test_http_returns_before_relationship_worker_repairs(self):
-        raw = chat_reply('そうだね', '是啊')
-        first, _body = self.send([raw], 'async-rel', drain=False)
+        first, _body = self.send([chat_reply('そうだね', '是啊')], 'async-rel', drain=False)
         self.assertEqual(first.status_code, 200)
-        self.assertEqual(self.jobs.call_count, 0)
-        self.assertEqual(self.rel.call_count, 0)
-        self.assertEqual(self.promise_detect.call_count, 0)
-        private_row = self.store.effects[('u', 'gojo', 'async-rel', 'chat_text', 'private_extraction')]
-        self.assertEqual(private_row['status'], 'pending')
-        row = self.store.effects[('u', 'gojo', 'async-rel', 'chat_text', 'relationship_update')]
-        self.assertEqual(row['status'], 'pending')
+        key = ('u', 'gojo', 'async-rel', 'chat_text', 'assistant_short_memory')
+        self.assertEqual(self.store.effects[key]['status'], 'pending')
         self._drain()
-        self.assertEqual(self.jobs.call_count, 1)
-        self.assertEqual(self.rel.call_count, 1)
-        self.assertEqual(self.promise_detect.call_count, 1)
-        self.assertEqual(
-            self.store.effects[('u', 'gojo', 'async-rel', 'chat_text', 'relationship_update')]['status'],
-            'completed')
+        self.assertEqual(self.store.effects[key]['status'], 'completed')
+        self.save_short.assert_called_once()
+        self.jobs.assert_not_called()
+        self.rel.assert_not_called()
+        self.assertFalse(any(row['effect'] in ('private_extraction','relationship_update') for row in self.store.effects.values()))
         self.assertEqual(self.route._create_json.call_count, 1)
 
     def test_observer_failure_retries_through_route_wrapper_and_worker_once(self):
-        source_event_id = 'observer-worker-retry'
-        raw = chat_reply('そうだね', '是啊')
-        response, _body = self.send([raw], source_event_id, drain=False)
+        response, _body = self.send([chat_reply('そうだね', '是啊')], 'source-worker-retry', drain=False)
         self.assertEqual(response.status_code, 200)
-        key = ('u', 'gojo', source_event_id, 'chat_text', 'relationship_update')
-        row = self.store.effects[key]
-        self.assertEqual(row['status'], 'pending')
-
-        applied = []
-        seen_source_ids = []
-
-        def process_turn(**kwargs):
-            seen_source_ids.append(kwargs.get('source_event_id'))
-            if len(seen_source_ids) == 1:
-                return {
-                    'signals_extracted': 0,
-                    'signals_applied': 0,
-                    'observer_error': 'signals_schema_invalid',
-                    'applied': [],
-                }
-            applied.append(kwargs.get('source_event_id'))
-            return {
-                'signals_extracted': 1,
-                'signals_applied': 1,
-                'observer_error': None,
-                'applied': [{'result': {'action': 'warmth+'}}],
-            }
-
-        self.process_turn.side_effect = process_turn
-        relationship_fn = lambda: self._real_start_relationship_update(
-            'u', 'gojo', '你好', 'そうだね',
-            {'core_prompt': 'core'}, [], {}, source_event_id)
-        effect_ctx = {'relationship_fn': relationship_fn}
-
-        from generation_side_effect_worker import process_one_side_effect
-        with patch(
-                'generation_effects.apply_relationship_update',
-                new=self._real_apply_relationship_update):
-            first = process_one_side_effect(row, ctx=effect_ctx)
-        self.assertFalse(first)
+        self.save_short.side_effect = RuntimeError('temporary source outage')
+        self._drain()
+        key = ('u','gojo','source-worker-retry','chat_text','assistant_short_memory')
         self.assertEqual(self.store.effects[key]['status'], 'failed')
-        self.assertEqual(applied, [])
-
-        self._expire_effect(source_event_id, 'relationship_update')
-        with patch(
-                'generation_effects.apply_relationship_update',
-                new=self._real_apply_relationship_update):
-            second = process_one_side_effect(
-                self.store.effects[key], ctx=effect_ctx)
-        self.assertTrue(second)
+        failed_attempts = self.save_short.call_count
+        self.assertGreaterEqual(failed_attempts, 1)
+        self._expire_effect('source-worker-retry', 'assistant_short_memory')
+        self.save_short.side_effect = None
+        self._drain()
         self.assertEqual(self.store.effects[key]['status'], 'completed')
-        self.assertEqual(applied, [source_event_id])
-        self.assertEqual(seen_source_ids, [source_event_id, source_event_id])
-
-        with patch(
-                'generation_effects.apply_relationship_update',
-                new=self._real_apply_relationship_update):
-            duplicate = process_one_side_effect(
-                self.store.effects[key], ctx=effect_ctx)
-        self.assertFalse(duplicate)
-        self.assertEqual(applied, [source_event_id])
-        self.assertEqual(seen_source_ids, [source_event_id, source_event_id])
+        self.assertEqual(self.save_short.call_count, failed_attempts + 1)
+        self._drain()
+        self.assertEqual(self.save_short.call_count, failed_attempts + 1)
+        self.jobs.assert_not_called()
+        self.rel.assert_not_called()
 
     def test_heartbeat_blocks_reclaim_while_llm_runs(self):
         self._hb_patch.stop()
@@ -1700,7 +1654,7 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(len(self.persist_calls), 2)
         self.assertEqual(self.client.messages.create.call_count, 1)
-        self.assertEqual(self.jobs.call_count, 1)
+        self.jobs.assert_not_called()
         self.assertEqual(body1['assistant_turn_id'], 'image_reply:img-same')
         self.assertEqual(
             [m['event_id'] for m in body1['messages']],
@@ -1731,7 +1685,7 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
         self.assertEqual(body2['media']['id'], 'media-img-fail')
 
     def test_image_crash_before_extraction_then_replay_once(self):
-        receipt.CRASH_BEFORE_EFFECT = 'private_extraction'
+        receipt.CRASH_BEFORE_EFFECT = 'assistant_short_memory'
         with self.assertRaises(RuntimeError):
             self.send('img-crash-pe')
         receipt.CRASH_BEFORE_EFFECT = None
@@ -1739,7 +1693,7 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
         second, body = self.send('img-crash-pe')
         self.assertEqual(second.status_code, 200)
         self.assertEqual(self.client.messages.create.call_count, 1)
-        self.assertEqual(self.jobs.call_count, 1)
+        self.jobs.assert_not_called()
         self.assertEqual(body['assistant_turn_id'], 'image_reply:img-crash-pe')
 
     def test_image_crash_before_complete_no_assistant_effects(self):
@@ -1780,24 +1734,24 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
     def test_image_completed_replay_repairs_pending(self):
         first, _body = self.send('img-repair')
         self.assertEqual(first.status_code, 200)
-        key = ('u', 'gojo', 'img-repair', 'chat_image', 'private_extraction')
+        key = ('u', 'gojo', 'img-repair', 'chat_image', 'assistant_short_memory')
         self.store.effects[key]['status'] = 'pending'
         self.store.effects[key]['claim_token'] = None
-        self.jobs.reset_mock()
-        second, _body2 = self.send('img-repair')
+        second, _body = self.send('img-repair')
         self.assertEqual(second.status_code, 200)
         self.assertEqual(self.client.messages.create.call_count, 1)
-        self.assertEqual(self.jobs.call_count, 1)
+        self.assertEqual(self.store.effects[key]['status'], 'completed')
+        self.jobs.assert_not_called()
 
     def test_image_worker_repairs_without_user_retry(self):
         first, _body = self.send('img-worker', drain=False)
         self.assertEqual(first.status_code, 200)
-        self.assertEqual(self.client.messages.create.call_count, 1)
-        key = ('u', 'gojo', 'img-worker', 'chat_image', 'relationship_update')
+        key = ('u', 'gojo', 'img-worker', 'chat_image', 'assistant_short_memory')
         self.assertEqual(self.store.effects[key]['status'], 'pending')
         self._drain()
         self.assertEqual(self.store.effects[key]['status'], 'completed')
         self.assertEqual(self.client.messages.create.call_count, 1)
+        self.jobs.assert_not_called()
 
 
 class RelationshipGateTests(unittest.TestCase):
@@ -2083,310 +2037,70 @@ class HeartbeatAndWorkerTests(unittest.TestCase):
 
 
 class RelationshipWorkerIntegrationTests(unittest.TestCase):
-    """Exercise the durable worker through the real relationship process_turn."""
+    """Old receipt names repair through canonical SQL without an Observer."""
+    from tests import test_private_source_first as fixture
+    setUpClass = classmethod(fixture.PrivateSourceFirstTests.setUpClass.__func__)
+    tearDownClass = classmethod(fixture.PrivateSourceFirstTests.tearDownClass.__func__)
+    setUp = fixture.PrivateSourceFirstTests.setUp
+    tearDown = fixture.PrivateSourceFirstTests.tearDown
+    sql = fixture.PrivateSourceFirstTests.sql
+    save = fixture.PrivateSourceFirstTests.save
+    drain_jobs = fixture.PrivateSourceFirstTests.drain_jobs
 
-    SIGNAL = {
-        'signal_type': 'small_care',
-        'actor': 'user',
-        'confidence': 'high',
-        'brief': '用户提醒角色早点休息',
-        'attributes': {},
-    }
+    def seed(self):
+        self.save()
+        gate = receipt.resolve_generation('u', 'c', 'user-1', 'chat_text')
+        self.assertTrue(receipt.complete_generation('u', 'c', 'user-1', 'chat_text',
+            gate['claim_token'], {'messages': [{'jp':'了解','zh':'知道了'}]},
+            effects=['relationship_update']))
+        return receipt.list_side_effects('u', 'c', 'user-1', 'chat_text')[0]
 
-    def setUp(self):
-        import cognitive_events
-        import generation_side_effect_worker
-        import raw_events
-        import relationship_engine
-        import relationship_signals
-
-        self.cognitive_events = cognitive_events
-        self.worker = generation_side_effect_worker
-        self.raw_events = raw_events
-        self.engine = relationship_engine
-        self.signals = relationship_signals
-        self.store = ReceiptStore()
-        self.processors = {}
-        self.applications = {}
-        self.model_outputs = []
-        self.model_calls = []
-        self.ledger_applies = []
-        self.stats_writes = []
-        self.provenance_writes = []
-        self.temporal_writes = []
-        self.ingress_attempts = []
-        self.ingress_inserts = []
-        self.ingress_fail_once = set()
-
-        router = Mock()
-        router.post.side_effect = lambda *_args, **_kwargs: lambda fn: fn
-        route_modules = {
-            'anthropic': stub('anthropic', Anthropic=Mock(return_value=Mock())),
-            'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
-            'fastapi.responses': stub(
-                'fastapi.responses',
-                JSONResponse=lambda content, status_code=200: types.SimpleNamespace(
-                    body=json.dumps(content).encode(), status_code=status_code)),
-            'config': stub(
-                'config', ANTHROPIC_KEY='', EMOTIONS=['平静'],
-                TTS_PROVIDER='fish', DEFAULT_CHARACTER_ID='gojo',
-                MODEL_MAIN='claude-test', MODEL_JP_AUX='claude-test'),
-            'utils': stub(
-                'utils', ingest_model_output=Mock(), sanitize_user_reply=Mock(),
-                contains_offline_marker=Mock(return_value=False),
-                finalize_user_messages=Mock(), has_visible_text=Mock(return_value=True),
-                valid_reply_msg=Mock(return_value=True),
-                commit_ready_msgs=Mock(return_value=True),
-                msg_has_json_debris=Mock(return_value=False)),
-            'ai_client': stub('ai_client', extract_text=Mock(return_value='')),
-            'tts': stub('tts', tts_to_b64=Mock(), transcribe_audio_b64=Mock()),
-            'prompt': stub(
-                'prompt', build_system_blocks=Mock(return_value=[]),
-                log_cache_usage=Mock()),
-            'user_memory': stub(
-                'user_memory', save_short_memory=Mock(),
-                save_user_short_memory_once=Mock(), get_short_memory=Mock(return_value=[]),
-                update_chat_days=Mock(), SHORT_MEMORY_MAX=20),
-            'memory_jobs': stub('memory_jobs', enqueue_private_extraction=Mock()),
-            'temporal_awareness': stub(
-                'temporal_awareness', find_reply_calendar_conflict=Mock(),
-                get_temporal_snapshot=Mock(return_value={}),
-                record_assistant_message=Mock(), record_turn=Mock(),
-                record_user_message=Mock()),
-            'characters': stub(
-                'characters', get_character=Mock(return_value={
-                    'core_prompt': 'core', 'voice_id': 'voice'})),
-        }
-        self.route = load_source('route_chat', route_modules)
-
-        def claim_processor(event_id, _processor_type, _processor_version):
-            if self.processors.get(event_id) == 'succeeded':
-                return 'already_succeeded'
-            self.processors[event_id] = 'processing'
-            return 'claimed'
-
-        def finish_processor(event_id, _processor_type, _processor_version,
-                             status, result_ref=None, last_error=None, conn=None):
-            self.processors[event_id] = status
-
-        def begin_application(event_id, _processor_type, _processor_version,
-                              _user_id=None, _character_id=None, payload=None):
-            if event_id in self.applications:
-                return False
-            self.applications[event_id] = json.loads(json.dumps(payload or {}))
-            return True
-
-        def get_application(event_id, *_args, **_kwargs):
-            payload = self.applications.get(event_id)
-            return json.loads(json.dumps(payload)) if payload is not None else None
-
-        @contextmanager
-        def relationship_txn():
-            yield object()
-
-        def create_chat(**kwargs):
-            self.model_calls.append(kwargs)
-            if not self.model_outputs:
-                raise AssertionError('unexpected relationship model call')
-            raw = self.model_outputs.pop(0)
-            return raw, {
-                'stop_reason': 'end_turn',
-                'output_tokens': 32,
-                'response_id': f'test-observer-{len(self.model_calls)}',
-            }
-
-        def apply_care(_user_id, _character_id, _stype, _conf, _mult, signal):
-            source_event_id = self.current_source_event_id
-            self.ledger_applies.append(source_event_id)
-            self.provenance_writes.append(source_event_id)
-            return {'action': 'warmth+', 'brief': signal.get('brief')}
-
-        def ingest_v4_signals(*, source_event_id, signals, **_kwargs):
-            self.ingress_attempts.append(source_event_id)
-            if (source_event_id in self.ingress_fail_once
-                    and self.ingress_attempts.count(source_event_id) == 1):
-                raise RuntimeError('injected cognitive ingress outage')
-            if source_event_id in self.ingress_inserts:
-                return {'status': 'duplicate'}
-            self.ingress_inserts.append(source_event_id)
-            return {'status': 'inserted', 'signals': len(signals)}
-
-        self.patchers = [
-            patch.object(receipt, 'get_conn', side_effect=lambda: FakeConn(self.store)),
-            patch.object(self.raw_events, 'sources_are_active', return_value=True),
-            patch.object(self.raw_events, 'claim_processor', side_effect=claim_processor),
-            patch.object(self.raw_events, 'finish_processor', side_effect=finish_processor),
-            patch.object(self.engine, 'ensure_state_row', return_value=None),
-            patch.object(self.engine, 'relationship_txn', side_effect=relationship_txn),
-            patch.object(self.engine, 'try_begin_application', side_effect=begin_application),
-            patch.object(self.engine, 'get_application_payload', side_effect=get_application),
-            patch.object(self.engine, '_apply_care', side_effect=apply_care),
-            patch.object(
-                self.engine, '_log_interaction_stats',
-                side_effect=lambda *_args, **kwargs:
-                    self.stats_writes.append(kwargs.get('source_event_id'))),
-            patch.object(
-                self.engine, '_log_temporal_observation',
-                side_effect=lambda *_args, **_kwargs:
-                    self.temporal_writes.append(self.current_source_event_id)),
-            patch.object(self.engine, 'cleanup_hypotheses', return_value=None),
-            patch.object(
-                self.engine, 'check_retreat_boundary_superseded', return_value=None),
-            patch.object(self.signals, 'create_chat', side_effect=create_chat),
-            patch.object(
-                self.cognitive_events, 'ingest_v4_signals',
-                side_effect=ingest_v4_signals),
-        ]
-        for item in self.patchers:
-            item.start()
-            self.addCleanup(item.stop)
-        self.addCleanup(setattr, receipt, 'CRASH_AFTER_EFFECT', None)
-        self.addCleanup(setattr, receipt, 'CRASH_BEFORE_EFFECT', None)
-
-    def _seed_effect(self, source_event_id):
-        key = ('u', 'gojo', source_event_id, receipt.ENDPOINT_CHAT_TEXT,
-               'relationship_update')
-        self.store.effects[key] = {
-            'effect': 'relationship_update',
-            'status': 'pending',
-            'claim_token': None,
-            'last_error': None,
-            'attempt_count': 0,
-            'claim_expires_at': None,
-            'payload_json': None,
-            'result_json': None,
-            'created_at': datetime.now(timezone.utc),
-            'user_id': 'u',
-            'character_id': 'gojo',
-            'source_event_id': source_event_id,
-            'endpoint': receipt.ENDPOINT_CHAT_TEXT,
-        }
-        return key
-
-    def _ctx(self, source_event_id):
-        def relationship_fn():
-            self.current_source_event_id = source_event_id
-            return self.route._start_relationship_update(
-                'u', 'gojo', '记得早点休息', 'うん、ありがとう。',
-                {'core_prompt': 'core'}, [], {}, source_event_id)
-
-        return {
-            'payload': {},
-            'user_text': '记得早点休息',
-            'full_jp': 'うん、ありがとう。',
-            'relationship_fn': relationship_fn,
-        }
-
-    def _valid_signal_output(self):
-        return json.dumps({'signals': [self.SIGNAL]}, ensure_ascii=False)
+    def apply(self, row):
+        from generation_side_effect_worker import process_one_side_effect
+        return process_one_side_effect(row, ctx={'user_text':'model-copied fact'})
 
     def test_distinct_metadata_and_signal_objects_fail_before_ledger_writes(self):
-        source_event_id = 'integrated-ambiguous-output'
-        key = self._seed_effect(source_event_id)
-        raw = '{"request_id":"metadata"}\n' + self._valid_signal_output()
-        self.model_outputs = [raw, raw]
-        ok = self.worker.process_one_side_effect(
-            self.store.effects[key], ctx=self._ctx(source_event_id))
-        self.assertFalse(ok)
-        self.assertEqual(self.store.effects[key]['status'], 'failed')
-        self.assertEqual(self.processors[source_event_id], 'failed')
-        self.assertNotIn(source_event_id, self.applications)
-        self.assertEqual(self.ledger_applies, [])
-        self.assertEqual(self.stats_writes, [])
-        self.assertEqual(self.provenance_writes, [])
-        self.assertEqual(self.ingress_attempts, [])
+        row = self.seed()
+        with patch('relationship_signals.create_chat', side_effect=AssertionError('old Observer invoked')) as model:
+            self.assertTrue(self.apply(row))
+        model.assert_not_called()
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0], 0)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 1)
+        source = Path(BACKEND, 'relationship_engine.py').read_text(encoding='utf-8')
+        for removed in ('extract_signals', 'def _route_signal', 'def _apply_care', 'relationship_txn'):
+            self.assertNotIn(removed, source)
 
     def test_observer_failure_retry_success_and_duplicate_delivery(self):
-        source_event_id = 'integrated-observer-retry'
-        key = self._seed_effect(source_event_id)
-        self.model_outputs = [
-            '{"request_id":"metadata-only"}',
-            '{"signals":null}',
-            self._valid_signal_output(),
-        ]
-        ctx = self._ctx(source_event_id)
-
-        first = self.worker.process_one_side_effect(self.store.effects[key], ctx=ctx)
-        self.assertFalse(first)
-        self.assertEqual(self.store.effects[key]['status'], 'failed')
-        self.assertEqual(self.processors[source_event_id], 'failed')
-        self.assertIn('relationship_observer_failed:signals_schema_invalid',
-                      self.store.effects[key]['last_error'])
-        self.assertNotIn(source_event_id, self.applications)
-        self.assertEqual(self.ledger_applies, [])
-        self.assertEqual(self.stats_writes, [])
-        self.assertEqual(self.provenance_writes, [])
-        self.assertEqual(self.ingress_attempts, [])
-
-        second = self.worker.process_one_side_effect(self.store.effects[key], ctx=ctx)
-        self.assertTrue(second)
-        self.assertEqual(self.store.effects[key]['status'], 'completed')
-        self.assertEqual(self.processors[source_event_id], 'succeeded')
-        self.assertEqual(self.applications[source_event_id]['signals'], [self.SIGNAL])
-        self.assertEqual(self.ledger_applies, [source_event_id])
-        self.assertEqual(self.stats_writes, [source_event_id])
-        self.assertEqual(self.provenance_writes, [source_event_id])
-        self.assertEqual(self.ingress_attempts, [source_event_id])
-        self.assertEqual(self.ingress_inserts, [source_event_id])
-
-        model_call_count = len(self.model_calls)
-        duplicate = self.worker.process_one_side_effect(self.store.effects[key], ctx=ctx)
-        self.assertFalse(duplicate)
-        self.assertEqual(len(self.model_calls), model_call_count)
-        self.assertEqual(self.ledger_applies, [source_event_id])
-        self.assertEqual(self.stats_writes, [source_event_id])
-        self.assertEqual(self.provenance_writes, [source_event_id])
-        self.assertEqual(self.ingress_inserts, [source_event_id])
+        row = self.seed()
+        self.sql('ALTER TABLE chat_log RENAME COLUMN text TO unavailable_text')
+        self.database.commit()
+        self.assertFalse(self.apply(row))
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 0)
+        self.sql('ALTER TABLE chat_log RENAME COLUMN unavailable_text TO text')
+        self.sql("UPDATE chat_generation_side_effect SET claim_expires_at=NOW()-INTERVAL '10 seconds'")
+        self.database.commit()
+        row = receipt.list_side_effects('u', 'c', 'user-1', 'chat_text')[0]
+        self.assertTrue(self.apply(row))
+        row = receipt.list_side_effects('u', 'c', 'user-1', 'chat_text')[0]
+        self.assertFalse(self.apply(row))
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 1)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_event_triggers')[0][0], 1)
 
     def test_retry_repairs_ingress_after_ledger_success_before_outer_complete(self):
-        source_event_id = 'integrated-after-ledger-crash'
-        key = self._seed_effect(source_event_id)
-        self.model_outputs = [self._valid_signal_output()]
-        self.ingress_fail_once.add(source_event_id)
-        ctx = self._ctx(source_event_id)
-
-        receipt.CRASH_AFTER_EFFECT = 'relationship_update'
-        with self.assertRaisesRegex(RuntimeError, 'injected crash after'):
-            self.worker.process_one_side_effect(self.store.effects[key], ctx=ctx)
-        receipt.CRASH_AFTER_EFFECT = None
-
-        self.assertEqual(self.store.effects[key]['status'], 'processing')
-        self.assertEqual(self.processors[source_event_id], 'succeeded')
-        self.assertEqual(self.ledger_applies, [source_event_id])
-        self.assertEqual(self.stats_writes, [source_event_id])
-        self.assertEqual(self.provenance_writes, [source_event_id])
-        self.assertEqual(self.ingress_attempts, [source_event_id])
-        self.assertEqual(self.ingress_inserts, [])
-
-        self.store.effects[key]['claim_expires_at'] = (
-            datetime.now(timezone.utc) - timedelta(seconds=1))
-        retried = self.worker.process_one_side_effect(self.store.effects[key], ctx=ctx)
-        self.assertTrue(retried)
-        self.assertEqual(self.store.effects[key]['status'], 'completed')
-        self.assertEqual(len(self.model_calls), 1)
-        self.assertEqual(self.ledger_applies, [source_event_id])
-        self.assertEqual(self.stats_writes, [source_event_id])
-        self.assertEqual(self.provenance_writes, [source_event_id])
-        self.assertEqual(
-            self.ingress_attempts, [source_event_id, source_event_id])
-        self.assertEqual(self.ingress_inserts, [source_event_id])
+        row = self.seed()
+        self.drain_jobs()
+        self.assertTrue(self.apply(row))
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 1)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_event_triggers')[0][0], 1)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0], 0)
 
     def test_valid_empty_signals_completes_without_observer_retry(self):
-        source_event_id = 'integrated-empty-signals'
-        key = self._seed_effect(source_event_id)
-        self.model_outputs = ['{"signals":[]}']
-
-        completed = self.worker.process_one_side_effect(
-            self.store.effects[key], ctx=self._ctx(source_event_id))
-
-        self.assertTrue(completed)
-        self.assertEqual(self.store.effects[key]['status'], 'completed')
-        self.assertEqual(self.processors[source_event_id], 'succeeded')
-        self.assertEqual(self.applications[source_event_id], {'signals': []})
-        self.assertEqual(len(self.model_calls), 1)
-        self.assertEqual(self.ledger_applies, [])
-        self.assertEqual(self.provenance_writes, [])
-        self.assertEqual(self.ingress_attempts, [source_event_id])
+        row = self.seed()
+        self.assertTrue(self.apply(row))
+        effect = receipt.list_side_effects('u', 'c', 'user-1', 'chat_text')[0]
+        self.assertEqual(effect['status'], 'completed')
+        self.assertEqual(effect['result_json']['signals_applied'], 0)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 1)
 
 
 class InitAndSchemaTests(unittest.TestCase):

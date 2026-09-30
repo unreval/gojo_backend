@@ -215,3 +215,111 @@ load-test independent concurrent database connections.
 - Review production schema migration and concurrent contention separately.
   This branch has not been deployed or merged, and production worker remains
   outside this task's execution scope.
+
+## Source-first ingress and reply parsing follow-up
+
+This follow-up starts from `cfb57c091482300bd934ebdc097158da4fc70ab8` on
+`codex/deterministic-cognitive-loop`.
+
+Private user ingress now follows this order:
+
+1. Resolve a stable source event id.
+2. Commit the canonical `chat_log` source and one `canonical_turn`
+   `memory_jobs` row in the same transaction, under the existing pair lock.
+3. Write the idempotent `short_memory` compatibility cache.
+4. Generate the visible assistant response.
+
+Source/job failure rolls back before cache or generation. Cache failure keeps
+the durable source and job. Duplicate identities must match the existing active
+source; retries cannot replace content or resurrect deleted sources. Provider
+or parse failure leaves user evidence available to the deterministic worker
+and creates no assistant source.
+
+A successful receipt schedules the repairable assistant source/cache effect.
+That source write owns the assistant's evidence job. New receipts no longer
+schedule `private_extraction` and `relationship_update` for the same user
+event. Existing named handlers remain for historical receipt/job repair and
+still reload canonical evidence. Projection occurs only in the deterministic
+cycle; assistant evidence records the actual utterance without proving its
+claims.
+
+The existing single `_generate_or_none` accepts safe raw speech on the current
+attempt. Nonverbal content (`🥺`, `🥺...`, `...`, `……`) preserves both
+language fields exactly and skips translation and punctuation normalization.
+Structured responses retain the existing validation and truth guards. Empty,
+broken JSON, internal/state output and provider failures can retry; a
+deterministic truth-guard rejection can also retry. Accepted trace records add
+`acceptance_mode=structured|plaintext|nonverbal`. Fallback carries no state or
+machine intents, and does not schedule promise detection. TTS behavior is
+unchanged.
+
+Rolling summaries use the shared `structured_output.parse_structured_output`
+with exactly the six existing fields, all required strings. Multiple distinct
+roots and malformed/schema-invalid output fail closed. Jobs retain the safe
+parse error code and log id, kind and attempt without raw text. Empty derived
+summaries fail as `empty_summary`. The existing source-current gate remains;
+it now also verifies all referenced raw events are active before a late
+summary/episode can become current.
+
+New acceptance runs use the same disposable PostgreSQL and offline guard as
+the baseline above. SQL fixture migrations preserve unresolved positive
+product expectations. Remaining old-contract and capability failures are
+reported separately; this follow-up does not restore broader semantics by
+calling a model judge.
+
+Follow-up verification:
+
+| Run | Tests | Failure records | Error records | Skips / xfails |
+| --- | ---: | ---: | ---: | ---: |
+| Deterministic hard acceptance | 52 | 0 | 0 | 0 / 0 |
+| Migrated diary/episodic readers | 52 | 0 | 0 | 0 / 0 |
+| Targeted generation/source/summary/authority regression | 413 | 0 | 0 | 0 / 0 |
+| Full suite after fixture migration | 956 | 45 | 62 | 0 / 0 |
+
+At the pre-closeout snapshot, the 107 remaining records comprised 79 old
+model-authority contracts, 27 capability gaps and one historical-recovery
+fixture migration. Compared with the 155-record baseline, 48 records have
+cleared. Identity/subtest comparison confirms 98 persistent records, nine
+failure-to-error transitions, zero error-to-failure transitions and zero newly
+failing records. The error count is 60 - 7 resolved errors + 9 prior failures
+now reaching result-contract errors = 62; aggregate counts alone are not proof. Of the original 31 fixture records,
+26 cleared, four now reach unmet positive behavior expectations, and one still
+needs a valid historical-recovery setup. Passing negative semantic checks does
+not imply the corresponding positive capability is implemented.
+
+All 386 pre-existing test methods in changed test files remain, including five
+renames for the intentional-silence contract. The method bodies for all 29
+distinct tests representing the original 32 capability records are unchanged.
+No new skip/xfail was added. The optional PGlite adapter only adds PostgreSQL
+parameter typing for standalone `IS NULL` placeholders; authority queries,
+locks, commits and rollbacks still execute as SQL.
+
+
+## Bounded canonical recovery and receipt closeout
+
+The remaining historical recovery fixture now constructs real canonical user
+evidence, deterministic adjudication and a completed receipt. Replaying a legacy
+model duplicate candidate preserves exactly the same rows and projections.
+Legacy candidates without sources do not become judgments; missing or invalid
+historical adjudication reports a reason. Deleted/retracted sources and
+superseded judgments cannot be revived. Source read errors propagate as errors.
+Compatibility ingress success means evidence ingress, never recovered authority.
+
+The three receipt windows are covered by real PGlite SQL in
+`tests/test_receipt_windows.py`: no receipt commit keeps only user evidence;
+an ASGI connection reset after commit replays the stored reply without a second
+Generator call; a crash after the assistant effect's durable writes but before
+effect completion repairs the same effect without duplicating raw/job/projection.
+`completed` means server persistence, not client receipt or a user read.
+
+The 79 legacy records retain their assertions and are mapped individually in
+`COGNITIVE_CONTRACT_COVERAGE.json`, including the actual replacement tests and
+unimplemented positive behavior. The 27 capability records remain explicit in
+`COGNITIVE_CAPABILITY_GAPS.json`; their test method bodies are unchanged by this
+closeout. A passing safety boundary does not establish the absent capability.
+
+All SQL acceptance uses PGlite 0.3.14, one database and one borrowed connection
+per fixture. Existing receipt owner/two-worker/heartbeat tests use Python
+threads and a process-local locked store. Independent PostgreSQL connections
+racing on source/job/receipt/effect boundaries remain unaccepted before release.
+No mock or single-connection result is a concurrent PostgreSQL acceptance claim.

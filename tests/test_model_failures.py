@@ -186,7 +186,7 @@ class ImageFailureTests(unittest.TestCase):
         self.assert_generation_failed(response, result)
         self.assertNotIn('没能读出图片', json.dumps(result, ensure_ascii=False))
 
-    def test_ellipsis_is_rejected_by_commit_gate(self):
+    def test_ellipsis_is_accepted_by_commit_gate(self):
         bad = json.dumps({
             'emotion': '平静',
             'messages': [{'jp': '...', 'zh': '...'}],
@@ -195,8 +195,9 @@ class ImageFailureTests(unittest.TestCase):
             model_response(bad), model_response(bad), model_response(bad),
         ]
         response, result = self.send()
-        self.assertEqual(len(self._reply_calls()), 3)
-        self.assert_generation_failed(response, result)
+        self.assertEqual(len(self._reply_calls()), 1)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result['messages'][0]['jp'], '...')
 
     def test_source_event_id_is_forwarded_to_user_memory(self):
         self.client.messages.create.side_effect = [
@@ -586,24 +587,13 @@ class ObserverFailureTests(unittest.TestCase):
         self.assertEqual(self.call.call_count, 1)
 
     def test_failed_observer_does_not_create_cognitive_event_or_update_relationship(self):
-        # Production engine imports are local/pure; replace its entry dependencies.
-        with patch.dict(sys.modules, {'ai_client': stub('ai_client', create_chat=self.call),
-                                     'db': stub('db', get_conn=Mock())}):
-            engine = load_source('relationship_engine', {})
-        with patch.object(engine, 'ensure_state_row') as ensure_state, \
-             patch.object(engine, 'extract_signals', return_value={
-                 'signals': [], 'error': 'empty_response'}), \
-             patch.object(engine, '_log_interaction_stats') as stats, \
-             patch.object(engine, '_route_signal') as route, \
-             patch.object(engine, 'cleanup_hypotheses') as cleanup, \
-             patch('cognitive_events.ingest_v4_signals') as ingress:
-            result = engine.process_turn('u', 'gojo', '你好')
-        self.assertEqual(result['observer_error'], 'empty_response')
-        ensure_state.assert_not_called()
-        stats.assert_not_called()
-        route.assert_not_called()
-        cleanup.assert_not_called()
-        ingress.assert_not_called()
+        engine = load_source('relationship_engine', {})
+        for removed in ('ensure_state_row', 'extract_signals', '_route_signal', '_apply_care'):
+            self.assertFalse(hasattr(engine, removed), removed)
+        result = engine.process_turn('u', 'gojo', 'copied model text', source_event_id=None)
+        self.assertEqual(result['cognitive_ingress']['status'], 'pending_canonical_source')
+        self.assertEqual(result['signals_applied'], 0)
+        self.call.assert_not_called()
 
 
 class ClientMetadataTests(unittest.TestCase):

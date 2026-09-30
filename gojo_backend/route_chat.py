@@ -35,7 +35,7 @@ from fastapi.responses import JSONResponse
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
 from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
-    finalize_user_messages,
+    finalize_user_messages, classify_reply_content,
     has_visible_text, valid_reply_msg, commit_ready_msgs, msg_has_json_debris,
 )
 from ai_client import extract_text
@@ -288,7 +288,7 @@ def _trace_response_field(response, field):
 def _build_generation_trace_payload(
     *, model, max_tokens, system_blocks, messages, attempt, attempts,
     trace_context, response=None, error=None, outcome='accepted',
-    will_retry=False, retry_reason=None,
+    will_retry=False, retry_reason=None, acceptance_mode=None,
 ):
     """Build one bounded, content-free audit record for a Generator attempt."""
     trace_context = trace_context if isinstance(trace_context, dict) else {}
@@ -320,6 +320,10 @@ def _build_generation_trace_payload(
                 _trace_response_field(response, 'stop_reason'), _TRACE_STOP_REASONS),
         },
         'outcome': normalized_outcome,
+        'acceptance_mode': (
+            _trace_enum(acceptance_mode, {'structured', 'plaintext', 'nonverbal'})
+            if normalized_outcome == 'accepted' else None
+        ),
         'will_retry': retrying,
         'retry_reason': (
             _trace_enum(retry_reason, _TRACE_RETRY_REASONS)
@@ -510,27 +514,35 @@ def _generate_or_none(
 ):
     """LLM → parse → validate → retry。成功返回 (parsed, state)，失败 (None, None)。"""
     result = None
-    last_visible = ''
     committed_state = None
     for attempt in range(attempts):
         try:
             raw, response = _create_json(model, max_tokens, system_blocks, messages)
             log_cache_usage(cache_tag, response)
-            print(f'[{log_tag}] attempt {attempt+1}: {(raw or "")[:120]}...')
+            print(f'[{log_tag}] attempt {attempt+1} chars={len(raw or "")}')
             parsed, visible, state = _parse_generation(raw)
-            if visible:
-                last_visible = visible
-            elif raw:
-                last_visible = sanitize_user_reply(raw)
+            acceptance_mode = 'structured'
+            if not _parsed_ready(parsed, min_messages) and salvage:
+                salvaged = _salvage_japanese(raw)
+                if salvaged and min_messages == 1 and _valid_msg(salvaged):
+                    parsed = {'emotion': '平静', 'messages': [salvaged]}
+                    state = None
+                    acceptance_mode = (
+                        'nonverbal' if classify_reply_content(salvaged['jp']) == 'nonverbal'
+                        else 'plaintext')
+                    parsed['_acceptance_mode'] = acceptance_mode
             if not _parsed_ready(parsed, min_messages):
+                will_retry = attempt + 1 < attempts and classify_reply_content(raw) == 'invalid'
                 _emit_generation_trace(
                     model=model, max_tokens=max_tokens, system_blocks=system_blocks,
                     messages=messages, attempt=attempt + 1, attempts=attempts,
                     trace_context=generation_trace, response=response,
                     outcome='parse_invalid',
-                    will_retry=attempt + 1 < attempts,
+                    will_retry=will_retry,
                     retry_reason='parse_invalid',
                 )
+                if not will_retry:
+                    break
                 continue
             if reject_fn:
                 reason = reject_fn(parsed)
@@ -546,7 +558,6 @@ def _generate_or_none(
                         will_retry=attempt + 1 < attempts,
                         retry_reason=trace_reason,
                     )
-                    last_visible = ''
                     continue
             result = parsed
             committed_state = state
@@ -554,7 +565,7 @@ def _generate_or_none(
                 model=model, max_tokens=max_tokens, system_blocks=system_blocks,
                 messages=messages, attempt=attempt + 1, attempts=attempts,
                 trace_context=generation_trace, response=response,
-                outcome='accepted', will_retry=False,
+                outcome='accepted', will_retry=False, acceptance_mode=acceptance_mode,
             )
             break
         except Exception as e:
@@ -567,11 +578,6 @@ def _generate_or_none(
                 retry_reason='provider_error',
             )
             print(f'[{log_tag}] attempt {attempt+1} error: {e}')
-    if not result and salvage and last_visible:
-        salvaged = _salvage_japanese(last_visible)
-        if salvaged and _valid_msg(salvaged):
-            result = {'emotion': '平静', 'messages': [salvaged]}
-            print(f'[{log_tag}] 纯日语救援：{salvaged["jp"][:40]}')
     return result, committed_state
 
 
@@ -745,42 +751,12 @@ def _history_plus_current(messages, content):
 
 
 def _salvage_japanese(raw: str):
-    """从模型没包成 JSON 的原始回复里，抢救出可用的日语当回复。
-    用于：模型直接吐日语大白话、没输出 JSON 时，别浪费他真说的话。
-    返回 {'jp':..., 'zh':...} 或 None。"""
-    import re
-    if not raw:
+    """Accept safe speech as text only; no state or machine fields survive."""
+    kind = classify_reply_content(raw)
+    if kind == 'invalid':
         return None
-    text = sanitize_user_reply(raw).strip().strip('`').strip()
-    if contains_offline_marker(text):
-        print('[salvage] 仍含 OFFLINE_CHARACTER_STATES,放弃救援')
-        return None
-
-    json_field_hits = 0
-    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"'):
-        if kw in text:
-            json_field_hits += 1
-    if json_field_hits >= 2:
-        print(f'[salvage] 检测到 JSON 结构泄露({json_field_hits} 个字段名),放弃救援')
-        return None
-
-    text = re.sub(r'^\s*\{?\s*"?(emotion|messages|jp|zh)"?\s*:?', '', text)
-    text = text.replace('{', '').replace('}', '').replace('[', '').replace(']', '').strip()
-    text = text.strip('"\'，, 。').strip()
-    if not text:
-        return None
-    if not re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', text):
-        return None
-    for kw in ('"jp"', '"zh"', '"messages"', '"emotion"', '"moodshift"', '"anchor"'):
-        if kw in text:
-            print(f'[salvage] 救援后仍含 JSON 残骸 {kw},放弃')
-            return None
-    text = sanitize_user_reply(text)
-    # 截断过长的（避免把一堆乱码全塞进去）
-    jp = text[:200].strip()
-    if not _has_visible_text(jp):
-        return None
-    zh = _quick_translate(jp)
+    jp = raw.strip()
+    zh = jp if kind == 'nonverbal' else _quick_translate(jp)
     return {'jp': jp, 'zh': zh}
 
 
@@ -1001,6 +977,15 @@ async def chat_text(data: dict):
         _latency_emit()
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    try:
+        save_user_short_memory_once(
+            user_id, user_text, character_id, source_event_id=source_event_id)
+    except Exception:
+        _latency_emit()
+        return JSONResponse(
+            {'error': 'canonical_source_unavailable', 'retryable': True,
+             'source_event_id': source_event_id}, status_code=503)
+
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
 
     # ★ 角色日程:free / soft_busy / hard_busy。
@@ -1022,9 +1007,6 @@ async def chat_text(data: dict):
         if not availability.get('can_reply'):
             act = availability.get('activity') or {}
             if availability.get('seen'):
-                save_user_short_memory_once(
-                    user_id, user_text, character_id,
-                    source_event_id=source_event_id)
                 record_user_message(
                     user_id, character_id, source='chat_text_seen_busy',
                     prior_snapshot=temporal_snapshot,
@@ -1098,9 +1080,6 @@ async def chat_text(data: dict):
         context_pack=pack)
     _trace.mark('prompt', (_time.perf_counter() - _tmark) * 1000.0)
     _tmark = _time.perf_counter()
-
-    save_user_short_memory_once(
-        user_id, user_text, character_id, source_event_id=source_event_id)
 
     def reject_calendar(parsed):
         reply_text = ' '.join(
@@ -1220,6 +1199,8 @@ async def chat_text(data: dict):
         'source_event_id': source_event_id,
         '_user_text': user_text,
     }
+    if result.get('_acceptance_mode'):
+        resp['_acceptance_mode'] = result['_acceptance_mode']
     if reminder_spec:
         resp['reminder'] = reminder_spec
     if result.get('cancel_reminder'):
@@ -1320,7 +1301,7 @@ async def chat_story(data: dict):
         user_id, character_id, recall_query, extra_suffix=STORY_SCENE,
         temporal_snapshot=temporal_snapshot, context_pack=pack)
 
-    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    source_event_id = str(data.get('source_event_id') or '').strip() or f'story:{uuid.uuid4()}'
     save_user_short_memory_once(
         user_id, user_text, character_id, source_event_id=source_event_id)
 
@@ -1337,16 +1318,14 @@ async def chat_story(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    # Frontend owns chat_log segments (`{source}:reply:{i}`). This is cache only.
-    save_short_memory(user_id, 'assistant', full_jp, character_id)
+    # Successful visible speech owns its source and durable utterance job.
+    save_short_memory(
+        user_id, 'assistant', full_jp, character_id,
+        source_event_id=f'{source_event_id}:reply',
+        metadata={'turn_aggregate': True, 'assistant_turn_id': f'{source_event_id}:reply'})
     record_turn(
         user_id, character_id, source='chat_story',
         prior_snapshot=temporal_snapshot,
-    )
-    enqueue_private_extraction(
-        user_id, user_text, full_jp, character_id,
-        temporal_context=temporal_snapshot,
-        source_event_id=source_event_id,
     )
 
     voice_id = char.get('voice_id')
@@ -1510,16 +1489,14 @@ async def chat_voice_text(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    # Frontend owns chat_log segments (`{source}:reply:{i}`). This is cache only.
-    save_short_memory(user_id, 'assistant', full_jp, character_id)
+    # Successful visible speech owns its source and durable utterance job.
+    save_short_memory(
+        user_id, 'assistant', full_jp, character_id,
+        source_event_id=f'{source_event_id}:reply',
+        metadata={'turn_aggregate': True, 'assistant_turn_id': f'{source_event_id}:reply'})
     record_turn(
         user_id, character_id, source='chat_voice_text',
         prior_snapshot=temporal_snapshot,
-    )
-    enqueue_private_extraction(
-        user_id, user_text, full_jp, character_id,
-        temporal_context=temporal_snapshot,
-        source_event_id=source_event_id,
     )
 
     voice_id = char.get('voice_id')
@@ -1604,16 +1581,14 @@ async def chat_voice_story(data: dict):
     _commit_offline_state(user_id, character_id, committed_state)
 
     full_jp = ' '.join(m['jp'] for m in msgs)
-    # Frontend owns chat_log segments (`{source}:reply:{i}`). This is cache only.
-    save_short_memory(user_id, 'assistant', full_jp, character_id)
+    # Successful visible speech owns its source and durable utterance job.
+    save_short_memory(
+        user_id, 'assistant', full_jp, character_id,
+        source_event_id=f'{source_event_id}:reply',
+        metadata={'turn_aggregate': True, 'assistant_turn_id': f'{source_event_id}:reply'})
     record_turn(
         user_id, character_id, source='chat_voice_story',
         prior_snapshot=temporal_snapshot,
-    )
-    enqueue_private_extraction(
-        user_id, user_text, full_jp, character_id,
-        temporal_context=temporal_snapshot,
-        source_event_id=source_event_id,
     )
 
     voice_id = char.get('voice_id')

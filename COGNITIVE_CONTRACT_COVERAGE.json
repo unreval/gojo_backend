@@ -1,0 +1,2536 @@
+[
+  {
+    "original_record": "failures[0]",
+    "test_id": "test_cognitive_continuous_loop.SemanticPredictionTests.test_current_event_uses_signal_selectors_and_negative_evidence_wins",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "证据选择、极性与历史依据必须约束当前判断。",
+    "original_method": "test_current_event_uses_signal_selectors_and_negative_evidence_wins",
+    "original_assertions": [
+      "self.assertEqual(outcome, -1.0)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_contradiction_checks_prediction_and_opens_issue",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_other_object_and_scope_do_not_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖明确字面自述的范围与矛盾；自由语义 signal selectors / 上下文 yes-no 仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[2]",
+    "test_id": "test_cognitive_p1_blockers.OperationEvidenceTests.test_ingress_itself_rejects_invalid_polarity",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无证据/错引用/错误主体的候选不能写入裁决或人格判断。",
+    "original_method": "test_ingress_itself_rejects_invalid_polarity",
+    "original_assertions": [
+      "self.assertRaises(ValueError)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[3]",
+    "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_pending_answer_cannot_reopen_slow_loop_resolved",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_pending_answer_cannot_reopen_slow_loop_resolved",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'already_resolved')",
+      "self.assertFalse(any((sql.startswith('INSERT INTO cognitive_questions') for (sql, _) in conn.executed)))"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[4]",
+    "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_same_question_text_cannot_be_recreated_under_another_key",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_same_question_text_cannot_be_recreated_under_another_key",
+    "original_assertions": [
+      "self.assertRaisesRegex(ValueError, 'question_identity')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[5]",
+    "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_fabricated_quote_cannot_resolve_question",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无证据/错引用/错误主体的候选不能写入裁决或人格判断。",
+    "original_method": "test_fabricated_quote_cannot_resolve_question",
+    "original_assertions": [
+      "self.assertRaises(ValueError)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[6]",
+    "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_unrelated_assistant_event_cannot_supply_promise",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无证据/错引用/错误主体的候选不能写入裁决或人格判断。",
+    "original_method": "test_unrelated_assistant_event_cannot_supply_promise",
+    "original_assertions": [
+      "self.assertRaises(ValueError)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[7]",
+    "test_id": "test_cognitive_slow_loop.MemoryContaminationGuardTests.test_character_self_claims_are_routed_away_from_bond_memory",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "角色自我陈述不能污染用户事实或关系判断。",
+    "original_method": "test_character_self_claims_are_routed_away_from_bond_memory",
+    "original_assertions": [
+      "self.assertIn('character_self_claim', source)",
+      "self.assertIn('not_bond_memory', source)",
+      "self.assertIn('self_model_evidence', source)",
+      "self.assertIn('bond 改道自我陈述证据', source)",
+      "self.assertIn('_looks_like_character_self_claim(content)', source)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_generated_generic_writers_have_no_factual_authority",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "实际 assistant 原文可以引用，所声称的事实和关系没有权威性。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[8]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_distinct_json_objects_fail_closed_before_cognitive_write",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_distinct_json_objects_fail_closed_before_cognitive_write",
+    "original_assertions": [
+      "self.assertEqual(call_model.call_count, 2)",
+      "self.assertRaisesRegex(cognitive_output.SlowLoopOutputError, 'model_output_ambiguous_json')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[9]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_generate_retries_invalid_json_then_accepts_valid_output",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_generate_retries_invalid_json_then_accepts_valid_output",
+    "original_assertions": [
+      "self.assertEqual(call_model.call_count, 2)",
+      "self.assertEqual(output['cycle_summary']['confidence'], 'high')",
+      "self.assertEqual(usage['input_tokens'], 1)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[10]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_invalid_stance_is_corrected_using_the_validator_enum",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_invalid_stance_is_corrected_using_the_validator_enum",
+    "original_assertions": [
+      "self.assertEqual(call_model.call_count, 2)",
+      "self.assertIn('violation_signals', prompt)",
+      "self.assertIn('new_predictions may be []', prompt)",
+      "self.assertEqual(output['evidence_refs'][0]['event_id'], 27)",
+      "self.assertNotIn('romantic_rejection', json.dumps(output))",
+      "self.assertIn(stance, prompt)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[11]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_invalid_ttl_releases_then_corrected_retry_commits_once",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_invalid_ttl_releases_then_corrected_retry_commits_once",
+    "original_assertions": [
+      "self.assertEqual(first['status'], 'failed')",
+      "self.assertEqual(first['triggers'][0]['status'], 'pending')",
+      "self.assertEqual(second['status'], 'succeeded')",
+      "self.assertEqual(call_model.call_count, 3)",
+      "fail.assert_called_once()",
+      "self.assertIn('sticky_note_update_0_ttl_out_of_range', fail.call_args.args[1])",
+      "commit.assert_called_once()",
+      "self.assertEqual(commit.call_args.args[0], 8)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[12]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_parser_schema_and_provider_failures_never_commit_cognition",
+    "subtest": "(response_type='str', usage={})",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_parser_schema_and_provider_failures_never_commit_cognition",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'failed')",
+      "commit.assert_not_called()",
+      "fail.assert_called_once()",
+      "self.assertTrue(fail.call_args.kwargs['preserve_raw_evidence'])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[13]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_parser_schema_and_provider_failures_never_commit_cognition",
+    "subtest": "(response_type='str', usage={})",
+    "occurrence": 2,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_parser_schema_and_provider_failures_never_commit_cognition",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'failed')",
+      "commit.assert_not_called()",
+      "fail.assert_called_once()",
+      "self.assertTrue(fail.call_args.kwargs['preserve_raw_evidence'])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[14]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_parser_schema_and_provider_failures_never_commit_cognition",
+    "subtest": "(response_type='str', usage={})",
+    "occurrence": 3,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_parser_schema_and_provider_failures_never_commit_cognition",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'failed')",
+      "commit.assert_not_called()",
+      "fail.assert_called_once()",
+      "self.assertTrue(fail.call_args.kwargs['preserve_raw_evidence'])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[15]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_parser_schema_and_provider_failures_never_commit_cognition",
+    "subtest": "(response_type='RuntimeError', usage={})",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_parser_schema_and_provider_failures_never_commit_cognition",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'failed')",
+      "commit.assert_not_called()",
+      "fail.assert_called_once()",
+      "self.assertTrue(fail.call_args.kwargs['preserve_raw_evidence'])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[16]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_parser_schema_and_provider_failures_never_commit_cognition",
+    "subtest": "(response_type='str', usage={'stop_reason': 'max_tokens'})",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_parser_schema_and_provider_failures_never_commit_cognition",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'failed')",
+      "commit.assert_not_called()",
+      "fail.assert_called_once()",
+      "self.assertTrue(fail.call_args.kwargs['preserve_raw_evidence'])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[17]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_parser_schema_and_provider_failures_never_commit_cognition",
+    "subtest": "(response_type='str', usage={'stop_reason': 'refusal'})",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_parser_schema_and_provider_failures_never_commit_cognition",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'failed')",
+      "commit.assert_not_called()",
+      "fail.assert_called_once()",
+      "self.assertTrue(fail.call_args.kwargs['preserve_raw_evidence'])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[18]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_unsupported_stance_still_rejected_after_retry",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_unsupported_stance_still_rejected_after_retry",
+    "original_assertions": [
+      "self.assertRaisesRegex(cognitive_output.SlowLoopOutputError, 'violation_signals_0_stance_type_invalid')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[19]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='completed', ttl=300)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[20]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='completed', ttl=259200)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[21]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='completed', ttl=1209600)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[22]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='expired', ttl=300)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[23]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='expired', ttl=259200)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[24]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='expired', ttl=1209600)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[25]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='archived', ttl=300)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[26]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='archived', ttl=259200)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[27]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "subtest": "(status='archived', ttl=1209600)",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_positive_ttl_succeeds_without_retry_or_content_logging",
+    "original_assertions": [
+      "call_model.assert_called_once()",
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn(f'status={status}', logs)",
+      "self.assertIn(f'ttl_value={ttl}', logs)",
+      "self.assertIn('error_category=inactive_ttl_ignored', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[28]",
+    "test_id": "test_cognitive_spend_guard.RequestBudgetTests.test_oversized_current_event_rejected_before_api",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_oversized_current_event_rejected_before_api",
+    "original_assertions": [
+      "provider.assert_not_called()",
+      "self.assertEqual(data, before)",
+      "self.assertRaisesRegex(budget.SlowLoopRequestBudgetError, 'request_budget_exceeded')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[29]",
+    "test_id": "test_cognitive_spend_guard.WorkerRecoveryTests.test_provider_503_not_validation_retried",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_provider_503_not_validation_retried",
+    "original_assertions": [
+      "self.assertEqual(provider.call_count, 1)",
+      "self.assertRaisesRegex(RuntimeError, '503')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[30]",
+    "test_id": "test_grumble_cognitive_sticky.PersistStickyProvenanceTests.test_worker_prompt_forbids_second_inner_monologue_pass",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_worker_prompt_forbids_second_inner_monologue_pass",
+    "original_assertions": [
+      "self.assertIn('user-facing presentation of Slow Loop working state', src)",
+      "self.assertIn('not a second per-turn roleplay pass', src)",
+      "self.assertIn('\"emotion\"', src)",
+      "self.assertIn('Allowed sticky emotions', src)",
+      "self.assertIn('FIRST PERSON / natural personal shorthand', src)",
+      "self.assertIn('not an analyst, database, observer, or system summary', src)",
+      "self.assertIn('没有说出口、但心里还挂着的一句话', src)",
+      "self.assertIn('not a chat-response emotion', src)",
+      "self.assertIn('\"trigger_snippet\"', src)",
+      "self.assertNotIn('Do not invent an emotion field', src)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "failures[40]",
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_failed_merge_never_appends_same_event_bond",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "同一来源的合并失败不能追加重复关系记忆。",
+    "original_method": "test_failed_merge_never_appends_same_event_bond",
+    "original_assertions": [
+      "self.assertTrue(result['ok'])",
+      "self.assertEqual(len(result['merge_calls']), 1)",
+      "self.assertEqual(result['bonds'], [])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_legacy_merge_resolution_and_invalidation_cannot_modify_canonical_bonds",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护 canonical 投影与来源幂等；独立 additive delta、上下文认可和语义合并正向能力仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[0]",
+    "test_id": "test_cognitive_continuous_loop.SemanticPredictionTests.test_worker_accepts_historical_evidence_already_present_in_context",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "证据选择、极性与历史依据必须约束当前判断。",
+    "original_method": "test_worker_accepts_historical_evidence_already_present_in_context",
+    "original_assertions": [
+      "self.assertEqual(cognitive_worker._event_ids({'events': [{'event_id': 27}], 'current_beliefs': [{'evidence_refs': [{'event_id': 12, 'reason': 'earlier'}]}]}), {12, 27})"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_contradiction_checks_prediction_and_opens_issue",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_other_object_and_scope_do_not_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖明确字面自述的范围与矛盾；自由语义 signal selectors / 上下文 yes-no 仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[1]",
+    "test_id": "test_cognitive_loop_v1.SchedulerTests.test_recent_success_suppresses_scheduled_occurrence",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "定时事件不能绕过冷却或制造无新证据的判断。",
+    "original_method": "test_recent_success_suppresses_scheduled_occurrence",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'suppressed')",
+      "self.assertEqual(create.call_args.kwargs['suppressed_reason'], 'recent_success')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_due_predictions_expire_once_without_old_memory_recall",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_replay_and_idle_time_never_raise_confidence",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "只验证到期检查和时间流逝不抬高置信；无证据模型反思不恢复。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[2]",
+    "test_id": "test_cognitive_loop_v1.SchedulerTests.test_scheduler_creates_event_and_normal_trigger_but_no_cycle",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "定时事件不能绕过冷却或制造无新证据的判断。",
+    "original_method": "test_scheduler_creates_event_and_normal_trigger_but_no_cycle",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'pending')",
+      "self.assertEqual(create.call_args.kwargs['trigger_class'], 'scheduled_reflection')",
+      "self.assertIn('pg_advisory_xact_lock', source)",
+      "self.assertIn('stable_advisory_lock_key', source)",
+      "self.assertNotIn('aggregate_pending_triggers', source)",
+      "self.assertNotIn('INSERT INTO cognitive_cycles', source)",
+      "self.assertIn('cognitive_event_triggers', queue_source)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_due_predictions_expire_once_without_old_memory_recall",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_replay_and_idle_time_never_raise_confidence",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "只验证到期检查和时间流逝不抬高置信；无证据模型反思不恢复。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[3]",
+    "test_id": "test_cognitive_loop_v1.TriggerIngressTests.test_cooldown_also_runs_after_fast_maintenance",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "同来源去重、维护与限流不丢失真实新证据。",
+    "original_method": "test_cooldown_also_runs_after_fast_maintenance",
+    "original_assertions": [
+      "self.assertEqual(call_order, ['settle', 'reactivate', 'cooldown'])",
+      "self.assertEqual(result['cycle']['status'], 'cooldown')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "canonical 来源/触发器/投影幂等已覆盖；旧信号 Fast Loop 的维护副作用不宣称等价恢复。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[4]",
+    "test_id": "test_cognitive_loop_v1.TriggerIngressTests.test_duplicate_source_event_skips_all_side_effects",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "同来源去重、维护与限流不丢失真实新证据。",
+    "original_method": "test_duplicate_source_event_skips_all_side_effects",
+    "original_assertions": [
+      "self.assertEqual(result['status'], 'duplicate')",
+      "settle.assert_not_called()",
+      "reactivate.assert_not_called()",
+      "create_trigger.assert_not_called()",
+      "embed.assert_not_called()"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "canonical 来源/触发器/投影幂等已覆盖；旧信号 Fast Loop 的维护副作用不宣称等价恢复。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[5]",
+    "test_id": "test_cognitive_loop_v1.TriggerIngressTests.test_fast_maintenance_completes_before_slow_limit_result",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "同来源去重、维护与限流不丢失真实新证据。",
+    "original_method": "test_fast_maintenance_completes_before_slow_limit_result",
+    "original_assertions": [
+      "self.assertEqual(call_order, ['settle', 'reactivate', 'limit'])",
+      "self.assertEqual(result['cycle']['status'], 'daily_limit')",
+      "self.assertGreaterEqual(connection.commits, 1)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "canonical 来源/触发器/投影幂等已覆盖；旧信号 Fast Loop 的维护副作用不宣称等价恢复。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[6]",
+    "test_id": "test_cognitive_p1_blockers.OperationEvidenceTests.test_valid_negative_is_persisted_as_no",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "证据选择、极性与历史依据必须约束当前判断。",
+    "original_method": "test_valid_negative_is_persisted_as_no",
+    "original_assertions": [
+      "self.assertEqual(result['question_status'], 'resolved')",
+      "self.assertEqual(json.loads(row[5])['resolution']['value'], 'no')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_contradiction_checks_prediction_and_opens_issue",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_other_object_and_scope_do_not_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖明确字面自述的范围与矛盾；自由语义 signal selectors / 上下文 yes-no 仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[7]",
+    "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_explicit_resolution_retry_keeps_resolved_and_judgment",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_explicit_resolution_retry_keeps_resolved_and_judgment",
+    "original_assertions": [
+      "self.assertEqual(row[4], 'resolved')",
+      "self.assertNotIn('current_judgment', json.loads(row[5]))"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[8]",
+    "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_cannot_become_active",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_resolved_cannot_become_active",
+    "original_assertions": [
+      "self.assertEqual(self.persist('resolved', 'active')[4], 'resolved')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[9]",
+    "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_cannot_become_dormant",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_resolved_cannot_become_dormant",
+    "original_assertions": [
+      "self.assertEqual(self.persist('resolved', 'dormant')[4], 'resolved')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[10]",
+    "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_output_fulfills_old_pending_answer",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_resolved_output_fulfills_old_pending_answer",
+    "original_assertions": [
+      "self.assertEqual(row[4], 'resolved')",
+      "self.assertEqual(json.loads(row[5])['pending_answer']['status'], 'fulfilled')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[11]",
+    "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_slow_loop_resolved_judgment_is_not_replaced_on_retry",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_slow_loop_resolved_judgment_is_not_replaced_on_retry",
+    "original_assertions": [
+      "self.assertEqual(row[4], 'resolved')",
+      "self.assertNotIn('current_judgment', json.loads(row[5]))"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[13]",
+    "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_current_judgment_persists_on_question_not_as_personality_belief",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无证据/错引用/错误主体的候选不能写入裁决或人格判断。",
+    "original_method": "test_current_judgment_persists_on_question_not_as_personality_belief",
+    "original_assertions": [
+      "self.assertEqual(judgment['value'], 'yes')",
+      "self.assertEqual(judgment['status'], 'committed')",
+      "self.assertEqual(judgment['cycle_id'], 101)",
+      "self.assertEqual(judgment['evidence_event_ids'], ['user-1', 'assistant-1'])",
+      "self.assertEqual(judgment['evidence_refs'][0]['event_id'], 27)",
+      "self.assertFalse(any((sql.startswith('INSERT INTO cognitive_beliefs') for (sql, _) in conn.executed)))"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[15]",
+    "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_resolution_keeps_only_validated_delta_recovery_fields",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_resolution_keeps_only_validated_delta_recovery_fields",
+    "original_assertions": [
+      "self.assertEqual(recovery['question_key'], result['question_key'])",
+      "self.assertEqual(recovery['value'], 'yes')",
+      "self.assertNotIn('untrusted_extra', recovery)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[16]",
+    "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_stale_cycle_cannot_restore_belief_flagged_by_explicit_resolution",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_stale_cycle_cannot_restore_belief_flagged_by_explicit_resolution",
+    "original_assertions": [
+      "decide.assert_not_called()"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[17]",
+    "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_stale_slow_loop_cannot_reopen_explicit_resolution_or_predictions",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "已提交裁决重放不能被旧候选覆盖、重开或复活。",
+    "original_method": "test_stale_slow_loop_cannot_reopen_explicit_resolution_or_predictions",
+    "original_assertions": [
+      "self.assertEqual(row[4], 'resolved')",
+      "self.assertIn('cognitive_questions.source_event_refs || EXCLUDED.source_event_refs', question_sql)",
+      "self.assertFalse(any((sql.startswith('INSERT INTO ' + table) for (sql, _) in conn.executed)))"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[18]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopInspectionTests.test_duplicate_diary_entries_are_not_inserted_twice",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "同一周期的日记重复提交不能重复插入。",
+    "original_method": "test_duplicate_diary_entries_are_not_inserted_twice",
+    "original_assertions": [
+      "self.assertEqual(getattr(cursor, 'inserted_diary', []), [])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_replay_and_idle_time_never_raise_confidence",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "该映射仅保护 canonical cycle 重放无重复影响；旧日记 writer 的正向去重目前无等价通过测试，仍为迁移缺口。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[19]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopInspectionTests.test_legacy_sticky_persist_writes_empty_display_metadata",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_legacy_sticky_persist_writes_empty_display_metadata",
+    "original_assertions": [
+      "self.assertEqual(metadata['emotion'], '')",
+      "self.assertEqual(metadata['trigger_snippet'], '')",
+      "self.assertEqual(metadata['tag'], '·')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[20]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopInspectionTests.test_sticky_metadata_is_written_and_replaced_on_update",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_sticky_metadata_is_written_and_replaced_on_update",
+    "original_assertions": [
+      "self.assertEqual(len(sticky_params), 2)",
+      "self.assertEqual(sticky_params[0][3], first['sticky_note_updates'][0]['content'])",
+      "self.assertEqual(first_meta['emotion'], '心动')",
+      "self.assertEqual(first_meta['trigger_snippet'], '因为satoru才知道喜欢和爱是什么意思')",
+      "self.assertEqual(first_meta['tag'], '♡')",
+      "self.assertEqual(sticky_params[1][3], second['sticky_note_updates'][0]['content'])",
+      "self.assertEqual(second_meta['emotion'], '嘴硬')",
+      "self.assertEqual(second_meta['trigger_snippet'], '还特地回来确认蛋糕。')",
+      "self.assertEqual(second_meta['tag'], '~')",
+      "self.assertIn('metadata = EXCLUDED.metadata', sticky_sql)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[21]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopTransactionTests.test_belief_commit_candidate_passes_gate_with_independent_evidence",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "证据门槛、裁决和触发器消费必须原子提交，独立证据不能被模型标记伪造。",
+    "original_method": "test_belief_commit_candidate_passes_gate_with_independent_evidence",
+    "original_assertions": [
+      "self.assertIn('INSERT INTO cognitive_beliefs', sql)",
+      "self.assertEqual(result['output']['belief_commit_decisions'][0]['action'], 'committed')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_transaction_rolls_back_partial_correction_then_retries",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_failed_projection_rolls_back_correction_and_retries",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_model_output_cannot_bypass_the_commit_validator",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖真实 SQL 事务失败回滚和权威门槛；独立多连接并发未验收，旧模型候选不再是提交入口。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[22]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopTransactionTests.test_structured_output_and_trigger_consumption_commit_together",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "证据门槛、裁决和触发器消费必须原子提交，独立证据不能被模型标记伪造。",
+    "original_method": "test_structured_output_and_trigger_consumption_commit_together",
+    "original_assertions": [
+      "self.assertEqual(result['output_state_version'], 5)",
+      "self.assertEqual(connection.commits, 1)",
+      "self.assertEqual(connection.rollbacks, 0)",
+      "self.assertNotIn('INSERT INTO cognitive_beliefs', sql)",
+      "self.assertIn(\"SET status = 'consumed'\", sql)",
+      "self.assertIn('cycle_summary', sql)",
+      "self.assertIn('belief_commit_decisions', sql)",
+      "self.assertIn('evidence_refs', sql)",
+      "self.assertIn('2026-09-13T08:00:00+00:00', cycle_update[1])",
+      "self.assertIn(table, sql)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_transaction_rolls_back_partial_correction_then_retries",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_failed_projection_rolls_back_correction_and_retries",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_model_output_cannot_bypass_the_commit_validator",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖真实 SQL 事务失败回滚和权威门槛；独立多连接并发未验收，旧模型候选不再是提交入口。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[23]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_empty_output_retry_does_not_send_empty_assistant_message",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_empty_output_retry_does_not_send_empty_assistant_message",
+    "original_assertions": [
+      "self.assertTrue(all((message['content'].strip() for message in call_model.call_args.kwargs['messages'])))"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[24]",
+    "test_id": "test_cognitive_slow_loop.SlowLoopWorkerTests.test_worker_prompt_forbids_response_policy_and_relationship_writes",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_worker_prompt_forbids_response_policy_and_relationship_writes",
+    "original_assertions": [
+      "self.assertIn('Do not write dialogue', prompt)",
+      "self.assertIn('modify relationship scores', prompt)",
+      "self.assertIn('question_updates', prompt)",
+      "self.assertIn('character_self_claim', prompt)",
+      "self.assertIn('belief_updates are commit candidates', prompt)",
+      "self.assertIn('reflection_note is a compact internal note', prompt)",
+      "self.assertIn('FIRST PERSON', prompt)",
+      "self.assertIn('private inner note', prompt)",
+      "self.assertIn('\"emotion\"', prompt)",
+      "self.assertIn('\"trigger_snippet\"', prompt)",
+      "self.assertIn('Allowed sticky emotions', prompt)",
+      "self.assertIn('not a recap of the conversation', prompt)",
+      "self.assertIn('not a chat-response emotion', prompt)",
+      "self.assertIn('没有说出口、但心里还挂着的一句话', prompt)",
+      "self.assertIn('她说了什么 / 我说了什么', prompt)",
+      "self.assertIn('prescribe a chat-response emotion', prompt)",
+      "self.assertNotIn('Do not invent an emotion field', prompt)",
+      "self.assertIn('self_disclosure', prompt)",
+      "self.assertNotIn('UPDATE rel_state', source)",
+      "self.assertNotIn('INSERT INTO rel_state', source)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[25]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_configuration_error_is_not_sent_to_the_model_for_retry",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_configuration_error_is_not_sent_to_the_model_for_retry",
+    "original_assertions": [
+      "call_model.assert_not_called()",
+      "self.assertRaises(cognitive_config.CognitiveConfigError)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[26]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_compatibility_ttl_persists_like_null_without_reactivation",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_compatibility_ttl_persists_like_null_without_reactivation",
+    "original_assertions": [
+      "self.assertEqual(params[4], status)",
+      "self.assertIsNone(params[9])",
+      "self.assertEqual(params[10], NOW if status == 'completed' else None)",
+      "self.assertIn('completed_at = COALESCE( EXCLUDED.completed_at, cognitive_sticky_notes.completed_at)', sql)",
+      "self.assertEqual(persisted[0], params)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[27]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_retry_accepts_legacy_ttl_using_runtime_bounds",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_retry_accepts_legacy_ttl_using_runtime_bounds",
+    "original_assertions": [
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertEqual(call_model.call_count, 2)",
+      "self.assertIn('default=900', prompt)",
+      "self.assertIn('status=expired', retry)",
+      "self.assertIn('integer 0 or a non-boolean positive JSON integer', retry)",
+      "self.assertIn('accepted and ignored (normalized to null)', retry)",
+      "self.assertIn('inclusive range [600, 1200]', instruction)",
+      "self.assertIn('omit expires_in_seconds or use null', instruction)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[28]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_inactive_zero_worker_diagnostic_does_not_log_content",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_inactive_zero_worker_diagnostic_does_not_log_content",
+    "original_assertions": [
+      "self.assertIsNone(output['sticky_note_updates'][0]['expires_in_seconds'])",
+      "self.assertIn('cycle=45', logs)",
+      "self.assertIn('status=archived', logs)",
+      "self.assertIn('ttl_value=0', logs)",
+      "self.assertIn('error_category=inactive_zero_normalized', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[29]",
+    "test_id": "test_cognitive_slow_loop.StickyNoteTTLValidationTests.test_prompt_and_retry_use_effective_ttl_config",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_prompt_and_retry_use_effective_ttl_config",
+    "original_assertions": [
+      "self.assertIn(f\"default={config['default']}\", prompt)",
+      "self.assertIn(f\"inclusive range [{config['minimum']}, {config['maximum']}]\", prompt)",
+      "self.assertIn('omit expires_in_seconds or use null', prompt)",
+      "self.assertIn('integer 0 or a positive JSON integer', prompt)",
+      "self.assertIn('the redundant TTL is ignored', prompt)",
+      "self.assertEqual(result['sticky_note_updates'][0]['expires_in_seconds'], config['minimum'])",
+      "self.assertIn('sticky_note_updates[0].expires_in_seconds', retry)",
+      "self.assertIn('status=active', retry)",
+      "self.assertIn('ttl_type=integer', retry)",
+      "self.assertIn(str(config['maximum'] + 1), retry)",
+      "self.assertIn(str(config['minimum']), retry)",
+      "self.assertIn(str(config['maximum']), retry)",
+      "self.assertIn('cycle=44', logs)",
+      "self.assertIn('attempt=1', logs)",
+      "self.assertIn('ttl_source=model', logs)",
+      "self.assertIn('error_category=ttl_out_of_range', logs)",
+      "self.assertNotIn(secret_body, logs)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[30]",
+    "test_id": "test_cognitive_spend_guard.WorkerRecoveryTests.test_at_output_ceiling_no_identical_truncation_retry",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_at_output_ceiling_no_identical_truncation_retry",
+    "original_assertions": [
+      "self.assertEqual(provider.call_count, 1)",
+      "self.assertRaises(worker.SlowLoopOutputError)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[31]",
+    "test_id": "test_cognitive_spend_guard.WorkerRecoveryTests.test_complete_json_with_truncation_still_fails_closed",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_complete_json_with_truncation_still_fails_closed",
+    "original_assertions": [
+      "self.assertRaises(worker.SlowLoopOutputError)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[32]",
+    "test_id": "test_cognitive_spend_guard.WorkerRecoveryTests.test_configured_large_output_is_capped",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_configured_large_output_is_capped",
+    "original_assertions": [
+      "self.assertEqual(provider.call_args.kwargs['max_tokens'], 4096)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[33]",
+    "test_id": "test_cognitive_spend_guard.WorkerRecoveryTests.test_default_slow_loop_call_disables_sdk_retries",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_default_slow_loop_call_disables_sdk_retries",
+    "original_assertions": [
+      "self.assertEqual(fake.create_chat.call_args.kwargs.get('max_retries'), 0)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[34]",
+    "test_id": "test_cognitive_spend_guard.WorkerRecoveryTests.test_repeated_truncation_stops_after_two_calls",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_repeated_truncation_stops_after_two_calls",
+    "original_assertions": [
+      "self.assertEqual(provider.call_count, 2)",
+      "self.assertRaises(worker.SlowLoopOutputError)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[35]",
+    "test_id": "test_cognitive_spend_guard.WorkerRecoveryTests.test_retry_does_not_add_failed_model_text_as_evidence",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_retry_does_not_add_failed_model_text_as_evidence",
+    "original_assertions": [
+      "self.assertTrue(all((m['role'] == 'user' for m in messages)))",
+      "self.assertNotIn('UNTRUSTED_PREVIOUS_OUTPUT', repr(messages))"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[36]",
+    "test_id": "test_cognitive_spend_guard.WorkerRecoveryTests.test_truncation_retry_changes_budget_once",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "无效/截断/多根/拒绝/失败候选不能污染证据，重试应有界且不增加模型权威。",
+    "original_method": "test_truncation_retry_changes_budget_once",
+    "original_assertions": [
+      "self.assertEqual([c.kwargs['max_tokens'] for c in provider.call_args_list], [1800, 3600])",
+      "self.assertEqual(value['cycle_summary']['summary'], '记录本轮事实。')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_quotas_do_not_drop_or_delay_corrections",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_rolling_summary_structured.RollingSummaryStructuredTests.test_fail_closed_error_codes",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "认知路径零模型与 shared parser 失败关闭已覆盖；旧裁决模型的枚举纠错、token预算和SDK重试协议被退役，不声称存在对应模型调用。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[37]",
+    "test_id": "test_flirt_response.DurableEngineUntouchedTests.test_handle_rejection_still_writes_flirt_friction",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_handle_rejection_still_writes_flirt_friction",
+    "original_assertions": [
+      "self.assertIn(\"signal_type='explicit_rejection'\", source)",
+      "self.assertIn(\"'flirt_rejected'\", source)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[38]",
+    "test_id": "test_flirt_response.DurableEngineUntouchedTests.test_rejection_still_routes_to_handle_rejection",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_rejection_still_routes_to_handle_rejection",
+    "original_assertions": [
+      "self.assertIn(\"stype == 'explicit_rejection' and actor == 'user'\", source)",
+      "self.assertIn('return _handle_rejection(', source)",
+      "self.assertIn(\"stype == 'offensive_content' and actor == 'user'\", source)",
+      "self.assertIn('return _apply_offensive(', source)",
+      "self.assertIn(\"stype == 'positive_reciprocal' and actor == 'user'\", source)",
+      "self.assertIn('return _handle_reciprocal(', source)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[39]",
+    "test_id": "test_flirt_response.LogInteractionStatsTests.test_mixed_turn_not_last_write_wins",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_mixed_turn_not_last_write_wins",
+    "original_assertions": [
+      "self.assertEqual(params[8], 'mixed')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[40]",
+    "test_id": "test_flirt_response.LogInteractionStatsTests.test_null_source_event_id_skips_on_conflict",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_null_source_event_id_skips_on_conflict",
+    "original_assertions": [
+      "self.assertNotIn('ON CONFLICT', sql)",
+      "self.assertIsNone(params[7])",
+      "self.assertEqual(params[3], 'support')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[41]",
+    "test_id": "test_flirt_response.LogInteractionStatsTests.test_offensive_character_writes_null_flirt_response",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_offensive_character_writes_null_flirt_response",
+    "original_assertions": [
+      "self.assertIsNone(params[8])",
+      "self.assertIsNone(params[4], 'legacy is_reciprocal must stay NULL')",
+      "self.assertNotIn('offensive', sql.lower())"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[42]",
+    "test_id": "test_flirt_response.LogInteractionStatsTests.test_offensive_third_party_writes_null_flirt_response",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_offensive_third_party_writes_null_flirt_response",
+    "original_assertions": [
+      "self.assertIsNone(params[8])",
+      "self.assertIsNone(params[4])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[43]",
+    "test_id": "test_flirt_response.LogInteractionStatsTests.test_retry_same_source_event_id_uses_on_conflict",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_retry_same_source_event_id_uses_on_conflict",
+    "original_assertions": [
+      "self.assertIn('ON CONFLICT (user_id, character_id, source_event_id)', sql)",
+      "self.assertIn('WHERE source_event_id IS NOT NULL', sql)",
+      "self.assertEqual(params[7], 'evt-retry')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[44]",
+    "test_id": "test_flirt_response.LogInteractionStatsTests.test_source_event_id_is_written",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_source_event_id_is_written",
+    "original_assertions": [
+      "self.assertEqual(params[7], 'evt-trace')",
+      "self.assertEqual(params[8], 'accepted')",
+      "self.assertIn('source_event_id', sql)",
+      "self.assertIn('ON CONFLICT', sql)",
+      "self.assertEqual(conn.commits, 1)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[45]",
+    "test_id": "test_flirt_response.ProcessTurnStatsOnceTests.test_apply_once_retry_does_not_log_stats_twice",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_apply_once_retry_does_not_log_stats_twice",
+    "original_assertions": [
+      "self.assertEqual(begins['n'], 2)",
+      "self.assertEqual(stats['n'], 1)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[46]",
+    "test_id": "test_flirt_response.ProcessTurnStatsOnceTests.test_log_stats_receives_source_event_id",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "来源归属、同轮/同来源幂等与负向互动记录不能靠最后一次模型信号覆盖。",
+    "original_method": "test_log_stats_receives_source_event_id",
+    "original_assertions": [
+      "self.assertEqual(seen.get('source_event_id'), 'evt-from-chat')"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_memory_authority.MemoryAuthorityTests.test_explicit_fact_state_refusal_boundary_and_date_range_are_applied",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_private_source_first.PrivateSourceFirstTests.test_retry_after_job_done_is_exactly_once",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_old_model_signals_never_settle_prediction",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "明确引用的拒绝/边界和来源幂等已覆盖；flirt friction、offensive对象区分、混合情绪聚合及旧interaction_stats正向写入仍未实现。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[47]",
+    "test_id": "test_grumble_cognitive_sticky.PersistStickyProvenanceTests.test_audit_sticky_dropped_natural_sticky_kept",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_audit_sticky_dropped_natural_sticky_kept",
+    "original_assertions": [
+      "self.assertFalse(cognitive_output.is_user_facing_sticky_content('用户明天要抽徽章，让我帮她选号码'))",
+      "self.assertTrue(cognitive_output.is_user_facing_sticky_content('她明天要抽徽章，还让我帮她选号。到时候看看。'))",
+      "self.assertNotIn('is_user_facing_sticky_content', sticky_persist)",
+      "self.assertNotIn('reflection_note', sticky_persist)",
+      "self.assertIn('dropped non-user-facing sticky', persist_src)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[48]",
+    "test_id": "test_grumble_cognitive_sticky.PersistStickyProvenanceTests.test_persist_sql_records_cycle_and_resets_viewed_on_content_change",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_persist_sql_records_cycle_and_resets_viewed_on_content_change",
+    "original_assertions": [
+      "self.assertIn('INSERT INTO cognitive_sticky_notes', sticky_block)",
+      "self.assertIn('created_by_cycle_id', sticky_block)",
+      "self.assertIn('source_event_refs', sticky_block)",
+      "self.assertIn('USER_FACING_STICKY_SOURCE', sticky_block)",
+      "self.assertIn('metadata', sticky_block)",
+      "self.assertIn('viewed = CASE', sticky_block)",
+      "self.assertIn('user_hidden_at = CASE', sticky_block)",
+      "self.assertIn('user_visible = CASE', sticky_block)",
+      "self.assertIn('EXCLUDED.content THEN NULL', sticky_block)",
+      "self.assertNotIn('char_grumble', sticky_block)",
+      "self.assertNotIn('status', hide_case)"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  },
+  {
+    "original_record": "errors[49]",
+    "test_id": "test_grumble_cognitive_sticky.StickyDisplayContractTests.test_persist_reader_and_grumbles_keep_inner_voice_fields",
+    "subtest": "",
+    "occurrence": 1,
+    "original_behavior": "便签生命周期、展示元数据、有效期与来源追踪必须一致，不能把审计/模型话语当自然内心或事实。",
+    "original_method": "test_persist_reader_and_grumbles_keep_inner_voice_fields",
+    "original_assertions": [
+      "self.assertEqual(note['emotion'], '心动')",
+      "self.assertEqual(note['tag'], '♡')",
+      "self.assertEqual(sticky_params[3], note['content'])",
+      "self.assertEqual(metadata['emotion'], '心动')",
+      "self.assertEqual(metadata['trigger_snippet'], '因为satoru才知道喜欢和爱是什么意思')",
+      "self.assertEqual(metadata['tag'], '♡')",
+      "self.assertEqual(read['emotion'], '心动')",
+      "self.assertEqual(read['trigger_snippet'], metadata['trigger_snippet'])",
+      "self.assertEqual(read['tag'], '♡')",
+      "self.assertEqual(public['emotion'], '心动')",
+      "self.assertEqual(public['trigger_snippet'], read['trigger_snippet'])",
+      "self.assertEqual(public['tag'], '♡')",
+      "self.assertEqual(public['content'], note['content'])"
+    ],
+    "replacement_tests": [
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_correction_withdraws_history_and_transitive_dependents",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_context_reads_only_the_current_event_worklist",
+        "result": "passed",
+        "executed_in_targeted": true
+      }
+    ],
+    "remaining_scope": "已覆盖依据失效时撤回便签与上下文隔离；自然内心展示、便签 metadata 更新/已读重置、兼容TTL正向持久化未验收，不能以安全测试替代。",
+    "legacy_test_retained": true,
+    "legacy_current_result": "still failing; not deleted or skipped"
+  }
+]

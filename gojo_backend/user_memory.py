@@ -37,6 +37,7 @@ import hashlib
 import json
 import re
 import unicodedata
+import uuid
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
@@ -123,7 +124,7 @@ def save_short_memory(user_id, role, content, character_id=DEFAULT_CHARACTER_ID,
     event_id = _normalize_event_id(source_event_id)
     extra = dict(metadata or {}) if isinstance(metadata, dict) else {}
     if event_id:
-        _mirror_raw_event(
+        _persist_raw_event(
             user_id, character_id, role=role, content=content, event_id=event_id,
             metadata=extra, subtitle=subtitle, emotion=emotion)
     conn = None
@@ -195,25 +196,17 @@ def commit_visible_assistant_message(
     return event_id
 
 
-def _mirror_raw_event(user_id, character_id, *, role, content, event_id,
+def _persist_raw_event(user_id, character_id, *, role, content, event_id,
                       content_type='text', metadata=None, reply_to_event_id=None,
                       subtitle='', emotion=''):
-    """Best-effort write-through to the canonical chat_log ledger."""
-    try:
-        import raw_events
-        raw_events.append_raw_event(
-            user_id, character_id,
-            event_id=event_id,
-            role=role,
-            content=content,
-            content_type=content_type,
-            metadata=metadata,
-            reply_to_event_id=reply_to_event_id,
-            subtitle=subtitle,
-            emotion=emotion,
-        )
-    except Exception as e:
-        print(f'[raw_events] mirror skipped:{e}')
+    """Durable source + one evidence job, before any compatibility cache write."""
+    from raw_events import append_raw_event
+    return append_raw_event(
+        user_id, character_id, event_id=event_id, role=role, content=content,
+        content_type=content_type, metadata=metadata,
+        reply_to_event_id=reply_to_event_id, subtitle=subtitle, emotion=emotion,
+        cognitive_ingress=True,
+    )
 
 
 def _normalize_event_id(source_event_id):
@@ -283,36 +276,32 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
     有 event id：INSERT ... ON CONFLICT DO NOTHING RETURNING id
       - RETURNING 有行 = 本次新插入，返回 True
       - RETURNING 空 = 已存在，返回 False
-    无 event id：普通 INSERT，每次都写入。
+    无 event id：先分配身份，再持久化 canonical source 与 evidence job。
     """
-    event_id = _normalize_event_id(source_event_id)
+    event_id = _normalize_event_id(source_event_id) or f'user:{uuid.uuid4()}'
     meta_text = _event_meta_json(event_meta)
+    meta = event_meta if isinstance(event_meta, dict) else parse_event_meta(event_meta)
+    kind = meta.get('kind')
+    _persist_raw_event(
+        user_id, character_id, role='user', content=content, event_id=event_id,
+        content_type=kind if kind in ('image', 'video', 'voice') else 'text',
+        metadata=meta,
+    )
     inserted = False
     conn = None
     cur = None
     try:
         conn = get_conn()
         cur = conn.cursor()
-        if event_id:
-            cur.execute(
-                INSERT_USER_EVENT_ONCE_SQL,
-                (user_id, character_id, content, event_id, meta_text),
-            )
-            row = cur.fetchone()
-            if not row:
-                conn.commit()
-                print(f'[memory] skip duplicate user event {event_id}')
-                inserted = False
-            else:
-                _prune_short_memory(cur, user_id, character_id)
-                conn.commit()
-                inserted = True
+        cur.execute(
+            INSERT_USER_EVENT_ONCE_SQL,
+            (user_id, character_id, content, event_id, meta_text),
+        )
+        row = cur.fetchone()
+        if not row:
+            conn.commit()
+            print(f'[memory] skip duplicate user event {event_id}')
         else:
-            cur.execute(
-                '''INSERT INTO short_memory (user_id, character_id, role, content, source_event_id, event_meta)
-                   VALUES (%s, %s, %s, %s, %s, %s)''',
-                (user_id, character_id, 'user', content, None, meta_text)
-            )
             _prune_short_memory(cur, user_id, character_id)
             conn.commit()
             inserted = True
@@ -327,7 +316,9 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
         if event_id and pgcode == '23505':
             print(f'[memory] skip duplicate user event {event_id} (unique)')
             return False
-        raise
+        # The source and its evidence job are already committed independently.
+        print(f'[memory] user cache unavailable error={type(e).__name__}')
+        return False
     finally:
         if cur is not None:
             try:
@@ -339,18 +330,6 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
                 conn.close()
             except Exception:
                 pass
-        if event_id:
-            meta = event_meta if isinstance(event_meta, dict) else parse_event_meta(event_meta)
-            kind = (meta or {}).get('kind') if isinstance(meta, dict) else ''
-            content_type = kind if kind in ('image', 'video', 'voice') else 'text'
-            _mirror_raw_event(
-                user_id, character_id,
-                role='user',
-                content=content,
-                event_id=event_id,
-                content_type=content_type,
-                metadata=meta if isinstance(meta, dict) else None,
-            )
 
 
 def attach_short_memory_event_meta(user_id, character_id, source_event_id, event_meta):
@@ -2513,10 +2492,25 @@ def extract_and_save_memory(user_id, user_text, assistant_text,
             backfill_result.update(status='pending', reason='model_candidate_not_authoritative')
         return True
     if not ids:
+        if isinstance(backfill_result, dict):
+            backfill_result.update(status='not_restored', reason='canonical_source_required',
+                                   judgment_restored=False)
         return False
     for event_id in ids:
-        result = ingest_canonical_turn(user_id=user_id, character_id=character_id,
-                                       source_event_id=event_id, allow_assistant=event_id != ids[0])
+        try:
+            result = ingest_canonical_turn(user_id=user_id, character_id=character_id,
+                                           source_event_id=event_id, allow_assistant=event_id != ids[0])
+        except Exception:
+            if isinstance(backfill_result, dict):
+                backfill_result.update(status='not_restored', reason='canonical_ingress_error',
+                                       judgment_restored=False)
+            raise
+        if isinstance(backfill_result, dict) and event_id == ids[0]:
+            backfill_result.update(
+                status=result['status'], judgment_restored=False,
+                reason=result.get('reason') or (
+                    'canonical_evidence_queued' if result['status'] == 'inserted'
+                    else 'canonical_source_unavailable'))
         if event_id == ids[0] and result['status'] not in {'inserted', 'duplicate'}:
             return False
     return True

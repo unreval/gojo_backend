@@ -180,6 +180,8 @@ def append_raw_event(
     subtitle='',
     emotion='',
     has_audio=False,
+    conn=None,
+    cognitive_ingress=False,
 ):
     """Insert one canonical raw event. Technical retry with the same event_id is a no-op.
 
@@ -189,6 +191,8 @@ def append_raw_event(
     user_id = (user_id or '').strip()
     character_id = (character_id or '').strip()
     if not user_id or not character_id:
+        if cognitive_ingress:
+            raise SourceValidityError('canonical_source_identity_required')
         return {'inserted': False, 'event_id': None, 'reason': 'missing_identity'}
 
     client_msg_id = _normalize_event_id(event_id)
@@ -220,7 +224,37 @@ def append_raw_event(
         else:
             msg['ts'] = str(occurred_at)
     from db_chatlog import append_messages
-    written = append_messages(user_id, character_id, [msg])
+    if cognitive_ingress:
+        if not client_msg_id:
+            raise SourceValidityError('canonical_source_identity_required')
+        from cognitive_queue import stable_advisory_lock_key
+        from memory_jobs import enqueue_kind
+        database, owns_connection = _borrow_conn(conn)
+        cur = database.cursor()
+        try:
+            cur.execute('SELECT pg_advisory_xact_lock(%s)',
+                        (stable_advisory_lock_key(user_id, character_id),))
+            written = append_messages(user_id, character_id, [msg], conn=database)
+            sources = get_active_events_by_ids(
+                user_id, character_id, [client_msg_id], conn=database, lock=True)
+            if (len(sources) != 1 or sources[0]['role'] != _prompt_role(role)
+                    or sources[0]['content'] != msg['text']):
+                raise SourceValidityError('canonical_source_unavailable_or_mismatched')
+            enqueue_kind('canonical_turn', user_id, character_id,
+                         source_event_id=client_msg_id, conn=database)
+            if owns_connection:
+                database.commit()
+        except Exception:
+            if owns_connection:
+                database.rollback()
+            raise
+        finally:
+            cur.close()
+            if owns_connection:
+                database.close()
+    else:
+        written = (append_messages(user_id, character_id, [msg], conn=conn)
+                   if conn is not None else append_messages(user_id, character_id, [msg]))
     return {
         'inserted': bool(written),
         'event_id': client_msg_id,

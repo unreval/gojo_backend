@@ -126,48 +126,23 @@ class CriticalContextTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
 
     def test_f_slow_loop_judgment_reaches_generator_context(self):
+        # Model-authored judgments cannot populate the Generator's fact context.
         import cognitive_output
         from tests.test_cognitive_pending_resolution import QuestionConnection, judgment_output
         normalized = cognitive_output.validate_slow_loop_output(
             judgment_output(), allowed_event_ids={27}, current_event_ids={27})
         database = QuestionConnection()
-        cognitive_output.persist_slow_loop_output(
-            database, cycle_id=101, user_id='u', character_id='gojo',
-            output=normalized, now=NOW)
-        persisted = next(params for sql, params in database.executed
-                         if sql.startswith('INSERT INTO cognitive_questions'))
+        with self.assertRaisesRegex(cognitive_output.SlowLoopOutputError,
+                                    'external_judgment_candidates_not_authoritative'):
+            cognitive_output.persist_slow_loop_output(
+                database, cycle_id=101, user_id='u', character_id='gojo',
+                output=normalized, now=NOW)
+        self.assertEqual(database.executed, [])
         current = state()
-        current['questions'] = [{
-            'question_key': persisted[2], 'question_text': persisted[3],
-            'status': persisted[4], 'metadata': json.loads(persisted[5]),
-            'source_event_refs': json.loads(persisted[6]),
-        }]
-        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current), \
-                patch('raw_events.get_active_events_by_ids', return_value=[
-                    {'event_id': 'user-1'}, {'event_id': 'assistant-1'},
-                ]):
-            items = cognitive_reader.iter_active_cognitive_items(
-                'u', 'gojo', query='宝宝', now=NOW)
-        self.assertEqual([row['kind'] for row in items], ['cognitive_judgment'])
-        packed = [context_budget.ContextItem(
-            'cog:judgment', 'cognitive_state', row['text'],
-            metadata=row,
-        ) for row in items]
-        kept = context_budget.ContextBudgetManager().allocate(packed)
-        pack = context_layer.ChatContextPack(
-            support_ready=True, recall_ready=True, recall_result={},
-            cognitive_prompt_text=context_layer._format_plain_block('当前认知', kept),
-            accounts_text='账户上下文',
-        )
-        with patch.object(prompt, 'get_character', return_value={'core_prompt': '角色设定'}), \
-                patch.object(prompt, 'load_canon_lock', return_value=''), \
-                patch.object(prompt, 'get_time_context', return_value=''), \
-                patch.object(prompt, 'get_first_interaction_days', return_value=None):
-            generator_input = prompt.build_system_prompt(
-                'u', 'gojo', user_message='宝宝', context_pack=pack)
-        self.assertIn('我愿意接受她叫我宝宝', generator_input)
-        self.assertIn('READ → EXPRESS', generator_input)
-        self.assertNotIn('未解决问题（', generator_input)
+        current['questions'] = []
+        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current):
+            items = cognitive_reader.iter_active_cognitive_items('u', 'gojo', query='宝宝', now=NOW)
+        self.assertFalse(any(row['kind'] == 'cognitive_judgment' for row in items))
 
     def test_g_unresolved_guard_is_in_generator_expression_rules(self):
         current = state()

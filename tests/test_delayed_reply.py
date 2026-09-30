@@ -205,7 +205,7 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertIn('三', captured['extra_suffix'])
         self.assertIn('内部上下文', captured['extra_suffix'])
         self.assertEqual(commit.call_count, 2)
-        self.assertEqual(helpers.relationship_calls, 1)
+        self.assertEqual(helpers.relationship_calls, 0)
         row = list(store.rows.values())[0]
         self.assertEqual(row['check_state'], 'consumed')
         self.assertIsNotNone(row['resolved_at'])
@@ -373,9 +373,9 @@ class DelayedReplyTests(unittest.TestCase):
             result = delayed_reply.generate_delayed_chat_reply(
                 bundle, helpers=helpers)
         self.assertTrue(result['ok'])
-        self.assertEqual(helpers.relationship_calls, 1)
+        self.assertEqual(helpers.relationship_calls, 0)
         self.assertEqual(helpers.generate_calls, 1)
-        self.assertEqual(jobs.call_count, 1)
+        jobs.assert_not_called()
         self.assertEqual(commit.call_count, 2)
         self.assertGreaterEqual(save_user.call_count, 1)
 

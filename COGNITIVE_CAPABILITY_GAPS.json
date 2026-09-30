@@ -1,0 +1,245 @@
+[
+  {
+    "test_id": "test_cognitive_p1_blockers.OperationEvidenceTests.test_cognitive_update_cannot_bypass_bond_delta_gate",
+    "subtest": "(text='不接受', quote='不接受')",
+    "original_record": "failures[1]",
+    "observed_error": "AssertionError: False != True",
+    "behavior": "已迁移到真实canonical SQL；原正向事实、上下文确认、极性或独立增量行为仍未实现，保留正向要求。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_A_merge_reject_saves_only_explicit_acceptance_delta",
+    "subtest": "",
+    "original_record": "failures[31]",
+    "observed_error": "AssertionError: Expected 'merge_bond_memories' to have been called once. Called 0 times.",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_literal_yes_can_resolve_a_scoped_question_without_restatement",
+    "subtest": "",
+    "original_record": "failures[32]",
+    "observed_error": "AssertionError: Expected 'save_bond_memory' to have been called once. Called 0 times.",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_terminal_and_unrelated_fragments_are_not_destructively_merged",
+    "subtest": "",
+    "original_record": "failures[34]",
+    "observed_error": "AssertionError: Expected 'save_bond_memory' to have been called once. Called 0 times.",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_unrelated_successful_merge_is_not_retired_by_acceptance",
+    "subtest": "",
+    "original_record": "failures[35]",
+    "observed_error": "AssertionError: Expected 'save_bond_memory' to have been called once. Called 0 times.",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_assistant_denial_does_not_override_adjacent_canonical_evidence",
+    "subtest": "",
+    "original_record": "failures[36]",
+    "observed_error": "AssertionError: 0 != 1",
+    "behavior": "已迁移到真实canonical SQL；原正向事实、上下文确认、极性或独立增量行为仍未实现，保留正向要求。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_compound_emoji_can_be_a_convention_payload",
+    "subtest": "",
+    "original_record": "failures[37]",
+    "observed_error": "AssertionError: 0 != 1",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_confirmed_nearby_emoji_reply_becomes_semantic_convention",
+    "subtest": "",
+    "original_record": "failures[38]",
+    "observed_error": "AssertionError: 0 != 1",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_current_user_confirmed_durable_bond_still_saves",
+    "subtest": "",
+    "original_record": "failures[39]",
+    "observed_error": "AssertionError: 0 != 1",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_invalid_extractor_event_id_uses_primary_canonical_event",
+    "subtest": "",
+    "original_record": "failures[41]",
+    "observed_error": "AssertionError: 0 != 1",
+    "behavior": "已迁移到真实canonical SQL；原正向事实、上下文确认、极性或独立增量行为仍未实现，保留正向要求。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_japanese_evidence_does_not_depend_on_chinese_keyword_gate",
+    "subtest": "",
+    "original_record": "failures[42]",
+    "observed_error": "AssertionError: 0 != 1",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_short_confirmation_uses_multi_event_provenance",
+    "subtest": "",
+    "original_record": "failures[43]",
+    "observed_error": "AssertionError: 0 != 1",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_stable_self_claim_still_records_low_confidence_evidence",
+    "subtest": "",
+    "original_record": "failures[44]",
+    "observed_error": "AssertionError: 0 != 1",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_c_explicit_yes_resolves_question_and_preserves_history",
+    "subtest": "",
+    "original_record": "errors[12]",
+    "observed_error": "KeyError: 'question_status'",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。 此项仍携带旧入口/返回结构夹具，尚不能视为完整行为验收。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_e_future_promise_stays_open_and_queues_existing_slow_loop",
+    "subtest": "",
+    "original_record": "errors[14]",
+    "observed_error": "KeyError: 'question_status'",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。 此项仍携带旧入口/返回结构夹具，尚不能视为完整行为验收。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_explicit_promise_does_not_require_an_answer_value",
+    "subtest": "",
+    "original_record": "errors[50]",
+    "observed_error": "AttributeError: 'NoneType' object has no attribute 'kwargs'",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_future_answer_extraction_reaches_existing_question_ingress",
+    "subtest": "",
+    "original_record": "errors[51]",
+    "observed_error": "AttributeError: 'NoneType' object has no attribute 'kwargs'",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_missing_delta_is_extracted_before_writes_and_used_after_merge_reject",
+    "subtest": "",
+    "original_record": "errors[52]",
+    "observed_error": "AttributeError: 'NoneType' object has no attribute 'args'",
+    "behavior": "已迁移到真实canonical SQL；原正向事实、上下文确认、极性或独立增量行为仍未实现，保留正向要求。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_successful_additive_merge_cannot_erase_independent_yes",
+    "subtest": "",
+    "original_record": "errors[53]",
+    "observed_error": "AttributeError: 'NoneType' object has no attribute 'args'",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_user_explicit_answer_uses_user_canonical_source",
+    "subtest": "",
+    "original_record": "errors[54]",
+    "observed_error": "AttributeError: 'NoneType' object has no attribute 'kwargs'",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_convention_only_backfill_does_not_replace_active_rule_from_assistant_only_reassignment",
+    "subtest": "",
+    "original_record": "errors[55]",
+    "observed_error": "KeyError: 'decision'",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_convention_only_backfill_plans_then_applies_with_atomic_provenance",
+    "subtest": "",
+    "original_record": "errors[56]",
+    "observed_error": "KeyError: 'candidate'",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_convention_only_backfill_supersedes_only_user_confirmed_target",
+    "subtest": "",
+    "original_record": "errors[57]",
+    "observed_error": "IndexError: list index out of range",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_convention_replace_and_revoke_keep_the_existing_bond_lifecycle",
+    "subtest": "",
+    "original_record": "errors[58]",
+    "observed_error": "IndexError: list index out of range",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_distinct_convention_slots_stay_independent",
+    "subtest": "",
+    "original_record": "errors[59]",
+    "observed_error": "IndexError: list index out of range",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_semantic_rewrite_is_rejected_but_faithful_summary_saves",
+    "subtest": "",
+    "original_record": "errors[60]",
+    "observed_error": "IndexError: list index out of range",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  },
+  {
+    "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_unique_convention_reference_inherits_its_verified_slot",
+    "subtest": "",
+    "original_record": "errors[61]",
+    "observed_error": "IndexError: list index out of range",
+    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+    "method_body_unchanged": true,
+    "still_failing": true
+  }
+]

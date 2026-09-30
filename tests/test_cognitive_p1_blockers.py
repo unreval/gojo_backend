@@ -149,7 +149,10 @@ class PromiseDailyLimitTests(unittest.TestCase):
         self.assertEqual(len(cursor.triggers), 1)
 
 
-class OperationEvidenceTests(unittest.TestCase):
+from tests.canonical_memory_fixture import CanonicalMemoryFixture
+
+
+class OperationEvidenceTests(CanonicalMemoryFixture, unittest.TestCase):
     def validate(self, text, quote, value='yes', kind='explicit_acceptance', **extra):
         item = memory_tests.delta(evidence_quote=quote, value=value, kind=kind,
                                   content='我接受这个称呼' if value == 'yes' else '我不接受这个称呼', **extra)
@@ -192,17 +195,21 @@ class OperationEvidenceTests(unittest.TestCase):
         self.assertIsNone(user_memory._validated_turn_delta(
             'u', memory_tests.delta(evidence_quote='yes'), events, 'u1'))
 
+
     def test_cognitive_update_cannot_bypass_bond_delta_gate(self):
-        helper = memory_tests.CriticalBondDeltaTests()
         for text, quote, value, expected in [('不接受', '接受', 'yes', False),
                                               ('不接受', '不接受', 'no', True)]:
             with self.subTest(text=text, quote=quote):
                 item = memory_tests.delta(type='resolution', evidence_quote=quote,
-                                          value=value, kind='relationship_resolution',
-                                          content='我接受' if value == 'yes' else '我不接受')
-                events = [memory_tests.EVENTS[0], dict(memory_tests.EVENTS[1], content=text)]
-                _, _, _, _, lifecycle = helper.extract(None, events=events, cognitive_update=item)
-                self.assertEqual(lifecycle.called, expected)
+                    value=value, kind='relationship_resolution',
+                    content='我接受' if value == 'yes' else '我不接受')
+                self.assertTrue(self.ingest_sources(
+                    [memory_tests.EVENTS[0], dict(memory_tests.EVENTS[1], content=text)],
+                    source_ids=['u1', 'chat_reply:u1'], model_payload={'cognitive_update': item}))
+                rows = self.sql("SELECT metadata->'resolution'->>'value' FROM cognitive_questions WHERE status='resolved'")
+                self.assertEqual(bool(rows), expected)
+                if expected:
+                    self.assertEqual(rows[0][0], 'no')
 
     def test_ingress_itself_rejects_invalid_polarity(self):
         with self.assertRaises(ValueError):

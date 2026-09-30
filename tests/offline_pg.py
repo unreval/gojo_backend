@@ -17,6 +17,9 @@ class Connection:
     def query(self, sql, params=()):
         counter = iter(range(1, len(params) + 1))
         sql = re.sub(r'%s', lambda _: '$' + str(next(counter)), sql)
+        # psycopg2 adapts IS NULL literals before parsing. PGlite binds parameters
+        # server-side, where a standalone null check needs an explicit type.
+        sql = re.sub(r'(\$\d+)(\s+IS\s+NULL)', r'\1::text\2', sql, flags=re.I)
         self.process.stdin.write(json.dumps({'sql': sql, 'params': list(params)},
             default=lambda value: value.isoformat(), ensure_ascii=False) + '\n')
         self.process.stdin.flush()

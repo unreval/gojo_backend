@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from context_budget import BudgetConfig, estimate_tokens
+from structured_output import StructuredOutputError, parse_structured_output
 
 
 SUMMARY_PROCESSOR_VERSION = 'rolling_summary_v1'
@@ -187,17 +188,27 @@ def re_sub_ws(text: str) -> str:
     return re.sub(r'\s+', ' ', text or '').strip()
 
 
+SUMMARY_FIELDS = (
+    ('what_happened', '发生'),
+    ('decisions', '决定'),
+    ('task_progress', '任务'),
+    ('unresolved', '未决'),
+    ('fact_changes', '事实变化'),
+    ('emotion_or_relation_only_if_evidenced', '有证据的情绪/关系'),
+)
+
+
+def _validate_summary(value):
+    if set(value) != {key for key, _label in SUMMARY_FIELDS}:
+        raise ValueError('summary_fields')
+    if any(not isinstance(item, str) for item in value.values()):
+        raise ValueError('summary_field_type')
+    return value
+
+
 def format_real_summary(parsed: dict, event_count: int) -> str:
     parts = []
-    mapping = (
-        ('what_happened', '发生'),
-        ('decisions', '决定'),
-        ('task_progress', '任务'),
-        ('unresolved', '未决'),
-        ('fact_changes', '事实变化'),
-        ('emotion_or_relation_only_if_evidenced', '有证据的情绪/关系'),
-    )
-    for key, label in mapping:
+    for key, label in SUMMARY_FIELDS:
         value = re_sub_ws((parsed or {}).get(key) or '')
         if value:
             parts.append(f'{label}：{value}')
@@ -210,7 +221,6 @@ def generate_real_summary_text(events: Sequence[dict], previous_text='') -> str:
     """LLM path. Tests mock create_chat. Never called on the Fast Path."""
     from ai_client import create_chat
     from config import MODEL_CN_AUX
-    from utils import extract_json
 
     raw, _usage = create_chat(
         model=MODEL_CN_AUX,
@@ -218,8 +228,16 @@ def generate_real_summary_text(events: Sequence[dict], previous_text='') -> str:
         system=_summary_system(),
         max_tokens=700,
     )
-    parsed = extract_json(raw or '') or {}
-    return format_real_summary(parsed, len(events or []))
+    parsed = parse_structured_output(
+        raw, schema_validator=_validate_summary, schema_name='rolling_summary')
+    if not parsed.ok:
+        code = ('schema_validation_failed' if parsed.error_code == 'root_not_object'
+                else parsed.error_code)
+        raise StructuredOutputError(code, result=parsed)
+    text = format_real_summary(parsed.value, len(events or []))
+    if not text:
+        raise StructuredOutputError('empty_summary')
+    return text
 
 
 def _enqueue_episode_index(user_id, character_id, source_event_ids, summary_text):
@@ -287,13 +305,9 @@ def process_summary_job(user_id, character_id, extra, source_event_id=None) -> b
                 merge_from = row.get('summary_id')
                 break
 
-    try:
-        text = generate_real_summary_text(events, previous_text=previous)
-    except Exception as exc:
-        print(f'[rolling_summary] llm failed:{exc}')
-        return False
+    text = generate_real_summary_text(events, previous_text=previous)
     if not text.strip():
-        return False
+        raise StructuredOutputError('empty_summary')
 
     version = 1
     if merge_from:
@@ -310,6 +324,8 @@ def process_summary_job(user_id, character_id, extra, source_event_id=None) -> b
         is_placeholder=False,
         status='active',
     )
+    if payload and payload.get('status') != 'active':
+        return True
     if merge_from and payload and payload.get('summary_id') != merge_from:
         try:
             invalidate_summary(merge_from, status='superseded', superseded_by=payload.get('summary_id'))

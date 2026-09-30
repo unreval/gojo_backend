@@ -93,19 +93,14 @@ def needed_effects(endpoint, payload, ctx=None):
     ctx = ctx or {}
     payload = payload or {}
     effects = ['assistant_short_memory', 'record_turn']
-    user_text = str(
-        ctx.get('user_text')
-        or payload.get('_user_text')
-        or payload.get('user_text')
-        or ''
-    ).strip()
-    if user_text:
-        effects.append('private_extraction')
+    # Raw-event persistence owns durable user/assistant evidence ingress.
+    # A failed generation still has a user job; a completed one adds only
+    # the assistant source via assistant_short_memory (also repairable).
     if endpoint in (ENDPOINT_CHAT_TEXT, ENDPOINT_CHAT_IMAGE):
         effects.append('behavior_evidence')
-        effects.append('relationship_update')
         msgs = payload.get('messages') or []
-        if any(str((m or {}).get('zh') or '').strip() for m in msgs):
+        if (payload.get('_acceptance_mode') not in ('plaintext', 'nonverbal')
+                and any(str((m or {}).get('zh') or '').strip() for m in msgs)):
             effects.append('promise_detector')
     if payload.get('reminder'):
         effects.append('reminder')

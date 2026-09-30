@@ -31,137 +31,66 @@ def empty_payload(**overrides):
     return payload
 
 
-class PrivateMemoryFactGateTests(unittest.TestCase):
+from tests.canonical_memory_fixture import CanonicalMemoryFixture
+
+
+class PrivateMemoryFactGateTests(CanonicalMemoryFixture, unittest.TestCase):
     def extract(self, payload, user_text, assistant_text, *, source_event_id=None,
                 canonical_events=None, canonical_context_events=None,
                 source_event_ids=None, merge_result=None, source_active=True,
                 canonical_error=None, convention_context_events=None,
                 existing_bonds=None, resolve_result=None, raw_output=None,
-                correction_error=None,
-                **extract_kwargs):
-        captured = {'prompt': ''}
-        chat_calls = []
-        bonds = []
-        claims = []
-        facts = []
-        resolutions = []
-
-        def fake_chat(*_args, **kwargs):
-            chat_calls.append(kwargs)
-            captured['prompt'] = kwargs['messages'][0]['content']
-            return (
-                raw_output if raw_output is not None
-                else json.dumps(payload, ensure_ascii=False),
-                None,
-            )
-
-        def save_bond(*args, **kwargs):
-            bonds.append((args, kwargs))
-            return True
-
-        def save_fact(*args, **kwargs):
-            facts.append((args, kwargs))
-            return True
-
-        def record_claim(*args, **kwargs):
-            claims.append((args, kwargs))
-            return {'status': 'inserted'}
-
+                correction_error=None, **extract_kwargs):
+        # Each helper call replaces the former independent fake fixture.
+        # All source reads, queue operations and projections use actual SQL.
+        self.database.rollback()
+        tables = [row[0] for row in self.sql(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public'")]
+        self.sql('TRUNCATE ' + ','.join('"' + name + '"' for name in tables)
+                 + ' RESTART IDENTITY CASCADE')
+        source = source_event_id or 'current-user'
+        if canonical_events is None:
+            canonical_events = [
+                {'event_id': source, 'role': 'user', 'content': user_text},
+                {'event_id': 'chat_reply:' + source, 'role': 'assistant',
+                 'content': assistant_text},
+            ]
+        events = {event['event_id']: event for event in
+                  [*(canonical_context_events or []), *(convention_context_events or []),
+                   *canonical_events]}
+        deleted = [key for key in events
+                   if not (source_active([key]) if callable(source_active) else source_active)]
+        for row in existing_bonds or []:
+            self.sql("INSERT INTO bond_memory(id,user_id,character_id,content) VALUES (%s,'u','c',%s)",
+                     (row[0], row[1]))
+        self.database.commit()
         with ExitStack() as stack:
-            stack.enter_context(patch.object(
-                user_memory, 'plan_memory_corrections', return_value=[],
-                side_effect=correction_error))
-            stack.enter_context(patch.object(
-                user_memory, 'get_long_memory', return_value=[]))
-            stack.enter_context(patch.object(
-                user_memory, 'get_bond_memories', return_value=existing_bonds or []))
-            stack.enter_context(patch.object(
-                user_memory, 'get_short_memory_for_prompt', return_value=[]))
-            stack.enter_context(patch.object(
-                user_memory, '_all_character_names', return_value=[]))
-            stack.enter_context(patch.object(
-                user_memory, 'get_relations_text', return_value=''))
-            stack.enter_context(patch.object(
-                user_memory, 'save_bond_memory', side_effect=save_bond))
-            stack.enter_context(patch.object(
-                user_memory, 'save_long_memory', side_effect=save_fact))
-            stack.enter_context(patch.object(
-                user_memory, '_record_character_self_claim_evidence',
-                side_effect=record_claim))
             merge = stack.enter_context(patch.object(
-                user_memory, 'merge_bond_memories',
-                return_value=merge_result if merge_result is not None else (True, 1)))
-            if resolve_result is not None:
-                def resolve_bond(*args, **kwargs):
-                    resolutions.append((args, kwargs))
-                    return resolve_result
-                stack.enter_context(patch.object(
-                    user_memory, 'resolve_bond_memories', side_effect=resolve_bond))
-            stack.enter_context(patch('ai_client.create_chat', side_effect=fake_chat))
-            stack.enter_context(patch(
-                'characters.get_character', return_value={'name': '五条'}))
-            stack.enter_context(patch(
-                'memory_lifecycle.apply_user_fact_lifecycle', return_value={
-                    'should_save_long_memory': True,
-                    'long_memory_kwargs': {},
-                }))
-            stack.enter_context(patch(
-                'memory_lifecycle.reactivate_lifecycle_memories', return_value=0))
-            stack.enter_context(patch('smart_recall.reinforce_mentioned_facts'))
-            stack.enter_context(patch('cognitive_events.question_extraction_state', return_value=[]))
-            if source_event_id:
-                active_kwargs = (
-                    {'side_effect': source_active}
-                    if callable(source_active) else {'return_value': source_active})
-                stack.enter_context(patch.object(
-                    raw_events, 'sources_are_active', **active_kwargs))
-                stack.enter_context(patch.object(
-                    raw_events, 'already_derived', return_value=False))
-                claim = stack.enter_context(patch.object(
-                    raw_events, 'claim_processor', return_value='claimed'))
-                finish = stack.enter_context(patch.object(raw_events, 'finish_processor'))
-                record = stack.enter_context(patch.object(raw_events, 'record_derived'))
-                stack.enter_context(patch.object(
-                    raw_events, 'get_active_events_by_ids',
-                    side_effect=canonical_error
-                    if canonical_error else None,
-                    return_value=None if canonical_error else (canonical_events or [])))
-                stack.enter_context(patch.object(
-                    raw_events, 'get_previous_active_user_events',
-                    return_value=canonical_context_events or []))
-                stack.enter_context(patch.object(
-                    raw_events, 'get_previous_active_turn_events',
-                    return_value=convention_context_events or []))
-                link_sources = stack.enter_context(patch.object(
-                    raw_events, 'link_memory_sources', return_value=0))
-            else:
-                finish = Mock()
-                link_sources = Mock()
-                claim = Mock()
-                record = Mock()
-            ok = user_memory.extract_and_save_memory(
-                'u1', user_text, assistant_text, 'gojo',
-                source_event_id=source_event_id,
-                source_event_ids=(
-                    source_event_ids if source_event_ids is not None
-                    else [source_event_id] if source_event_id else None
-                ),
-                **extract_kwargs,
-            )
-        return {
-            'ok': ok,
-            'prompt': captured['prompt'],
-            'bonds': bonds,
-            'claims': claims,
-            'facts': facts,
-            'merge_calls': merge.call_args_list,
-            'resolutions': resolutions,
-            'link_source_calls': link_sources.call_args_list,
-            'chat_calls': chat_calls,
-            'finish_calls': finish.call_args_list,
-            'claim_calls': claim.call_args_list,
-            'record_calls': record.call_args_list,
-        }
+                user_memory, 'merge_bond_memories', wraps=user_memory.merge_bond_memories))
+            resolve = stack.enter_context(patch.object(
+                user_memory, 'resolve_bond_memories', wraps=user_memory.resolve_bond_memories))
+            ok = self.ingest_sources(
+                list(events.values()), primary=source, source_ids=source_event_ids,
+                copied_user=user_text, copied_assistant=assistant_text,
+                model_payload=extract_kwargs.pop('parsed_override',
+                    raw_output if raw_output is not None else payload),
+                deleted=deleted, database_error=bool(canonical_error), **extract_kwargs)
+        facts = [(( 'u', content, category), {'source_event_refs': refs})
+                 for content, category, refs in self.sql(
+                     'SELECT content,category,source_event_refs FROM long_memory ORDER BY id')]
+        bonds = []
+        for memory_id, kind, content in self.sql("""SELECT b.id,b.kind,b.content
+                FROM bond_memory b JOIN cognitive_events e ON e.id=b.authority_event_id
+                WHERE e.source_event_type='canonical_user_turn' ORDER BY b.id"""):
+            ids = [r[0] for r in self.sql("""SELECT source_event_id FROM memory_source_events
+                WHERE memory_type='bond_memory' AND memory_id=%s ORDER BY source_event_id""",
+                (memory_id,))]
+            bonds.append((('u', 'c', kind, content), {'source_event_ids': ids}))
+        return {'ok': ok, 'prompt': '', 'bonds': bonds, 'facts': facts,
+                'claims': [], 'merge_calls': merge.call_args_list,
+                'resolutions': resolve.call_args_list, 'link_source_calls': [],
+                'chat_calls': [call for guard in self.model_guards for call in guard.call_args_list],
+                'finish_calls': [], 'claim_calls': [], 'record_calls': []}
 
     def test_real_roleplay_denial_fixture_does_not_persist(self):
         result = self.extract(
@@ -215,36 +144,19 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertEqual(result['bonds'], [])
 
-    def test_ambiguous_distinct_memory_objects_fail_before_any_write(self):
-        first = empty_payload()
-        second = empty_payload(user_fact={
-            'content': '她喜欢寿司',
-            'category': '喜好',
-            'evidence_quote': '喜欢寿司',
-            'evidence_event_ids': ['evt-ambiguous-output'],
-        })
-        result = self.extract(
-            first,
-            '我喜欢寿司。', '知道了。',
-            source_event_id='evt-ambiguous-output',
-            canonical_events=[{
-                'event_id': 'evt-ambiguous-output',
-                'role': 'user',
-                'content': '我喜欢寿司。',
-            }],
-            raw_output=(
-                json.dumps(first, ensure_ascii=False)
-                + '\n'
-                + json.dumps(second, ensure_ascii=False)
-            ),
-        )
 
-        self.assertFalse(result['ok'])
-        self.assertEqual(result['facts'], [])
-        self.assertEqual(result['bonds'], [])
-        self.assertEqual(result['claims'], [])
-        self.assertEqual(len(result['chat_calls']), 2)
-        self.assertEqual(result['finish_calls'][-1].args[3], 'failed')
+    def test_ambiguous_distinct_memory_objects_fail_before_any_write(self):
+        # The removed extractor is never called, even if its old output contains
+        # competing roots. The unsupported canonical text stays pending.
+        raw = '{"user_fact": null} {"user_fact": {"content": "forged"}}'
+        self.assertTrue(self.ingest_sources(
+            [{'event_id': 'u1', 'role': 'user', 'content': '我喜欢寿司。'}],
+            model_payload=raw))
+        self.assert_no_authority()
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 1)
+        self.assertNotIn('forged', str(self.sql('SELECT statement FROM cognitive_beliefs')))
+        for guard in self.model_guards:
+            guard.assert_not_called()
 
     def test_confirmed_nearby_emoji_reply_becomes_semantic_convention(self):
         result = self.extract(
@@ -834,98 +746,50 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
         self.assertTrue(faithful['ok'])
         self.assertEqual(faithful['facts'][0][0][1], '她今天吃了寿司')
 
+
     def test_canonical_user_event_overrides_copied_payload(self):
-        result = self.extract(
-            empty_payload(bond={
-                'content': '我和她约好周六看电影',
-                'evidence_quote': '你之前答应周六和我看电影',
-            }),
-            '你之前答应周六和我看电影',
-            '我不记得答应过。',
-            source_event_id='evt-canonical',
-            canonical_events=[{
-                'event_id': 'evt-canonical',
-                'role': 'user',
-                'content': '我没有约定周六看电影',
-            }],
-        )
-        self.assertTrue(result['ok'])
-        self.assertEqual(result['bonds'], [])
-        self.assertIn('我没有约定周六看电影', result['prompt'])
-        self.assertNotIn('你之前答应周六和我看电影', result['prompt'])
+        text = '我没有约定周六看电影'
+        self.assertTrue(self.ingest_sources(
+            [{'event_id': 'u1', 'role': 'user', 'content': text}],
+            copied_user='你之前答应周六和我看电影',
+            model_payload=empty_payload(bond={'content': '我和她约好周六看电影'})))
+        self.assertEqual(self.sql("SELECT payload->>'content' FROM cognitive_events"), [(text,)])
+        self.assert_no_authority()
+
 
     def test_invalid_extractor_event_id_uses_primary_canonical_event(self):
-        result = self.extract(
-            empty_payload(user_fact={
+        text = '我有计算机系统结构课，下午3点开会'
+        self.assertTrue(self.ingest_sources(
+            [{'event_id': 'evt-primary', 'role': 'user', 'content': text}],
+            primary='evt-primary', model_payload=empty_payload(user_fact={
                 'content': '她有计算机系统结构课，下午3点开会',
-                'category': '状态',
-                'evidence_quote': '计算机系统结构课，下午3点开会',
-                'evidence_event_ids': ['1790641541152'],
-            }),
-            '我有计算机系统结构课，下午3点开会', '知道了。',
-            source_event_id='evt-primary',
-            canonical_events=[{
-                'event_id': 'evt-primary',
-                'role': 'user',
-                'content': '我有计算机系统结构课，下午3点开会',
-            }],
-        )
+                'evidence_event_ids': ['1790641541152']})))
+        self.assertEqual(self.sql('SELECT source_event_id FROM cognitive_events'), [('evt-primary',)])
+        # Preserve the original product expectation; unsupported free-form
+        # semantics must remain a capability failure, not a fixture failure.
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory')[0][0], 1)
+        self.assertEqual(self.sql('SELECT source_event_id FROM memory_source_events'), [('evt-primary',)])
 
-        self.assertTrue(result['ok'])
-        self.assertEqual(len(result['facts']), 1)
-        self.assertEqual(result['facts'][0][1]['source_event_refs'], [
-            {'source_id': 'evt-primary'},
-        ])
 
     def test_extractor_hint_cannot_bind_loaded_context_without_primary(self):
-        result = self.extract(
-            empty_payload(user_fact={
-                'content': '她明天要看电影',
-                'category': '状态',
-                'evidence_quote': '明天要看电影',
-                'evidence_event_ids': ['evt-context'],
-            }),
-            '我今天有计算机系统结构课', '知道了。',
-            source_event_id='evt-primary',
-            canonical_events=[{
-                'event_id': 'evt-primary',
-                'role': 'user',
-                'content': '我今天有计算机系统结构课',
-            }],
-            canonical_context_events=[{
-                'event_id': 'evt-context',
-                'role': 'user',
-                'content': '我明天要看电影',
-            }],
-        )
+        self.assertTrue(self.ingest_sources([
+            {'event_id': 'evt-context', 'role': 'user', 'content': '我明天要看电影'},
+            {'event_id': 'evt-primary', 'role': 'user', 'content': '我今天有计算机系统结构课'},
+        ], primary='evt-primary', model_payload=empty_payload(user_fact={
+            'content': '她明天要看电影', 'evidence_event_ids': ['evt-context']})))
+        self.assert_no_authority()
+        self.assertEqual(self.sql('SELECT source_event_id FROM cognitive_events'), [('evt-primary',)])
 
-        self.assertTrue(result['ok'])
-        self.assertEqual(result['facts'], [])
 
     def test_primary_fallback_keeps_quote_bound_to_primary_event(self):
-        result = self.extract(
-            empty_payload(user_fact={
-                'content': '她今天有计算机系统结构课',
-                'category': '状态',
-                'evidence_quote': '下午3点开会',
-                'evidence_event_ids': ['not-a-canonical-event'],
-            }),
-            '我今天有计算机系统结构课', '知道了。',
-            source_event_id='evt-primary',
-            canonical_events=[{
-                'event_id': 'evt-primary',
-                'role': 'user',
-                'content': '我今天有计算机系统结构课',
-            }],
-            canonical_context_events=[{
-                'event_id': 'evt-context',
-                'role': 'user',
-                'content': '我下午3点开会',
-            }],
-        )
-
-        self.assertTrue(result['ok'])
-        self.assertEqual(result['facts'], [])
+        self.assertTrue(self.ingest_sources([
+            {'event_id': 'evt-context', 'role': 'user', 'content': '我下午3点开会'},
+            {'event_id': 'evt-primary', 'role': 'user', 'content': '我今天有计算机系统结构课'},
+        ], primary='evt-primary', model_payload=empty_payload(user_fact={
+            'content': '她今天有计算机系统结构课', 'evidence_quote': '下午3点开会',
+            'evidence_event_ids': ['not-a-canonical-event']})))
+        self.assert_no_authority()
+        self.assertEqual(self.sql('SELECT source_event_id FROM cognitive_events'), [('evt-primary',)])
 
     def test_shorter_merge_is_allowed_when_each_fragment_is_retained(self):
         store = MergeStore([
@@ -1025,73 +889,39 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
         )
         self.assertIn('[event_id:evt-plan] 周六一起看电影', result['prompt'])
 
-    def test_job_carried_user_event_cannot_bypass_previous_scope(self):
-        result = self.extract(
-            empty_payload(bond={
-                'content': '我和她约好周六看电影',
-                'evidence_quote': '约定。',
-                'evidence_event_ids': ['evt-future', 'evt-confirm'],
-            }),
-            '约定。', '那就周六见。',
-            source_event_id='evt-confirm',
-            source_event_ids=['evt-confirm', 'evt-future'],
-            canonical_events=[
-                {'event_id': 'evt-confirm', 'role': 'user', 'content': '约定。'},
-                {
-                    'event_id': 'evt-future',
-                    'role': 'user',
-                    'content': '周六一起看电影',
-                },
-            ],
-        )
 
-        self.assertTrue(result['ok'])
-        self.assertEqual(result['bonds'], [])
-        self.assertNotIn('[event_id:evt-future]', result['prompt'])
+    def test_job_carried_user_event_cannot_bypass_previous_scope(self):
+        self.assertTrue(self.ingest_sources([
+            {'event_id': 'evt-confirm', 'role': 'user', 'content': '约定。'},
+            {'event_id': 'evt-future', 'role': 'user', 'content': '周六一起看电影'},
+        ], primary='evt-confirm', source_ids=['evt-confirm', 'evt-future'],
+           model_payload=empty_payload(bond={
+               'content': '我和她约好周六看电影', 'evidence_event_ids': ['evt-confirm', 'evt-future']})))
+        self.assert_no_authority()
+        row = self.sql("SELECT payload FROM cognitive_events WHERE source_event_id='evt-confirm'")[0][0]
+        self.assertNotIn('evt-future', str(row))
+
 
     def test_assistant_denial_does_not_override_adjacent_canonical_evidence(self):
-        result = self.extract(
-            empty_payload(bond={
-                'content': '我和她约好周六看电影',
-                'evidence_quote': '约定。',
-                'evidence_event_ids': ['evt-plan', 'evt-confirm'],
-            }),
-            '约定。', '我不记得答应过。',
-            source_event_id='evt-confirm',
-            canonical_events=[{
-                'event_id': 'evt-confirm', 'role': 'user', 'content': '约定。',
-            }],
-            canonical_context_events=[{
-                'event_id': 'evt-plan', 'role': 'user', 'content': '周六一起看电影',
-            }],
-        )
+        self.assertTrue(self.ingest_sources([
+            {'event_id': 'evt-plan', 'role': 'user', 'content': '周六一起看电影'},
+            {'event_id': 'evt-confirm', 'role': 'user', 'content': '约定。'},
+            {'event_id': 'chat_reply:evt-confirm', 'role': 'assistant', 'content': '我不记得答应过。'},
+        ], primary='evt-confirm', model_payload=empty_payload(bond={
+            'content': '我和她约好周六看电影', 'evidence_event_ids': ['evt-plan', 'evt-confirm']})))
+        self.assertEqual(self.sql('SELECT count(*) FROM bond_memory')[0][0], 1)
+        self.assertEqual({r[0] for r in self.sql('SELECT source_event_id FROM memory_source_events')},
+                         {'evt-plan', 'evt-confirm'})
 
-        self.assertTrue(result['ok'])
-        self.assertEqual(len(result['bonds']), 1)
-        self.assertEqual(
-            result['bonds'][0][1]['source_event_ids'],
-            ['evt-plan', 'evt-confirm'],
-        )
 
     def test_short_canonical_event_drops_for_semantic_insufficiency(self):
-        result = self.extract(
-            empty_payload(bond={
-                'content': '我和她约好周六看电影',
-                'evidence_quote': '约定。',
-                'evidence_event_ids': ['evt-short'],
-            }),
-            '约定。', '好。',
-            source_event_id='evt-short',
-            canonical_events=[{
-                'event_id': 'evt-short', 'role': 'user', 'content': '约定。',
-            }],
-            canonical_context_events=[{
-                'event_id': 'evt-short', 'role': 'user', 'content': '约定。',
-            }],
-        )
-        self.assertTrue(result['ok'])
-        self.assertEqual(result['bonds'], [])
-        self.assertEqual(len(result['chat_calls']), 1)
+        self.assertTrue(self.ingest_sources(
+            [{'event_id': 'u1', 'role': 'user', 'content': '嗯。'}],
+            model_payload=empty_payload(bond={'content': '我和她约好周六看电影'})))
+        self.assert_no_authority()
+        self.assertEqual(self.sql("SELECT adjudication->>'status' FROM cognitive_events"), [('pending',)])
+        for guard in self.model_guards:
+            guard.assert_not_called()
 
     def test_japanese_evidence_does_not_depend_on_chinese_keyword_gate(self):
         result = self.extract(
@@ -1135,60 +965,31 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertEqual(result['bonds'], [])
 
+
     def test_missing_canonical_event_never_uses_copied_payload(self):
-        result = self.extract(
-            empty_payload(user_fact={
-                'content': '她喜欢寿司',
-                'category': '喜好',
-                'evidence_quote': '我最喜欢寿司',
-                'evidence_event_ids': ['evt-missing'],
-            }),
-            '我最喜欢寿司', '我也喜欢。',
-            source_event_id='evt-missing',
-            canonical_events=[],
-        )
-        self.assertFalse(result['ok'])
-        self.assertEqual(result['chat_calls'], [])
-        self.assertEqual(result['facts'], [])
-        self.assertEqual(result['finish_calls'][-1].args[3], 'failed')
-        self.assertEqual(result['finish_calls'][-1].kwargs['last_error'],
-                         'canonical_source_lookup_failed')
+        self.assertFalse(self.ingest_sources([], primary='evt-missing',
+            copied_user='我最喜欢寿司', copied_assistant='我也喜欢。'))
+        self.assert_no_authority()
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 0)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_event_triggers')[0][0], 0)
+
 
     def test_transient_canonical_lookup_error_never_uses_assistant_payload(self):
-        result = self.extract(
-            empty_payload(bond={
-                'content': '我和她约好周六看电影',
-                'evidence_quote': '我们约定周六一起看电影',
-                'evidence_event_ids': ['evt-transient'],
-            }),
-            '我们约定周六一起看电影', '我答应了。',
-            source_event_id='evt-transient',
-            canonical_error=raw_events.SourceValidityError('temporary db read'),
-        )
-        self.assertFalse(result['ok'])
-        self.assertEqual(result['chat_calls'], [])
-        self.assertEqual(result['bonds'], [])
-        self.assertEqual(result['finish_calls'][-1].args[3], 'failed')
-        self.assertEqual(result['finish_calls'][-1].kwargs['last_error'],
-                         'canonical_source_lookup_failed')
+        with self.assertRaises(raw_events.SourceValidityError):
+            self.ingest_sources(
+                [{'event_id': 'u1', 'role': 'user', 'content': '我们约定周六一起看电影'}],
+                copied_assistant='我答应了。', database_error=True)
+        self.assert_no_authority()
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 0)
+
 
     def test_deleted_source_is_skipped_without_extraction(self):
-        result = self.extract(
-            empty_payload(bond={
-                'content': '我和她约好周六看电影',
-                'evidence_quote': '我们约定周六一起看电影',
-                'evidence_event_ids': ['evt-deleted'],
-            }),
-            '我们约定周六一起看电影', '我答应了。',
-            source_event_id='evt-deleted',
-            source_active=False,
-        )
-        self.assertTrue(result['ok'])
-        self.assertEqual(result['chat_calls'], [])
-        self.assertEqual(result['bonds'], [])
-        self.assertEqual(result['finish_calls'][-1].args[3], 'skipped')
-        self.assertEqual(result['finish_calls'][-1].kwargs['last_error'],
-                         'deleted_source')
+        self.assertFalse(self.ingest_sources(
+            [{'event_id': 'evt-deleted', 'role': 'user', 'content': '我们约定周六一起看电影'}],
+            primary='evt-deleted', copied_assistant='我答应了。', deleted=['evt-deleted']))
+        self.assert_no_authority()
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 0)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_event_triggers')[0][0], 0)
 
 
 class MemoryJobRetryTests(unittest.TestCase):
@@ -1201,14 +1002,14 @@ class MemoryJobRetryTests(unittest.TestCase):
              patch.object(memory_jobs, '_set_status') as set_status:
             memory_jobs._run_job(row)
         set_status.assert_called_once_with(
-            17, 'pending', 'extraction returned False')
+            17, 'pending', 'extraction_returned_false')
 
         exhausted = row[:7] + (memory_jobs.MAX_ATTEMPTS,) + row[8:]
         with patch('user_memory.extract_and_save_memory', return_value=False), \
              patch.object(memory_jobs, '_set_status') as set_status:
             memory_jobs._run_job(exhausted)
         set_status.assert_called_once_with(
-            17, 'failed', 'extraction returned False')
+            17, 'failed', 'extraction_returned_false')
 
 
 class MergeStore:

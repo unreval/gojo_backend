@@ -275,7 +275,8 @@ def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, 
 
     group_candidate = (str(source_chat_id or '').startswith('group:')
                        and str(source_event_id or '').startswith(str(source_chat_id) + ':message:'))
-    if not source_event_id or (is_nonrelationship_generated_source(source_event_id) and not group_candidate):
+    if not source_event_id or (is_nonrelationship_generated_source(source_event_id)
+                               and not group_candidate and not allow_assistant):
         return {'status': 'pending_canonical_source'}
     database = conn
     owns_connection = database is None
@@ -292,6 +293,9 @@ def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, 
         if len(events) != 1 or events[0]['role'] not in allowed_roles:
             return {'status': 'pending_canonical_source'}
         raw = events[0]
+        if (raw['role'] == 'user' and is_nonrelationship_generated_source(source_event_id)
+                and not group_candidate):
+            return {'status': 'pending_canonical_source'}
         if not cognitive_source_matches_scope(raw, character_id, chat_id):
             return {'status': 'pending_canonical_source'}
         parsed = (parse_cognitive_evidence(raw['content'], user_id, character_id)
@@ -303,9 +307,28 @@ def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, 
             source='deterministic_evidence_policy_v1', occurred_at=raw['timestamp'],
             payload={'content': raw['content'], 'source_chat_id': chat_id, **parsed})
         if event_id is None:
+            # A duplicate source is not proof of a recovered historical judgment.
+            # Report only a matching canonical decision from a committed cycle.
+            cur.execute("""SELECT e.adjudication, e.source, e.payload->>'content', c.status
+                           FROM cognitive_events e
+                           LEFT JOIN cognitive_cycles c
+                             ON c.id::text=e.adjudication->>'processed_by_cycle_id'
+                            AND c.user_id=e.user_id AND c.character_id=e.character_id
+                           WHERE e.user_id=%s AND e.character_id=%s
+                             AND e.source_event_id=%s AND e.source_event_type=%s""",
+                        (user_id, character_id, source_event_id,
+                         'canonical_user_turn' if raw['role'] == 'user' else 'canonical_assistant_turn'))
+            row = cur.fetchone()
+            decision = _question_json(row[0], {}) if row else {}
+            reason = 'historical_adjudication_missing'
+            if row and row[1] == 'deterministic_evidence_policy_v1' and row[2] == raw['content']:
+                if decision.get('status') == 'superseded':
+                    reason = 'historical_adjudication_superseded'
+                elif decision.get('status') == 'applied' and row[3] == 'succeeded':
+                    reason = 'canonical_judgment_already_committed'
             if owns_connection:
                 database.commit()
-            return {'status': 'duplicate', 'event_id': None}
+            return {'status': 'duplicate', 'event_id': None, 'reason': reason}
         trigger = create_trigger_occurrence(database, event_id=event_id, user_id=user_id,
             character_id=character_id, trigger_class='question_reactivation',
             occurrence_key=qkey, payload={'question_key': qkey, 'reason': 'new_canonical_evidence'})

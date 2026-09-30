@@ -687,90 +687,41 @@ class FakeConn:
 
 
 class RawEventLayerTests(unittest.TestCase):
-    def setUp(self):
-        self.store = LayerStore()
-        self.conn = FakeConn(self.store)
-        self.patchers = [
-            patch('db.get_conn', side_effect=lambda: FakeConn(self.store)),
-            patch('db_chatlog.get_conn', side_effect=lambda: FakeConn(self.store)),
-            patch('raw_events.get_conn', side_effect=lambda: FakeConn(self.store)),
-            patch('user_memory.get_conn', side_effect=lambda: FakeConn(self.store)),
-            patch('builtins.print'),
-        ]
-        for item in self.patchers:
-            item.start()
-        self.db_chatlog = db_chatlog
-        self.raw_events = raw_events
-        self.user_memory = user_memory
-        db_chatlog.init_chatlog_table()
-        raw_events.init_raw_event_layer()
+    from tests import test_private_source_first as fixture
+    setUpClass = classmethod(fixture.PrivateSourceFirstTests.setUpClass.__func__)
+    tearDownClass = classmethod(fixture.PrivateSourceFirstTests.tearDownClass.__func__)
+    sql = fixture.PrivateSourceFirstTests.sql
+    tearDown = fixture.PrivateSourceFirstTests.tearDown
 
-    def tearDown(self):
-        for item in self.patchers:
-            item.stop()
+    def setUp(self):
+        self.fixture.PrivateSourceFirstTests.setUp(self)
+        import context_layer, episodic_index, memory_lifecycle
+        for module in (episodic_index, memory_lifecycle):
+            self.stack.enter_context(patch.object(module, 'get_conn', return_value=self.database))
+        self.stack.enter_context(patch('builtins.print'))
+        self.stack.enter_context(patch('user_memory._bg_embed'))
+        memory_lifecycle.init_memory_lifecycle_tables(conn=self.database)
+        raw_events.init_raw_event_layer()
+        context_layer.init_context_layer_tables()
+        episodic_index.init_episodic_index_tables()
+        self.db_chatlog, self.raw_events, self.user_memory = db_chatlog, raw_events, user_memory
+
+    def rows(self, table):
+        cur = self.database.cursor()
+        cur.execute(f'SELECT * FROM {table} ORDER BY id')
+        names = [item[0] for item in cur.description]
+        return [dict(zip(names, row)) for row in cur.fetchall()]
 
     def active_events(self, user_id='u', character_id='gojo'):
-        return [
-            row for row in self.store.chat_log
-            if row['user_id'] == user_id and row['chat_id'] == character_id
-            and row.get('status') == 'active'
-        ]
+        return [row for row in self.rows('chat_log')
+                if row['user_id'] == user_id and row['chat_id'] == character_id
+                and row['status'] == 'active']
 
     def append_user_event_at(self, user_id, character_id, event_id, content, occurred_at):
-        result = self.raw_events.append_raw_event(
-            user_id, character_id, event_id=event_id, role='user', content=content)
+        result = raw_events.append_raw_event(
+            user_id, character_id, event_id=event_id, role='user',
+            content=content, occurred_at=occurred_at)
         self.assertTrue(result['inserted'])
-        self.store.chat_log[-1]['created_at'] = occurred_at
-
-    def capture_extractor_prompt(self, prior_events, user_text, assistant_text,
-                                 existing_bond=''):
-        for event_id, role, content in prior_events:
-            self.raw_events.append_raw_event(
-                'u', 'gojo', event_id=event_id, role=role, content=content)
-        self.raw_events.append_raw_event(
-            'u', 'gojo', event_id='current-user', role='user', content=user_text)
-        self.raw_events.append_raw_event(
-            'u', 'gojo', event_id='current-assistant', role='assistant',
-            content=assistant_text)
-
-        payload = json.dumps({
-            'user_fact': None,
-            'bond': None,
-            'told': None,
-            'character_self_claim': None,
-            'bond_merge': None,
-            'bond_resolution': None,
-        }, ensure_ascii=False)
-        captured = {}
-
-        def fake_chat(*_args, **kwargs):
-            captured['prompt'] = kwargs['messages'][0]['content']
-            return payload, None
-
-        bonds = [
-            (1, existing_bond, datetime.now(timezone.utc))
-        ] if existing_bond else []
-        with patch.object(self.user_memory, 'plan_memory_corrections', return_value=[]), \
-             patch.object(self.user_memory, 'get_long_memory', return_value=[]), \
-             patch.object(self.user_memory, 'get_bond_memories', return_value=bonds), \
-             patch.object(self.user_memory, '_all_character_names', return_value=set()), \
-             patch.object(self.user_memory, 'get_relations_text', return_value=''), \
-             patch('ai_client.create_chat', side_effect=fake_chat), \
-             patch('characters.get_character', return_value={'name': '五条'}), \
-             patch('memory_lifecycle.reactivate_lifecycle_memories', return_value=0), \
-             patch('cognitive_events.question_extraction_state', return_value=[]), \
-             patch('smart_recall.reinforce_mentioned_facts'):
-            ok = self.user_memory.extract_and_save_memory(
-                'u', user_text, assistant_text, 'gojo',
-                source_event_id='current-user',
-                source_event_ids=['current-user'],
-            )
-        self.assertTrue(ok)
-        return captured['prompt']
-
-    @staticmethod
-    def prompt_section(prompt, heading, next_heading):
-        return prompt.split(heading, 1)[1].split(next_heading, 1)[0]
 
     def test_text_writes_one_canonical_raw_event(self):
         inserted = self.user_memory.save_user_short_memory_once(
@@ -863,7 +814,9 @@ class RawEventLayerTests(unittest.TestCase):
             'u', 'gojo', 'ask', '那你该回我什么？', now - timedelta(minutes=2))
         self.raw_events.append_raw_event(
             'u', 'gojo', event_id='chat_reply:ask', role='assistant', content='🦖')
-        self.store.chat_log[-1]['created_at'] = now - timedelta(minutes=1)
+        self.sql("UPDATE chat_log SET created_at=%s WHERE event_id='chat_reply:ask'",
+                 (now - timedelta(minutes=1),))
+        self.database.commit()
         self.append_user_event_at('u', 'gojo', 'confirm', '对，我们约定好了。', now)
 
         events = self.raw_events.get_previous_active_turn_events(
@@ -912,62 +865,46 @@ class RawEventLayerTests(unittest.TestCase):
         self.assertIn('📷 [图片]', rendered[0]['content'])
 
     def test_extractor_recent_context_resolves_reference_without_old_bond(self):
-        old_bond = '她答应明天拍谷子照片给我看'
-        prompt = self.capture_extractor_prompt(
-            [
-                ('prior-user-1', 'user', '我今天买了甜点'),
-                ('prior-assistant-1', 'assistant', '买了什么？'),
-                ('prior-user-2', 'user', '这个蛋糕看起来很好吃'),
-                ('prior-assistant-2', 'assistant', '那给我看看。'),
-            ],
-            '只能明天拍照给您看了',
-            '写真で見せるだけ？',
-            existing_bond=old_bond,
-        )
-        bond_section = self.prompt_section(
-            prompt, '【已记录的羁绊记忆】', '【最近对话上下文】')
-        recent_section = self.prompt_section(
-            prompt, '【最近对话上下文】', '【上下文使用边界】')
-        self.assertIn('这个蛋糕看起来很好吃', recent_section)
-        self.assertIn(old_bond, bond_section)
-        self.assertNotIn(old_bond, recent_section)
-        self.assertIn('禁止拿它们猜当前 turn 没有明确说出的对象', prompt)
+        self.raw_events.append_raw_event('u', 'gojo', event_id='prior', content='这个蛋糕看起来很好吃')
+        self.raw_events.append_raw_event('u', 'gojo', event_id='current-user', content='只能明天拍照给您看了')
+        with patch('ai_client.create_chat') as model:
+            self.assertTrue(self.user_memory.extract_and_save_memory(
+                'u', 'copied text cannot replace source', 'candidate speech', 'gojo',
+                source_event_id='current-user', parsed_override={'bond': {'content': '旧 bond 猜测'}}))
+        model.assert_not_called()
+        row = self.sql('SELECT source_event_id,payload FROM cognitive_events')[0]
+        self.assertEqual(row[0], 'current-user')
+        self.assertEqual(row[1]['content'], '只能明天拍照给您看了')
+        self.assertNotIn('candidate speech', json.dumps(row[1]))
+        self.assertEqual(self.sql('SELECT count(*) FROM bond_memory')[0][0], 0)
 
     def test_extractor_forbids_old_bond_antecedent_without_prior_object(self):
-        prompt = self.capture_extractor_prompt(
-            [
-                ('prior-user-1', 'user', '今天有点忙'),
-                ('prior-assistant-1', 'assistant', '先忙你的。'),
-            ],
-            '明天拍照给你看',
-            '分かった。',
-            existing_bond='她以前答应拍谷子照片给我看',
-        )
-        recent_section = self.prompt_section(
-            prompt, '【最近对话上下文】', '【上下文使用边界】')
-        self.assertNotIn('谷子', recent_section)
-        self.assertIn('只能泛化（例如“她答应明天拍照片给我看”）或填 null', prompt)
-        self.assertIn('禁止因为旧 bond 里有“谷子”', prompt)
+        self.raw_events.append_raw_event('u', 'gojo', event_id='prior', content='今天有点忙')
+        self.raw_events.append_raw_event('u', 'gojo', event_id='current-user', content='明天拍照给你看')
+        with patch('ai_client.create_chat') as model:
+            self.assertTrue(self.user_memory.extract_and_save_memory(
+                'u', 'copied text cannot replace source', 'candidate speech', 'gojo',
+                source_event_id='current-user', parsed_override={'bond': {'content': '旧 bond 猜测'}}))
+        model.assert_not_called()
+        row = self.sql('SELECT source_event_id,payload FROM cognitive_events')[0]
+        self.assertEqual(row[0], 'current-user')
+        self.assertEqual(row[1]['content'], '明天拍照给你看')
+        self.assertNotIn('candidate speech', json.dumps(row[1]))
+        self.assertEqual(self.sql('SELECT count(*) FROM bond_memory')[0][0], 0)
 
     def test_extractor_current_turn_appears_only_in_current_section(self):
-        user_text = '明天拍照给你看'
-        assistant_text = '写真で見せるだけ？'
-        prompt = self.capture_extractor_prompt(
-            [
-                ('prior-user-1', 'user', '这个蛋糕颜色很漂亮'),
-                ('prior-assistant-1', 'assistant', '見せて。'),
-            ],
-            user_text,
-            assistant_text,
-        )
-        recent_section = self.prompt_section(
-            prompt, '【最近对话上下文】', '【上下文使用边界】')
-        current_section = self.prompt_section(
-            prompt, '【本轮权威原始证据】', '【硬性证据边界】')
-        self.assertNotIn(user_text, recent_section)
-        self.assertNotIn(assistant_text, recent_section)
-        self.assertEqual(current_section.count(user_text), 1)
-        self.assertEqual(current_section.count(assistant_text), 1)
+        self.raw_events.append_raw_event('u', 'gojo', event_id='prior', content='这个蛋糕颜色很漂亮')
+        self.raw_events.append_raw_event('u', 'gojo', event_id='current-user', content='明天拍照给你看')
+        with patch('ai_client.create_chat') as model:
+            self.assertTrue(self.user_memory.extract_and_save_memory(
+                'u', 'copied text cannot replace source', 'candidate speech', 'gojo',
+                source_event_id='current-user', parsed_override={'bond': {'content': '旧 bond 猜测'}}))
+        model.assert_not_called()
+        row = self.sql('SELECT source_event_id,payload FROM cognitive_events')[0]
+        self.assertEqual(row[0], 'current-user')
+        self.assertEqual(row[1]['content'], '明天拍照给你看')
+        self.assertNotIn('candidate speech', json.dumps(row[1]))
+        self.assertEqual(self.sql('SELECT count(*) FROM bond_memory')[0][0], 0)
 
     def test_worker_retry_does_not_duplicate_derived_memory(self):
         event_id = 'evt-worker'
@@ -990,7 +927,7 @@ class RawEventLayerTests(unittest.TestCase):
             self.raw_events.record_derived(
                 self.raw_events.PROCESSOR_MEMORY_EXTRACTOR,
                 self.raw_events.PROCESSOR_MEMORY_EXTRACTOR_VERSION, key,
-                'long_memory', self.store.long_memory[-1]['id'])
+                'long_memory', self.rows('long_memory')[-1]['id'])
             self.raw_events.finish_processor(
                 event_id, self.raw_events.PROCESSOR_MEMORY_EXTRACTOR,
                 self.raw_events.PROCESSOR_MEMORY_EXTRACTOR_VERSION, 'succeeded')
@@ -998,8 +935,8 @@ class RawEventLayerTests(unittest.TestCase):
 
         self.assertTrue(derive())
         self.assertFalse(derive())
-        self.assertEqual(len(self.store.long_memory), 1)
-        self.assertEqual(len(self.store.source_map), 1)
+        self.assertEqual(len(self.rows('long_memory')), 1)
+        self.assertEqual(len(self.sql('SELECT memory_type,memory_id,source_event_id FROM memory_source_events')), 1)
 
     def test_queue_duplicate_delivery_reuses_idempotency(self):
         event_id = 'evt-queue'
@@ -1074,34 +1011,23 @@ class RawEventLayerTests(unittest.TestCase):
             source_event_refs=[{'source_id': 'src-a'}, {'source_id': 'src-b'}])
         self.db_chatlog.delete_message('u', 'gojo', client_msg_id='src-a')
         self.raw_events.invalidate_memories_for_deleted_event('src-a', 'u', 'gojo')
-        statuses = {row['content']: row['recall_status'] for row in self.store.long_memory}
+        statuses = {row['content']: row['recall_status'] for row in self.rows('long_memory')}
         self.assertEqual(statuses['只来自 A'], 'deleted')
         self.assertEqual(statuses['来自 A 和 B'], 'active')
         leftover = [
-            item for item in self.store.source_map if item[2] == 'src-b'
+            item for item in self.sql('SELECT memory_type,memory_id,source_event_id FROM memory_source_events') if item[2] == 'src-b'
         ]
         self.assertEqual(len(leftover), 1)
 
     def test_convention_is_invalidated_when_any_required_source_is_deleted(self):
-        convention = self.user_memory._communication_convention_content(
-            '🦖', '专属回复')
-        self.store.bond_memory.append({
-            'id': 77,
-            'content': convention,
-            'recall_status': 'active',
-        })
-        self.store.source_map.extend([
-            ('bond_memory', 77, 'convention-user'),
-            ('bond_memory', 77, 'convention-symbol'),
-        ])
-
-        result = self.raw_events.invalidate_memories_for_deleted_event(
-            'convention-symbol', 'u', 'gojo')
-
+        convention = self.user_memory._communication_convention_content('🦖', '专属回复')
+        self.sql("INSERT INTO bond_memory(id,user_id,character_id,content) VALUES (77,'u','gojo',%s)", (convention,))
+        self.sql("INSERT INTO memory_source_events VALUES ('bond_memory',77,'convention-user'),('bond_memory',77,'convention-symbol')")
+        self.database.commit()
+        result = self.raw_events.invalidate_memories_for_deleted_event('convention-symbol', 'u', 'gojo')
         self.assertEqual(result['invalidated'], 1)
-        self.assertEqual(self.store.bond_memory[0]['recall_status'], 'deleted')
-        self.assertEqual(
-            self.store.source_map, [('bond_memory', 77, 'convention-user')])
+        self.assertEqual(self.sql('SELECT recall_status FROM bond_memory'), [('deleted',)])
+        self.assertEqual(self.sql('SELECT source_event_id FROM memory_source_events'), [('convention-user',)])
 
     def test_migration_is_idempotent(self):
         self.user_memory.save_user_short_memory_once(
@@ -1157,41 +1083,15 @@ class RawEventLayerTests(unittest.TestCase):
         self.assertEqual(len(segs), 2)
 
     def test_deleted_source_commit_race_does_not_write_derived(self):
-        self.raw_events.append_raw_event(
-            'u', 'gojo', event_id='race-1', role='user', content='我叫小明')
-        deleted_after_llm = {'value': False}
-
-        def gated_deleted(event_id, user_id=None, character_id=None, conn=None):
-            return bool(deleted_after_llm['value'])
-
-        fact = (
-            '{"user_fact":{"content":"她叫小明","category":"身份"},'
-            '"bond":null,"told":null,"character_self_claim":null,"bond_merge":null}'
-        )
-
-        def fake_chat(*args, **kwargs):
-            deleted_after_llm['value'] = True
-            return fact, None
-
-        with patch.object(self.raw_events, 'is_raw_event_deleted', gated_deleted), \
-             patch.object(self.user_memory, 'plan_memory_corrections', return_value=[]), \
-             patch.object(self.user_memory, 'get_long_memory', return_value=[]), \
-             patch.object(self.user_memory, 'get_bond_memories', return_value=[]), \
-             patch.object(self.user_memory, '_all_character_names', return_value=set()), \
-             patch.object(self.user_memory, 'get_relations_text', return_value=''), \
-             patch('ai_client.create_chat', side_effect=fake_chat), \
-             patch('characters.get_character', return_value={'name': '五条'}), \
-             patch('memory_lifecycle.reactivate_lifecycle_memories', return_value=0), \
-             patch('memory_lifecycle.apply_user_fact_lifecycle') as lifecycle:
-            ok = self.user_memory.extract_and_save_memory(
-                'u', '我叫小明', 'そうか', 'gojo', source_event_id='race-1')
-        self.assertTrue(ok)
-        self.assertTrue(deleted_after_llm['value'])
-        lifecycle.assert_not_called()
-        self.assertEqual(self.store.long_memory, [])
-        statuses = [row['status'] for row in self.store.processing.values()]
-        self.assertIn('skipped', statuses)
-        self.assertNotIn('succeeded', statuses)
+        self.raw_events.append_raw_event('u', 'gojo', event_id='race-1', content='我的名字是「小明」。')
+        self.assertTrue(self.user_memory.extract_and_save_memory('u', '', '', 'gojo', source_event_id='race-1'))
+        self.db_chatlog.delete_message('u', 'gojo', client_msg_id='race-1')
+        import cognitive_worker
+        result = cognitive_worker.run_worker_once(now=datetime.now(timezone.utc) + timedelta(seconds=5))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(self.sql("SELECT count(*) FROM cognitive_events WHERE adjudication->>'status'='applied'")[0][0], 0)
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory')[0][0], 0)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0], 0)
 
     def test_assistant_source_event_id_retry_is_one_cache_row(self):
         self.user_memory.save_short_memory(
@@ -1199,14 +1099,14 @@ class RawEventLayerTests(unittest.TestCase):
         self.user_memory.save_short_memory(
             'u', 'assistant', 'ん？', 'gojo', source_event_id='asst-1')
         keyed = [
-            row for row in self.store.short_memory
+            row for row in self.rows('short_memory')
             if row['role'] == 'assistant' and row.get('source_event_id') == 'asst-1'
         ]
         self.assertEqual(len(keyed), 1)
         self.user_memory.save_short_memory('u', 'assistant', '旧缓存', 'gojo')
         self.user_memory.save_short_memory('u', 'assistant', '旧缓存', 'gojo')
         legacy = [
-            row for row in self.store.short_memory
+            row for row in self.rows('short_memory')
             if row['role'] == 'assistant' and not row.get('source_event_id')
         ]
         self.assertGreaterEqual(len(legacy), 2)
@@ -1236,74 +1136,26 @@ class RawEventLayerTests(unittest.TestCase):
         self.assertEqual(events[0]['role'], 'gojo')
 
     def test_source_validity_error_does_not_write_derived_memory(self):
-        self.raw_events.append_raw_event(
-            'u', 'gojo', event_id='src-err', role='user', content='我叫小明')
-
-        def boom(*_args, **_kwargs):
-            raise self.raw_events.SourceValidityError('db down')
-
-        with patch.object(self.raw_events, 'is_raw_event_deleted', side_effect=boom), \
-             patch('ai_client.create_chat') as chat, \
-             patch('memory_lifecycle.reactivate_lifecycle_memories') as reactivate, \
-             patch('memory_lifecycle.apply_user_fact_lifecycle') as lifecycle:
-            ok = self.user_memory.extract_and_save_memory(
-                'u', '我叫小明', 'そうか', 'gojo', source_event_id='src-err')
-        self.assertFalse(ok)
-        chat.assert_not_called()
-        reactivate.assert_not_called()
-        lifecycle.assert_not_called()
-        self.assertEqual(self.store.long_memory, [])
-        statuses = [row['status'] for row in self.store.processing.values()]
-        self.assertIn('failed', statuses)
-        self.assertNotIn('succeeded', statuses)
+        self.raw_events.append_raw_event('u', 'gojo', event_id='src-err', content='我的名字是「小明」。')
+        self.sql('ALTER TABLE chat_log RENAME COLUMN text TO unavailable_text')
+        self.database.commit()
+        with self.assertRaises(self.raw_events.SourceValidityError):
+            self.user_memory.extract_and_save_memory('u', '', '', 'gojo', source_event_id='src-err')
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 0)
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory')[0][0], 0)
 
     def test_lifecycle_reactivation_skipped_when_source_deleted_before_commit(self):
-        self.store.lifecycle.append({
-            'id': 1,
-            'user_id': 'u',
-            'character_id': 'gojo',
-            'topic_key': 'sleep',
-            'status': 'archived',
-            'decay_state': 'dormant',
-        })
-        self.raw_events.append_raw_event(
-            'u', 'gojo', event_id='life-1', role='user',
-            content='我又想起之前失眠那阵子')
-        deleted_after_llm = {'value': False}
-
-        def gated_deleted(event_id, user_id=None, character_id=None, conn=None):
-            return bool(deleted_after_llm['value'])
-
-        fact = (
-            '{"user_fact":{"content":"她最近又失眠","category":"状态"},'
-            '"bond":null,"told":null,"character_self_claim":null,"bond_merge":null}'
-        )
-
-        def fake_chat(*args, **kwargs):
-            deleted_after_llm['value'] = True
-            return fact, None
-
-        with patch.object(self.raw_events, 'is_raw_event_deleted', gated_deleted), \
-             patch.object(self.user_memory, 'plan_memory_corrections', return_value=[]), \
-             patch.object(self.user_memory, 'get_long_memory', return_value=[]), \
-             patch.object(self.user_memory, 'get_bond_memories', return_value=[]), \
-             patch.object(self.user_memory, '_all_character_names', return_value=set()), \
-             patch.object(self.user_memory, 'get_relations_text', return_value=''), \
-             patch('ai_client.create_chat', side_effect=fake_chat), \
-             patch('characters.get_character', return_value={'name': '五条'}), \
-             patch('memory_lifecycle.get_conn', side_effect=lambda: FakeConn(self.store)), \
-             patch('memory_lifecycle.apply_user_fact_lifecycle') as lifecycle:
-            ok = self.user_memory.extract_and_save_memory(
-                'u', '我又想起之前失眠那阵子', 'そうか', 'gojo',
-                source_event_id='life-1')
-        self.assertTrue(ok)
+        self.sql("""INSERT INTO memory_lifecycle_items
+            (user_id,character_id,source_id,content,memory_kind,topic_key,status,decay_state)
+            VALUES ('u','gojo','old','睡眠','ephemeral','sleep','archived','dormant')""")
+        self.database.commit()
+        self.raw_events.append_raw_event('u', 'gojo', event_id='life-1', content='我又想起之前失眠那阵子')
+        self.db_chatlog.delete_message('u', 'gojo', client_msg_id='life-1')
+        with patch('memory_lifecycle.reactivate_lifecycle_memories') as lifecycle:
+            self.assertFalse(self.user_memory.extract_and_save_memory('u', '', '', 'gojo', source_event_id='life-1'))
         lifecycle.assert_not_called()
-        self.assertEqual(self.store.long_memory, [])
-        self.assertEqual(self.store.lifecycle[0]['status'], 'archived')
-        self.assertEqual(self.store.lifecycle[0]['decay_state'], 'dormant')
-        statuses = [row['status'] for row in self.store.processing.values()]
-        self.assertIn('skipped', statuses)
-        self.assertNotIn('succeeded', statuses)
+        self.assertEqual(self.sql('SELECT status,decay_state FROM memory_lifecycle_items'), [('archived','dormant')])
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 0)
 
     def test_voice_proactive_request_ids_are_not_minute_buckets(self):
         first = 'voice_proactive:req:aaa'
@@ -1401,33 +1253,13 @@ class RawEventLayerTests(unittest.TestCase):
 
     def test_cognitive_ingest_fails_closed_on_source_validity_error(self):
         import cognitive_events
-
-        class GuardConn:
-            def cursor(self):
-                raise AssertionError('must not write cognitive derived state')
-
-            def commit(self):
-                raise AssertionError('must not commit')
-
-            def rollback(self):
-                self.rolled = True
-
-            def close(self):
-                pass
-
-        def boom(*_args, **_kwargs):
-            raise self.raw_events.SourceValidityError('db down')
-
-        with patch.object(self.raw_events, 'is_raw_event_deleted', side_effect=boom):
-            result = cognitive_events.ingest_v4_signals(
-                user_id='u', character_id='gojo',
-                source_event_id='evt-cog',
-                signals=[{'brief': 'x'}],
-                conn=GuardConn(),
-                aggregate=False,
-            )
-        self.assertEqual(result['status'], 'failed_source_validity')
-        self.assertIsNone(result['event_id'])
+        self.sql('ALTER TABLE chat_log RENAME COLUMN text TO unavailable_text')
+        self.database.commit()
+        with self.assertRaises(self.raw_events.SourceValidityError):
+            cognitive_events.ingest_v4_signals(user_id='u', character_id='gojo',
+                source_event_id='evt-cog', signals=[{'brief':'untrusted'}], aggregate=False)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 0)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0], 0)
 
 
 if __name__ == '__main__':

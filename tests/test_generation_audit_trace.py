@@ -19,6 +19,27 @@ import route_chat  # noqa: E402
 
 
 class GenerationAuditTraceTests(unittest.TestCase):
+    def test_acceptance_modes_are_safe_and_plaintext_does_not_retry(self):
+        for raw, mode in (
+                ('🥺...', 'nonverbal'), ('こんにちは', 'plaintext'),
+                ('{"messages":[{"jp":"🥺...","zh":"🥺..."}]}', 'structured')):
+            with self.subTest(mode=mode), patch.object(
+                    route_chat, '_create_json', return_value=(raw, self.response)) as generate, patch.object(
+                    route_chat, '_quick_translate', return_value='你好') as translate, patch.object(
+                    route_chat, 'log_cache_usage'), patch('builtins.print') as logged:
+                result, state = route_chat._generate_or_none(
+                    'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',
+                    salvage=True, generation_trace=self.trace_context)
+            generate.assert_called_once()
+            self.assertIsNone(state)
+            self.assertEqual(self._trace_payloads(logged)[0]['acceptance_mode'], mode)
+            self.assertEqual(self._trace_payloads(logged)[0]['outcome'], 'accepted')
+            self.assertFalse(self._trace_payloads(logged)[0]['will_retry'])
+            if mode != 'plaintext':
+                translate.assert_not_called()
+            if mode != 'structured':
+                self.assertEqual(set(result), {'emotion', 'messages', '_acceptance_mode'})
+
     def setUp(self):
         self.secret = 'PRIVATE-PROMPT-BODY-DO-NOT-LOG'
         episode = types.SimpleNamespace(

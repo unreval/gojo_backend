@@ -58,20 +58,12 @@ def passthrough_generation_receipt():
         ctx = ctx or {}
         payload = payload or {}
         effects = ['assistant_short_memory', 'record_turn']
-        user_text = str(
-            ctx.get('user_text')
-            or payload.get('_user_text')
-            or payload.get('user_text')
-            or ''
-        ).strip()
-        if user_text:
-            effects.append('private_extraction')
         # Image passthrough tests do not stub relationship_engine.
         if endpoint == 'chat_text':
             effects.append('behavior_evidence')
-            effects.append('relationship_update')
             msgs = payload.get('messages') or []
-            if any(str((m or {}).get('zh') or '').strip() for m in msgs):
+            if (payload.get('_acceptance_mode') not in ('plaintext', 'nonverbal')
+                    and any(str((m or {}).get('zh') or '').strip() for m in msgs)):
                 effects.append('promise_detector')
         if payload.get('reminder'):
             effects.append('reminder')

@@ -5,11 +5,12 @@ from contextlib import ExitStack
 from unittest.mock import patch
 
 from tests import test_private_memory_fact_gate as private_tests
+from tests.canonical_memory_fixture import CanonicalMemoryFixture
 import user_memory
 from structured_output import StructuredOutputError
 
 
-class MemoryStructuredOutputTests(unittest.TestCase):
+class MemoryStructuredOutputTests(CanonicalMemoryFixture, unittest.TestCase):
     def test_malformed_member_blocks_other_valid_memory_fields(self):
         for bad_field in ({'bond': []}, {'bond_delta': {'novel': 'yes'}},
                           {'told': {'content': 42}},
@@ -20,24 +21,26 @@ class MemoryStructuredOutputTests(unittest.TestCase):
                     'evidence_quote': '我喜欢寿司',
                 })
                 payload.update(bad_field)
-                result = private_tests.PrivateMemoryFactGateTests().extract(
-                    payload, '我喜欢寿司', '记住了。')
-                self.assertFalse(result['ok'])
-                self.assertEqual(result['facts'], [])
-                self.assertEqual(result['bonds'], [])
-                self.assertEqual(result['claims'], [])
+                # Extractor output is not parsed or granted authority. The
+                # actual source still enters the deterministic pending queue.
+                self.assertTrue(self.ingest_sources(
+                    [{'event_id': 'u1', 'role': 'user', 'content': '我喜欢寿司'}],
+                    copied_assistant='记住了。', model_payload=payload))
+                self.assert_no_authority()
+                self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 1)
+                for guard in self.model_guards:
+                    guard.assert_not_called()
 
     def test_correction_scan_structured_failure_aborts_extraction(self):
-        result = private_tests.PrivateMemoryFactGateTests().extract(
-            private_tests.empty_payload(user_fact={
-                'content': '她喜欢寿司', 'category': '喜好',
-                'evidence_quote': '我喜欢寿司',
-            }), '其实我喜欢寿司', '记住了。',
-            correction_error=StructuredOutputError('memory_correction_invalid_json'))
-        self.assertFalse(result['ok'])
-        self.assertEqual(result['facts'], [])
-        self.assertEqual(result['bonds'], [])
-        self.assertEqual(result['claims'], [])
+        with patch.object(user_memory, 'plan_memory_corrections',
+                side_effect=StructuredOutputError('memory_correction_invalid_json')) as old_scan:
+            self.assertTrue(self.ingest_sources(
+                [{'event_id': 'u1', 'role': 'user', 'content': '其实我喜欢寿司'}],
+                copied_assistant='记住了。', model_payload=private_tests.empty_payload(
+                    user_fact={'content': '她喜欢寿司', 'category': '喜好'})))
+        old_scan.assert_not_called()
+        self.assert_no_authority()
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 1)
 
     def test_correction_scan_does_not_silently_convert_failure_to_none(self):
         """The removed model correction scanner cannot delete any memory."""

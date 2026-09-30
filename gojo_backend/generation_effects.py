@@ -1,7 +1,7 @@
 """Apply durable chat generation side effects after receipt complete.
 
-Never reruns the main reply generation. relationship_update owns its bounded
-observer call; replay/repair uses the same side-effect functions.
+Never reruns the main reply generation. Raw-event writes own canonical
+evidence jobs; legacy effect names remain readable for receipt repair.
 """
 from datetime import datetime
 
@@ -366,6 +366,8 @@ def apply_behavior_evidence(ctx):
 
 def apply_promise_detector(ctx):
     payload = _payload(ctx)
+    if payload.get('_acceptance_mode') in ('plaintext', 'nonverbal'):
+        return {}
     msgs = ctx.get('msgs') or payload.get('messages') or []
     reply_zh = ctx.get('reply_zh') or ' '.join(
         str((m or {}).get('zh') or '') for m in msgs if (m or {}).get('zh'))

@@ -14,6 +14,11 @@ MAX_ATTEMPTS = 3
 _WAKE = threading.Event()
 _THREAD = None
 _LOCK = threading.Lock()
+_SAFE_ERROR_CODES = {
+    'empty_response', 'no_top_level_json_object', 'invalid_json',
+    'incomplete_json', 'multiple_distinct_json_objects',
+    'schema_validation_failed', 'empty_summary',
+}
 
 
 def init_memory_jobs_table():
@@ -73,12 +78,12 @@ def enqueue_private_extraction(user_id, user_text, assistant_text, character_id,
 
 
 def enqueue_kind(kind, user_id, character_id, source_event_id=None, extra=None,
-                 user_text=None, assistant_text=None):
+                 user_text=None, assistant_text=None, *, conn=None):
     """Generic idempotent enqueue used by rolling summary and similar jobs."""
     extra_json = json.dumps(extra or {}, ensure_ascii=False) if extra is not None else None
     return _enqueue(
         kind, user_id, character_id, user_text, assistant_text, extra_json,
-        source_event_id=source_event_id,
+        source_event_id=source_event_id, conn=conn,
     )
 
 
@@ -93,10 +98,11 @@ def enqueue_group_extraction(user_id, user_text, round_transcript, members,
 
 
 def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
-             source_event_id=None, assistant_event_id=None):
+             source_event_id=None, assistant_event_id=None, *, conn=None):
     source_event_id = (str(source_event_id).strip() if source_event_id else '') or None
     assistant_event_id = (str(assistant_event_id).strip() if assistant_event_id else '') or None
-    conn = get_conn()
+    owns_connection = conn is None
+    conn = get_conn() if owns_connection else conn
     cur = conn.cursor()
     job_id = None
     try:
@@ -111,7 +117,8 @@ def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
                 (kind, user_id, character_id, source_event_id))
             existing = cur.fetchone()
             if existing:
-                conn.commit()
+                if owns_connection:
+                    conn.commit()
                 job_id = existing[0]
             else:
                 cur.execute(
@@ -123,7 +130,8 @@ def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
                      source_event_id, assistant_event_id)
                 )
                 job_id = cur.fetchone()[0]
-                conn.commit()
+                if owns_connection:
+                    conn.commit()
         else:
             cur.execute(
                 '''INSERT INTO memory_jobs
@@ -134,8 +142,12 @@ def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
                  source_event_id, assistant_event_id)
             )
             job_id = cur.fetchone()[0]
-            conn.commit()
+            if owns_connection:
+                conn.commit()
     except Exception as e:
+        if not owns_connection:
+            cur.close()
+            raise
         conn.rollback()
         pgcode = getattr(e, 'pgcode', None)
         if source_event_id and pgcode == '23505':
@@ -154,7 +166,8 @@ def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
             conn.close()
             raise
     cur.close()
-    conn.close()
+    if owns_connection:
+        conn.close()
     _WAKE.set()
     print(f'[memory_jobs] queued #{job_id} kind={kind} user={user_id}')
     return job_id
@@ -241,7 +254,13 @@ def _run_job(row):
         source_ids = [
             item for item in (source_event_id, assistant_event_id) if item
         ]
-        if kind == 'rolling_summary':
+        if kind == 'canonical_turn':
+            from cognitive_events import ingest_canonical_turn
+            result = ingest_canonical_turn(
+                user_id=user_id, character_id=character_id,
+                source_event_id=source_event_id, allow_assistant=True)
+            ok = result['status'] in {'inserted', 'duplicate'}
+        elif kind == 'rolling_summary':
             from rolling_summary import process_summary_job
             ok = process_summary_job(
                 user_id, character_id, extra, source_event_id=source_event_id)
@@ -278,16 +297,18 @@ def _run_job(row):
             _set_status(job_id, 'done')
             print(f'[memory_jobs] done #{job_id}')
             return
-        err = 'extraction returned False'
+        err = 'extraction_returned_false'
     except Exception as e:
-        err = f'{type(e).__name__}: {e}'
-        print(f'[memory_jobs] #{job_id} 执行失败：{err}')
+        from structured_output import StructuredOutputError
+        err = (e.code if isinstance(e, StructuredOutputError)
+               and e.code in _SAFE_ERROR_CODES else 'job_exception')
 
     if attempts >= MAX_ATTEMPTS:
         _set_status(job_id, 'failed', err)
-        print(f'[memory_jobs] failed #{job_id} after {attempts} attempts')
+        print(f'[memory_jobs] failed #{job_id} kind={kind} after {attempts} attempts error={err}')
     else:
         _set_status(job_id, 'pending', err)
+        print(f'[memory_jobs] retry #{job_id} kind={kind} attempt={attempts} error={err}')
 
 
 def _loop():
