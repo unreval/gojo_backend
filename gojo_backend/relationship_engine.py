@@ -133,8 +133,6 @@ def process_turn(
     """
     if is_nonrelationship_generated_source(source_event_id):
         return _empty_turn_result(skipped='nonrelationship_generated_source')
-    ensure_state_row(user_id, character_id)
-
     rel_processor = None
     rel_processor_version = None
     processor_claimed = False
@@ -272,6 +270,9 @@ def process_turn(
                 skipped='source_validity_unknown',
             )
 
+    # The observer must pass parsing/schema validation before any ledger row
+    # is created. Processor retry bookkeeping above is not relationship state.
+    ensure_state_row(user_id, character_id)
     applied = []
     payload_signals = signals
     if source_event_id:

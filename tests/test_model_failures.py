@@ -415,13 +415,14 @@ class ObserverFailureTests(unittest.TestCase):
             'attributes': {},
         }
 
-    def test_balanced_json_parser_ignores_trailing_metadata_object(self):
+    def test_distinct_trailing_metadata_object_fails_closed(self):
         self.call.return_value = ('Result: {"signals":[]}\nmetadata: {"done":true}', {})
         result = self.observer.extract_signals('你好')
-        self.assertIsNone(result['error'])
-        self.assertEqual(self.call.call_count, 1)
+        self.assertEqual(result['error'], 'signals_envelope_ambiguous')
+        self.assertEqual(result['error_reason'], 'multiple_distinct_signals_envelopes')
+        self.assertEqual(self.call.call_count, 2)
 
-    def test_leading_metadata_does_not_hide_later_signals_envelope(self):
+    def test_distinct_leading_metadata_object_fails_closed(self):
         envelope = json.dumps({'signals': [self._signal()]}, ensure_ascii=False)
         metadata = json.dumps({
             'request_id': 'metadata-only',
@@ -432,9 +433,10 @@ class ObserverFailureTests(unittest.TestCase):
             {'stop_reason': 'end_turn'},
         )
         result = self.observer.extract_signals('你好')
-        self.assertIsNone(result['error'])
-        self.assertEqual(result['signals'], [self._signal()])
-        self.assertEqual(self.call.call_count, 1)
+        self.assertEqual(result['error'], 'signals_envelope_ambiguous')
+        self.assertEqual(result['error_reason'], 'multiple_distinct_signals_envelopes')
+        self.assertEqual(result['signals'], [])
+        self.assertEqual(self.call.call_count, 2)
 
     def test_object_nested_inside_array_cannot_masquerade_as_outer_envelope(self):
         self.call.return_value = (
@@ -569,9 +571,10 @@ class ObserverFailureTests(unittest.TestCase):
             for call in self.log.call_args_list
         )
         self.assertIn('candidate_count=1', logs)
-        self.assertIn('has_signals=False', logs)
-        self.assertIn('signals_type=missing', logs)
-        self.assertIn('error_reason=signals_missing', logs)
+        self.assertIn('distinct_candidate_count=1', logs)
+        self.assertIn('error=schema_validation_failed', logs)
+        self.assertIn('reason=signals_missing', logs)
+        self.assertIn('extraction_mode=raw', logs)
         self.assertIn('stop_reason=end_turn', logs)
         self.assertIn('response_id=safe-response-id', logs)
         self.assertNotIn(secret, logs)
@@ -587,7 +590,7 @@ class ObserverFailureTests(unittest.TestCase):
         with patch.dict(sys.modules, {'ai_client': stub('ai_client', create_chat=self.call),
                                      'db': stub('db', get_conn=Mock())}):
             engine = load_source('relationship_engine', {})
-        with patch.object(engine, 'ensure_state_row'), \
+        with patch.object(engine, 'ensure_state_row') as ensure_state, \
              patch.object(engine, 'extract_signals', return_value={
                  'signals': [], 'error': 'empty_response'}), \
              patch.object(engine, '_log_interaction_stats') as stats, \
@@ -596,6 +599,7 @@ class ObserverFailureTests(unittest.TestCase):
              patch('cognitive_events.ingest_v4_signals') as ingress:
             result = engine.process_turn('u', 'gojo', '你好')
         self.assertEqual(result['observer_error'], 'empty_response')
+        ensure_state.assert_not_called()
         stats.assert_not_called()
         route.assert_not_called()
         cleanup.assert_not_called()

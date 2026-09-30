@@ -2277,10 +2277,23 @@ class RelationshipWorkerIntegrationTests(unittest.TestCase):
         }
 
     def _valid_signal_output(self):
-        return (
-            '{"request_id":"safe-metadata"}\n'
-            + json.dumps({'signals': [self.SIGNAL]}, ensure_ascii=False)
-        )
+        return json.dumps({'signals': [self.SIGNAL]}, ensure_ascii=False)
+
+    def test_distinct_metadata_and_signal_objects_fail_before_ledger_writes(self):
+        source_event_id = 'integrated-ambiguous-output'
+        key = self._seed_effect(source_event_id)
+        raw = '{"request_id":"metadata"}\n' + self._valid_signal_output()
+        self.model_outputs = [raw, raw]
+        ok = self.worker.process_one_side_effect(
+            self.store.effects[key], ctx=self._ctx(source_event_id))
+        self.assertFalse(ok)
+        self.assertEqual(self.store.effects[key]['status'], 'failed')
+        self.assertEqual(self.processors[source_event_id], 'failed')
+        self.assertNotIn(source_event_id, self.applications)
+        self.assertEqual(self.ledger_applies, [])
+        self.assertEqual(self.stats_writes, [])
+        self.assertEqual(self.provenance_writes, [])
+        self.assertEqual(self.ingress_attempts, [])
 
     def test_observer_failure_retry_success_and_duplicate_delivery(self):
         source_event_id = 'integrated-observer-retry'
