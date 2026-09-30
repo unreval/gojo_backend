@@ -40,7 +40,8 @@ def delta(**overrides):
 class CriticalBondDeltaTests(unittest.TestCase):
     def extract(self, item, *, old=OLD, events=None, sources_active=True,
                 repair=None, question_state=None, merge_result=(False, 0),
-                cognitive_update=None, merge_targets=None):
+                cognitive_update=None, merge_targets=None, repair_raw=None,
+                pending_corrections=None, payload_extra=None):
         events = EVENTS if events is None else events
         candidate = {
             'content': NEW, 'replaces': merge_targets or [old],
@@ -49,9 +50,10 @@ class CriticalBondDeltaTests(unittest.TestCase):
         }
         payload = {'bond': dict(candidate), 'bond_merge': candidate,
                    'bond_delta': item, 'cognitive_update': cognitive_update}
+        payload.update(payload_extra or {})
         with ExitStack() as stack:
             for name, result in (
-                ('plan_memory_corrections', []), ('get_long_memory', []),
+                ('plan_memory_corrections', pending_corrections or []), ('get_long_memory', []),
                 ('get_bond_memories', [(10, old, None)]),
                 ('get_short_memory_for_prompt', []), ('_all_character_names', []),
                 ('get_relations_text', ''),
@@ -60,7 +62,9 @@ class CriticalBondDeltaTests(unittest.TestCase):
             stack.enter_context(patch('characters.get_character', return_value={'name': '五条'}))
             outputs = [payload, {'bond_delta': repair}]
             stack.enter_context(patch('ai_client.create_chat', side_effect=[
-                (json.dumps(value, ensure_ascii=False), None) for value in outputs]))
+                (repair_raw if index == 1 and repair_raw is not None
+                 else json.dumps(value, ensure_ascii=False), None)
+                for index, value in enumerate(outputs)]))
             for name, result in (
                 ('sources_are_active', sources_active), ('already_derived', False),
                 ('claim_processor', 'claimed'), ('get_active_events_by_ids', events),
@@ -154,11 +158,30 @@ class CriticalBondDeltaTests(unittest.TestCase):
         save.assert_not_called()
         resolve.assert_not_called()
 
-    def test_missing_delta_after_merge_reject_gets_bounded_schema_repair(self):
+    def test_missing_delta_is_extracted_before_writes_and_used_after_merge_reject(self):
         ok, _merge, save, _resolve, _lifecycle = self.extract(None, repair=delta())
         self.assertTrue(ok)
         self.assertEqual(save.call_args.args[3], DELTA.rstrip('。'))
         self.assertEqual(save.call_count, 1)
+
+    def test_delta_parse_or_schema_failure_precedes_every_domain_write(self):
+        for raw in ('not JSON', '{"bond_delta": []}',
+                    '{"bond_delta": null} {"bond_delta": {"novel": true}}'):
+            with self.subTest(raw=raw), \
+                    patch.object(user_memory, 'apply_memory_corrections') as correct, \
+                    patch.object(user_memory, 'save_long_memory') as fact, \
+                    patch.object(user_memory, '_apply_communication_convention') as convention, \
+                    patch.object(user_memory, '_record_character_self_claim_evidence') as claim:
+                ok, merge, save, resolve, lifecycle = self.extract(
+                    None, repair_raw=raw, pending_corrections=[(7, 'old fact')],
+                    payload_extra={'user_fact': {
+                        'content': '她叫我宝宝', 'category': '其他',
+                        'evidence_quote': '我还是叫你宝宝',
+                        'evidence_event_ids': ['u1'],
+                    }})
+                self.assertFalse(ok)
+                for writer in (correct, fact, convention, claim, merge, save, resolve, lifecycle):
+                    writer.assert_not_called()
 
     def test_successful_additive_merge_cannot_erase_independent_yes(self):
         ok, _merge, save, resolve, _lifecycle = self.extract(delta(), merge_result=(True, 1))

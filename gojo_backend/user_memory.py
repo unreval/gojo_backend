@@ -40,7 +40,12 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
-from utils import extract_json, is_emoji_only
+from structured_output import (
+    StructuredOutputError,
+    invoke_structured_llm,
+    parse_structured_output,
+)
+from utils import is_emoji_only
 from character_relations import get_relations_text
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -1366,6 +1371,78 @@ def get_companion_days(user_id):
 
 # ────────── 记忆自动纠错 ──────────
 
+_MEMORY_OBJECT_FIELDS = (
+    'user_fact', 'bond', 'told', 'character_self_claim', 'bond_merge',
+    'bond_resolution', 'bond_update', 'communication_convention',
+    'bond_delta', 'cognitive_update',
+)
+_MEMORY_TEXT_FIELDS = (
+    'content', 'category', 'evidence_quote', 'reason', 'kind', 'actor',
+    'question_key', 'question_text', 'value', 'type', 'action', 'slot',
+    'symbol', 'user_evidence_quote', 'symbol_event_id', 'symbol_evidence_quote',
+    'target',
+)
+
+
+def _validate_memory_item(item, field):
+    """Validate wire types only; evidence and meaning stay in the domain gates."""
+    if item is None:
+        return
+    if not isinstance(item, dict):
+        raise StructuredOutputError(field + '_not_object')
+    for key in _MEMORY_TEXT_FIELDS:
+        if key in item and item[key] is not None and not isinstance(item[key], str):
+            raise StructuredOutputError(field + '_' + key + '_not_string')
+    for key in ('evidence_event_ids', 'user_evidence_event_ids', 'replaces'):
+        if key in item and item[key] is not None:
+            if (not isinstance(item[key], list)
+                    or any(not isinstance(value, str) for value in item[key])):
+                raise StructuredOutputError(field + '_' + key + '_not_string_array')
+    if 'novel' in item and not isinstance(item['novel'], bool):
+        raise StructuredOutputError(field + '_novel_not_boolean')
+
+
+def _validate_memory_output(value):
+    if not any(key in value for key in _MEMORY_OBJECT_FIELDS):
+        raise StructuredOutputError('memory_fields_missing')
+    for field in _MEMORY_OBJECT_FIELDS:
+        _validate_memory_item(value.get(field), field)
+    return value
+
+
+def _validate_group_memory_output(value):
+    if not any(key in value for key in ('user_fact', 'told', 'char_bonds')):
+        raise StructuredOutputError('group_memory_fields_missing')
+    for field in ('user_fact', 'told'):
+        _validate_memory_item(value.get(field), field)
+    bonds = value.get('char_bonds')
+    if bonds is not None:
+        if not isinstance(bonds, list):
+            raise StructuredOutputError('char_bonds_not_array')
+        for item in bonds:
+            if item is None:
+                raise StructuredOutputError('char_bond_not_object')
+            _validate_memory_item(item, 'char_bond')
+    return value
+
+
+def _validate_correction_output(value):
+    if value.get('action') not in ('delete', 'none'):
+        raise StructuredOutputError('correction_action_invalid')
+    ids = value.get('ids')
+    if (not isinstance(ids, list)
+            or any(type(item) not in (int, str) for item in ids)):
+        raise StructuredOutputError('correction_ids_not_array')
+    return value
+
+
+def _validate_delta_output(value):
+    if 'bond_delta' not in value:
+        raise StructuredOutputError('bond_delta_missing')
+    _validate_memory_item(value['bond_delta'], 'bond_delta')
+    return value
+
+
 def plan_memory_corrections(user_id, user_text, character_id=DEFAULT_CHARACTER_ID):
     """只判断哪些旧记忆该删，不写库。返回 [(id, content), ...]。"""
     correction_keywords = [
@@ -1413,15 +1490,19 @@ def plan_memory_corrections(user_id, user_text, character_id=DEFAULT_CHARACTER_I
 【输出格式——严格 JSON，只输出一行】
 要删除：{{"action":"delete","ids":[1,2]}}
 不删除：{{"action":"none","ids":[]}}'''
-        raw, _usage = create_chat(
+        call = invoke_structured_llm(
+            domain='memory_correction_scan',
+            create_chat_fn=create_chat,
             model=MODEL_CN_AUX, max_tokens=1500,
             messages=[{'role': 'user', 'content': correction_prompt}],
+            schema_name='memory_correction_scan',
+            schema_validator=_validate_correction_output,
         )
-        raw = raw.strip()
-        print(f'[{user_id}] 纠错扫描 ({MODEL_CN_AUX}): {raw[:120]}')
-
-        parsed = extract_json(raw)
-        if not parsed or parsed.get('action') != 'delete' or not parsed.get('ids'):
+        if not call.parsed.ok:
+            raise StructuredOutputError(
+                'memory_correction_' + call.parsed.error_code, result=call.parsed)
+        parsed = call.parsed.value
+        if parsed.get('action') != 'delete' or not parsed.get('ids'):
             return []
 
         planned = []
@@ -1434,6 +1515,10 @@ def plan_memory_corrections(user_id, user_text, character_id=DEFAULT_CHARACTER_I
                 planned.append((mid_int, by_id[mid_int]))
         return planned
 
+    except StructuredOutputError:
+        # A failed scan is not an affirmative decision to keep all old facts.
+        # Abort the enclosing extraction before any domain writes.
+        raise
     except Exception as e:
         print(f'[{user_id}] 纠错扫描失败：{e}')
         return []
@@ -2973,49 +3058,97 @@ actor=user，仅引用当前 canonical user event；不得把用户答案写成�
             {'event_id': event['event_id'], 'role': event['role']}
             for event in canonical_turn_events], ensure_ascii=False)
         prompt_content += '\n【现有问题及结果（只供匹配/查重）】\n' + json.dumps(question_state, ensure_ascii=False, default=str)
+        model_call = None
         if parsed_override is None:
-            raw, _usage = create_chat(
+            model_call = invoke_structured_llm(
+                domain='memory_extractor',
+                create_chat_fn=create_chat,
                 model=MODEL_CN_AUX, max_tokens=2000,
                 messages=[{'role': 'user', 'content': prompt_content}],
+                schema_name='memory_extractor',
+                schema_validator=_validate_memory_output,
             )
-            raw = raw.strip()
-            print(f'[{user_id}][{character_id}] 提取器({MODEL_CN_AUX}) 完整输出: {raw}')
-
-            parsed = extract_json(raw)
-
-            # ★ 解析失败重试一次:一次抽风就丢掉整轮记忆太亏。
-            #   重试时加一句硬约束,压掉推理模型的思考冲动。
-            if not parsed:
-                print(f'[{user_id}] ⚠️ 首次解析失败,重试一次...')
-                try:
-                    raw2, _u2 = create_chat(
-                        model=MODEL_CN_AUX, max_tokens=2000,
-                        messages=[{
-                            'role': 'user',
-                            'content': prompt_content +
-                            '\n\n【⚠️ 重要】不要输出任何思考过程、解释、markdown 代码块标记。'
-                            '直接输出那一行 JSON,第一个字符必须是 {,最后一个字符必须是 }。'
-                        }],
-                    )
-                    raw2 = raw2.strip()
-                    print(f'[{user_id}] 重试输出: {raw2}')
-                    parsed = extract_json(raw2)
-                except Exception as _re:
-                    print(f'[{user_id}] 重试也失败:{_re}')
-
+            parsed_result = model_call.parsed
         else:
+            # Apply mode reuses the candidate emitted by a preceding dry-run.
+            # Canonical sources and the deterministic gate still run below.
             raw = json.dumps(parsed_override, ensure_ascii=False)
-            parsed = extract_json(raw)
+            parsed_result = parse_structured_output(
+                raw, schema_name='memory_extractor',
+                schema_validator=_validate_memory_output)
 
-        if not parsed:
-            print(f'[{user_id}] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢（纠错删除已取消，旧记忆保留）: {raw[:200]}')
-            _finish_extract('failed', 'unparsed')
+        # Retry is a fresh extraction from the original evidence, never an
+        # attempt to repair or feed back malformed JSON.
+        if not parsed_result.ok and parsed_override is None:
+            print(f'[{user_id}] ⚠️ structured memory output failed; retrying fresh extraction')
+            try:
+                retry_call = invoke_structured_llm(
+                    domain='memory_extractor',
+                    create_chat_fn=create_chat,
+                    model=MODEL_CN_AUX, max_tokens=2000,
+                    messages=[{
+                        'role': 'user',
+                        'content': prompt_content +
+                        '\n\n【格式要求】请基于上面完整证据重新独立输出一个完整 JSON 对象。'
+                        '不要解释，不要引用或修补上一次的文本。'
+                    }],
+                    schema_name='memory_extractor',
+                    schema_validator=_validate_memory_output,
+                    attempt=2,
+                )
+                model_call = retry_call
+                parsed_result = retry_call.parsed
+            except Exception as _re:
+                print(f'[{user_id}] 重试也失败:{_re}')
+
+        if not parsed_result.ok:
+            print(f'[{user_id}] ❌ structured memory output rejected; old memory retained')
+            _finish_extract(
+                'failed',
+                'structured_output_' + (parsed_result.error_code or 'failed'),
+            )
             return False
+        parsed = parsed_result.value
 
         if isinstance(backfill_result, dict):
             backfill_result['candidate'] = (
                 parsed.get('communication_convention')
                 if isinstance(parsed, dict) else None)
+
+        delta_item = parsed.get('bond_delta')
+        for question in question_state:
+            recovery = ((question.get('metadata') or {}).get('resolution') or {}).get('bond_delta')
+            if (isinstance(recovery, dict)
+                    and primary_event_id in (recovery.get('evidence_event_ids') or [])):
+                delta_item = recovery
+                break
+
+        bm = parsed.get('bond_merge')
+        merge_content = _clean_content(bm.get('content')) if isinstance(bm, dict) else ''
+        merge_replaces = bm.get('replaces') if isinstance(bm, dict) else []
+        merge_attempted = bool(merge_content and isinstance(merge_replaces, list))
+        staged_delta = None
+        if (not convention_only and delta_item is None and merge_attempted
+                and len(canonical_turn_events) > 1):
+            # Stage the bounded semantic extraction before *any* writes. Its
+            # result is used only if the merge later fails its existing gate.
+            # No malformed output is fed back for JSON repair.
+            delta_call = invoke_structured_llm(
+                domain='memory_delta_extraction',
+                create_chat_fn=create_chat,
+                model=MODEL_CN_AUX, max_tokens=800,
+                messages=[{'role': 'user', 'content': prompt_content
+                           + '\n请独立补提 bond_delta（没有新状态则 null），供合并覆盖检查拒绝时使用。'
+                             '不要重写 bond，不要决定答案，只记录上述原始事件已明确的新增变化。'
+                             '返回 {"bond_delta":对象或null}。'}],
+                schema_name='memory_delta_extraction',
+                schema_validator=_validate_delta_output,
+            )
+            if not delta_call.parsed.ok:
+                raise StructuredOutputError(
+                    'memory_delta_' + delta_call.parsed.error_code,
+                    result=delta_call.parsed)
+            staged_delta = delta_call.parsed.value['bond_delta']
 
         if required_source_ids:
             try:
@@ -3132,25 +3265,10 @@ actor=user，仅引用当前 canonical user event；不得把用户答案写成�
                 except Exception as _e:
                     print(f'[{user_id}] ❌ 结束旧 bond 出错(不影响其他记忆):{_e}')
 
-        delta_item = parsed.get('bond_delta')
-        for question in question_state:
-            recovery = ((question.get('metadata') or {}).get('resolution') or {}).get('bond_delta')
-            if (isinstance(recovery, dict)
-                    and primary_event_id in (recovery.get('evidence_event_ids') or [])):
-                delta_item = recovery
-                break
-
         # ★ B0. 记忆合并:只允许"旧事件仍成立、补更多细节"。先处理,把碎片收成一条。
-        bm = parsed.get('bond_merge')
-        merge_attempted = False
         merge_ok = False
-        merge_content = ''
-        merge_replaces = []
         if isinstance(bm, dict):
-            merge_content = _clean_content(bm.get('content'))
-            merge_replaces = bm.get('replaces')
             if merge_content and isinstance(merge_replaces, list):
-                merge_attempted = True
                 merge_evidence = _valid_durable_bond(
                     user_id, merge_content, char_name, bm,
                     canonical_user_events, primary_event_id,
@@ -3188,18 +3306,7 @@ actor=user，仅引用当前 canonical user event；不得把用户答案写成�
         # then retire its unresolved reading using the existing lifecycle.
         if (delta_item is None and merge_attempted and not merge_ok
                 and len(canonical_turn_events) > 1):
-            # One bounded repair by the SAME extractor, not a second decision
-            # engine: isolate facts already stated in the supplied raw turn.
-            repaired, _repair_usage = create_chat(
-                model=MODEL_CN_AUX, max_tokens=800,
-                messages=[{'role': 'user', 'content': prompt_content
-                           + '\n合并覆盖检查已拒绝。只补提 bond_delta（没有新状态则 null）。'
-                             '不要重写 bond，不要决定答案，只记录上述原始事件已明确的新增变化。'
-                             '返回 {"bond_delta":对象或null}。'}])
-            repair = extract_json(str(repaired or '').strip())
-            if not isinstance(repair, dict) or 'bond_delta' not in repair:
-                raise ValueError('rejected_merge_delta_repair_invalid')
-            delta_item = repair.get('bond_delta')
+            delta_item = staged_delta
         resolved_texts.extend(_apply_extracted_bond_delta(
             user_id, character_id, delta_item, canonical_turn_events,
             primary_event_id, existing_bond, merge_ok=merge_ok,
@@ -3325,15 +3432,6 @@ def extract_and_save_group_memory(user_id, user_text, round_transcript, members)
     members: [{'id','name'}, ...] 群里全部角色。
     """
     try:
-        try:
-            from memory_lifecycle import reactivate_lifecycle_memories
-            reactivated = reactivate_lifecycle_memories(
-                user_id, SHARED_CHARACTER_ID, user_text)
-            if reactivated:
-                print(f'[{user_id}][group] 🔁 重新激活 {reactivated} 条生命周期记忆')
-        except Exception as _e:
-            print(f'[{user_id}][group] 生命周期记忆激活跳过:{_e}')
-
         pending_corrections = plan_memory_corrections(user_id, user_text, SHARED_CHARACTER_ID)
         correction_hint = ''
         if pending_corrections:
@@ -3403,17 +3501,27 @@ C. char_bonds：这一轮里发生的、值得【某个角色】记进自己回�
 【输出格式——严格 JSON，只输出一行】
 {{"user_fact":{{"content":"她XXX","category":"喜好"}},"told":{{"target":"角色名","content":"她说过XXX"}},"char_bonds":[{{"target":"角色名","content":"我XXX"}}]}}
 没有的类填 null（char_bonds 没有就填 []）。category 只能选：喜好/厌恶/身份/状态/健康/经历/关系/其他'''
-        raw, _usage = create_chat(
+        call = invoke_structured_llm(
+            domain='group_memory_extractor',
+            create_chat_fn=create_chat,
             model=MODEL_CN_AUX, max_tokens=2000,
             messages=[{'role': 'user', 'content': group_prompt}],
+            schema_name='group_memory_extractor',
+            schema_validator=_validate_group_memory_output,
         )
-        raw = raw.strip()
-        print(f'[{user_id}][group] {MODEL_CN_AUX}: {raw[:150]}')
-
-        parsed = extract_json(raw)
-        if not parsed:
-            print(f'[{user_id}][group] ❌ 提取器输出无法解析成 JSON,本轮记忆全丢（纠错删除已取消）: {raw[:200]}')
+        if not call.parsed.ok:
+            print(f'[{user_id}][group] ❌ structured memory output rejected')
             return False
+        parsed = call.parsed.value
+
+        try:
+            from memory_lifecycle import reactivate_lifecycle_memories
+            reactivated = reactivate_lifecycle_memories(
+                user_id, SHARED_CHARACTER_ID, user_text)
+            if reactivated:
+                print(f'[{user_id}][group] 🔁 重新激活 {reactivated} 条生命周期记忆')
+        except Exception as _e:
+            print(f'[{user_id}][group] 生命周期记忆激活跳过:{_e}')
 
         if pending_corrections:
             apply_memory_corrections(

@@ -36,7 +36,8 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
                 canonical_events=None, canonical_context_events=None,
                 source_event_ids=None, merge_result=None, source_active=True,
                 canonical_error=None, convention_context_events=None,
-                existing_bonds=None, resolve_result=None,
+                existing_bonds=None, resolve_result=None, raw_output=None,
+                correction_error=None,
                 **extract_kwargs):
         captured = {'prompt': ''}
         chat_calls = []
@@ -48,7 +49,11 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
         def fake_chat(*_args, **kwargs):
             chat_calls.append(kwargs)
             captured['prompt'] = kwargs['messages'][0]['content']
-            return json.dumps(payload, ensure_ascii=False), None
+            return (
+                raw_output if raw_output is not None
+                else json.dumps(payload, ensure_ascii=False),
+                None,
+            )
 
         def save_bond(*args, **kwargs):
             bonds.append((args, kwargs))
@@ -64,7 +69,8 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(
-                user_memory, 'plan_memory_corrections', return_value=[]))
+                user_memory, 'plan_memory_corrections', return_value=[],
+                side_effect=correction_error))
             stack.enter_context(patch.object(
                 user_memory, 'get_long_memory', return_value=[]))
             stack.enter_context(patch.object(
@@ -208,6 +214,37 @@ class PrivateMemoryFactGateTests(unittest.TestCase):
         )
         self.assertTrue(result['ok'])
         self.assertEqual(result['bonds'], [])
+
+    def test_ambiguous_distinct_memory_objects_fail_before_any_write(self):
+        first = empty_payload()
+        second = empty_payload(user_fact={
+            'content': '她喜欢寿司',
+            'category': '喜好',
+            'evidence_quote': '喜欢寿司',
+            'evidence_event_ids': ['evt-ambiguous-output'],
+        })
+        result = self.extract(
+            first,
+            '我喜欢寿司。', '知道了。',
+            source_event_id='evt-ambiguous-output',
+            canonical_events=[{
+                'event_id': 'evt-ambiguous-output',
+                'role': 'user',
+                'content': '我喜欢寿司。',
+            }],
+            raw_output=(
+                json.dumps(first, ensure_ascii=False)
+                + '\n'
+                + json.dumps(second, ensure_ascii=False)
+            ),
+        )
+
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['facts'], [])
+        self.assertEqual(result['bonds'], [])
+        self.assertEqual(result['claims'], [])
+        self.assertEqual(len(result['chat_calls']), 2)
+        self.assertEqual(result['finish_calls'][-1].args[3], 'failed')
 
     def test_confirmed_nearby_emoji_reply_becomes_semantic_convention(self):
         result = self.extract(
