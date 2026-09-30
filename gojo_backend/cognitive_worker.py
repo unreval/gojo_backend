@@ -32,6 +32,11 @@ from cognitive_queue import (
 from cognitive_scheduler import enqueue_due_reflections
 from cognitive_predictions import PREDICTION_STANCE_TYPES
 from structured_output import invoke_structured_llm
+from cognitive_request_budget import (
+    MAX_MODEL_ATTEMPTS, MAX_OUTPUT_TOKENS, OUTPUT_INSTRUCTION,
+    check_request_budget, compact_json, project_request_context,
+    retry_output_budget, validate_output_budget,
+)
 
 
 _THREAD = None
@@ -389,7 +394,7 @@ def _utc_now():
 
 
 def _serialize_context(context):
-    return json.dumps(context, ensure_ascii=False, indent=2, default=str)
+    return compact_json(context)
 
 
 def _event_ids(context):
@@ -547,9 +552,14 @@ def generate_cycle_output(context, *, create_chat_fn=None):
     if create_chat_fn is None:
         # Keep maintenance and test imports independent from production model
         # client dependencies until a cycle actually needs the model.
-        from ai_client import create_chat as call_model
+        from ai_client import create_chat
+
+        def call_model(**kwargs):
+            # SDK retries must not multiply this worker's explicit retry budget.
+            return create_chat(**kwargs, max_retries=0)
     else:
         call_model = create_chat_fn
+    context = project_request_context(context)
     allowed_event_ids = _event_ids(context)
     current_event_ids = {
         int(event.get('event_id'))
@@ -562,26 +572,34 @@ def generate_cycle_output(context, *, create_chat_fn=None):
         'role': 'user',
         'content': 'Consolidate this cognitive cycle:\n' + _serialize_context(context),
     }]
-    system_prompt = _build_system_prompt()
+    system_prompt = _build_system_prompt() + OUTPUT_INSTRUCTION
     last_error = None
-    for attempt in range(COGNITIVE_WORKER_MODEL_ATTEMPTS):
+    output_tokens = min(COGNITIVE_WORKER_MAX_TOKENS, MAX_OUTPUT_TOKENS)
+    attempts = min(COGNITIVE_WORKER_MODEL_ATTEMPTS, MAX_MODEL_ATTEMPTS)
+    for attempt in range(attempts):
         diagnostics = []
 
         def _validate_output(value):
-            return validate_slow_loop_output(
+            output = validate_slow_loop_output(
                 value,
                 allowed_event_ids=allowed_event_ids,
                 current_event_ids=current_event_ids,
                 diagnostics=diagnostics,
             )
+            return validate_output_budget(output)
 
+        # Check the entire request again on retry, including retry instructions.
+        request_bytes = check_request_budget(system_prompt, messages)
+        print('[cognitive_budget] '
+              f'cycle={context.get("cycle_id", "-")} attempt={attempt + 1} '
+              f'request_bytes={request_bytes} max_tokens={output_tokens}', flush=True)
         call = invoke_structured_llm(
             domain='slow_loop',
             create_chat_fn=call_model,
             model=COGNITIVE_WORKER_MODEL,
             messages=messages,
             system=system_prompt,
-            max_tokens=COGNITIVE_WORKER_MAX_TOKENS,
+            max_tokens=output_tokens,
             schema_validator=_validate_output,
             schema_name='slow_loop_output',
             attempt=attempt + 1,
@@ -596,8 +614,13 @@ def generate_cycle_output(context, *, create_chat_fn=None):
             _log_ttl_diagnostic(
                 context, attempt + 1, getattr(exc, 'details', None),
             )
-            if attempt + 1 >= COGNITIVE_WORKER_MODEL_ATTEMPTS:
+            if attempt + 1 >= attempts:
                 break
+            if call.parsed.error_code == 'truncated_response':
+                larger_budget = retry_output_budget(output_tokens)
+                if larger_budget <= output_tokens:
+                    break
+                output_tokens = larger_budget
             messages.extend([
                 {
                     'role': 'user',

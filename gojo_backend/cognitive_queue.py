@@ -138,10 +138,9 @@ def _recover_expired_claims(cur, user_id, character_id, now):
         )
     for trigger_id, _cycle_id, attempt_count, last_error in expired:
         preserve_raw_evidence = str(last_error or '').startswith('slow_loop_')
-        next_attempt_count = (
-            max(0, attempt_count - 1) if preserve_raw_evidence else attempt_count
-        )
-        status = 'pending' if preserve_raw_evidence else retry_status(attempt_count)
+        # Retaining source evidence must never refund a claimed attempt.
+        next_attempt_count = attempt_count
+        status = retry_status(attempt_count)
         cur.execute(
             '''UPDATE cognitive_event_triggers
                SET status = %s, attempt_count = %s,
@@ -225,15 +224,15 @@ def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
         cur.execute(
             '''SELECT COUNT(*) FROM cognitive_cycles
                WHERE user_id = %s AND character_id = %s
-                 AND status = 'succeeded' AND completed_at >= %s
+                 AND status IN ('succeeded', 'failed') AND completed_at >= %s
                  AND completed_at < %s''',
             (
                 user_id, character_id, day_start,
                 day_start + timedelta(days=1),
             ),
         )
-        successful_today = int(cur.fetchone()[0])
-        if successful_today >= COGNITIVE_DAILY_CYCLE_LIMIT:
+        completed_today = int(cur.fetchone()[0])
+        if completed_today >= COGNITIVE_DAILY_CYCLE_LIMIT:
             suppressed = _suppress_daily_limited_triggers(cur, user_id, character_id, current_time)
             database.commit()
             return {
@@ -245,13 +244,13 @@ def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
         cur.execute(
             '''SELECT completed_at FROM cognitive_cycles
                WHERE user_id = %s AND character_id = %s
-                 AND status = 'succeeded'
+                 AND status IN ('succeeded', 'failed')
                ORDER BY completed_at DESC NULLS LAST LIMIT 1''',
             (user_id, character_id),
         )
-        latest_success = cur.fetchone()
-        if latest_success and latest_success[0] is not None:
-            cooldown_until = latest_success[0] + timedelta(
+        latest_completion = cur.fetchone()
+        if latest_completion and latest_completion[0] is not None:
+            cooldown_until = latest_completion[0] + timedelta(
                 seconds=COGNITIVE_COOLDOWN_SECONDS,
             )
             if cooldown_until > current_time:
@@ -609,7 +608,7 @@ def commit_cycle_success(
         cur.execute(
             '''SELECT COUNT(*) FROM cognitive_cycles
                WHERE user_id = %s AND character_id = %s
-                 AND status = 'succeeded' AND completed_at >= %s
+                 AND status IN ('succeeded', 'failed') AND completed_at >= %s
                  AND completed_at < %s''',
             (
                 user_id, character_id, day_start,
@@ -678,16 +677,10 @@ def fail_cycle(cycle_id, error_code, *, preserve_raw_evidence=False,
         )
         released = []
         for trigger_id, attempt_count in cur.fetchall():
-            # A failed worker transaction has produced no cognitive writes.
-            # Keep its input eligible without charging a completed attempt.
-            next_status = (
-                'pending' if preserve_raw_evidence
-                else retry_status(attempt_count)
-            )
-            next_attempt_count = (
-                max(0, attempt_count - 1)
-                if preserve_raw_evidence else attempt_count
-            )
+            # Evidence retention and retry accounting are independent. Both
+            # pending and dead_letter retain their canonical source records.
+            next_status = retry_status(attempt_count)
+            next_attempt_count = attempt_count
             cur.execute(
                 '''UPDATE cognitive_event_triggers
                    SET status = %s, attempt_count = %s, claimed_by_cycle_id = NULL,

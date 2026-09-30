@@ -601,7 +601,7 @@ class QueueLifecycleTests(unittest.TestCase):
         self.assertIn('output_state_version = NULL', sql)
         self.assertNotIn("status = 'consumed'", sql)
 
-    def test_structured_output_failure_keeps_raw_evidence_pending_after_retry_budget(self):
+    def test_structured_output_failure_keeps_evidence_but_exhausts_retry_budget(self):
         cursor = CycleCursor(success=False)
         connection = TransactionConnection(cursor)
         result = cognitive_queue.fail_cycle(
@@ -611,7 +611,7 @@ class QueueLifecycleTests(unittest.TestCase):
         self.assertTrue(result['raw_evidence_preserved'])
         self.assertEqual(
             [item['status'] for item in result['triggers']],
-            ['pending', 'pending'],
+            ['pending', 'dead_letter'],
         )
         sql = '\n'.join(item[0] for item in cursor.executed)
         self.assertNotIn("status = 'consumed'", sql)
@@ -619,7 +619,7 @@ class QueueLifecycleTests(unittest.TestCase):
                    if sql.startswith('UPDATE cognitive_event_triggers')]
         self.assertEqual(
             [params[1] for params in updates],
-            [0, cognitive_config.COGNITIVE_MAX_RETRY - 1],
+            [1, cognitive_config.COGNITIVE_MAX_RETRY],
         )
 
     def test_success_rejects_an_expired_or_missing_claim(self):
@@ -641,7 +641,7 @@ class QueueLifecycleTests(unittest.TestCase):
                    if sql.startswith('UPDATE cognitive_event_triggers')]
         self.assertEqual([params[0] for params in updates], ['pending', 'dead_letter'])
 
-    def test_retry_evidence_survives_later_lease_expiry_without_retry_charge(self):
+    def test_retry_evidence_survives_lease_expiry_without_refunding_attempts(self):
         error = 'slow_loop_slowloopoutputerror:model_output_invalid_json'
         cursor = RecoverCursor(last_error=error)
         connection = TransactionConnection(cursor)
@@ -650,10 +650,10 @@ class QueueLifecycleTests(unittest.TestCase):
         )
         updates = [params for sql, params in cursor.executed
                    if sql.startswith('UPDATE cognitive_event_triggers')]
-        self.assertEqual([params[0] for params in updates], ['pending', 'pending'])
+        self.assertEqual([params[0] for params in updates], ['pending', 'dead_letter'])
         self.assertEqual(
             [params[1] for params in updates],
-            [0, cognitive_config.COGNITIVE_MAX_RETRY - 1],
+            [1, cognitive_config.COGNITIVE_MAX_RETRY],
         )
         self.assertTrue(all(params[2] == error for params in updates))
 

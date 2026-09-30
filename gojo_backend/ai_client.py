@@ -58,7 +58,7 @@ def extract_text(response, sep=''):
     return sep.join(parts)
 
 
-def create_chat(model, messages, system=None, max_tokens=1000, temperature=None):
+def create_chat(model, messages, system=None, max_tokens=1000, temperature=None, *, max_retries=None):
     """统一接口,自动按 model 前缀分发到 Anthropic 或 DeepSeek。
 
     Args:
@@ -67,6 +67,7 @@ def create_chat(model, messages, system=None, max_tokens=1000, temperature=None)
         system: str 或 None(简化版,不支持 blocks + cache_control)
         max_tokens: 输出上限
         temperature: None = provider 默认
+        max_retries: 可选 SDK 重试上限；Slow Loop 使用 0，其他调用保持默认。
 
     Returns:
         (raw_text: str, usage_info: dict {input_tokens, output_tokens})
@@ -75,7 +76,10 @@ def create_chat(model, messages, system=None, max_tokens=1000, temperature=None)
         RuntimeError: provider 报错时抛出
     """
     if model.startswith('claude-') or model.startswith('anthropic-'):
-        return _call_anthropic(model, messages, system, max_tokens, temperature)
+        if max_retries is None:
+            return _call_anthropic(model, messages, system, max_tokens, temperature)
+        return _call_anthropic(
+            model, messages, system, max_tokens, temperature, max_retries=max_retries)
     elif model.startswith('deepseek-'):
         return _call_deepseek(model, messages, system, max_tokens, temperature)
     else:
@@ -97,8 +101,10 @@ def response_metadata(response):
     }
 
 
-def _call_anthropic(model, messages, system, max_tokens, temperature):
+def _call_anthropic(model, messages, system, max_tokens, temperature, *, max_retries=None):
     client = _get_anthropic()
+    if max_retries is not None:
+        client = client.with_options(max_retries=max_retries)
     kwargs = {
         'model': model,
         'max_tokens': max_tokens,
