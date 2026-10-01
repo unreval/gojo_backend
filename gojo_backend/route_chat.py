@@ -40,6 +40,7 @@ from utils import (
     normalize_plaintext_reply,
 )
 from ai_client import extract_text
+from context_budget import estimate_tokens
 from tts import tts_to_b64, transcribe_audio_b64
 from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
@@ -158,6 +159,9 @@ def _trace_system_blocks(system_blocks):
                 'index': index,
                 'type': _trace_enum(block.get('type'), _TRACE_BLOCK_TYPES) or 'unknown',
                 'chars': _trace_chars(block.get('text')),
+                'local_token_estimate': estimate_tokens(block.get('text'))
+                if isinstance(block.get('text'), str) else 0,
+                'fingerprint': _trace_ref(block.get('text')),
                 'cache_control': bool(block.get('cache_control')),
             })
         else:
@@ -165,6 +169,8 @@ def _trace_system_blocks(system_blocks):
                 'index': index,
                 'type': 'unknown',
                 'chars': _trace_chars(block),
+                'local_token_estimate': estimate_tokens(block) if isinstance(block, str) else 0,
+                'fingerprint': _trace_ref(block),
                 'cache_control': False,
             })
     return blocks
@@ -183,6 +189,7 @@ def _trace_messages(messages):
             'index': index,
             'role': role,
             'chars': _trace_chars(content),
+            'local_token_estimate': estimate_tokens(content) if isinstance(content, str) else 0,
         })
     return rows
 

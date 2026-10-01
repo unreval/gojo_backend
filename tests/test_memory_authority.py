@@ -62,7 +62,8 @@ class MemoryAuthorityTests(unittest.TestCase):
         with patch.object(prompt, 'get_character', return_value={'core_prompt': '角色'}), \
              patch.object(prompt, 'get_first_interaction_days', return_value=1), \
              patch.object(prompt, 'load_canon_lock', return_value=''):
-            return prompt._build_prompt_parts('u', 'c', user_message='咖啡', context_pack=pack)[1]
+            # Query-selected memory now belongs to the uncached dynamic block.
+            return prompt._build_prompt_parts('u', 'c', user_message='咖啡', context_pack=pack)[-1]
 
     def current_result(self):
         return {'facts': [dict(id=mid,content=text,timestamp=ts,category=cat,authority=AUTHORITY)

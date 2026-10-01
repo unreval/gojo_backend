@@ -371,6 +371,18 @@ context 里写清楚为什么触发,让【触发那一刻的你】知道要说�
 
 ★ 记账、提醒、取消、承诺可以并存，该有的字段都给。绝不能因为加了 pending_transaction 就漏 reminder。'''
 
+
+_REPLY_SCOPE_RULES = '''【★ 这一条回复的分寸——最后再确认一遍】
+1. 长度跟着【她这句话的分量】走，不要一律短促：
+   · 她随口一句、开玩笑、简单确认 → 短短接住就好（1 条气泡，10~25 字），这时候话多反而假。
+   · 她说了要紧的事，或情绪明显起伏（撒娇、赌气、示弱、告白、难过、认真发问）
+     → 【这正是该多说两句的时刻】：把你的反应说完整，1~3 条气泡、总共 30~80 字。
+       先接住她的情绪，再说你想说的。用一句话打发过去，会显得你不在意。
+   · 你自己聊到在意的人或喜欢的东西 → 自然地多说几句，别端着。
+2. 情绪浓的时候，你的反应也该有温度：可以调侃，但调侃之后要有下文，别只丢一句就没了。
+3. 严格按最上方规定的单行 JSON 输出，不要有任何多余文字。'''
+
+
 def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
                         user_message='', extra_suffix='', temporal_snapshot=None,
                         context_pack=None):
@@ -613,31 +625,22 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     emotion_list = ', '.join(EMOTIONS)
 
     # ════════════════════════════════════════════════════════
-    #  ★ 分段返回：静态头 / 半静态记忆 / 动态尾
-    #    静态头和记忆段打 cache_control 断点 → 命中缓存只按 1/10 计费
+    #  Cache only character/spec text and fixed reply rules. Recall is selected
+    #  for this query even when the underlying memory store has not changed.
     # ════════════════════════════════════════════════════════
     static_head = f"""{core_prompt}
 {canon_lock}
 
 """ + OUTPUT_SPEC.format(emotion_list=emotion_list)
 
-    semi_static = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
+    query_recall = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 
-    dynamic_tail = f"""{pinned_block}{summary_block}{episode_block}{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
+    dynamic_tail = f"""{query_recall}
+{pinned_block}{summary_block}{episode_block}{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
 
-{time_ctx}
+{time_ctx}{extra_suffix}"""
 
-【★ 这一条回复的分寸——最后再确认一遍】
-1. 长度跟着【她这句话的分量】走，不要一律短促：
-   · 她随口一句、开玩笑、简单确认 → 短短接住就好（1 条气泡，10~25 字），这时候话多反而假。
-   · 她说了要紧的事，或情绪明显起伏（撒娇、赌气、示弱、告白、难过、认真发问）
-     → 【这正是该多说两句的时刻】：把你的反应说完整，1~3 条气泡、总共 30~80 字。
-       先接住她的情绪，再说你想说的。用一句话打发过去，会显得你不在意。
-   · 你自己聊到在意的人或喜欢的东西 → 自然地多说几句，别端着。
-2. 情绪浓的时候，你的反应也该有温度：可以调侃，但调侃之后要有下文，别只丢一句就没了。
-3. 严格按最上方规定的单行 JSON 输出，不要有任何多余文字。{extra_suffix}"""
-
-    return static_head, semi_static, dynamic_tail
+    return static_head, _REPLY_SCOPE_RULES, dynamic_tail
 
 
 def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID,
@@ -646,19 +649,19 @@ def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID,
     """★ 返回 Anthropic system 数组（带缓存断点）。
 
     结构：
-      [0] 静态头（人设+铁律+输出规范）—— 永远不变，打缓存断点
-      [1] 记忆段（事实+羁绊+告知）—— 只在提取到新记忆时变，打缓存断点
-      [2] 动态尾（相处史/时间/召回/防重复/场景）—— 每次都变，不缓存
+      [0] 静态头（人设+铁律+输出规范）—— 仅角色定义/规范变化，打缓存断点
+      [1] 固定回复规则（代码常量）—— 仅规范变化，打缓存断点
+      [2] 动态尾（当前召回/相处史/时间/防重复/场景）—— 不缓存
 
     调用方式：client.messages.create(system=build_system_blocks(...), ...)
     """
-    static_head, semi_static, dynamic_tail = _build_prompt_parts(
+    static_head, fixed_rules, dynamic_tail = _build_prompt_parts(
         user_id, character_id, user_message, extra_suffix, temporal_snapshot,
         context_pack=context_pack,
     )
     return [
         {'type': 'text', 'text': static_head, 'cache_control': {'type': 'ephemeral'}},
-        {'type': 'text', 'text': semi_static, 'cache_control': {'type': 'ephemeral'}},
+        {'type': 'text', 'text': fixed_rules, 'cache_control': {'type': 'ephemeral'}},
         {'type': 'text', 'text': dynamic_tail},
     ]
 
@@ -674,18 +677,22 @@ def build_system_prompt(user_id, character_id=DEFAULT_CHARACTER_ID,
 
 
 def log_cache_usage(tag, resp):
-    """★ 打印缓存命中情况：部署后看日志就知道省了多少。"""
+    """Cache ratios and the project's 0.9 * cache-read estimate, not a price quote."""
     try:
         u = resp.usage
         created = getattr(u, 'cache_creation_input_tokens', 0) or 0
         read = getattr(u, 'cache_read_input_tokens', 0) or 0
         plain = getattr(u, 'input_tokens', 0) or 0
+        total = plain + created + read
+        saved = int(read * 0.9)
+        ratios = (f'cache_read_ratio={read / total if total else 0:.4f} '
+                  f'uncached_ratio={plain / total if total else 0:.4f} '
+                  f'effective_input_estimate={total - saved} '
+                  'savings_estimate=0.9*cache_read')
         if read or created:
-            total = plain + created + read
-            saved = int(read * 0.9)
             print(f'[cache][{tag}] 命中={read} 新建={created} 未缓存={plain} '
-                  f'总输入={total} 约省={saved} tokens')
+                  f'总输入={total} 约省={saved} tokens {ratios}')
         else:
-            print(f'[cache][{tag}] ⚠️ 未命中缓存（输入 {plain} tokens）')
+            print(f'[cache][{tag}] ⚠️ 未命中缓存（输入 {plain} tokens） {ratios}')
     except Exception:
         pass

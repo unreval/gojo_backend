@@ -18,6 +18,7 @@ _SAFE_ERROR_CODES = {
     'empty_response', 'no_top_level_json_object', 'invalid_json',
     'incomplete_json', 'multiple_distinct_json_objects',
     'schema_validation_failed', 'empty_summary',
+    'truncated_response', 'model_refused',
 }
 
 
@@ -263,7 +264,8 @@ def _run_job(row):
         elif kind == 'rolling_summary':
             from rolling_summary import process_summary_job
             ok = process_summary_job(
-                user_id, character_id, extra, source_event_id=source_event_id)
+                user_id, character_id, extra, source_event_id=source_event_id,
+                attempt=attempts)
         elif kind == 'episodic_index':
             from episodic_index import process_episode_job
             ok = process_episode_job(

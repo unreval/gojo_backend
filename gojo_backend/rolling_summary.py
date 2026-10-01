@@ -9,10 +9,11 @@ import hashlib
 import json
 import threading
 from datetime import datetime, timezone
+from functools import partial
 from typing import Optional, Sequence
 
 from context_budget import BudgetConfig, estimate_tokens
-from structured_output import StructuredOutputError, parse_structured_output
+from structured_output import StructuredOutputError, invoke_structured_llm
 
 
 SUMMARY_PROCESSOR_VERSION = 'rolling_summary_v1'
@@ -178,6 +179,8 @@ def _summary_user(events: Sequence[dict], previous_text=''):
         '请用中文归纳这一段已离开热窗口的对话。字段：\n'
         'what_happened, decisions, task_progress, unresolved, fact_changes, '
         'emotion_or_relation_only_if_evidenced。\n'
+        '输出一个完整 JSON 对象，包含全部六个字段，值均为字符串；不要说明或重复输出。\n'
+        '每字段只写简短要点，最多60字，六字段正文合计最多300字；不要逐条复述原文。\n'
         '没有证据的字段用空字符串。\n'
         f'{prev}\n【原文】\n' + '\n'.join(lines)
     )
@@ -217,19 +220,25 @@ def format_real_summary(parsed: dict, event_count: int) -> str:
     return f'情景摘要（{event_count} 条原文）：' + '；'.join(parts)
 
 
-def generate_real_summary_text(events: Sequence[dict], previous_text='') -> str:
+def generate_real_summary_text(events: Sequence[dict], previous_text='', *, attempt=1) -> str:
     """LLM path. Tests mock create_chat. Never called on the Fast Path."""
     from ai_client import create_chat
     from config import MODEL_CN_AUX
 
-    raw, _usage = create_chat(
+    call = invoke_structured_llm(
+        domain='rolling_summary',
+        # The durable worker owns retries, including provider transport failures.
+        create_chat_fn=partial(create_chat, max_retries=0),
         model=MODEL_CN_AUX,
         messages=[{'role': 'user', 'content': _summary_user(events, previous_text)}],
         system=_summary_system(),
-        max_tokens=700,
+        # Headroom for six JSON keys and bounded Chinese text, not a target length.
+        max_tokens=1200,
+        schema_validator=_validate_summary,
+        schema_name='rolling_summary',
+        attempt=attempt,
     )
-    parsed = parse_structured_output(
-        raw, schema_validator=_validate_summary, schema_name='rolling_summary')
+    parsed = call.parsed
     if not parsed.ok:
         code = ('schema_validation_failed' if parsed.error_code == 'root_not_object'
                 else parsed.error_code)
@@ -261,7 +270,7 @@ def _enqueue_episode_index(user_id, character_id, source_event_ids, summary_text
     return False
 
 
-def process_summary_job(user_id, character_id, extra, source_event_id=None) -> bool:
+def process_summary_job(user_id, character_id, extra, source_event_id=None, *, attempt=1) -> bool:
     extra = extra or {}
     ids = [str(x) for x in (extra.get('source_event_ids') or []) if str(x).strip()]
     if not ids:
@@ -305,7 +314,7 @@ def process_summary_job(user_id, character_id, extra, source_event_id=None) -> b
                 merge_from = row.get('summary_id')
                 break
 
-    text = generate_real_summary_text(events, previous_text=previous)
+    text = generate_real_summary_text(events, previous_text=previous, attempt=attempt)
     if not text.strip():
         raise StructuredOutputError('empty_summary')
 

@@ -19,6 +19,22 @@ import route_chat  # noqa: E402
 
 
 class GenerationAuditTraceTests(unittest.TestCase):
+    def test_block_fingerprints_and_estimates_are_content_free_and_track_changes(self):
+        from context_budget import estimate_tokens
+        first = self._payload()
+        for index, block in enumerate(self.system_blocks):
+            row = first['system_blocks'][index]
+            self.assertEqual(row['local_token_estimate'], estimate_tokens(block['text']))
+            self.assertEqual(row['fingerprint'], route_chat._trace_ref(block['text']))
+        self.assertEqual(first['messages'][0]['local_token_estimate'],
+                         estimate_tokens(self.messages[0]['content']))
+        self.system_blocks[1]['text'] += ' changed query-selected recall'
+        second = self._payload()
+        self.assertEqual(first['system_blocks'][0], second['system_blocks'][0])
+        self.assertNotEqual(first['system_blocks'][1]['fingerprint'],
+                            second['system_blocks'][1]['fingerprint'])
+        self.assertNotIn(self.secret, json.dumps(second))
+
     def test_acceptance_modes_are_safe_and_plaintext_does_not_retry(self):
         for raw, mode in (
                 ('🥺...', 'nonverbal'), ('こんにちは', 'plaintext'),
