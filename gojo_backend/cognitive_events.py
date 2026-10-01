@@ -254,8 +254,8 @@ def ingest_question_update(
 ):
     """Compatibility ingress: ignore extracted judgments, reload canonical text."""
     results = [ingest_canonical_turn(user_id=user_id, character_id=character_id,
-                source_event_id=e['event_id'], conn=conn, aggregate=aggregate)
-               for e in canonical_events if e.get('role') == 'user' and e.get('event_id')]
+                source_event_id=e['event_id'], conn=conn, aggregate=aggregate, allow_assistant=True)
+               for e in canonical_events if e.get('role') in ('user', 'assistant') and e.get('event_id')]
     return results[-1] if results else {'status': 'pending_canonical_source'}
 
 

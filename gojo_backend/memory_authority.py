@@ -9,9 +9,103 @@ MEMORY_AUTHORITY_DDL = tuple(
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS authority TEXT NOT NULL DEFAULT 'generated_recollection'",
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS authority_event_id BIGINT",
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS authority_belief_key TEXT",
-        f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_authority_event ON {table}(authority_event_id) WHERE authority_event_id IS NOT NULL",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS authority_operation_id TEXT NOT NULL DEFAULT 'main'",
+        f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_authority_operation ON {table}(authority_event_id, authority_operation_id) WHERE authority_event_id IS NOT NULL",
+        f"DROP INDEX IF EXISTS idx_{table}_authority_event",
     )
 )
+
+
+def dependencies_current_sql(dependencies, user, character):
+    """Check every required snapshot, including the question behind a bare yes.
+
+    Arguments are internal SQL expressions, never caller-provided identifiers.
+    New bindings are private-chat only; group scope retains its existing policy.
+    """
+    return f"""(jsonb_array_length(COALESCE({dependencies}, '[]'::jsonb)) > 0
+        AND NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements({dependencies}) dep
+            WHERE NOT EXISTS (
+                SELECT 1 FROM chat_log src
+                WHERE src.user_id={user} AND src.chat_id={character}
+                  AND COALESCE(NULLIF(src.event_id,''),src.client_msg_id)=dep->>'source_id'
+                  AND COALESCE(src.status,'active')='active'
+                  AND src.text=dep->>'content' AND src.role=dep->>'raw_role'
+                  AND src.id::text=dep->>'row_id'
+                  AND src.created_at=(dep->>'timestamp')::timestamptz
+                  AND COALESCE(src.reply_to_event_id,'')=COALESCE(dep->>'reply_to_event_id','')
+                  AND COALESCE(NULLIF(src.extra,''),'{{}}')::jsonb=dep->'metadata'
+            )))"""
+
+
+def current_answer_question_sql(alias='cognitive_questions'):
+    deps = f"{alias}.metadata->'dependencies'"
+    return f"""({dependencies_current_sql(deps, alias + '.user_id', alias + '.character_id')}
+        AND ({alias}.status <> 'resolved' OR EXISTS (
+            SELECT 1 FROM cognitive_events ae
+            CROSS JOIN LATERAL jsonb_each(COALESCE(ae.adjudication->'operations','{{}}'::jsonb)) op
+            WHERE ae.user_id={alias}.user_id AND ae.character_id={alias}.character_id
+              AND ae.adjudication->>'status'='applied'
+              AND op.value->>'status'='applied'
+              AND op.value->>'question_key'={alias}.question_key
+              AND ae.id::text={alias}.metadata->'current_judgment'->>'event_id'
+              AND op.key={alias}.metadata->'current_judgment'->>'operation_id'
+              AND op.value->>'memory_content'={alias}.metadata->'current_judgment'->>'content'
+        )))"""
+
+
+def filter_derived_answer_sources(rows, user_id, character_id):
+    """Reject a summary/episode/cache when an answer dependency is no longer current."""
+    ids = list({sid for row in rows for sid in row.get('source_event_ids', ())})
+    if not ids:
+        return []
+    from db import get_conn
+    database = cur = None
+    try:
+        database = get_conn()
+        cur = database.cursor()
+        cur.execute(f'''SELECT DISTINCT ce.source_event_id FROM cognitive_events ce
+            CROSS JOIN LATERAL jsonb_each(COALESCE(ce.adjudication->'operations','{{}}')) op
+            WHERE ce.user_id=%s AND ce.character_id=%s AND ce.source_event_id=ANY(%s)
+              AND op.value->>'authority'='explicit_answer_v1'
+              AND (ce.adjudication->>'status'='superseded' OR op.value->>'status'='superseded'
+                   OR (op.value ? 'dependencies' AND NOT
+                       {dependencies_current_sql("op.value->'dependencies'", 'ce.user_id', 'ce.character_id')}))''',
+            (user_id, character_id, ids))
+        invalid = {row[0] for row in cur.fetchall()}
+        from raw_events import get_active_events_by_ids
+        active = {row['event_id'] for row in get_active_events_by_ids(user_id, character_id, ids, conn=database)}
+        return [row for row in rows if row.get('source_event_ids')
+                and set(row['source_event_ids']).issubset(active - invalid)]
+    except Exception:
+        return []
+    finally:
+        if cur is not None:
+            cur.close()
+        if database is not None:
+            database.close()
+
+
+def answer_question_is_current(user_id, character_id, question, conn=None):
+    """Revalidate a cached cognitive working set against current adjudication."""
+    from db import get_conn
+    database, cur = conn, None
+    try:
+        database = conn or get_conn()
+        cur = database.cursor()
+        cur.execute(f'''SELECT 1 FROM cognitive_questions
+            WHERE user_id=%s AND character_id=%s AND question_key=%s
+              AND metadata=%s::jsonb AND {current_answer_question_sql()}''',
+            (user_id, character_id, question['question_key'],
+             json.dumps(question['metadata'], ensure_ascii=False)))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is None and database is not None:
+            database.close()
 
 
 def authoritative_memory_sql(table):
@@ -28,6 +122,9 @@ def authoritative_memory_sql(table):
         AND ({table}.expires_at IS NULL OR {table}.expires_at > CURRENT_TIMESTAMP)
         AND EXISTS (
             SELECT 1 FROM cognitive_events ce
+            CROSS JOIN LATERAL (SELECT CASE WHEN ce.adjudication ? 'operations'
+                THEN ce.adjudication->'operations'->{table}.authority_operation_id
+                ELSE ce.adjudication END AS decision) adjudicated
             JOIN chat_log raw ON raw.user_id=ce.user_id
                 AND raw.chat_id=COALESCE(ce.payload->>'source_chat_id', ce.character_id)
                 AND COALESCE(NULLIF(raw.event_id, ''), raw.client_msg_id)=ce.source_event_id
@@ -36,20 +133,25 @@ def authoritative_memory_sql(table):
                 AND COALESCE(raw.status, 'active')='active'
                 AND raw.text=ce.payload->>'content'
                 AND ce.adjudication->>'status'='applied'
-                AND ce.adjudication->>'memory_content'={table}.content
-                AND ce.adjudication->>'memory_table'='{table}'
+                AND decision->>'status'='applied'
+                AND decision->>'memory_content'={table}.content
+                AND decision->>'memory_table'='{table}'
+                AND (NOT (decision ? 'dependencies') OR
+                     {dependencies_current_sql("decision->'dependencies'", 'ce.user_id', 'ce.character_id')})
                 AND (
                     (ce.source_event_type='canonical_assistant_turn'
                      AND raw.role IN ('assistant', 'gojo', 'char', 'character')
                      AND {table}.authority_belief_key IS NULL)
                     OR
                     (ce.source_event_type='canonical_user_turn' AND raw.role='user'
-                     AND EXISTS (
+                     AND ((decision->>'authority'='explicit_answer_v1'
+                           AND {table}.authority_belief_key IS NULL)
+                       OR EXISTS (
                         SELECT 1 FROM cognitive_beliefs b
                         WHERE b.user_id=ce.user_id AND b.character_id=ce.character_id
                           AND b.belief_key={table}.authority_belief_key
                           AND b.status='active' AND b.metadata->>'review_status'='stable'
-                          AND b.statement={table}.content))
+                          AND b.statement={table}.content)))
                 ))"""
 
 
@@ -59,23 +161,26 @@ def current_literal_belief_sql(alias):
         raise ValueError('unsupported_belief_alias')
     return f"""EXISTS (
         SELECT 1 FROM cognitive_events ce
+        CROSS JOIN LATERAL jsonb_each(COALESCE(ce.adjudication->'operations',
+            jsonb_build_object('main',ce.adjudication))) op
         JOIN chat_log raw ON raw.user_id=ce.user_id
             AND raw.chat_id=COALESCE(ce.payload->>'source_chat_id', ce.character_id)
             AND COALESCE(NULLIF(raw.event_id, ''), raw.client_msg_id)=ce.source_event_id
         WHERE ce.user_id={alias}.user_id AND ce.character_id={alias}.character_id
             AND ce.source_event_type='canonical_user_turn'
             AND ce.adjudication->>'status'='applied'
-            AND ce.adjudication->>'belief_key'={alias}.belief_key
+            AND op.value->>'status'='applied'
+            AND op.value->>'belief_key'={alias}.belief_key
             AND raw.role='user' AND COALESCE(raw.status, 'active')='active'
             AND raw.text=ce.payload->>'content'
-            AND COALESCE(ce.adjudication->>'memory_content',
+            AND COALESCE(op.value->>'memory_content',
                 '用户明确自述：' || (ce.payload->'claim'->>'text') ||
                 '（仅限这次自述，不推断隐含心理）')={alias}.statement)"""
 
 
 def project_canonical_memory(cur, *, user_id, character_id, event_id,
                              source_id, content, claim=None, belief_key=None,
-                             occurred_at=None):
+                             occurred_at=None, operation_id='main', dependencies=None):
     """Project an adjudicated literal report/utterance in its cycle transaction.
 
     The caller has locked and reloaded the original message. Generic memory
@@ -92,23 +197,25 @@ def project_canonical_memory(cur, *, user_id, character_id, event_id,
     if table == 'long_memory':
         cur.execute("""INSERT INTO long_memory
             (user_id,character_id,content,category,timestamp,source_event_refs,
-             authority,authority_event_id,authority_belief_key,expires_at)
-            VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
-            ON CONFLICT (authority_event_id) WHERE authority_event_id IS NOT NULL
+             authority,authority_event_id,authority_belief_key,expires_at,authority_operation_id)
+            VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)
+            ON CONFLICT (authority_event_id,authority_operation_id) WHERE authority_event_id IS NOT NULL
             DO NOTHING RETURNING id""",
             (user_id, character_id, content, category, occurred_at,
-             json.dumps([{'source_id': source_id}]), AUTHORITY, event_id, belief_key, expires_at))
+             json.dumps(dependencies or [{'source_id': source_id}]), AUTHORITY, event_id, belief_key, expires_at, operation_id))
     else:
         cur.execute("""INSERT INTO bond_memory
-            (user_id,character_id,kind,content,timestamp,authority,authority_event_id,authority_belief_key)
-            VALUES (%s,%s,'between',%s,%s,%s,%s,%s)
-            ON CONFLICT (authority_event_id) WHERE authority_event_id IS NOT NULL
+            (user_id,character_id,kind,content,timestamp,authority,authority_event_id,authority_belief_key,authority_operation_id)
+            VALUES (%s,%s,'between',%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (authority_event_id,authority_operation_id) WHERE authority_event_id IS NOT NULL
             DO NOTHING RETURNING id""",
-            (user_id, character_id, content, occurred_at, AUTHORITY, event_id, belief_key))
+            (user_id, character_id, content, occurred_at, AUTHORITY, event_id, belief_key, operation_id))
     row = cur.fetchone()
     if row:
-        cur.execute("""INSERT INTO memory_source_events(memory_type,memory_id,source_event_id)
-                       VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""", (table, row[0], source_id))
+        for dependency in dependencies or [{'source_id': source_id}]:
+            cur.execute("""INSERT INTO memory_source_events(memory_type,memory_id,source_event_id)
+                           VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+                        (table, row[0], dependency['source_id']))
     return {'memory_table': table, 'memory_content': content}
 
 

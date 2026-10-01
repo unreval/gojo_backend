@@ -123,3 +123,31 @@ class ReceiptWindowTests(unittest.TestCase):
         self.assertEqual(self.sql(effect_key_sql), effect_id)
         self.assertEqual(self.assistant_effect('window-c')['attempt_count'], 2)
         self.assertEqual(self.sql("SELECT count(*) FROM bond_memory")[0][0], 1)
+
+    def test_D_nickname_answer_receipt_repair_keeps_single_binding(self):
+        from generation_side_effect_worker import process_one_side_effect
+        from cognitive_reader import fetch_cognitive_reader_state
+        request = self.request('phase-d')
+        request['text'] = '我还是叫你宝宝。你接不接受这个称呼？'
+        with self.http(reply='yes') as (route, generate):
+            self.assertEqual(asyncio.run(route.chat_text(request)).status_code,200)
+            generate.assert_called_once()
+        with patch.object(receipt,'CRASH_AFTER_EFFECT','assistant_short_memory'):
+            with self.assertRaisesRegex(RuntimeError,'injected crash after'):
+                process_one_side_effect(self.assistant_effect('phase-d'))
+        self.drain_jobs()
+        self.run_cycle()
+        self.run_cycle()
+        question = fetch_cognitive_reader_state('u','c',conn=self.database)['questions'][0]
+        self.assertEqual(question['metadata']['resolution']['value'],'yes')
+        self.assertEqual(question['metadata']['resolution']['actor'],'character')
+        tables=('chat_log','cognitive_events','cognitive_questions','bond_memory','memory_source_events')
+        before={table:self.sql(f'SELECT * FROM {table} ORDER BY 1') for table in tables}
+        self.sql("UPDATE chat_generation_side_effect SET claim_expires_at=NOW()-INTERVAL '1 minute' WHERE effect='assistant_short_memory'")
+        self.database.commit()
+        payload=receipt.get_generation('u','c','phase-d','chat_text')['response_json']
+        generation_effects.repair_completed_generation('u','c','phase-d','chat_text',payload)
+        self.assertTrue(process_one_side_effect(self.assistant_effect('phase-d')))
+        self.drain_jobs()
+        self.assertEqual(before,{table:self.sql(f'SELECT * FROM {table} ORDER BY 1') for table in tables})
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0],0)

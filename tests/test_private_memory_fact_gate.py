@@ -992,6 +992,34 @@ class PrivateMemoryFactGateTests(CanonicalMemoryFixture, unittest.TestCase):
         self.assertEqual(self.sql('SELECT count(*) FROM cognitive_event_triggers')[0][0], 0)
 
 
+    def test_explicit_user_nickname_answer_uses_both_canonical_sources(self):
+        self.assertTrue(self.ingest_sources([
+            {'event_id':'question','role':'assistant','content':'我可以叫你宝宝吗？'},
+            {'event_id':'u1','role':'user','content':'yes'},
+        ], model_payload=empty_payload(bond={'content':'我们相爱了','novel':False})))
+        from cognitive_reader import fetch_cognitive_reader_state
+        row = fetch_cognitive_reader_state('u','c',conn=self.database)['questions'][0]
+        self.assertEqual(row['status'],'resolved')
+        answer = row['metadata']['resolution']
+        self.assertEqual((answer['actor'],answer['value']),('user','yes'))
+        self.assertEqual(set(answer['evidence_event_ids']),{'question','u1'})
+        with patch.object(user_memory,'get_conn',return_value=self.database):
+            self.assertIn(answer['content'],[r[1] for r in user_memory.get_bond_memories('u','c')])
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0],0)
+
+    def test_assistant_denial_cannot_erase_user_nickname_permission(self):
+        self.assertTrue(self.ingest_sources([
+            {'event_id':'question','role':'assistant','content':'我可以叫你宝宝吗？'},
+            {'event_id':'u1','role':'user','content':'我明确接受你叫我宝宝。'},
+            {'event_id':'a1','role':'assistant','content':'我不记得答应过。'},
+        ],source_ids=['u1','a1']))
+        from cognitive_reader import fetch_cognitive_reader_state
+        row = fetch_cognitive_reader_state('u','c',conn=self.database)['questions'][0]
+        self.assertEqual(row['metadata']['resolution']['actor'],'user')
+        self.assertEqual(row['metadata']['resolution']['value'],'yes')
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0],0)
+
+
 class MemoryJobRetryTests(unittest.TestCase):
     def test_existing_queue_retries_then_fails_without_unbounded_loop(self):
         row = (

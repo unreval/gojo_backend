@@ -5,6 +5,10 @@ This iteration extends `93e0fa7afd8eb2af09bd0a1affe49704aa208b30` on
 `codex/deterministic-cognitive-loop`. It does not deploy or enable a production
 worker. `COGNITIVE_WORKER_ENABLED` remains false in code and `.env.example`.
 
+The Phase D section at the end records the current uncommitted work from
+`6fae36a9b1e189ff211296465da81309829d8da3`. Earlier verification tables are
+historical snapshots; Phase D reran the exact C baseline (983 tests).
+
 ## One authority path
 
 The existing flow remains:
@@ -48,7 +52,9 @@ its scoring prompt, estimation and state-writing functions are removed.
 
 `memory_authority.py` provides the projection writer and shared reader gates.
 The existing long/bond tables gain `authority`, `authority_event_id` and
-`authority_belief_key`, plus an event-unique projection index.
+`authority_belief_key`. Phase D adds `authority_operation_id` (default `main`)
+and uses a unique `(authority_event_id, authority_operation_id)` projection
+index so independent operations from one event cannot erase one another.
 The DDL runs through the existing database initialization. It has been tested
 on disposable PostgreSQL, not applied to production during this task.
 
@@ -64,8 +70,10 @@ An authoritative read requires all of:
 - An applied canonical event in the same user/character scope.
 - A currently active raw source whose ID, owner, chat, role and text match.
 - Exact agreement between projected content/table and the event adjudication.
-- For user reports, an active stable belief with the same key and statement.
-- For assistant speech, a witnessed utterance only, with no belief key.
+- For literal user reports, an active stable belief with the same key and statement.
+- For a bounded explicit answer, the current scoped question judgment and all
+  question/answer/context source dependencies, without a personality belief.
+- For other assistant speech, a witnessed utterance only, with no belief key.
 
 Assistant speech is explicitly rendered as “角色实际说过 … 仅为话语记录，不证明话中内容或关系”.
 It does not establish a user fact, a realized event, a relationship or a belief.
@@ -122,7 +130,8 @@ under review pending a scoped correction; repeating the conflict cannot
 silently resolve it. State memory projections have a 48-hour recall expiry
 and retain their original report date; they do not assert the state persists.
 
-Sarcasm, flirtation, implicit intent, mixed clauses, contextual yes/no,
+Sarcasm, flirtation, implicit intent, unsupported mixed clauses, contextual yes/no
+outside the bounded Phase D nickname grammar,
 ambiguous recipients, unsupported Japanese/free-form paraphrases and
 unmatched corrections remain pending. This is not a keyword sentiment
 classifier. No LLM label is used to fill these gaps.
@@ -353,3 +362,145 @@ Eleven new TTS tests execute the real shared TTS entry and count the provider
 boundary, with external requests intercepted. All nine tested nonverbal inputs
 have zero provider calls. Four mixed/text controls have one provider invocation
 and one intercepted HTTP request each. No paid network request is made.
+
+## Phase D: explicit answers and independent deltas, 2026-10-01
+
+Baseline: `codex/deterministic-cognitive-loop`,
+`6fae36a9b1e189ff211296465da81309829d8da3`. A `d49699f` and B `513f382`
+are ancestors. No reset, commit, push, merge, deployment, production migration
+or production worker start was performed. The original checkout's unrelated
+changes were preserved; work was done in an isolated checkout.
+
+### Bounded question and answer binding
+
+The existing canonical ingress, worker, revision transaction, cognitive question
+table and projection/readers remain the sole authority path. No extractor,
+relationship signal writer, second question store or answer worker was restored.
+Compatibility question ingress reloads actual user and assistant canonical rows;
+model-provided keys, actor/value/novel fields and copied text do not decide a result.
+
+Supported private-chat questions include `你接受我叫你宝宝吗？`,
+`你接不接受我叫你宝宝？`, `我可以叫你宝宝吗？`, `我能叫你宝宝吗？`,
+and the original `我还是叫你宝宝。你接不接受这个称呼？`.
+An arbitrary nickname of 1–40 characters requires `「...」` or `“...”`.
+Speaker, respondent, object and `this_exchange` scope are derived from the
+canonical source and stored as the normalized question proposition.
+
+Complete literal answers use the existing finite polarity vocabulary: yes/no,
+接受/不接受, 同意/不同意, 是/不是, 要/不要, 愿意/不愿意, 可以/不可以,
+はい/いいえ, and the listed literal English acceptance/refusal forms.
+The grammar also accepts `我明确说了yes` and `yes，接受你叫我宝宝。`.
+A self-contained `我明确接受你叫我宝宝。` is a witnessed choice sourced to
+that utterance; it does not fabricate a prior question event.
+Unknown tails, quotations such as `他说 yes`, `yes?`, double negatives and
+sarcasm are not reduced to a substring polarity. Independent complete clauses
+can carry separate operations; balanced quoted text is not split on commas.
+This does not implement free Japanese or general conversational inference.
+
+A persisted explicit reply reference takes priority and must pass owner, chat,
+respondent, ordering, source snapshot and question-type checks. Conflicting
+reference fields fail closed. Without a reference, the preceding six rows within
+24 hours are examined as a contiguous context, requiring one eligible question.
+Competing questions, a topic change or an invalid source prevent bare binding.
+An explicit deferred answer and the finite `答案呢？` / `你的回答呢？` bridge
+can retain context; their original rows become required provenance.
+An answer can be processed before the question's job because identity and scope
+are reconstructed from committed raw sources. Source I/O failure rolls back and
+can retry; it is not recorded as a completed semantic pending result.
+
+User calls character 宝宝 + assistant yes records that the character explicitly
+accepted that address in this exchange. The reverse records the user's scoped
+permission. A no records refusal. Neither creates romance beliefs, updates
+warmth/passion nor settles an unrelated relationship question.
+`明天回答` / `明天给你回答` (also finite 稍后/晚点 forms) keeps the question
+open and the witnessed pending utterance. No deadline is invented; retries keep
+the original source timestamp, and time alone cannot settle the answer.
+
+### Operations, provenance and withdrawal
+
+Each event's adjudication contains an `operations` map. Stable `main`, `utterance`
+and `clause.N` identities are retained through projection and replay. An assistant
+reply may have one witnessed utterance operation plus one scoped answer operation.
+User literal beliefs and commitments continue through the existing literal policy.
+Independent source-backed operations do not consult summary merge outcomes or
+model duplicate/novel labels, and do not close unrelated obligations.
+
+The only schema addition is `authority_operation_id TEXT NOT NULL DEFAULT 'main'`
+on the existing long/bond projection tables. The composite unique index is
+created before the old event-only index is removed. The event ID cannot identify
+two different operations from one real source; using the new key avoids fake raw
+events and keeps duplicate delivery idempotent. Existing rows/root adjudications
+remain readable as `main`. Disposable SQL tests cover old-schema upgrade, repeated
+initialization, old-row reads and new multi-operation retry.
+
+Required source snapshots include row/source identity, speaker role, full text,
+original timestamp with precision, metadata and persisted reply pointer. Both
+write-time adjudication and read-time gates recheck all dependencies in scope.
+The normal bond getter, cognitive reader, two-level recall, cached vector candidate
+gate, summaries/episodes and final prompt context revalidation enforce them.
+Deleting only the question preserves the raw yes and its witnessed quotation but
+removes the bound permission from current readers. A cached authority badge or
+previously loaded vector cannot restore the binding; late derived writes are
+superseded when their source operation is no longer current.
+
+The finite user correction
+`更正事件「a」：我刚才回答的不是「宝宝」这个称呼。`
+withdraws only that user's current matching answer operation. It preserves raw
+history and other operations and does not turn yes into no. It cannot rewrite
+the character's reply or withdraw a newer answer by referring to an older one.
+An out-of-order correction uses the same canonical adjudicator to materialize
+the earlier committed source; subsequent job replay cannot revive it.
+Operation-scoped dependencies retain unrelated commitments/predictions; older
+generic dependents without operation identity are conservatively invalidated.
+
+### Phase D verification and remaining work
+
+| Run | Tests | Failure records | Error records | Skips / xfails |
+| --- | ---: | ---: | ---: | ---: |
+| Exact C baseline, full suite | 983 | 44 | 62 | 0 / 0 |
+| Final full suite | 1021 | 34 | 45 | 0 / 0 |
+| Related regression, 19 modules | 366 | 0 | 0 | 0 / 0 |
+| Three requested priority modules | 71 | 9 | 7 | 0 / 0 |
+| New explicit-answer SQL acceptance | 35 | 0 | 0 | 0 / 0 |
+| Pending/P1 after unused fixture-helper cleanup | 37 | 0 | 0 | 0 / 0 |
+
+These sets overlap and must not be added. The 366-test run includes all 52
+existing deterministic/memory-authority hard acceptance tests plus C chat/TTS,
+source-first, receipt, correction, context and recall modules. The priority run's
+16 remaining records are all pre-existing private-memory tests. Its critical
+delta (23) and pending-resolution (10) modules pass, as does P1 (27) in the
+related run. The two new private-memory positive nickname tests also pass.
+
+The exact test-ID + subtest + duplicate-ordinal comparison resolves 27 baseline
+records, retains 79, and has zero newly failing records or failure/error
+transitions. Existing 140 methods in changed test files retain their IDs; 35
+method bodies are migrated and 38 new methods are added (35 SQL, two private
+memory, one receipt). No test was deleted, skipped or marked expected failure.
+The context-critical and episode prompt display changes are fixture migrations,
+not new semantic capabilities. Actual source deletion and cache invalidation
+are covered separately by the real SQL acceptance.
+
+The historical capability map now marks 12 of its 27 records restored, with 15
+still failing. The historical contract map marks 15 of its 79 records resolved,
+with 64 still failing. Original changed fields and assertions remain available;
+the complete same-ID before/after assertion mapping is in the delivery artifact
+`phase-d-test-migration.json`. The 79 total persistent full-suite records occur
+in continuous-loop (2), loop-v1 (5), slow-loop (33), spend-guard (9), flirt (10),
+grumble/sticky (4) and private-memory (16) modules. They retain their failures
+instead of reintroducing model authority or the legacy merge/save writer.
+
+Evidence artifacts show the original q/a raw rows, event 2 main/utterance
+adjudications, both bond projections, all source links and reader/recall output;
+separate snapshots cover independent deltas, withdrawal, derived/cached readers
+and retained cached vectors after deletion. The three merge scenarios seed the
+historical rejected/accepted/unrelated summary states. They do not execute the
+retired merge writer. Eleven fail-on-call guards cover cognitive/model entry
+points, embedding, relationship extraction, legacy writers and HTTP, all with
+zero calls in the new SQL acceptance. External network and real psycopg2 remain
+blocked by the offline runner. Vector ranking uses supplied test vectors.
+
+PGlite 0.3.14 exercises real PostgreSQL SQL using one connection per fixture.
+Independent multi-connection races and production migration/load behavior remain
+unaccepted before release. General sarcasm/flirtation, free-form bilingual
+semantics, emoji conventions, historical migration and relationship algorithms
+remain outside Phase D. The full suite is not green and this work is uncommitted.

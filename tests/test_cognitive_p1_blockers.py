@@ -1,5 +1,4 @@
 """P1 audit regressions: deterministic boundaries, no live DB or model."""
-import json
 import os
 import sys
 import unittest
@@ -17,59 +16,58 @@ import user_memory
 from tests import test_cognitive_pending_resolution as pending
 from tests import test_cognitive_loop_v1 as queue_tests
 from tests import test_memory_critical_delta as memory_tests
+from tests.test_explicit_answer_sql import ExplicitAnswerFixture
 
 
-class QuestionTransitionTests(unittest.TestCase):
-    def persist(self, old_status, new_status, metadata=None, key='nickname.acceptance'):
-        old = (71, 'nickname.acceptance', pending.QUESTION, old_status, metadata or {}, [])
-        conn = pending.QuestionConnection(old)
-        output = pending.judgment_output()
-        output['question_updates'][0].update(status=new_status, question_key=key)
-        cognitive_output.persist_slow_loop_output(
-            conn, cycle_id=1, user_id='u', character_id='gojo', output=output, now=pending.NOW)
-        return next(p for sql, p in conn.executed if sql.startswith('INSERT INTO cognitive_questions'))
-
+class QuestionTransitionTests(ExplicitAnswerFixture, unittest.TestCase):
     def test_resolved_cannot_become_active(self):
-        self.assertEqual(self.persist('resolved', 'active')[4], 'resolved')
+        self.exchange()
+        before = self.reader()['questions']
+        with self.assertRaises(cognitive_output.SlowLoopOutputError):
+            cognitive_output.persist_slow_loop_output(self.database, cycle_id=1, user_id='u', character_id='c',
+                output=pending.judgment_output(), now=self.now)
+        self.assertEqual(self.reader()['questions'], before)
 
     def test_resolved_cannot_become_dormant(self):
-        self.assertEqual(self.persist('resolved', 'dormant')[4], 'resolved')
+        self.exchange()
+        output = pending.judgment_output()
+        output['question_updates'][0]['status']='dormant'
+        with self.assertRaises(cognitive_output.SlowLoopOutputError):
+            cognitive_output.persist_slow_loop_output(self.database, cycle_id=1, user_id='u', character_id='c', output=output, now=self.now)
+        self.assert_answer()
 
     def test_resolved_output_fulfills_old_pending_answer(self):
-        row = self.persist('active', 'resolved', {'pending_answer': {'status': 'pending'}})
-        self.assertEqual(row[4], 'resolved')
-        self.assertEqual(json.loads(row[5])['pending_answer']['status'], 'fulfilled')
+        self.exchange('明天给你回答。')
+        self.turn('a2', 'yes', 'assistant', reply='q')
+        self.assert_answer()
+        self.assertEqual(self.reader()['questions'][0]['metadata']['pending_answer']['status'],'fulfilled')
 
     def test_explicit_resolution_retry_keeps_resolved_and_judgment(self):
-        row = self.persist('resolved', 'active', {'resolution': {'value': 'no'}})
-        self.assertEqual(row[4], 'resolved')
-        self.assertNotIn('current_judgment', json.loads(row[5]))
+        self.exchange('no')
+        before = self.reader()['questions']
+        self.deliver('a')
+        self.assertEqual(self.reader()['questions'],before)
+        self.assert_answer(value='no')
 
     def test_slow_loop_resolved_judgment_is_not_replaced_on_retry(self):
-        row = self.persist('resolved', 'active', {
-            'current_judgment': {'value': 'no', 'status': 'committed'},
-            'pending_answer': {'status': 'pending'},
-        })
-        self.assertEqual(row[4], 'resolved')
-        self.assertNotIn('current_judgment', json.loads(row[5]))
+        self.exchange('no')
+        with self.assertRaises(cognitive_output.SlowLoopOutputError):
+            cognitive_output.persist_slow_loop_output(self.database, cycle_id=1,user_id='u',character_id='c',output=pending.judgment_output(),now=self.now)
+        self.assert_answer(value='no')
 
     def test_same_question_text_cannot_be_recreated_under_another_key(self):
-        with self.assertRaisesRegex(ValueError, 'question_identity'):
-            self.persist('resolved', 'active', key='nickname.other')
+        self.exchange()
+        before = self.reader()['questions']
+        cognitive_events.ingest_question_update(user_id='u',character_id='c',update={'question_key':'forged'},
+            canonical_events=[{'event_id':'q','role':'user'}])
+        self.assertEqual(self.reader()['questions'],before)
 
     def test_pending_answer_cannot_reopen_slow_loop_resolved(self):
-        old = (71, 'nickname.acceptance', pending.QUESTION, 'resolved',
-               {'current_judgment': {'value': 'no', 'status': 'committed'}}, [])
-        helper = pending.PendingResolutionTests()
-        result, conn, _ = helper._ingest({
-            'type': 'pending_answer', 'question_key': 'nickname.acceptance',
-            'question_text': pending.QUESTION, 'content': '明天给你回答',
-            'evidence_quote': '明天给你回答',
-            'evidence_event_ids': ['user-1', 'assistant-1'],
-        }, events=[pending.EVENTS[0], dict(pending.EVENTS[1], content='明天给你回答')],
-            conn=pending.QuestionConnection(old))
-        self.assertEqual(result['status'], 'already_resolved')
-        self.assertFalse(any(sql.startswith('INSERT INTO cognitive_questions') for sql, _ in conn.executed))
+        self.exchange('no')
+        before = self.reader()['questions']
+        self.turn('later','明天给你回答','assistant',reply='q')
+        self.assertEqual(self.reader()['questions'],before)
+        self.assert_answer(value='no')
 
     def test_unimplemented_reopen_operation_is_not_authorized(self):
         with self.assertRaises(ValueError):
@@ -197,38 +195,26 @@ class OperationEvidenceTests(CanonicalMemoryFixture, unittest.TestCase):
 
 
     def test_cognitive_update_cannot_bypass_bond_delta_gate(self):
-        for text, quote, value, expected in [('不接受', '接受', 'yes', False),
-                                              ('不接受', '不接受', 'no', True)]:
-            with self.subTest(text=text, quote=quote):
-                item = memory_tests.delta(type='resolution', evidence_quote=quote,
-                    value=value, kind='relationship_resolution',
-                    content='我接受' if value == 'yes' else '我不接受')
-                self.assertTrue(self.ingest_sources(
-                    [memory_tests.EVENTS[0], dict(memory_tests.EVENTS[1], content=text)],
-                    source_ids=['u1', 'chat_reply:u1'], model_payload={'cognitive_update': item}))
-                rows = self.sql("SELECT metadata->'resolution'->>'value' FROM cognitive_questions WHERE status='resolved'")
-                self.assertEqual(bool(rows), expected)
-                if expected:
-                    self.assertEqual(rows[0][0], 'no')
+        for index, candidate in enumerate(('yes','no')):
+            events = [dict(memory_tests.EVENTS[0],event_id=f'u{index}'),
+                dict(memory_tests.EVENTS[1],event_id=f'a{index}',content='不接受',metadata={},reply_to_event_id=f'u{index}')]
+            self.assertTrue(self.ingest_sources(events,primary=f'u{index}',source_ids=[f'u{index}',f'a{index}'],
+                model_payload={'cognitive_update':{'value':candidate,'evidence_quote':'接受'}}))
+        rows = self.sql("SELECT metadata->'resolution'->>'value' FROM cognitive_questions WHERE status='resolved'")
+        self.assertEqual(rows,[('no',),('no',)])
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0],0)
 
     def test_ingress_itself_rejects_invalid_polarity(self):
-        with self.assertRaises(ValueError):
-            pending.PendingResolutionTests()._ingest({
-                'type': 'resolution', 'question_text': pending.QUESTION,
-                'content': '我接受', 'value': 'yes', 'evidence_quote': '接受',
-                'evidence_event_ids': ['user-1', 'assistant-1'],
-            }, events=[pending.EVENTS[0], dict(pending.EVENTS[1], content='不接受')])
+        self.assertTrue(self.ingest_sources([memory_tests.EVENTS[0],dict(memory_tests.EVENTS[1],content='不接受')],
+            source_ids=['u1','chat_reply:u1'],model_payload={'value':'yes','evidence_quote':'接受'}))
+        self.assertEqual(self.sql("SELECT metadata->'resolution'->>'value' FROM cognitive_questions WHERE status='resolved'"),[('no',)])
 
 
     def test_valid_negative_is_persisted_as_no(self):
-        result, conn, _ = pending.PendingResolutionTests()._ingest({
-            'type': 'resolution', 'kind': 'explicit_rejection', 'question_text': pending.QUESTION,
-            'content': '我不接受这个称呼', 'value': 'no', 'evidence_quote': '不接受',
-            'evidence_event_ids': ['user-1', 'assistant-1'],
-        }, events=[pending.EVENTS[0], dict(pending.EVENTS[1], content='不接受')])
-        self.assertEqual(result['question_status'], 'resolved')
-        row = next(p for sql, p in conn.executed if sql.startswith('INSERT INTO cognitive_questions'))
-        self.assertEqual(json.loads(row[5])['resolution']['value'], 'no')
+        self.assertTrue(self.ingest_sources([memory_tests.EVENTS[0],dict(memory_tests.EVENTS[1],content='不接受')],source_ids=['u1','chat_reply:u1']))
+        self.assertEqual(self.sql("SELECT metadata->'resolution'->>'value' FROM cognitive_questions WHERE status='resolved'"),[('no',)])
+        from cognitive_reader import fetch_cognitive_reader_state
+        self.assertIn('不接受',fetch_cognitive_reader_state('u','c',conn=self.database)['questions'][0]['metadata']['resolution']['content'])
 
     def test_summary_content_cannot_reverse_the_validated_answer(self):
         item = memory_tests.delta(evidence_quote='不接受', value='no', kind='explicit_rejection')

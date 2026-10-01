@@ -47,6 +47,13 @@ class CriticalBondDeltaTests(CanonicalMemoryFixture, unittest.TestCase):
                 cognitive_update=None, merge_targets=None, repair_raw=None,
                 pending_corrections=None, payload_extra=None):
         events = EVENTS if events is None else events
+        # Materialize the summary result independently; it has no authority over
+        # the canonical answer, regardless of the former merge outcome.
+        summaries = [NEW if merge_result[0] else old, *(merge_targets or [])]
+        for summary in dict.fromkeys(summaries):
+            if not self.sql('SELECT id FROM bond_memory WHERE content=%s', (summary,)):
+                self.sql("INSERT INTO bond_memory(user_id,character_id,content) VALUES ('u','c',%s)", (summary,))
+        self.database.commit()
         payload = {'bond_delta': item, 'cognitive_update': cognitive_update,
                    'bond': {'content': NEW, 'replaces': merge_targets or [old]}}
         payload.update(payload_extra or {})
@@ -65,41 +72,49 @@ class CriticalBondDeltaTests(CanonicalMemoryFixture, unittest.TestCase):
                 model_payload=repair_raw if repair_raw is not None else payload,
                 deleted=[] if sources_active else [e['event_id'] for e in events])
         self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0], 0)
-        self.assertEqual(self.sql("""SELECT count(*) FROM bond_memory b
-            JOIN cognitive_events e ON e.id=b.authority_event_id
-            WHERE e.source_event_type <> 'canonical_assistant_turn'""")[0][0], 0)
+        for writer in watched:
+            writer.assert_not_called()
         return ok, *watched
 
+    def assert_delta(self, value='yes', actor='character'):
+        rows = self.sql("""SELECT metadata FROM cognitive_questions
+            WHERE status='resolved' AND metadata->>'updated_by'='explicit_answer_v1'""")
+        self.assertEqual(len(rows),1)
+        judgment = rows[0][0]['resolution']
+        self.assertEqual((judgment['value'],judgment['actor']),(value,actor))
+        from cognitive_reader import fetch_cognitive_reader_state
+        state = fetch_cognitive_reader_state('u','c',conn=self.database)
+        self.assertTrue(any(q['metadata'].get('resolution') == judgment for q in state['questions']))
+        with patch.object(user_memory,'get_conn',return_value=self.database):
+            self.assertIn(judgment['content'], [r[1] for r in user_memory.get_bond_memories('u','c')])
+        ids = self.sql("""SELECT m.source_event_id FROM memory_source_events m JOIN bond_memory b
+            ON b.id=m.memory_id AND m.memory_type='bond_memory' WHERE b.content=%s""", (judgment['content'],))
+        self.assertEqual({r[0] for r in ids},set(judgment['evidence_event_ids']))
+        return judgment
+
     def test_A_merge_reject_saves_only_explicit_acceptance_delta(self):
-        ok, merge, save, resolve, lifecycle = self.extract(delta())
+        ok, *_ = self.extract(delta())
         self.assertTrue(ok)
-        merge.assert_called_once()
-        self.assertEqual(save.call_count, 1)
-        self.assertEqual(save.call_args.args[3], DELTA.rstrip('。'))
-        self.assertEqual(save.call_args.kwargs['source_event_ids'], ['u1', 'chat_reply:u1'])
-        self.assertNotEqual(save.call_args.args[3], NEW)
-        self.assertEqual(resolve.call_args.args[3], [OLD])
-        self.assertEqual(lifecycle.call_args.kwargs['update']['value'], 'yes')
+        judgment = self.assert_delta()
+        self.assertEqual(set(judgment['evidence_event_ids']), {'u1','chat_reply:u1'})
+        self.assertIn('角色被用户称作「宝宝」', judgment['content'])
+        self.assertEqual(self.sql('SELECT content,recall_status FROM bond_memory WHERE authority_event_id IS NULL'), [(OLD,'active')])
 
 
     def test_B_same_event_duplicate_is_not_appended(self):
-        for _ in range(2):
-            ok, _merge, save, resolve, lifecycle = self.extract(
-                delta(content='她叫我宝宝', novel=False), old='她叫我宝宝')
-            self.assertTrue(ok)
-            save.assert_not_called()
-            resolve.assert_not_called()
-            lifecycle.assert_not_called()
-        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0], 2)
-        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_event_triggers')[0][0], 2)
-        self.assertEqual(self.sql("""SELECT count(*) FROM bond_memory b
-            JOIN cognitive_events e ON e.id=b.authority_event_id
-            WHERE e.source_event_type='canonical_assistant_turn'""")[0][0], 1)
+        self.extract(delta(content='她叫我宝宝',novel=False),old='她叫我宝宝')
+        before = self.sql('SELECT id,content,authority_event_id,authority_operation_id FROM bond_memory ORDER BY id')
+        self.extract(delta(content='她叫我宝宝',novel=False),old='她叫我宝宝')
+        self.assertEqual(self.sql('SELECT id,content,authority_event_id,authority_operation_id FROM bond_memory ORDER BY id'),before)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_events')[0][0],2)
+        self.assert_delta()
 
     def test_model_novel_flag_cannot_bypass_exact_duplicate(self):
-        _ok, _merge, save, resolve, _lifecycle = self.extract(delta(), old=DELTA)
-        save.assert_not_called()
-        resolve.assert_not_called()
+        self.extract(delta(),old=DELTA)
+        before = self.sql('SELECT id,adjudication FROM cognitive_events ORDER BY id')
+        self.extract(delta(novel=True),old=DELTA)
+        self.assertEqual(self.sql('SELECT id,adjudication FROM cognitive_events ORDER BY id'),before)
+        self.assert_delta()
 
     def test_no_canonical_assistant_evidence_cannot_save_character_yes(self):
         _ok, _merge, save, resolve, _lifecycle = self.extract(delta(), events=EVENTS[:1])
@@ -107,11 +122,11 @@ class CriticalBondDeltaTests(CanonicalMemoryFixture, unittest.TestCase):
         resolve.assert_not_called()
 
     def test_forged_event_or_quote_is_rejected(self):
-        for item in (delta(evidence_event_ids=['u1', 'fake']), delta(evidence_quote='绝对没有说过')):
-            with self.subTest(item=item):
-                _ok, _merge, save, resolve, _lifecycle = self.extract(item)
-                save.assert_not_called()
-                resolve.assert_not_called()
+        for item in (delta(evidence_event_ids=['u1','fake']),delta(evidence_quote='绝对没有说过')):
+            self.extract(item)
+            judgment = self.assert_delta()
+            self.assertNotIn('fake',str(judgment))
+            self.assertNotIn('绝对没有说过',str(judgment))
 
     def test_deleted_source_does_not_commit_delta(self):
         _ok, _merge, save, resolve, _lifecycle = self.extract(delta(), sources_active=False)
@@ -119,41 +134,33 @@ class CriticalBondDeltaTests(CanonicalMemoryFixture, unittest.TestCase):
         resolve.assert_not_called()
 
     def test_user_explicit_answer_uses_user_canonical_source(self):
-        user_event = {'event_id': 'u1', 'role': 'user', 'content': '我明确接受你叫我宝宝。'}
-        item = delta(actor='user', content='她明确接受我叫她宝宝',
-                     evidence_quote=user_event['content'], evidence_event_ids=['u1'])
-        ok, _merge, save, _resolve, lifecycle = self.extract(item, events=[user_event])
-        self.assertTrue(ok)
-        self.assertEqual(save.call_args.kwargs['source_event_ids'], ['u1'])
-        self.assertEqual(lifecycle.call_args.kwargs['update']['actor'], 'user')
+        self.extract(delta(actor='user'),events=[{'event_id':'u1','role':'user','content':'我明确接受你叫我宝宝。'}])
+        judgment = self.assert_delta(actor='user')
+        self.assertEqual(judgment['evidence_event_ids'],['u1'])
 
     def test_explicit_promise_does_not_require_an_answer_value(self):
-        events = [EVENTS[0], dict(EVENTS[1], content='明天给你回答。')]
-        item = delta(kind='explicit_promise', value=None, content='明天给你回答',
-                     evidence_quote='明天给你回答。')
-        ok, _merge, save, resolve, lifecycle = self.extract(item, events=events)
-        self.assertTrue(ok)
-        self.assertEqual(lifecycle.call_args.kwargs['update']['type'], 'pending_answer')
-        save.assert_called_once()
-        resolve.assert_not_called()
+        self.extract(delta(kind='explicit_promise',value=None),events=[EVENTS[0],dict(EVENTS[1],content='明天给你回答。')])
+        from cognitive_reader import fetch_cognitive_reader_state
+        row = fetch_cognitive_reader_state('u','c',conn=self.database)['questions'][0]
+        self.assertEqual(row['status'],'active')
+        self.assertEqual(row['metadata']['pending_answer']['status'],'pending')
+        self.assertNotIn('resolution',row['metadata'])
+        with patch.object(user_memory,'get_conn',return_value=self.database):
+            self.assertTrue(any('仍待回答' in r[1] for r in user_memory.get_bond_memories('u','c')))
 
     def test_literal_yes_can_resolve_a_scoped_question_without_restatement(self):
-        events = [EVENTS[0], dict(EVENTS[1], content='yes')]
-        ok, _merge, save, _resolve, _lifecycle = self.extract(delta(evidence_quote='yes'), events=events)
-        self.assertTrue(ok)
-        save.assert_called_once()
+        self.extract(delta(evidence_quote='yes'),events=[EVENTS[0],dict(EVENTS[1],content='yes')])
+        self.assert_delta()
 
     def test_literal_no_cannot_support_an_acceptance_delta(self):
-        events = [EVENTS[0], dict(EVENTS[1], content='no')]
-        _ok, _merge, save, resolve, _lifecycle = self.extract(delta(evidence_quote='no'), events=events)
-        save.assert_not_called()
-        resolve.assert_not_called()
+        self.extract(delta(evidence_quote='no'),events=[EVENTS[0],dict(EVENTS[1],content='no')])
+        self.assert_delta(value='no')
 
     def test_missing_delta_is_extracted_before_writes_and_used_after_merge_reject(self):
-        ok, _merge, save, _resolve, _lifecycle = self.extract(None, repair=delta())
-        self.assertTrue(ok)
-        self.assertEqual(save.call_args.args[3], DELTA.rstrip('。'))
-        self.assertEqual(save.call_count, 1)
+        self.extract(None)
+        self.assert_delta()
+        for guard in self.model_guards:
+            guard.assert_not_called()
 
 
     def test_delta_parse_or_schema_failure_precedes_every_domain_write(self):
@@ -174,25 +181,22 @@ class CriticalBondDeltaTests(CanonicalMemoryFixture, unittest.TestCase):
                     guard.assert_not_called()
 
     def test_successful_additive_merge_cannot_erase_independent_yes(self):
-        ok, _merge, save, resolve, _lifecycle = self.extract(delta(), merge_result=(True, 1))
-        self.assertTrue(ok)
-        self.assertEqual(save.call_args.args[3], DELTA.rstrip('。'))
-        self.assertEqual(resolve.call_args.args[3], [NEW])
+        self.extract(delta(novel=False),merge_result=(True,1))
+        self.assert_delta()
+        self.assertEqual(self.sql('SELECT content,recall_status FROM bond_memory WHERE authority_event_id IS NULL'),[(NEW,'active')])
 
     def test_unrelated_successful_merge_is_not_retired_by_acceptance(self):
-        ok, _merge, save, resolve, _lifecycle = self.extract(
-            delta(), merge_result=(True, 1), merge_targets=['她答应周六一起散步'])
-        self.assertTrue(ok)
-        save.assert_called_once()
-        self.assertEqual(resolve.call_args.args[3], [OLD])
+        self.extract(delta(),merge_result=(True,1),merge_targets=['她答应周六一起散步'])
+        self.assert_delta()
+        self.assertEqual(self.sql("SELECT recall_status FROM bond_memory WHERE content='她答应周六一起散步'"),[('active',)])
 
     def test_terminal_and_unrelated_fragments_are_not_destructively_merged(self):
-        ok, merge, save, resolve, _lifecycle = self.extract(
-            delta(), merge_result=(True, 2), merge_targets=[OLD, '她答应周六一起散步'])
-        self.assertTrue(ok)
-        merge.assert_not_called()
-        save.assert_called_once()
-        self.assertEqual(resolve.call_args.args[3], [OLD])
+        self.sql("INSERT INTO bond_memory(user_id,character_id,content,recall_status) VALUES ('u','c','她答应周六一起散步','completed')")
+        self.database.commit()
+        self.extract(delta(),merge_result=(True,2),merge_targets=[OLD,'她答应周六一起散步'])
+        self.assert_delta()
+        self.assertEqual(self.sql("SELECT recall_status FROM bond_memory WHERE content='她答应周六一起散步'"),[('completed',)])
+        self.assertEqual(self.sql('SELECT recall_status FROM bond_memory WHERE content=%s',(OLD,)),[('active',)])
 
     def test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate(self):
         import db_generation_receipt as receipt
@@ -298,39 +302,17 @@ class CriticalBondDeltaTests(CanonicalMemoryFixture, unittest.TestCase):
         self.assertIn('讨厌咖啡', self.sql("SELECT statement FROM cognitive_beliefs WHERE status='active'")[0][0])
 
     def test_future_answer_extraction_reaches_existing_question_ingress(self):
-        events = [EVENTS[0], dict(EVENTS[1], content='明天给你回答。')]
-        pending = {'type': 'pending_answer', 'question_text': '是否接受宝宝称呼',
-                   'content': '明天给你回答', 'evidence_quote': '明天给你回答。',
-                   'evidence_event_ids': ['u1', 'chat_reply:u1']}
-        ok, _merge, _save, _resolve, lifecycle = self.extract(
-            None, events=events, cognitive_update=pending)
-        self.assertTrue(ok)
-        self.assertEqual(lifecycle.call_args.kwargs['update']['type'], 'pending_answer')
+        self.extract(None,events=[EVENTS[0],dict(EVENTS[1],content='明天给你回答。')])
+        rows = self.sql("SELECT status,metadata->'pending_answer'->>'status' FROM cognitive_questions")
+        self.assertEqual(rows,[('active','pending')])
+        self.assertGreaterEqual(self.sql("SELECT count(*) FROM cognitive_cycles WHERE status='succeeded'")[0][0],1)
 
     def test_rejected_merge_preserves_old_row_and_persists_delta_provenance(self):
-        from tests.test_bond_recall_status import BondRecallStore, NOW
-        store = BondRecallStore()
-        store.bonds = [{'id': 10, 'user_id': 'user', 'character_id': 'gojo',
-                        'kind': 'between', 'content': OLD, 'recall_status': 'active',
-                        'timestamp': NOW}]
-        canonical = [EVENTS[0], dict(EVENTS[1], reply_to_event_id='u1')]
-        with patch.object(user_memory, 'get_conn', return_value=store), \
-                patch.object(user_memory, '_merge_retains_target_signal', return_value=False), \
-                patch.object(user_memory, '_bg_embed'), \
-                patch('smart_recall.link_bond_to_fact', return_value=None), \
-                patch('raw_events.sources_are_active', return_value=True), \
-                patch('cognitive_events.ingest_question_update', return_value={'status': 'inserted'}):
-            self.assertEqual(user_memory.merge_bond_memories(
-                'user', 'gojo', 'between', [OLD], NEW), (False, 0))
-            user_memory._apply_extracted_bond_delta(
-                'user', 'gojo', delta(), canonical, 'u1', [(10, OLD, NOW)],
-                merge_rejected=True)
-        self.assertEqual(store.bonds[0]['content'], OLD)
-        self.assertEqual(store.bonds[0]['recall_status'], 'superseded')
-        active = [row for row in store.bonds if row['recall_status'] == 'active']
-        self.assertEqual([row['content'] for row in active], [DELTA.rstrip('。')])
-        links = [params for sql, params in store.executed if sql.startswith('INSERT INTO memory_source_events')]
-        self.assertEqual({p[1] for p in links}, {'u1', 'chat_reply:u1'})
+        self.extract(delta())
+        judgment = self.assert_delta()
+        self.assertEqual(set(judgment['evidence_event_ids']),{'u1','chat_reply:u1'})
+        self.assertEqual(self.sql('SELECT content FROM bond_memory WHERE authority_event_id IS NULL'),[(OLD,)])
+        self.assertEqual(self.sql("SELECT count(*) FROM cognitive_questions WHERE status='resolved'")[0][0],1)
 
 
 if __name__ == '__main__':

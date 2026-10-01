@@ -589,7 +589,10 @@ def _alive_source_ids(source_event_ids, deleted: set) -> Tuple[str, ...]:
     return tuple(eid for eid in _json_ids(source_event_ids) if eid not in deleted)
 
 
-def _verified_derived(rows, deleted: set, *, require_source=True):
+def _verified_derived(rows, deleted: set, *, require_source=True, user_id=None, character_id=None):
+    if user_id and character_id and not _USE_MEMORY_STORE:
+        from memory_authority import filter_derived_answer_sources
+        rows = filter_derived_answer_sources(rows, user_id, character_id)
     out = []
     for row in rows:
         ids = _json_ids(row.get('source_event_ids'))
@@ -1177,6 +1180,25 @@ class ChatContextPack:
         return list(self.recent_event_ids)
 
 
+def revalidate_pack_blocks(pack, user_id, character_id, query):
+    """Rebuild cached expression blocks from current sources at prompt assembly."""
+    from memory_authority import filter_derived_answer_sources
+    from cognitive_reader import build_cognitive_prompt_context
+    candidates = [{'source_event_ids': item.source_event_ids, 'item': item}
+                  for item in getattr(pack, 'items', ())
+                  if item.item_type in ('pinned', 'rolling_summary', 'episodic_memory')]
+    current = filter_derived_answer_sources(candidates, user_id, character_id) if candidates else []
+    items = [row['item'] for row in current]
+    try:
+        cognitive = build_cognitive_prompt_context(user_id, character_id, query=query)
+    except Exception:
+        cognitive = ''
+    return dict(cognitive_prompt_text=cognitive,
+                pinned_prompt_text=_format_pinned_block([i for i in items if i.item_type == 'pinned']),
+                summary_prompt_text=_format_summary_block([i for i in items if i.item_type == 'rolling_summary']),
+                episode_prompt_text=_format_episode_block([i for i in items if i.item_type == 'episodic_memory']))
+
+
 def _format_pinned_block(items: Sequence[ContextItem]) -> str:
     if not items:
         return ''
@@ -1490,7 +1512,7 @@ def assemble_from_events(
         list_rolling_summaries(
             user_id, character_id, status='active',
             limit=SUMMARY_RECALL_CANDIDATE_LIMIT),
-        deleted,
+        deleted, user_id=user_id, character_id=character_id,
     )
     summaries = _pick_prompt_summaries(
         summary_candidates, user_message=user_message)
@@ -1506,7 +1528,7 @@ def assemble_from_events(
           f'selected={len(summaries)} items=[{";".join(summary_refs)}]')
     pins = _verified_derived(
         list_pins(user_id, character_id, status='active', limit=12, now=now),
-        deleted,
+        deleted, user_id=user_id, character_id=character_id,
     )
 
     # Summaries may be suppressed later only when a selected episode covers

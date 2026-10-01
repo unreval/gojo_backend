@@ -769,11 +769,15 @@ def _active_episode_rows(user_id, character_id, rows):
         str(row.get('event_id') or '').strip()
         for row in (canonical or []) if isinstance(row, dict)
     }
-    return [
+    current = [
         row for row in candidates
         if _source_ids(row.get('source_event_ids'))
         and set(_source_ids(row.get('source_event_ids'))).issubset(active_ids)
     ]
+    if not _uses_memory_store():
+        from memory_authority import filter_derived_answer_sources
+        current = filter_derived_answer_sources(current, user_id, character_id)
+    return current
 
 
 def _trace_episode_recall(label, rows, *, vector_enabled=False):

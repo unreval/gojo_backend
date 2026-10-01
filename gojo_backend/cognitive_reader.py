@@ -10,7 +10,7 @@ from cognitive_config import (
 )
 from cognitive_output import sticky_emotion_tag
 from cognitive_revision import current_belief_display, is_stable_reader_belief
-from memory_authority import current_literal_belief_sql
+from memory_authority import current_literal_belief_sql, current_answer_question_sql, answer_question_is_current
 from relationship_semantics import (
     ENGAGEMENT_STYLE_KEY,
     INTERNAL_CONFLICT_KEY,
@@ -284,6 +284,8 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                             AND b.character_id=cognitive_questions.character_id
                             AND b.belief_key=cognitive_questions.metadata->'current_judgment'->>'belief_key'
                             AND b.status='active' AND {current_literal_belief_sql('b')}))
+                 AND (metadata->>'updated_by' IS DISTINCT FROM 'explicit_answer_v1'
+                      OR {current_answer_question_sql()})
                ORDER BY updated_at DESC, id DESC
                LIMIT 6''',
             (user_id, character_id),
@@ -655,6 +657,9 @@ def iter_active_cognitive_items(user_id, character_id, *, conn=None,
             belief, 'judgment')
     for question in state.get('questions') or []:
         meta = question.get('metadata') or {}
+        if meta.get('updated_by') == 'explicit_answer_v1' and not answer_question_is_current(
+                user_id, character_id, question, conn=conn):
+            continue
         resolution = meta.get('resolution') or {}
         text = _safe_text(question.get('question_text'), 420)
         pending = meta.get('pending_answer') or {}

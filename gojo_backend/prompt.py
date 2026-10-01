@@ -391,6 +391,9 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
         and getattr(context_pack, 'support_ready', False)
         and not getattr(context_pack, 'failed_closed', False)
     )
+    if context_pack is not None:
+        from context_layer import revalidate_pack_blocks
+        current_blocks = revalidate_pack_blocks(context_pack, user_id, character_id, user_message)
 
     # ── 2. 角色背景记忆 ──
     recall_text = ''
@@ -507,7 +510,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
         from shared_relation_prompt import _EXPRESSION_ONLY_RULES
         stage_text = (
             (getattr(context_pack, 'relationship_prompt_text', '') or '')
-            + (getattr(context_pack, 'cognitive_prompt_text', '') or '')
+            + current_blocks['cognitive_prompt_text']
             + '\n' + (getattr(context_pack, 'expression_rules', '') or _EXPRESSION_ONLY_RULES)
         )
         temporal_text = getattr(context_pack, 'temporal_text', '') or ''
@@ -590,9 +593,9 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     summary_block = ''
     episode_block = ''
     if context_pack is not None:
-        pinned_block = getattr(context_pack, 'pinned_prompt_text', '') or ''
-        summary_block = getattr(context_pack, 'summary_prompt_text', '') or ''
-        episode_block = getattr(context_pack, 'episode_prompt_text', '') or ''
+        pinned_block = current_blocks['pinned_prompt_text']
+        summary_block = current_blocks['summary_prompt_text']
+        episode_block = current_blocks['episode_prompt_text']
 
     # ── ★ 角色专属铁律 ──
     canon_lock = load_canon_lock(character_id)

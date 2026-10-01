@@ -4,45 +4,235 @@
     "subtest": "(text='不接受', quote='不接受')",
     "original_record": "failures[1]",
     "observed_error": "AssertionError: False != True",
-    "behavior": "已迁移到真实canonical SQL；原正向事实、上下文确认、极性或独立增量行为仍未实现，保留正向要求。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "已迁移到真实canonical SQL；原正向事实、上下文确认、极性或独立增量行为仍未实现，保留正向要求。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.OperationEvidenceTests.test_cognitive_update_cannot_bypass_bond_delta_gate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_A_merge_reject_saves_only_explicit_acceptance_delta",
     "subtest": "",
     "original_record": "failures[31]",
     "observed_error": "AssertionError: Expected 'merge_bond_memories' to have been called once. Called 0 times.",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_A_merge_reject_saves_only_explicit_acceptance_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_literal_yes_can_resolve_a_scoped_question_without_restatement",
     "subtest": "",
     "original_record": "failures[32]",
     "observed_error": "AssertionError: Expected 'save_bond_memory' to have been called once. Called 0 times.",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_literal_yes_can_resolve_a_scoped_question_without_restatement",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_terminal_and_unrelated_fragments_are_not_destructively_merged",
     "subtest": "",
     "original_record": "failures[34]",
     "observed_error": "AssertionError: Expected 'save_bond_memory' to have been called once. Called 0 times.",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_terminal_and_unrelated_fragments_are_not_destructively_merged",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_unrelated_successful_merge_is_not_retired_by_acceptance",
     "subtest": "",
     "original_record": "failures[35]",
     "observed_error": "AssertionError: Expected 'save_bond_memory' to have been called once. Called 0 times.",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_unrelated_successful_merge_is_not_retired_by_acceptance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_assistant_denial_does_not_override_adjacent_canonical_evidence",
@@ -121,63 +311,329 @@
     "subtest": "",
     "original_record": "errors[12]",
     "observed_error": "KeyError: 'question_status'",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。 此项仍携带旧入口/返回结构夹具，尚不能视为完整行为验收。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。 此项仍携带旧入口/返回结构夹具，尚不能视为完整行为验收。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_c_explicit_yes_resolves_question_and_preserves_history",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_e_future_promise_stays_open_and_queues_existing_slow_loop",
     "subtest": "",
     "original_record": "errors[14]",
     "observed_error": "KeyError: 'question_status'",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。 此项仍携带旧入口/返回结构夹具，尚不能视为完整行为验收。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。 此项仍携带旧入口/返回结构夹具，尚不能视为完整行为验收。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_e_future_promise_stays_open_and_queues_existing_slow_loop",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_explicit_promise_does_not_require_an_answer_value",
     "subtest": "",
     "original_record": "errors[50]",
     "observed_error": "AttributeError: 'NoneType' object has no attribute 'kwargs'",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_explicit_promise_does_not_require_an_answer_value",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_future_answer_extraction_reaches_existing_question_ingress",
     "subtest": "",
     "original_record": "errors[51]",
     "observed_error": "AttributeError: 'NoneType' object has no attribute 'kwargs'",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_future_answer_extraction_reaches_existing_question_ingress",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_missing_delta_is_extracted_before_writes_and_used_after_merge_reject",
     "subtest": "",
     "original_record": "errors[52]",
     "observed_error": "AttributeError: 'NoneType' object has no attribute 'args'",
-    "behavior": "已迁移到真实canonical SQL；原正向事实、上下文确认、极性或独立增量行为仍未实现，保留正向要求。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "已迁移到真实canonical SQL；原正向事实、上下文确认、极性或独立增量行为仍未实现，保留正向要求。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_missing_delta_is_extracted_before_writes_and_used_after_merge_reject",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_successful_additive_merge_cannot_erase_independent_yes",
     "subtest": "",
     "original_record": "errors[53]",
     "observed_error": "AttributeError: 'NoneType' object has no attribute 'args'",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_successful_additive_merge_cannot_erase_independent_yes",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_user_explicit_answer_uses_user_canonical_source",
     "subtest": "",
     "original_record": "errors[54]",
     "observed_error": "AttributeError: 'NoneType' object has no attribute 'kwargs'",
-    "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
-    "method_body_unchanged": true,
-    "still_failing": true
+    "behavior": "阶段 D 已恢复本项有限行为。原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+    "method_body_unchanged": false,
+    "still_failing": false,
+    "pre_phase_d": {
+      "behavior": "原产品语义断言保留：确定性多轮、约定、自由表达或独立增量尚未恢复；未用模型裁决补齐。",
+      "method_body_unchanged": true,
+      "still_failing": true
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复/拒绝/待答增量独立保存，来源与主体正确，不被旧摘要合并和 duplicate 标签吞掉；同事件重试不重复，无关历史保留。当前用真实 SQL、问题裁决、多源链接与 reader 断言替代旧 writer 调用次数。",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_user_explicit_answer_uses_user_canonical_source",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_merge_outcomes_and_duplicate_labels_cannot_lose_independent_delta",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_same_event_independent_answers_and_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "test_id": "test_private_memory_fact_gate.PrivateMemoryFactGateTests.test_convention_only_backfill_does_not_replace_active_rule_from_assistant_only_reassignment",

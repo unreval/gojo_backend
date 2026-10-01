@@ -37,24 +37,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "test_id": "test_cognitive_p1_blockers.OperationEvidenceTests.test_ingress_itself_rejects_invalid_polarity",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.OperationEvidenceTests.test_ingress_itself_rejects_invalid_polarity",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "failures[3]",
@@ -69,24 +128,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_pending_answer_cannot_reopen_slow_loop_resolved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_pending_answer_cannot_reopen_slow_loop_resolved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "failures[4]",
@@ -100,24 +218,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_same_question_text_cannot_be_recreated_under_another_key",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_same_question_text_cannot_be_recreated_under_another_key",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "failures[5]",
@@ -131,24 +308,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_fabricated_quote_cannot_resolve_question",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_fabricated_quote_cannot_resolve_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "failures[6]",
@@ -162,24 +398,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_unrelated_assistant_event_cannot_supply_promise",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_unrelated_assistant_event_cannot_supply_promise",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "failures[7]",
@@ -1175,19 +1470,78 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_contradiction_checks_prediction_and_opens_issue",
+        "test_id": "test_cognitive_p1_blockers.OperationEvidenceTests.test_valid_negative_is_persisted_as_no",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_other_object_and_scope_do_not_settle_prediction",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "已覆盖明确字面自述的范围与矛盾；自由语义 signal selectors / 上下文 yes-no 仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_contradiction_checks_prediction_and_opens_issue",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_other_object_and_scope_do_not_settle_prediction",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "已覆盖明确字面自述的范围与矛盾；自由语义 signal selectors / 上下文 yes-no 仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.OperationEvidenceTests.test_valid_negative_is_persisted_as_no",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[7]",
@@ -1202,24 +1556,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_explicit_resolution_retry_keeps_resolved_and_judgment",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_explicit_resolution_retry_keeps_resolved_and_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[8]",
@@ -1233,24 +1646,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_cannot_become_active",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_cannot_become_active",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[9]",
@@ -1264,24 +1736,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_cannot_become_dormant",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_cannot_become_dormant",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[10]",
@@ -1296,24 +1827,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_output_fulfills_old_pending_answer",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_resolved_output_fulfills_old_pending_answer",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[11]",
@@ -1328,24 +1918,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_slow_loop_resolved_judgment_is_not_replaced_on_retry",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：来源、主体、极性和当前问题生命周期约束裁决。当前按 raw 原文保存 no，忽略错误模型标签；真实 SQL 重试与历史模型写入不能重新打开已答问题。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_p1_blockers.QuestionTransitionTests.test_slow_loop_resolved_judgment_is_not_replaced_on_retry",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_chinese_refusal_is_saved",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_worker_replay_is_operation_idempotent",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_nickname_answer_never_settles_unrelated_romance_question",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[13]",
@@ -1364,24 +2013,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+        "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_current_judgment_persists_on_question_not_as_personality_belief",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_memory_and_relationship_model_candidates_cannot_write_judgments",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_missing_or_assistant_source_cannot_create_a_user_report",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_authority.MemoryAuthorityTests.test_private_actual_assistant_quote_does_not_become_user_fact",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "来源拒绝与 assistant 仅作话语记录已覆盖；assistant 承诺及省略式回答的正向解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_current_judgment_persists_on_question_not_as_personality_belief",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[15]",
@@ -1397,24 +2105,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_resolution_keeps_only_validated_delta_recovery_fields",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_resolution_keeps_only_validated_delta_recovery_fields",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[16]",
@@ -1428,24 +2195,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_stale_cycle_cannot_restore_belief_flagged_by_explicit_resolution",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_stale_cycle_cannot_restore_belief_flagged_by_explicit_resolution",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[17]",
@@ -1461,24 +2287,83 @@
     ],
     "replacement_tests": [
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+        "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_stale_slow_loop_cannot_reopen_explicit_resolution_or_predictions",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
         "result": "passed",
         "executed_in_targeted": true
       },
       {
-        "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+        "result": "passed",
+        "executed_in_targeted": true
+      },
+      {
+        "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
         "result": "passed",
         "executed_in_targeted": true
       }
     ],
-    "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。",
+    "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。",
     "legacy_test_retained": true,
-    "legacy_current_result": "still failing; not deleted or skipped"
+    "legacy_current_result": "passed after same-ID canonical SQL migration; legacy authority not restored",
+    "pre_phase_d": {
+      "legacy_current_result": "still failing; not deleted or skipped",
+      "replacement_tests": [
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_replay_uses_committed_delta_if_extractor_now_calls_it_duplicate",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_memory_critical_delta.CriticalBondDeltaTests.test_historical_superseded_judgment_is_not_reapplied",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_cognitive_deterministic.OfflineDatabaseTests.test_rejected_source_preserves_the_existing_judgment",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "保护现有 canonical 裁决和显式纠正历史；自由问题身份合并、assistant pending-answer 与上下文解析仍未实现。"
+    },
+    "phase_d": {
+      "baseline_head": "6fae36a9b1e189ff211296465da81309829d8da3",
+      "current_result": "passed",
+      "resolved_in_this_phase": true,
+      "same_test_id_retained": true,
+      "method_body_changed": true,
+      "comparison_record": "resolved",
+      "comparison_artifact": "phase-d-comparison.json",
+      "business_postcondition": "原业务要求：明确答复结算对应问题，延后答复仍待答，伪造/陈旧裁决不能覆盖当前结果，保留历史。当前走 canonical 原文和真实 SQL，验证 reader/recall；不以模型输出直接写 question。",
+      "replacement_tests": [
+        {
+          "test_id": "test_cognitive_pending_resolution.PendingResolutionTests.test_stale_slow_loop_cannot_reopen_explicit_resolution_or_predictions",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_original_character_yes_has_full_chain_and_no_romance",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_tomorrow_remains_pending_and_retry_preserves_source_time",
+          "result": "passed",
+          "executed_in_targeted": true
+        },
+        {
+          "test_id": "test_explicit_answer_sql.ExplicitAnswerSQLTests.test_correction_processed_before_answer_job_cannot_be_revived",
+          "result": "passed",
+          "executed_in_targeted": true
+        }
+      ],
+      "remaining_scope": "恢复有限昵称问题/严格答复与独立增量；通用反话、调情、自由日语、表情约定和历史语义迁移未恢复。"
+    }
   },
   {
     "original_record": "errors[18]",

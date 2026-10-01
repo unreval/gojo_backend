@@ -465,10 +465,15 @@ class EpisodicRetrievalTests(unittest.TestCase):
             recall_result={},
             memory_text='已有召回证据优先级',
             episode_prompt_text='【你们以前一起经历过的事】\n- 一起讨论东京旅行\n',
+            items=[context_budget.ContextItem(item_id='episode',item_type='episodic_memory',
+                text='一起讨论东京旅行',source_event_ids=('episode-source',))],
             accounts_text='账户上下文',
         )
         with patch.object(prompt, 'get_character',
                           return_value={'core_prompt': '角色核心设定'}), \
+             patch('memory_authority.filter_derived_answer_sources',
+                   side_effect=lambda rows, *_: [r for r in rows
+                       if r['source_event_ids'] == ('episode-source',)]) as validate, \
              patch.object(prompt, 'load_canon_lock', return_value=''), \
              patch.object(prompt, 'get_time_context', return_value=''), \
              patch.object(prompt, 'get_first_interaction_days', return_value=None):
@@ -477,6 +482,7 @@ class EpisodicRetrievalTests(unittest.TestCase):
 
         self.assertIn('【你们以前一起经历过的事】', system_prompt)
         self.assertIn('一起讨论东京旅行', system_prompt)
+        validate.assert_called_once()
 
     def test_existing_fact_and_lifecycle_recall_stays_available_when_episode_empty(self):
         fact = {

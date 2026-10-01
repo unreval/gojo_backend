@@ -160,6 +160,7 @@ class CriticalContextTests(unittest.TestCase):
             accounts_text='账户上下文',
         )
         with patch.object(prompt, 'get_character', return_value={'core_prompt': '角色设定'}), \
+                patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current), \
                 patch.object(prompt, 'load_canon_lock', return_value=''), \
                 patch.object(prompt, 'get_time_context', return_value=''), \
                 patch.object(prompt, 'get_first_interaction_days', return_value=None):
