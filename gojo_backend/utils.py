@@ -270,6 +270,9 @@ def classify_reply_content(text) -> str:
     if not isinstance(text, str) or not text.strip():
         return 'invalid'
     text = text.strip()
+    if (text.lower() in ('null', 'undefined', 'nan', '[done]')
+            or any(ord(char) < 32 and char not in '\n\r\t' for char in text)):
+        return 'invalid'
     if (contains_offline_marker(text) or 'OFFLINE_CHARACTER_STATES' in text.upper()
             # Reject serialized envelopes/fragments, not brackets in prose.
             or _try_parse_json(text) is not None
@@ -283,12 +286,24 @@ def classify_reply_content(text) -> str:
             or re.search(r'<\s*/?\s*(?:analysis|thinking|tool_call)\b', text, re.I)
             or re.search(r'["\'][\w.-]+["\']\s*:', text)
             or re.search(r'["\']?\b(?:jp|zh|messages|emotion|moodshift|anchor|inner|'
-                         r'state|intent|reminder|accounting|pending_transaction|schedule_intent|memory_metadata|'
+                         r'state|intent|reminder|accounting|pending_transaction|schedule_intent|schedule_action_intent|memory_metadata|'
                          r'relationship|belief|cognitive_state)["\']?\s*:', text, re.I)):
         return 'invalid'
     if is_emoji_only(text) or re.fullmatch(r'(?:(?:\.{3,}|[…・])\s*)+', text):
         return 'nonverbal'
     return 'text' if has_visible_text(text) else 'invalid'
+
+
+def normalize_plaintext_reply(raw):
+    """One local, speech-only recovery contract, shared with voice's content gate.
+
+    Never extract from a broken envelope or synthesize translation/action fields.
+    The legacy two-column transport carries the same original text in both slots.
+    """
+    if classify_reply_content(raw) == 'invalid':
+        return None
+    text = raw.strip()
+    return {'jp': text, 'zh': text}
 
 
 def valid_reply_msg(m: dict) -> bool:
@@ -437,14 +452,14 @@ def merge_only_extreme_short(msgs):
     return result
 
 
-def finalize_user_messages(msgs):
+def finalize_user_messages(msgs, *, preserve_text=False):
     """发给前端的最后一道清洗。attempt / rescue / fallback 都应走这里。"""
     cleaned = []
     for m in msgs or []:
         if not isinstance(m, dict):
             continue
         jp = sanitize_user_reply(str(m.get('jp', '') or ''))
-        if classify_reply_content(jp) == 'text':
+        if not preserve_text and classify_reply_content(jp) == 'text':
             jp = sanitize_jp(jp)
         zh = sanitize_user_reply(str(m.get('zh', '') or ''))
         if not jp.strip() and not zh.strip():

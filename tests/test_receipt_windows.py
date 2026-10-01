@@ -37,7 +37,7 @@ class ReceiptWindowTests(unittest.TestCase):
                 route_chat, 'log_cache_usage'), patch.object(
                 route_chat, '_create_json', return_value=(json.dumps({
                     'messages': [{'jp': reply, 'zh': reply}]}), Mock())) as generate, patch.object(
-                route_chat, '_quick_translate', side_effect=AssertionError('translation not expected')), patch.object(
+                route_chat.claude_client.messages, 'create', side_effect=AssertionError('extra model call')), patch.object(
                 route_chat, '_commit_offline_state'), patch.object(
                 route_chat, '_reject_schedule_candidate', return_value=None), patch.object(
                 route_chat, '_commit_schedule_candidate', return_value={'ok': True, 'noop': True}), patch.object(
@@ -92,6 +92,24 @@ class ReceiptWindowTests(unittest.TestCase):
         self.assertEqual(self.sql("SELECT count(*) FROM memory_jobs WHERE source_event_id='chat_reply:window-b'")[0][0], 1)
         self.assertEqual(self.sql("SELECT count(*) FROM bond_memory")[0][0], 1)
         self.assertFalse({'delivered_at', 'received_at', 'read_at'} & stored.keys())
+
+    def test_salvage_preserves_canonical_assistant_and_memory_enqueue_once(self):
+        from generation_side_effect_worker import process_one_side_effect
+        raw = '今なら話せるよ'
+        with self.http() as (route, generate), patch.object(route, '_emit_generation_turn_link') as link:
+            generate.return_value = (raw, Mock(stop_reason='end_turn'))
+            first = asyncio.run(route.chat_text(self.request('salvage-sql')))
+            replay = asyncio.run(route.chat_text(self.request('salvage-sql')))
+            self.assertEqual((first.status_code, replay.status_code), (200, 200))
+            self.assertEqual(json.loads(first.body), json.loads(replay.body))
+            self.assertEqual(json.loads(first.body)['messages'][0]['jp'], raw)
+            generate.assert_called_once()
+            link.assert_called_once_with('salvage-sql', 'chat_reply:salvage-sql')
+        self.assertTrue(process_one_side_effect(self.assistant_effect('salvage-sql')))
+        self.assertFalse(process_one_side_effect(self.assistant_effect('salvage-sql')))
+        self.assertEqual(self.sql("SELECT text FROM chat_log WHERE role='gojo'"), [(raw,)])
+        self.assertEqual(self.sql("SELECT count(*) FROM memory_jobs WHERE source_event_id='chat_reply:salvage-sql'")[0][0], 1)
+        self.assertEqual(self.sql("SELECT count(*) FROM chat_generation_receipt")[0][0], 1)
 
     def test_C_repair_interrupted_assistant_effect_keeps_event_job_projection_once(self):
         from generation_side_effect_worker import process_one_side_effect

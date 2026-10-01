@@ -1175,6 +1175,7 @@ class ChatContextPack:
     meet_line: str = ''
     allocation: dict = field(default_factory=dict)
     failed_closed: bool = False
+    temporal_snapshot: Optional[dict] = None
 
     def recent_ids(self) -> List[str]:
         return list(self.recent_event_ids)
@@ -1393,12 +1394,11 @@ def _support_items(user_id, character_id, user_message, hot_messages, temporal_s
 
     try:
         import db_schedule as _dbs
-        from datetime import datetime as _dt
         try:
             from config import CN_TZ
-            now = _dt.now(CN_TZ)
+            now = _now_utc((temporal_snapshot or {}).get('now_utc')).astimezone(CN_TZ)
         except Exception:
-            now = _dt.utcnow()
+            now = _now_utc((temporal_snapshot or {}).get('now_utc'))
         schedule_text, _world = _dbs.format_world_prompt(
             character_id, user_id, now)
         if schedule_text:
@@ -1487,7 +1487,7 @@ def assemble_from_events(
 ) -> ChatContextPack:
     cfg = config or BudgetConfig()
     manager = ContextBudgetManager(cfg)
-    now = _now_utc(now)
+    now = _now_utc((temporal_snapshot or {}).get('now_utc') or now)
     events = exclude_current_turn_events(events, current_event_id)
     with _latency_span('hot'):
         hot, spill = select_hot_window(events, config=cfg, now=now)
@@ -1603,6 +1603,15 @@ def assemble_from_events(
         allocated = manager.split(items)
     _trace_budget_dropped(items, allocated)
     hot_kept = allocated.get('hot') or []
+    if temporal_snapshot is not None:
+        from temporal_awareness import conversational_applicability
+        historical_times = [
+            _now_utc(item.created_at) for item in hot_kept
+            if item.created_at and conversational_applicability(
+                item.created_at, temporal_snapshot)['applicability'] == 'historical'
+        ]
+        temporal_snapshot['historical_context_through'] = (
+            max(historical_times).isoformat() if historical_times else None)
     pin_kept = allocated.get('pinned') or []
     sum_kept = allocated.get('summary') or []
     recall_kept = list(allocated.get('recall') or []) + list(allocated.get('diary') or [])
@@ -1627,6 +1636,7 @@ def assemble_from_events(
             })
 
     pack = ChatContextPack(
+        temporal_snapshot=temporal_snapshot,
         messages=messages,
         recent_event_ids=[
             item.source_event_ids[0]
@@ -1696,6 +1706,9 @@ def build_chat_context(
 ) -> ChatContextPack:
     """Fast path: bounded ledger fetch + deterministic window. No LLM."""
     cfg = BudgetConfig.for_profile(profile)
+    now = _now_utc((temporal_snapshot or {}).get('now_utc') or now)
+    if temporal_snapshot is None:
+        temporal_snapshot = {'now_utc': now}
     try:
         import raw_events
         deleted = raw_events.deleted_event_ids(user_id, character_id)

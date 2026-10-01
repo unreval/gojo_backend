@@ -171,7 +171,7 @@ class PrivateSourceFirstTests(unittest.TestCase):
                 route_chat, 'build_system_blocks', return_value=[]), patch.object(
                 route_chat, 'log_cache_usage'), patch.object(
                 route_chat, '_create_json', return_value=('🥺...', Mock())) as generate, patch.object(
-                route_chat, '_quick_translate', side_effect=AssertionError('nonverbal translation')) as translate, patch.object(
+                route_chat.claude_client.messages, 'create', side_effect=AssertionError('extra model call')) as translate, patch.object(
                 route_chat, '_commit_offline_state') as state, patch.object(
                 route_chat, '_reject_schedule_candidate', return_value=None), patch.object(
                 route_chat, '_commit_schedule_candidate', return_value={'ok': True, 'noop': True}), patch.object(

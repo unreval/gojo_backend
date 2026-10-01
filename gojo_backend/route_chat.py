@@ -37,6 +37,7 @@ from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
     finalize_user_messages, classify_reply_content,
     has_visible_text, valid_reply_msg, commit_ready_msgs, msg_has_json_debris,
+    normalize_plaintext_reply,
 )
 from ai_client import extract_text
 from tts import tts_to_b64, transcribe_audio_b64
@@ -320,6 +321,11 @@ def _build_generation_trace_payload(
                 _trace_response_field(response, 'stop_reason'), _TRACE_STOP_REASONS),
         },
         'outcome': normalized_outcome,
+        'output_contract': (
+            ('salvaged_plaintext' if acceptance_mode in ('plaintext', 'nonverbal')
+             else 'structured_ok') if normalized_outcome == 'accepted'
+            else 'retry_invalid' if normalized_outcome == 'parse_invalid' else None
+        ),
         'acceptance_mode': (
             _trace_enum(acceptance_mode, {'structured', 'plaintext', 'nonverbal'})
             if normalized_outcome == 'accepted' else None
@@ -522,8 +528,11 @@ def _generate_or_none(
             print(f'[{log_tag}] attempt {attempt+1} chars={len(raw or "")}')
             parsed, visible, state = _parse_generation(raw)
             acceptance_mode = 'structured'
-            if not _parsed_ready(parsed, min_messages) and salvage:
-                salvaged = _salvage_japanese(raw)
+            if (not _parsed_ready(parsed, min_messages) and salvage
+                    and parsed is None and state is None
+                    and _trace_response_field(response, 'stop_reason') not in (
+                        'max_tokens', 'length', 'tool_use', 'pause_turn', 'refusal', 'content_filter')):
+                salvaged = normalize_plaintext_reply(raw)
                 if salvaged and min_messages == 1 and _valid_msg(salvaged):
                     parsed = {'emotion': '平静', 'messages': [salvaged]}
                     state = None
@@ -532,7 +541,11 @@ def _generate_or_none(
                         else 'plaintext')
                     parsed['_acceptance_mode'] = acceptance_mode
             if not _parsed_ready(parsed, min_messages):
-                will_retry = attempt + 1 < attempts and classify_reply_content(raw) == 'invalid'
+                will_retry = (attempt + 1 < attempts and (
+                    classify_reply_content(raw) == 'invalid'
+                    or min_messages > 1
+                    or _trace_response_field(response, 'stop_reason') in (
+                        'max_tokens', 'length', 'tool_use', 'pause_turn', 'refusal', 'content_filter')))
                 _emit_generation_trace(
                     model=model, max_tokens=max_tokens, system_blocks=system_blocks,
                     messages=messages, attempt=attempt + 1, attempts=attempts,
@@ -588,15 +601,12 @@ def _finalize_committed(result, min_messages=1):
     emotion = result.get('emotion', '平静')
     if emotion not in EMOTIONS:
         emotion = '平静'
-    msgs = _finalize_msgs(result.get('messages', []))
+    msgs = finalize_user_messages(
+        result.get('messages', []),
+        preserve_text=result.get('_acceptance_mode') in ('plaintext', 'nonverbal'))
     if not _commit_ready(msgs) or len(msgs) < min_messages:
         return None, None
     return emotion, msgs
-
-
-def _finalize_msgs(msgs):
-    """发给前端的最后一道清洗。attempt / rescue 都走这里；fallback 已删除，不能绕过 commit gate。"""
-    return finalize_user_messages(msgs)
 
 
 def _safe_reply_to(data):
@@ -631,7 +641,7 @@ def _busy_response(availability):
     })
 
 
-def _gate_voice_inbound(user_id, character_id, user_text, source_event_id):
+def _gate_voice_inbound(user_id, character_id, user_text, source_event_id, *, now=None):
     """Use the exact same canonical availability/phone-check path as text."""
     try:
         from reply_availability import check_reply_availability
@@ -639,6 +649,7 @@ def _gate_voice_inbound(user_id, character_id, user_text, source_event_id):
             character_id, user_id,
             source_event_id=source_event_id or '',
             pending_text=user_text,
+            now=now,
             event_meta={
                 'kind': 'voice',
                 'source_event_id': source_event_id or '',
@@ -654,9 +665,9 @@ def _gate_voice_inbound(user_id, character_id, user_text, source_event_id):
         return None, None
 
 
-def _reject_schedule_candidate(character_id, user_id, parsed, system_blocks):
+def _reject_schedule_candidate(character_id, user_id, parsed, system_blocks, *, now=None):
     from schedule_transition import validate_generated_schedule_reply
-    reason, _world = validate_generated_schedule_reply(character_id, user_id, parsed)
+    reason, _world = validate_generated_schedule_reply(character_id, user_id, parsed, now=now)
     if not reason:
         return None
     system_blocks.append({
@@ -695,8 +706,10 @@ def _prompt_messages(user_id, character_id, short_memories, limit=24):
 
 
 def _turn_context(user_id, character_id, user_message='', profile='default',
-                  limit=24, current_event_id=None):
+                  limit=24, current_event_id=None, temporal_snapshot=None):
     """Hot-context first; fail-closed on source validity; bounded fallback."""
+    if temporal_snapshot is None:
+        temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     pack = None
     try:
         from context_layer import build_chat_context
@@ -706,6 +719,8 @@ def _turn_context(user_id, character_id, user_message='', profile='default',
             profile=profile,
             include_recall=True,
             current_event_id=current_event_id,
+            temporal_snapshot=temporal_snapshot,
+            now=temporal_snapshot.get('now_utc'),
         )
         if getattr(pack, 'failed_closed', False):
             return pack, []
@@ -748,32 +763,6 @@ def _turn_context(user_id, character_id, user_message='', profile='default',
 def _history_plus_current(messages, content):
     from context_layer import append_current_user_turn
     return append_current_user_turn(messages, content)
-
-
-def _salvage_japanese(raw: str):
-    """Accept safe speech as text only; no state or machine fields survive."""
-    kind = classify_reply_content(raw)
-    if kind == 'invalid':
-        return None
-    jp = raw.strip()
-    zh = jp if kind == 'nonverbal' else _quick_translate(jp)
-    return {'jp': jp, 'zh': zh}
-
-
-def _quick_translate(jp: str) -> str:
-    """把一句日语快速翻成中文（救援用）。失败就返回空串，不阻断主流程。"""
-    if not jp:
-        return ''
-    try:
-        resp = claude_client.messages.create(
-            model=MODEL_JP_AUX,
-            max_tokens=200,
-            messages=[{'role': 'user', 'content':
-                f'把下面这句日语忠实翻译成中文，只输出译文本身，不要解释、不要引号：\n{jp}'}],
-        )
-        return extract_text(resp).strip().strip('「」"\'。 ').strip()
-    except Exception:
-        return ''
 
 
 # ★ 记账透传辅助：只做基本形状校验,不写库(由前端确认后 POST /accounting/records)
@@ -998,6 +987,7 @@ async def chat_text(data: dict):
             character_id, user_id,
             source_event_id=source_event_id or '',
             pending_text=user_text,
+            now=temporal_snapshot.get('now_local'),
             event_meta={
                 'kind': 'text',
                 'reply_to': reply_to,
@@ -1059,7 +1049,8 @@ async def chat_text(data: dict):
     short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
     pack, messages = _turn_context(
         user_id, character_id, user_text, profile='text',
-        current_event_id=source_event_id)
+        current_event_id=source_event_id,
+        temporal_snapshot=temporal_snapshot)
     messages = _history_plus_current(
         messages, _user_prompt_with_reply(user_text, reply_to))
     if 'hot' not in _trace.marks:
@@ -1107,7 +1098,8 @@ async def chat_text(data: dict):
 
     def reject_schedule(parsed):
         return _reject_schedule_candidate(
-            character_id, user_id, parsed, system_blocks)
+            character_id, user_id, parsed, system_blocks,
+            now=temporal_snapshot.get('now_local'))
 
     def reject_reply(parsed):
         return reject_calendar(parsed) or reject_schedule(parsed)
@@ -1285,7 +1277,8 @@ async def chat_story(data: dict):
     total_days = update_chat_days(user_id)
     pack, messages = _turn_context(
         user_id, character_id, user_text, profile='story',
-        current_event_id=str(data.get('source_event_id') or '').strip() or None)
+        current_event_id=str(data.get('source_event_id') or '').strip() or None,
+        temporal_snapshot=temporal_snapshot)
     messages = _history_plus_current(messages, user_text)
 
     recall_query = user_text
@@ -1367,7 +1360,8 @@ async def chat_proactive(data: dict):
 
     short_memories = get_short_memory(user_id, 4, character_id)
     pack, messages = _turn_context(
-        user_id, character_id, task_title, profile='proactive')
+        user_id, character_id, task_title, profile='proactive',
+        temporal_snapshot=temporal_snapshot)
     if pack and getattr(pack, 'failed_closed', False):
         messages = []
     elif messages:
@@ -1446,11 +1440,12 @@ async def chat_voice_text(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
-    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     source_event_id = (str(data.get('source_event_id') or '').strip()
                        or f'voice_inbound:{uuid.uuid4()}')
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     availability, busy = _gate_voice_inbound(
-        user_id, character_id, user_text, source_event_id)
+        user_id, character_id, user_text, source_event_id,
+        now=temporal_snapshot.get('now_local'))
     if busy is not None:
         if availability and availability.get('seen'):
             save_user_short_memory_once(
@@ -1458,7 +1453,8 @@ async def chat_voice_text(data: dict):
         return busy
     pack, messages = _turn_context(
         user_id, character_id, user_text, profile='voice',
-        current_event_id=source_event_id)
+        current_event_id=source_event_id,
+        temporal_snapshot=temporal_snapshot)
     messages = _history_plus_current(messages, user_text)
 
     system_blocks = build_system_blocks(
@@ -1475,7 +1471,8 @@ async def chat_voice_text(data: dict):
         cache_tag=f'voice:{character_id}',
         salvage=True,
         reject_fn=lambda parsed: _reject_schedule_candidate(
-            character_id, user_id, parsed, system_blocks),
+            character_id, user_id, parsed, system_blocks,
+            now=temporal_snapshot.get('now_local')),
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
@@ -1538,11 +1535,12 @@ async def chat_voice_story(data: dict):
     if not char:
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
-    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     source_event_id = (str(data.get('source_event_id') or '').strip()
                        or f'voice_story:{uuid.uuid4()}')
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     availability, busy = _gate_voice_inbound(
-        user_id, character_id, user_text, source_event_id)
+        user_id, character_id, user_text, source_event_id,
+        now=temporal_snapshot.get('now_local'))
     if busy is not None:
         if availability and availability.get('seen'):
             save_user_short_memory_once(
@@ -1550,7 +1548,8 @@ async def chat_voice_story(data: dict):
         return busy
     pack, messages = _turn_context(
         user_id, character_id, user_text, profile='voice',
-        current_event_id=source_event_id)
+        current_event_id=source_event_id,
+        temporal_snapshot=temporal_snapshot)
     messages = _history_plus_current(messages, user_text)
 
     system_blocks = build_system_blocks(
@@ -1567,7 +1566,8 @@ async def chat_voice_story(data: dict):
         cache_tag=f'voice_story:{character_id}',
         min_messages=3,
         reject_fn=lambda parsed: _reject_schedule_candidate(
-            character_id, user_id, parsed, system_blocks),
+            character_id, user_id, parsed, system_blocks,
+            now=temporal_snapshot.get('now_local')),
     )
     emotion, msgs = _finalize_committed(result, min_messages=3)
     if msgs is None:
@@ -1624,7 +1624,8 @@ async def chat_voice_proactive(data: dict):
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     try:
         import db_schedule
-        world = db_schedule.get_current_world_state(character_id, user_id)
+        world = db_schedule.get_current_world_state(
+            character_id, user_id, temporal_snapshot.get('now_local'))
         if not (world.get('availability') or {}).get('can_reply', True):
             return JSONResponse({
                 'busy': True,
@@ -1678,7 +1679,8 @@ async def chat_voice_proactive(data: dict):
         n_recent = 4
 
     pack, messages = _turn_context(
-        user_id, character_id, '', profile='voice')
+        user_id, character_id, '', profile='voice',
+        temporal_snapshot=temporal_snapshot)
     if pack and getattr(pack, 'failed_closed', False):
         messages = []
     elif messages:
@@ -1702,7 +1704,8 @@ async def chat_voice_proactive(data: dict):
         log_tag=f'voice_proactive:{character_id}',
         cache_tag=f'voice_proactive:{character_id}',
         reject_fn=lambda parsed: _reject_schedule_candidate(
-            character_id, user_id, parsed, system_blocks),
+            character_id, user_id, parsed, system_blocks,
+            now=temporal_snapshot.get('now_local')),
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:

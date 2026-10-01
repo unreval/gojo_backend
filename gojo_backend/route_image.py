@@ -58,7 +58,7 @@ def _prompt_messages(user_id, character_id, short_memories, limit=24):
 
 
 def _turn_context(user_id, character_id, user_message='', limit=24,
-                  current_event_id=None):
+                  current_event_id=None, temporal_snapshot=None):
     pack = None
     try:
         from context_layer import build_chat_context
@@ -68,6 +68,7 @@ def _turn_context(user_id, character_id, user_message='', limit=24,
             profile='image',
             include_recall=True,
             current_event_id=current_event_id,
+            temporal_snapshot=temporal_snapshot,
         )
         if getattr(pack, 'failed_closed', False):
             return pack, []
@@ -453,6 +454,7 @@ async def chat_image(data: dict):
             character_id, user_id,
             source_event_id=source_event_id or '',
             pending_text=display_text,
+            now=temporal_snapshot.get('now_local'),
             event_meta=base_event_meta,
         )
         if not availability.get('can_reply'):
@@ -522,7 +524,8 @@ async def chat_image(data: dict):
 
     # ── free / immediate reply：一次 Vision 同时产出回复 + visual_summary ──
     pack, messages = _turn_context(
-        user_id, character_id, user_text, current_event_id=source_event_id)
+        user_id, character_id, user_text, current_event_id=source_event_id,
+        temporal_snapshot=temporal_snapshot)
     from context_layer import append_current_user_turn
     messages = append_current_user_turn(messages, user_content)
 

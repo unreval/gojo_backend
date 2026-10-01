@@ -5,7 +5,7 @@
     - _accounts_block() 在动态尾里注入当前用户的账户列表(dynamic_tail,不缓存)
     - OUTPUT_SPEC 末尾追加 pending_transaction 字段规范(静态,进缓存头)
 """
-from datetime import datetime, timedelta
+from datetime import timedelta
 from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID
 from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock, load_core
@@ -16,10 +16,11 @@ from user_memory import (
 from route_period import get_period_context
 from shared_relation_prompt import build_relation_rules
 import memory_search
+from context_layer import _now_utc
 
 
 def get_time_context(user_message='', now=None):
-    now = now or datetime.now(CN_TZ)
+    now = now or _now_utc()
     if now.tzinfo is None:
         now = now.replace(tzinfo=CN_TZ)
     else:
@@ -373,6 +374,12 @@ context 里写清楚为什么触发,让【触发那一刻的你】知道要说�
 def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
                         user_message='', extra_suffix='', temporal_snapshot=None,
                         context_pack=None):
+    if temporal_snapshot is None:
+        temporal_snapshot = getattr(context_pack, 'temporal_snapshot', None)
+    if temporal_snapshot is None:
+        temporal_snapshot = {'now_utc': _now_utc()}
+    now_utc = _now_utc(temporal_snapshot.get('now_utc'))
+    now_local = now_utc.astimezone(CN_TZ)
     # ── 1. 角色定义 ──
     char = get_character(character_id)
     if not char:
@@ -460,11 +467,11 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
         if long_memories is None:
             long_memories = get_long_memory(user_id, character_id)
         from datetime import timezone as _tz
-        _now_utc = datetime.utcnow()
+        frozen_utc = now_utc.astimezone(_tz.utc).replace(tzinfo=None)
         fresh_memories = []
         for content, ts, category in long_memories:
             if category == '状态' and ts is not None:
-                if (_now_utc - ts).total_seconds() / 3600 > 48:
+                if (frozen_utc - ts).total_seconds() / 3600 > 48:
                     continue
             fresh_memories.append((content, ts, category))
         long_memories = fresh_memories
@@ -526,12 +533,6 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
                                           user_message=user_message)
         temporal_text = ''
         try:
-            from temporal_awareness import build_prompt_context
-            temporal_text = build_prompt_context(
-                user_id, character_id, snapshot=temporal_snapshot)
-        except Exception as _e:
-            print(f'[prompt] 时间意识注入跳过：{_e}')
-        try:
             period_text = get_period_context(user_id)
         except Exception:
             period_text = ''
@@ -547,17 +548,10 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 【别复读上一条，但要接得上】
 上一条你说的是：「{last_reply[:200]}」
 1. 禁止把同样的意思、同样的句式再说一遍——原地打转最没意思。
-2. 但你们是在【连着聊天】，不是各说各的：她的话是接着你这句来的，你也可以自然承接刚才的语境
-   （她赌气你就接住那个气、她撒娇你就接住那份撒娇），只要说的是新的内容。
+2. 是否连续聊天以 TEMPORAL SNAPSHOT 为准：continuing 可以承接短期语境；
+   historical/unknown 只用于避免复读，不得把上一条的临时状态当成现在仍成立。
 3. 第一句要回应她【这次】说的话，别答非所问。'''
         schedule_text = ''
-        try:
-            import db_schedule as _dbs
-            _now = datetime.now(CN_TZ)
-            schedule_text, _world = _dbs.format_world_prompt(
-                character_id, user_id, _now)
-        except Exception as _e:
-            print(f'[prompt] 日程注入跳过：{_e}')
         diary_hint = ''
         try:
             import diary_engine
@@ -601,7 +595,21 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     canon_lock = load_canon_lock(character_id)
 
     # ── 时间 + 输出规范 ──
-    time_ctx = get_time_context(user_message)
+    # The frozen clock and transient-state constraints must survive aux trimming.
+    try:
+        from temporal_awareness import build_prompt_context
+        temporal_text = build_prompt_context(
+            user_id, character_id, snapshot=temporal_snapshot)
+    except Exception as _e:
+        print(f'[prompt] 时间意识注入跳过：{_e}')
+    try:
+        import db_schedule as _dbs
+        schedule_text, _world = _dbs.format_world_prompt(
+            character_id, user_id, now_local)
+    except Exception as _e:
+        schedule_text = ''
+        print(f'[prompt] 日程注入跳过：{_e}')
+    time_ctx = get_time_context(user_message, now=now_local)
     emotion_list = ', '.join(EMOTIONS)
 
     # ════════════════════════════════════════════════════════

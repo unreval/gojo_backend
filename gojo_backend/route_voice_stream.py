@@ -101,6 +101,8 @@ async def chat_voice_stream(data: dict):
     if not char:
         return _err(f'character {character_id} not found')
 
+    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+
     # Streaming voice is an inbound chat surface, so it enters through the
     # same canonical availability/phone-check gate as text and image.
     try:
@@ -109,6 +111,7 @@ async def chat_voice_stream(data: dict):
             character_id, user_id,
             source_event_id=source_event_id or '',
             pending_text=user_text,
+            now=temporal_snapshot.get('now_local'),
             event_meta={
                 'kind': 'voice_stream',
                 'source_event_id': source_event_id or '',
@@ -134,7 +137,6 @@ async def chat_voice_stream(data: dict):
         print(f'[{user_id}] voice_stream schedule check skipped:{exc}')
 
     voice_id = char.get('voice_id')
-    temporal_snapshot = get_temporal_snapshot(user_id, character_id)
 
     # Commit before reading: history includes this event once, even on retries.
     save_user_short_memory_once(
@@ -151,6 +153,8 @@ async def chat_voice_stream(data: dict):
             profile='voice',
             include_recall=True,
             current_event_id=source_event_id,
+            temporal_snapshot=temporal_snapshot,
+            now=temporal_snapshot.get('now_utc'),
         )
         if getattr(pack, 'failed_closed', False):
             failed_closed = True
@@ -228,7 +232,7 @@ async def chat_voice_stream(data: dict):
                     import db_schedule
                     from schedule_contract import completion_claim_conflict
                     world = db_schedule.get_current_world_state(
-                        character_id, user_id)
+                        character_id, user_id, temporal_snapshot.get('now_local'))
                     if completion_claim_conflict(
                             [{'jp': jp_to_tts, 'zh': zh_final}], world, None):
                         print('[voice_stream] dropped uncommitted completion claim')

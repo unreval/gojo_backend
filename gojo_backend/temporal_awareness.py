@@ -56,6 +56,10 @@ def get_temporal_snapshot(user_id: str, character_id: str,
     """
     now = _as_utc_naive(now_utc)
     row = _load_row(user_id, character_id) or _load_history_fallback(user_id, character_id)
+    activity = _load_canonical_activity(user_id, character_id, now)
+    generation_fields = _generation_activity_fields(now, activity)
+    if activity and activity.get('last_interaction_at'):
+        row = {**(row or {}), **activity}
 
     if not row or not row.get('last_interaction_at'):
         return {
@@ -65,6 +69,7 @@ def get_temporal_snapshot(user_id: str, character_id: str,
             'now_utc': now,
             'now_cn': _format_cn(now),
             **_derived_temporal_fields(now, None),
+            **generation_fields,
             'elapsed_seconds_since_last_interaction': None,
             'elapsed_label': '首次记录',
             'gap_bucket': 'first_contact',
@@ -85,6 +90,7 @@ def get_temporal_snapshot(user_id: str, character_id: str,
         'now_utc': now,
         'now_cn': _format_cn(now),
         **_derived_temporal_fields(now, last_interaction),
+        **generation_fields,
         'first_interaction_at': first,
         'first_interaction_cn': _format_cn(first) if first else None,
         'last_interaction_at': last_interaction,
@@ -106,6 +112,106 @@ def get_temporal_snapshot(user_id: str, character_id: str,
         'last_initiator': row.get('last_initiator') or 'unknown',
         'last_source': row.get('last_source') or 'chat',
     }
+
+
+def _load_canonical_activity(user_id, character_id, now_utc):
+    """Read timestamps only; do not adjudicate or mutate any memory source."""
+    conn = cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('''SELECT MIN(created_at) AS first_at, MAX(created_at) AS latest_at,
+                              MAX(created_at) FILTER (WHERE role = 'user') AS latest_user_at,
+                              MAX(created_at) FILTER (WHERE role IN ('gojo', 'assistant')) AS latest_assistant_at
+                       FROM chat_log c
+                       WHERE user_id=%s AND chat_id=%s
+                         AND created_at <= %s
+                         AND role IN ('user', 'gojo', 'assistant')
+                         AND COALESCE(status, 'active') = 'active'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM chat_log_tombstone t
+                             WHERE t.user_id=c.user_id AND t.chat_id=c.chat_id
+                               AND t.client_msg_id IN (c.event_id, c.client_msg_id))''',
+                    (user_id, character_id, _as_utc_naive(now_utc).replace(tzinfo=timezone.utc)))
+        first, last, user, assistant = cur.fetchone()
+        return {'first_interaction_at': first, 'last_interaction_at': last,
+                'last_user_message_at': user, 'last_assistant_message_at': assistant,
+                'last_initiator': ('user' if user and user == last and user != assistant
+                                   else 'assistant' if assistant and assistant == last and user != assistant
+                                   else 'unknown'),
+                'last_source': 'canonical_chat_log'}
+    except Exception:
+        return None
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
+
+
+def conversational_applicability(event_at, snapshot):
+    """Applicability of transient context, never a statement that a user slept.
+
+    Reuse the hot-context continuity windows. Reply links can recall an event,
+    but cannot renew its transient state. No events are expired or deleted.
+    """
+    from context_budget import HOT_CONTEXT_CONTINUE_GAP_MINUTES
+    source = _coerce_dt(event_at)
+    now = _coerce_dt(snapshot.get('now_utc'))
+    if source is None or now is None or _as_utc_naive(source) > _as_utc_naive(now):
+        return {'age_seconds': None, 'applicability': 'unknown', 'reason': 'unknown_time'}
+    age = _seconds_between(source, now)
+    latest_user = _coerce_dt(snapshot.get('latest_user_at'))
+    newer_user = bool(latest_user and
+                      _as_utc_naive(source) < _as_utc_naive(latest_user) <= _as_utc_naive(now))
+    # Whether the current inbound event was already read must not change the
+    # continuity window across text and voice. Canonical activity supplies the
+    # source timestamp; elapsed time uses the existing continuous-episode bound.
+    historical = age > HOT_CONTEXT_CONTINUE_GAP_MINUTES * 60
+    return {'age_seconds': age,
+            'applicability': 'historical' if historical else 'continuing',
+            'reason': ('new_activity_after_gap' if historical and newer_user
+                       else 'elapsed_gap' if historical else 'short_continuity'),
+            'newer_user_activity': newer_user}
+
+
+def _generation_activity_fields(now, activity):
+    activity = activity or {}
+    fields = {
+        'now_utc': now, 'now_local': now.replace(tzinfo=timezone.utc).astimezone(CN_TZ),
+        'timezone_source': 'legacy_app_config',
+        'latest_user_at': _coerce_dt(activity.get('last_user_message_at')),
+        'latest_assistant_at': _coerce_dt(activity.get('last_assistant_message_at')),
+    }
+    for role in ('user', 'assistant'):
+        at = fields[f'latest_{role}_at']
+        if at is not None:
+            at = _as_utc_naive(at).replace(tzinfo=timezone.utc)
+            fields[f'latest_{role}_at'] = at
+        fields[f'elapsed_since_{role}'] = _seconds_between(at, now) if at else None
+    fields['canonical_activity_boundary'] = max(
+        (fields[key] for key in ('latest_user_at', 'latest_assistant_at')
+         if fields[key] is not None), default=None)
+    fields['conversational_state'] = conversational_applicability(
+        fields['latest_assistant_at'], fields)
+    return fields
+
+
+def _generation_prompt_context(snapshot):
+    state = snapshot.get('conversational_state') or {}
+    return f'''
+【当前状态适用性——只限定短期语境，不删除历史】
+- authoritative_now_utc: {_iso_utc(snapshot.get('now_utc'))}
+- display_timezone_source: legacy_app_config; display_timezone: {CN_TZ}（仅显示，不参与短期状态判定）
+- latest_user_at_utc: {_iso_utc(snapshot.get('latest_user_at'))}; elapsed_seconds={snapshot.get('elapsed_since_user')}
+- latest_assistant_at_utc: {_iso_utc(snapshot.get('latest_assistant_at'))}; elapsed_seconds={snapshot.get('elapsed_since_assistant')}
+- canonical_activity_boundary_utc: {_iso_utc(snapshot.get('canonical_activity_boundary'))}
+- conversational_state: {state.get('applicability', 'unknown')}; age_seconds={state.get('age_seconds')}; reason={state.get('reason')}
+- retained_history_state_historical_through: {snapshot.get('historical_context_through')}; 此时间及以前保留的旧对话状态只适用于当时。
+历史消息里的“晚安/快睡/起床后再说”只证明当时说过，不证明用户现在仍准备睡觉或尚未醒来。
+historical/unknown 的短期状态不得当作当前事实；continuing 允许承接短期话题，也不证明状态成立。
+最新用户明确陈述的状态转换优先于旧话题；新用户活动只证明再次发言，不推断已经睡过。
+'''
 
 
 def serialize_snapshot(snapshot: Optional[Dict]) -> Optional[Dict]:
@@ -278,7 +384,7 @@ def build_calendar_grounding(now_utc: Optional[datetime] = None,
         )
 
     return f'''【确定性日历锚点——后端已计算，不得凭感觉改写】
-- 当前：{now_cn.strftime("%Y-%m-%d %H:%M")}（北京时间）
+- 当前：{now_cn.strftime("%Y-%m-%d %H:%M")}（{CN_TZ}）
 {_anchor_line('今天早上', today_morning, now_cn)}
 {_anchor_line('今天中午', today_noon, now_cn)}
 {_anchor_line('今天傍晚', today_evening, now_cn)}
@@ -500,10 +606,30 @@ def record_assistant_message(user_id: str, character_id: str, source: str = 'pro
 def build_prompt_context(user_id: str, character_id: str,
                          snapshot: Optional[Dict] = None) -> str:
     """给主生成 prompt 的持久时间上下文。"""
+    # Legacy callers may supply only the frozen clock; resolve activity at that
+    # same instant without requiring a new prompt/context signature.
+    if snapshot is not None and 'has_history' not in snapshot:
+        snapshot = get_temporal_snapshot(
+            user_id, character_id, now_utc=snapshot.get('now_utc'))
     snap = _normalize_snapshot(snapshot) or get_temporal_snapshot(user_id, character_id)
+    applicability = _generation_prompt_context(snap)
+    previous_reply = snap.get('latest_assistant_at')
+    if previous_reply:
+        # The latest user event can be this very request. It does not renew an
+        # old assistant state or make that earlier reply "just now".
+        elapsed = snap['elapsed_since_assistant']
+        snap.update(_derived_temporal_fields(snap['now_utc'], previous_reply))
+        snap.update(
+            last_interaction_cn=_format_cn(previous_reply),
+            elapsed_seconds_since_last_interaction=elapsed,
+            elapsed_label=format_elapsed(elapsed), gap_bucket=classify_gap(elapsed),
+            previous_relevant_event_kind='latest_canonical_assistant_reply',
+            last_initiator='assistant',
+        )
     if not snap.get('has_history'):
         return f'''
 
+{applicability}
 【TEMPORAL SNAPSHOT——生成前必须优先遵守】
 - current_timestamp: {snap.get('current_timestamp') or snap.get('now_cn')}
 - previous_relevant_event: none
@@ -535,6 +661,7 @@ def build_prompt_context(user_id: str, character_id: str,
 
     return f'''
 
+{applicability}
 【TEMPORAL SNAPSHOT——生成前必须优先遵守】
 - current_timestamp: {snap.get('current_timestamp') or snap.get('now_cn')}
 - previous_relevant_event:
@@ -549,7 +676,7 @@ def build_prompt_context(user_id: str, character_id: str,
 
 【真实经过时间——持久时间账本】
 - 现在：{snap.get('now_cn')}
-- 上次有记录的互动：{last_cn}（约 {elapsed} 前，最后由{initiator}开口）{user_line}{assistant_line}
+- 上述参照事件：{last_cn}（约 {elapsed} 前，由{initiator}开口）{user_line}{assistant_line}
 - 最早有记录的互动：{first_cn}；累计记录互动约 {count} 轮；最长断档约 {longest}
 
 用法：

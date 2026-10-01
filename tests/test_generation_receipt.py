@@ -944,6 +944,36 @@ class RouteIdempotencyTests(unittest.TestCase):
         self.assertEqual(self.save_short.call_count, 1)
         self.assertEqual(self.record_turn.call_count, 1)
 
+    def test_salvaged_body_replay_has_one_receipt_turn_link_and_effect_application(self):
+        raw = '今はゆっくり話そう'
+        with patch.object(self.route, '_emit_generation_turn_link') as link, \
+                patch.object(self.route.claude_client.messages, 'create',
+                             side_effect=AssertionError('translation must be local')):
+            first, body1 = self.send([raw], 'salvage-once')
+            self.assertEqual(self.tts.call_count, 1)
+            second, body2 = self.send([], 'salvage-once')
+        self.assertEqual((first.status_code, second.status_code), (200, 200))
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.assertEqual(body1['messages'][0]['jp'], raw)
+        self.assertEqual(body2['messages'][0]['jp'], raw)
+        self.assertEqual(body1['assistant_turn_id'], body2['assistant_turn_id'])
+        link.assert_called_once_with('salvage-once', body1['assistant_turn_id'])
+        self.assertEqual(len(self.store.receipts), 1)
+        self.assertEqual(self.save_short.call_count, 1)
+        self.assertEqual(self.record_turn.call_count, 1)
+        salvage_tts_calls = self.tts.call_count
+        effects = [v for k, v in self.store.effects.items() if k[2] == 'salvage-once']
+        self.assertTrue(effects)
+        self.assertTrue(all(e['status'] == 'completed' for e in effects))
+        self.assertTrue(all(e['attempt_count'] == 1 for e in effects))
+        self.promise_detect.assert_not_called()
+        # Receipts deliberately omit audio; each successful HTTP replay hydrates
+        # TTS. Salvage must match structured success, not introduce audio storage.
+        before = self.tts.call_count
+        self.send([chat_reply('話そう', '聊聊吧')], 'structured-tts-control')
+        self.send([], 'structured-tts-control')
+        self.assertEqual(salvage_tts_calls, self.tts.call_count - before)
+
     def test_http_loss_replays_completed(self):
         raw = chat_reply('そうだね', '是啊')
         first, body1 = self.send([raw], 'lost-1')
