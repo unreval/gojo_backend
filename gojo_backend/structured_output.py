@@ -341,7 +341,7 @@ def invoke_structured_llm(
     try:
         raw_text, raw_usage = create_chat_fn(**kwargs)
     except Exception as exc:
-        print(f'[structured_output] domain={domain} attempt={attempt} '
+        print(f'[structured_output] status=error domain={domain} attempt={attempt} '
               f'ok=False error=llm_call_failed exception={type(exc).__name__}')
         raise
     raw_text = raw_text if isinstance(raw_text, str) else ''
@@ -386,6 +386,7 @@ def emit_structured_output_telemetry(call: StructuredLLMCall, *, attempt: int,
     telemetry = call.telemetry
     logger(
         '[structured_output] '
+        f'status={"success" if telemetry.get("ok") else "error"} '
         f'domain={telemetry.get("domain") or "unknown"} '
         f'attempt={attempt} ok={telemetry.get("ok")} '
         f'error={telemetry.get("error_code") or "-"} '

@@ -548,11 +548,7 @@ def _generate_or_none(
                         else 'plaintext')
                     parsed['_acceptance_mode'] = acceptance_mode
             if not _parsed_ready(parsed, min_messages):
-                will_retry = (attempt + 1 < attempts and (
-                    classify_reply_content(raw) == 'invalid'
-                    or min_messages > 1
-                    or _trace_response_field(response, 'stop_reason') in (
-                        'max_tokens', 'length', 'tool_use', 'pause_turn', 'refusal', 'content_filter')))
+                will_retry = attempt + 1 < attempts
                 _emit_generation_trace(
                     model=model, max_tokens=max_tokens, system_blocks=system_blocks,
                     messages=messages, attempt=attempt + 1, attempts=attempts,

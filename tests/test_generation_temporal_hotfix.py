@@ -28,16 +28,37 @@ class PlaintextContractTests(unittest.TestCase):
                   if c.args and isinstance(c.args[0], str) and c.args[0].startswith('[generation_trace] {')]
         return result, state, provider.call_count, traces
 
-    def test_plain_japanese_chinese_english_use_exact_body_and_one_provider_call(self):
+    def test_plain_japanese_chinese_english_retry_without_salvage(self):
         for raw in ('今日はゆっくり話そう', '现在我们慢慢聊吧', 'We can talk now'):
+            with self.subTest(raw=raw):
+                result, state, calls, traces = self.generate(raw)
+                self.assertEqual(calls, 3)
+                self.assertIsNone(state)
+                self.assertIsNone(result)
+                self.assertIsNone(utils.normalize_plaintext_reply(raw))
+                self.assertEqual([t['output_contract'] for t in traces], ['retry_invalid'] * 3)
+                self.assertEqual([t['will_retry'] for t in traces], [True, True, False])
+
+    def test_nonverbal_plaintext_salvages_once(self):
+        for raw in ('😒', '……', '...'):
             with self.subTest(raw=raw):
                 result, state, calls, traces = self.generate(raw)
                 self.assertEqual(calls, 1)
                 self.assertIsNone(state)
                 self.assertEqual(result['messages'], [{'jp': raw, 'zh': raw}])
-                self.assertEqual(route_chat._finalize_committed(result)[1], result['messages'])
-                self.assertEqual(traces[0]['output_contract'], 'salvaged_plaintext')
-                self.assertFalse(traces[0]['will_retry'])
+                self.assertEqual(traces[0]['acceptance_mode'], 'nonverbal')
+
+    def test_plaintext_then_bilingual_reply_uses_second_attempt(self):
+        response = types.SimpleNamespace(stop_reason='end_turn', usage=None)
+        bilingual = '{"messages":[{"jp":"そうだね","zh":"是啊"}]}'
+        with patch.object(route_chat, '_create_json', side_effect=[
+                ('そうだね', response), (bilingual, response)]) as provider:
+            result, state = route_chat._generate_or_none(
+                'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',
+                salvage=True)
+        self.assertEqual(provider.call_count, 2)
+        self.assertIsNone(state)
+        self.assertEqual(result['messages'], [{'jp': 'そうだね', 'zh': '是啊'}])
 
     def test_invalid_or_protocol_output_retries_without_accepting_fragments(self):
         for raw in ('', '?!', 'null', '\x00hello', '{"messages":[',
@@ -63,12 +84,13 @@ class PlaintextContractTests(unittest.TestCase):
         self.assertEqual(calls, 3)
 
     def test_structured_success_and_truth_guard_keep_existing_contract(self):
-        raw = '{"messages":[{"jp":"話そう","zh":"聊聊吧"}]}'
+        raw = '{"messages":[{"jp":"そうだね","zh":"是啊"}]}'
         result, _, calls, traces = self.generate(raw)
         self.assertEqual(calls, 1)
+        self.assertEqual(result['messages'], [{'jp': 'そうだね', 'zh': '是啊'}])
         self.assertEqual(traces[0]['output_contract'], 'structured_ok')
         reject = Mock(return_value='active_event_completion_claim_without_intent')
-        result, _, calls, traces = self.generate('終わったよ', reject_fn=reject)
+        result, _, calls, traces = self.generate(raw, reject_fn=reject)
         self.assertIsNone(result)
         self.assertEqual(calls, 3)
         self.assertEqual(reject.call_count, 3)
@@ -82,7 +104,7 @@ class StructuredBoundaryTests(unittest.TestCase):
         from user_memory import _validate_memory_output
         from relationship_signals import _validate_signals_envelope
         for validator in (_validate_memory_output, _validate_signals_envelope):
-            self.assertIsNotNone(utils.normalize_plaintext_reply('现在可以慢慢聊。'))
+            self.assertIsNone(utils.normalize_plaintext_reply('现在可以慢慢聊。'))
             self.assertFalse(parse_structured_output(
                 '现在可以慢慢聊。', schema_validator=validator).ok)
             self.assertFalse(parse_structured_output('{}', schema_validator=validator).ok)

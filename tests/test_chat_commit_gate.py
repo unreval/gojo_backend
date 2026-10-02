@@ -326,15 +326,15 @@ class ChatCommitGateTests(unittest.TestCase):
                 self.client.messages.create.assert_not_called()
                 self.state.assert_not_called()
 
-    def test_safe_raw_bracket_notes_keep_existing_plaintext_path(self):
-        for text in ('配列の a[0] を見て。', '补充说明（可选）[第三章]，集合 {甲, 乙}。'):
+    def test_safe_raw_bracket_notes_retry_without_copying_translation(self):
+        for index, text in enumerate(('配列の a[0] を見て。',
+                                      '补充说明（可选）[第三章]，集合 {甲, 乙}。')):
             with self.subTest(text=text):
                 self.client.messages.create.reset_mock()
-                response, body = self.send([text])
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(body['messages'][0]['jp'], text)
-                self.assertEqual(body['messages'][0]['zh'], text)
-                self.assertEqual(self.route._create_json.call_count, 1)
+                response, body = self.send([text] * 3, source_event_id=f'raw-bracket-{index}')
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(body['messages'], [])
+                self.assertEqual(self.route._create_json.call_count, 3)
                 self.client.messages.create.assert_not_called()
                 self.state.assert_not_called()
 
@@ -359,6 +359,31 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertFalse(self.route._valid_msg({'jp': '{"jp":"...","zh":"..."}', 'zh': '...'}))
         self.assertTrue(self.route._valid_msg({'jp': 'ん？', 'zh': '嗯？'}))
         self.assertTrue(self.route._valid_msg({'jp': 'え？', 'zh': '诶？'}))
+
+    def test_bilingual_gate_rejects_identical_text_and_kana_in_chinese(self):
+        from utils import valid_reply_pair
+
+        for jp, zh in (('今日は疲れたよ', '今日は疲れたよ'),
+                       ('そうだね', '是啊ね')):
+            with self.subTest(jp=jp, zh=zh):
+                message = {'jp': jp, 'zh': zh}
+                self.assertFalse(self.route._valid_msg(message))
+                self.assertFalse(valid_reply_pair(jp, zh))
+                self.assertEqual(self.route._finalize_committed(
+                    {'messages': [message]}), (None, None))
+        self.assertTrue(valid_reply_pair('了解', '知道了'))
+        self.assertTrue(valid_reply_pair('😒', '😒'))
+
+    def test_invalid_bilingual_candidates_retry_before_commit(self):
+        for index, pair in enumerate((('今日は疲れたよ', '今日は疲れたよ'),
+                                      ('そうだね', '是啊ね'))):
+            with self.subTest(pair=pair):
+                raw = chat_reply(*pair)
+                response, body = self.send([raw] * 3,
+                                           source_event_id=f'invalid-pair-{index}')
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(body['messages'], [])
+                self.assertEqual(self.route._create_json.call_count, 3)
 
     def test_no_fallback_pool_in_source(self):
         src = Path(ROUTE_CHAT).read_text(encoding='utf-8')
@@ -452,7 +477,7 @@ class ChatCommitGateTests(unittest.TestCase):
         response, body = self.send(['', '', ''], handler=self.route.chat_voice_text)
         self.assert_generation_failed(response, body, attempts=3)
 
-    def test_text_voice_use_one_snapshot_and_identical_plaintext_recovery(self):
+    def test_text_voice_use_one_snapshot_and_retry_plaintext(self):
         from datetime import datetime, timezone
         now = datetime(2026, 9, 30, 13, 30, tzinfo=timezone.utc)
         snapshot = {'now_utc': now, 'now_local': now}
@@ -460,11 +485,13 @@ class ChatCommitGateTests(unittest.TestCase):
             with self.subTest(handler=handler.__name__), patch.object(
                     self.route, 'get_temporal_snapshot', return_value=snapshot) as clock, patch.object(
                     self.route, '_turn_context', return_value=(None, [])) as context:
-                response, body = self.send(['今日はゆっくり話そう'], handler=handler,
+                response, body = self.send([
+                    '今日はゆっくり話そう', chat_reply('今日はゆっくり話そう。', '今天慢慢聊吧。')], handler=handler,
                                            source_event_id=handler.__name__)
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(body['messages'][0]['jp'], '今日はゆっくり話そう')
-                self.assertEqual(self.route._create_json.call_count, 1)
+                self.assertEqual(body['messages'][0]['jp'], '今日はゆっくり話そう。')
+                self.assertEqual(body['messages'][0]['zh'], '今天慢慢聊吧。')
+                self.assertEqual(self.route._create_json.call_count, 2)
                 clock.assert_called_once()
                 self.assertIs(context.call_args.kwargs['temporal_snapshot'], snapshot)
                 self.assertIs(self.route.build_system_blocks.call_args.kwargs['temporal_snapshot'], snapshot)
@@ -487,7 +514,7 @@ class ChatCommitGateTests(unittest.TestCase):
 
 
     def test_raw_nonverbal_accepts_first_attempt_without_translation(self):
-        for token in ('🥺', '🥺...', '...', '……'):
+        for token in ('😒', '🥺', '🥺...', '...', '……'):
             with self.subTest(token=token):
                 response, body = self.send([token])
                 self.assertEqual(response.status_code, 200)

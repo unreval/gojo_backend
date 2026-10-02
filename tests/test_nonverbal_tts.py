@@ -33,11 +33,12 @@ class NonverbalTTSTests(unittest.TestCase):
     def test_bracket_bodies_and_protocol_envelopes_are_distinct(self):
         for text in BRACKET_TEXT:
             with self.subTest(text=text):
-                raw = json.dumps({'messages': [{'jp': text, 'zh': text}]}, ensure_ascii=False)
+                message = {'jp': text, 'zh': '这段说明我看到了。'}
+                raw = json.dumps({'messages': [message]}, ensure_ascii=False)
                 self.assertEqual(classify_reply_content(raw), 'invalid')
                 _, parsed, state = ingest_model_output(raw)
                 self.assertIsNone(state)
-                self.assertEqual(parsed['messages'], [{'jp': text, 'zh': text}])
+                self.assertEqual(parsed['messages'], [message])
                 self.assertTrue(valid_reply_msg(parsed['messages'][0]))
                 self.assertEqual(classify_reply_content(text), 'text')
 
@@ -81,6 +82,13 @@ class NonverbalTTSTests(unittest.TestCase):
                     http.assert_not_called()
                     db.assert_not_called()
                     model.assert_not_called()
+
+    def test_single_displeased_emoji_stays_silent(self):
+        with patch.object(tts, 'fish_tts') as provider:
+            self.assertEqual(classify_reply_content('😒'), 'nonverbal')
+            self.assertTrue(valid_reply_msg({'jp': '😒', 'zh': '😒'}))
+            self.assertEqual(REAL_TTS('😒', '平静'), '')
+            provider.assert_not_called()
 
     def test_direct_provider_and_empty_fallback_cannot_voice_silence(self):
         with patch.object(tts.requests, 'post') as http:
@@ -208,8 +216,8 @@ class VoiceStreamSilentTests(unittest.TestCase):
 
     def test_mixed_stream_still_has_audio_and_finishes(self):
         with patch.object(tts, 'fish_tts', return_value=b'offline') as provider:
-            text = '……你过来。🥺'
-            events = self.events(f'JP: {text}\nZH: {text}\n')
+            text = '……こっちに来て。🥺'
+            events = self.events(f'JP: {text}\nZH: ……你过来。🥺\n')
             self.assertEqual(events[-1]['type'], 'done')
             self.assertTrue(next(e for e in events if e['type'] == 'audio')['audio_b64'])
             provider.assert_called_once_with(text, '平静', 'v1')
@@ -221,10 +229,10 @@ class VoiceStreamSilentTests(unittest.TestCase):
                 tts, 'fish_tts', wraps=tts.fish_tts) as provider:
             for text in BRACKET_TEXT:
                 with self.subTest(text=text):
-                    events = self.events(f'JP: {text}\nZH: {text}\n')
+                    events = self.events(f'JP: {text}\nZH: 这段我看到了。\n')
                     self.assertEqual(events[-1]['type'], 'done')
                     segment = next(e for e in events if e['type'] == 'audio')
-                    self.assertEqual((segment['jp'], segment['zh']), (text, text))
+                    self.assertEqual((segment['jp'], segment['zh']), (text, '这段我看到了。'))
                     self.assertTrue(segment['audio_b64'])
                     self.assertEqual(provider.call_count, 1)
                     self.assertEqual(http.call_count, 1)
@@ -248,7 +256,7 @@ class NonverbalDeliveryTests(unittest.TestCase):
         from generation_side_effect_worker import process_one_side_effect
         with patch.object(tts, 'fish_tts') as provider:
             for index, text in enumerate(SILENT):
-                with self.subTest(text=text), self.http(text) as (route, generate), patch.object(
+                with self.subTest(text=text), self.http(text, translation=text) as (route, generate), patch.object(
                         tts, 'tts_to_b64', REAL_TTS), patch.object(route, 'tts_to_b64', REAL_TTS):
                     source = f'nonverbal-{index}'
                     request = dict(self.request(source), text='你好')

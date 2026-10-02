@@ -29,6 +29,19 @@ class RollingSummaryStructuredTests(unittest.TestCase):
             with self.subTest(wrapped=wrapped):
                 self.assertIn('发生：完成讨论', self.generate(wrapped))
 
+    def test_markdown_fence_succeeds_once_and_logs_success(self):
+        raw = '```json\n' + self.output() + '\n```'
+        with patch('ai_client.create_chat', return_value=(raw, {})) as model, patch(
+                'builtins.print') as logged:
+            text = rolling_summary.generate_real_summary_text(
+                [{'event_id': 'e1', 'role': 'user', 'content': 'private source'}])
+        self.assertIn('发生：完成讨论', text)
+        model.assert_called_once()
+        log = ' '.join(str(call) for call in logged.call_args_list)
+        self.assertIn('[structured_output] status=success domain=rolling_summary', log)
+        self.assertIn('ok=True', log)
+        self.assertIn('extraction_mode=markdown_fence', log)
+
     def test_fail_closed_error_codes(self):
         cases = [
             ('', 'empty_response'),
@@ -107,7 +120,7 @@ class RollingSummaryStructuredTests(unittest.TestCase):
             model.assert_called_once()
             self.assertEqual(model.call_args.kwargs['max_retries'], 0)
             log = ' '.join(str(call) for call in logged.call_args_list)
-            for field in ('domain=rolling_summary', 'attempt=2', f'error={expected}',
+            for field in ('status=error', 'domain=rolling_summary', 'attempt=2', f'error={expected}',
                           'stop_reason=', 'output_tokens=700', 'chars=', 'candidate_count='):
                 self.assertIn(field, log)
             self.assertNotIn(secret, log)

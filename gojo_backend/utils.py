@@ -295,24 +295,26 @@ def classify_reply_content(text) -> str:
 
 
 def normalize_plaintext_reply(raw):
-    """One local, speech-only recovery contract, shared with voice's content gate.
-
-    Never extract from a broken envelope or synthesize translation/action fields.
-    The legacy two-column transport carries the same original text in both slots.
-    """
-    if classify_reply_content(raw) == 'invalid':
+    """Recover intentional nonverbal replies without inventing a translation."""
+    if classify_reply_content(raw) != 'nonverbal':
         return None
     text = raw.strip()
     return {'jp': text, 'zh': text}
 
 
 def valid_reply_msg(m: dict) -> bool:
-    """Both languages must contain safe text or an intentional nonverbal reply."""
+    """Require safe bilingual text, or an intentional nonverbal reply."""
     if not isinstance(m, dict):
         return False
     if msg_has_json_debris(m):
         return False
-    return all(classify_reply_content(m.get(key)) != 'invalid' for key in ('jp', 'zh'))
+    jp, zh = m.get('jp'), m.get('zh')
+    jp_kind, zh_kind = classify_reply_content(jp), classify_reply_content(zh)
+    if 'invalid' in (jp_kind, zh_kind):
+        return False
+    if 'text' in (jp_kind, zh_kind) and jp.strip() == zh.strip():
+        return False
+    return re.search(r'[\u3041-\u3096\u30a1-\u30fa\uff66-\uff9f]', zh) is None
 
 
 def valid_reply_pair(jp, zh) -> bool:

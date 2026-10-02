@@ -107,6 +107,10 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
                 DEFAULT_CHARACTER_ID='gojo',
                 MODEL_JP_AUX='claude-haiku-test',
             ),
+            'db_generation_receipt': stub(
+                'db_generation_receipt',
+                assign_source_event_id=lambda value: (value or 'voice-test', False),
+            ),
             'tts': stub('tts', tts_to_b64=self.tts),
             'prompt': stub(
                 'prompt',
@@ -222,6 +226,15 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.jobs.assert_not_called()
         self.record_turn.assert_not_called()
 
+    def test_identical_verbal_or_kana_in_zh_never_commits(self):
+        for raw in ('JP: そうだね\nZH: そうだね\n',
+                    'JP: そうだね\nZH: 是啊ね\n'):
+            with self.subTest(raw=raw):
+                events = self.events(raw)
+                self.assertIn('generation_failed', self.types(events))
+                self.assertNotIn('audio', self.types(events))
+                self.save_short.assert_not_called()
+
     def test_user_event_saved_even_when_generation_fails(self):
         self.events('JP: \nZH: \n', source_event_id='voice-1')
         self.save_user_once.assert_called()
@@ -284,7 +297,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.tts.assert_not_called()
 
         second_events = self.events(
-            'JP: OK\nZH: OK\n',
+            'JP: わかった\nZH: 知道了\n',
             text=user_text,
             source_event_id=source_event_id,
         )

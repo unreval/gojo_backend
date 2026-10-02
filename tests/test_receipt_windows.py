@@ -22,7 +22,7 @@ class ReceiptWindowTests(unittest.TestCase):
     run_cycle = source_first.PrivateSourceFirstTests.run_cycle
 
     @contextmanager
-    def http(self, reply='了解。'):
+    def http(self, reply='了解。', translation='知道了。'):
         import route_chat
         from starlette.responses import JSONResponse
         with patch.object(route_chat, 'JSONResponse', JSONResponse), patch.object(
@@ -36,7 +36,7 @@ class ReceiptWindowTests(unittest.TestCase):
                 route_chat, 'build_system_blocks', return_value=[]), patch.object(
                 route_chat, 'log_cache_usage'), patch.object(
                 route_chat, '_create_json', return_value=(json.dumps({
-                    'messages': [{'jp': reply, 'zh': reply}]}), Mock())) as generate, patch.object(
+                    'messages': [{'jp': reply, 'zh': translation}]}), Mock())) as generate, patch.object(
                 route_chat.claude_client.messages, 'create', side_effect=AssertionError('extra model call')), patch.object(
                 route_chat, '_commit_offline_state'), patch.object(
                 route_chat, '_reject_schedule_candidate', return_value=None), patch.object(
@@ -93,22 +93,26 @@ class ReceiptWindowTests(unittest.TestCase):
         self.assertEqual(self.sql("SELECT count(*) FROM bond_memory")[0][0], 1)
         self.assertFalse({'delivered_at', 'received_at', 'read_at'} & stored.keys())
 
-    def test_salvage_preserves_canonical_assistant_and_memory_enqueue_once(self):
+    def test_retry_preserves_canonical_assistant_and_memory_enqueue_once(self):
         from generation_side_effect_worker import process_one_side_effect
-        raw = '今なら話せるよ'
+        raw = '今なら話せるよ。'
+        bilingual = json.dumps({'messages': [{'jp': raw, 'zh': '现在可以聊天了。'}]},
+                               ensure_ascii=False)
         with self.http() as (route, generate), patch.object(route, '_emit_generation_turn_link') as link:
-            generate.return_value = (raw, Mock(stop_reason='end_turn'))
-            first = asyncio.run(route.chat_text(self.request('salvage-sql')))
-            replay = asyncio.run(route.chat_text(self.request('salvage-sql')))
+            generate.side_effect = [(raw, Mock(stop_reason='end_turn')),
+                                    (bilingual, Mock(stop_reason='end_turn'))]
+            first = asyncio.run(route.chat_text(self.request('retry-sql')))
+            replay = asyncio.run(route.chat_text(self.request('retry-sql')))
             self.assertEqual((first.status_code, replay.status_code), (200, 200))
             self.assertEqual(json.loads(first.body), json.loads(replay.body))
             self.assertEqual(json.loads(first.body)['messages'][0]['jp'], raw)
-            generate.assert_called_once()
-            link.assert_called_once_with('salvage-sql', 'chat_reply:salvage-sql')
-        self.assertTrue(process_one_side_effect(self.assistant_effect('salvage-sql')))
-        self.assertFalse(process_one_side_effect(self.assistant_effect('salvage-sql')))
+            self.assertEqual(json.loads(first.body)['messages'][0]['zh'], '现在可以聊天了。')
+            self.assertEqual(generate.call_count, 2)
+            link.assert_called_once_with('retry-sql', 'chat_reply:retry-sql')
+        self.assertTrue(process_one_side_effect(self.assistant_effect('retry-sql')))
+        self.assertFalse(process_one_side_effect(self.assistant_effect('retry-sql')))
         self.assertEqual(self.sql("SELECT text FROM chat_log WHERE role='gojo'"), [(raw,)])
-        self.assertEqual(self.sql("SELECT count(*) FROM memory_jobs WHERE source_event_id='chat_reply:salvage-sql'")[0][0], 1)
+        self.assertEqual(self.sql("SELECT count(*) FROM memory_jobs WHERE source_event_id='chat_reply:retry-sql'")[0][0], 1)
         self.assertEqual(self.sql("SELECT count(*) FROM chat_generation_receipt")[0][0], 1)
 
     def test_C_repair_interrupted_assistant_effect_keeps_event_job_projection_once(self):
@@ -147,7 +151,7 @@ class ReceiptWindowTests(unittest.TestCase):
         from cognitive_reader import fetch_cognitive_reader_state
         request = self.request('phase-d')
         request['text'] = '我还是叫你宝宝。你接不接受这个称呼？'
-        with self.http(reply='yes') as (route, generate):
+        with self.http(reply='yes', translation='是的') as (route, generate):
             self.assertEqual(asyncio.run(route.chat_text(request)).status_code,200)
             generate.assert_called_once()
         with patch.object(receipt,'CRASH_AFTER_EFFECT','assistant_short_memory'):

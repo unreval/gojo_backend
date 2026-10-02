@@ -36,9 +36,9 @@ class GenerationAuditTraceTests(unittest.TestCase):
                             second['system_blocks'][1]['fingerprint'])
         self.assertNotIn(self.secret, json.dumps(second))
 
-    def test_acceptance_modes_are_safe_and_plaintext_does_not_retry(self):
+    def test_acceptance_modes_are_safe_for_nonverbal_and_structured_replies(self):
         for raw, mode in (
-                ('🥺...', 'nonverbal'), ('こんにちは', 'plaintext'),
+                ('🥺...', 'nonverbal'),
                 ('{"messages":[{"jp":"🥺...","zh":"🥺..."}]}', 'structured')):
             with self.subTest(mode=mode), patch.object(
                     route_chat, '_create_json', return_value=(raw, self.response)) as generate, patch.object(
@@ -55,6 +55,20 @@ class GenerationAuditTraceTests(unittest.TestCase):
             translate.assert_not_called()
             if mode != 'structured':
                 self.assertEqual(set(result), {'emotion', 'messages', '_acceptance_mode'})
+
+    def test_plain_verbal_reply_records_retries_instead_of_acceptance(self):
+        with patch.object(route_chat, '_create_json', return_value=(
+                'こんにちは', self.response)) as generate, patch.object(
+                route_chat, 'log_cache_usage'), patch('builtins.print') as logged:
+            result, state = route_chat._generate_or_none(
+                'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',
+                salvage=True, generation_trace=self.trace_context)
+        self.assertIsNone(result)
+        self.assertIsNone(state)
+        self.assertEqual(generate.call_count, 3)
+        traces = self._trace_payloads(logged)
+        self.assertEqual([trace['outcome'] for trace in traces], ['parse_invalid'] * 3)
+        self.assertEqual([trace['will_retry'] for trace in traces], [True, True, False])
 
     def setUp(self):
         self.secret = 'PRIVATE-PROMPT-BODY-DO-NOT-LOG'
