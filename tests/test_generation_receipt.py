@@ -22,6 +22,7 @@ if os.path.dirname(__file__) not in sys.path:
     sys.path.insert(0, os.path.dirname(__file__))
 
 import db_generation_receipt as receipt  # noqa: E402
+import db_read_receipt  # noqa: E402
 
 
 class _PassthroughHeartbeat:
@@ -782,6 +783,7 @@ class RouteIdempotencyTests(unittest.TestCase):
         }
         self.receipt_patchers = [
             patch.object(receipt, 'get_conn', side_effect=lambda: FakeConn(self.store)),
+            patch.object(db_read_receipt, 'mark_immediate_seen', Mock()),
             patch.object(receipt, 'DEFAULT_WAIT_SECONDS', 0.5),
             patch.object(receipt, 'DEFAULT_POLL_SECONDS', 0.05),
         ]
@@ -943,6 +945,7 @@ class RouteIdempotencyTests(unittest.TestCase):
         self.assertEqual(self.promise_detect.call_count, 1)
         self.assertEqual(self.save_short.call_count, 1)
         self.assertEqual(self.record_turn.call_count, 1)
+        db_read_receipt.mark_immediate_seen.assert_called_with('u', 'gojo', 'dup-1')
 
     def test_salvaged_body_replay_has_one_receipt_turn_link_and_effect_application(self):
         raw = '今はゆっくり話そう'
@@ -1605,6 +1608,7 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
         }
         self.receipt_patchers = [
             patch.object(receipt, 'get_conn', side_effect=lambda: FakeConn(self.store)),
+            patch.object(db_read_receipt, 'mark_immediate_seen', Mock()),
             patch.object(receipt, 'DEFAULT_WAIT_SECONDS', 0.4),
             patch.object(receipt, 'DEFAULT_POLL_SECONDS', 0.05),
         ]

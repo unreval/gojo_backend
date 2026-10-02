@@ -87,7 +87,8 @@ async def chat_voice_stream(data: dict):
     user_text = (data.get('text') or '').strip()
     user_id = data.get('user_id', 'default')
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
-    source_event_id = str(data.get('source_event_id') or '').strip() or None
+    from db_generation_receipt import assign_source_event_id
+    source_event_id, _legacy = assign_source_event_id(data.get('source_event_id'))
 
     def _err(msg: str):
         return StreamingResponse(
@@ -102,6 +103,7 @@ async def chat_voice_stream(data: dict):
         return _err(f'character {character_id} not found')
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    availability = None
 
     # Streaming voice is an inbound chat surface, so it enters through the
     # same canonical availability/phone-check gate as text and image.
@@ -142,6 +144,14 @@ async def chat_voice_stream(data: dict):
     save_user_short_memory_once(
         user_id, user_text, character_id, source_event_id=source_event_id,
     )
+    if availability and availability.get('can_reply'):
+        try:
+            from db_read_receipt import mark_immediate_seen
+            mark_immediate_seen(user_id, character_id, source_event_id)
+        except Exception as exc:
+            print(f'[read_receipt] immediate voice failed source_event_id={source_event_id} '
+                  f'error={type(exc).__name__}')
+            return _err('read_receipt_unavailable')
     pack = None
     messages = []
     failed_closed = False

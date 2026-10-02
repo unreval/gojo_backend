@@ -28,6 +28,7 @@ import random
 import threading
 import uuid
 from db import get_conn
+from db_read_receipt import mark_source_events_seen_tx, source_event_ids_from_claim
 from schedule_contract import (
     ACTION_CANCEL,
     ACTION_COMPLETE,
@@ -87,6 +88,20 @@ PHONE_CHECK_TERMINAL = (
 )
 PHONE_CHECK_CLAIMABLE = (PHONE_CHECK_PENDING, PHONE_CHECK_DEFERRED)
 CLAIM_TTL_SECONDS = 180
+
+
+def log_phone_check_action(action, claimed, *, next_at=None):
+    claimed = claimed or {}
+    print('[phone_check] '
+          f'id={claimed.get("id")} action={action} '
+          f'pending_count={claimed.get("pending_count")} '
+          f'seen_watermark={claimed.get("seen_watermark")} '
+          f'origin_event_id={claimed.get("schedule_event_id")} '
+          f'origin_phase_id={claimed.get("phase_id")} '
+          f'current_event_id={claimed.get("current_event_id")} '
+          f'current_phase_id={claimed.get("current_phase_id")} '
+          f'current_reply_state={claimed.get("current_reply_state")} '
+          f'next_phone_check_at={next_at if next_at is not None else claimed.get("next_phone_check_at")}')
 
 
 def init_schedule_table():
@@ -674,7 +689,7 @@ def supersede_ended_phone_checks(cur, user_id, character_id, now, activity=None)
            WHERE user_id=%s AND character_id=%s
              AND resolved_at IS NULL
              AND COALESCE(pending_count, 0) > 0
-             AND check_state NOT IN ('consumed','resolved','expired','superseded')
+             AND check_state = 'pending'
              ''' + keep + '''
              AND ''' + ended,
         (now, now, user_id, character_id) + keep_params + ended_params)
@@ -710,7 +725,7 @@ def claim_due_phone_check(cur, oid, now, *, token=None, owner=None):
                claim_owner = %s,
                claim_expires_at = %s,
                seen = TRUE,
-               seen_at = %s,
+               seen_at = COALESCE(seen_at, %s),
                seen_watermark = pending_count,
                updated_at = CURRENT_TIMESTAMP
            WHERE id = %s
@@ -727,12 +742,12 @@ def claim_due_phone_check(cur, oid, now, *, token=None, owner=None):
                       user_id, character_id, first_source_event_id,
                       last_source_event_id, activity_title, start_time, end_time,
                       sched_date, schedule_event_id, phase_id, event_revision,
-                      occurrence_id''',
+                      occurrence_id, seen_at''',
         (now, token, owner, expires, now, oid, now, now))
     row = cur.fetchone()
     if not row:
         return None
-    return {
+    claimed = {
         'id': row[0],
         'pending_count': row[1],
         'pending_text': row[2],
@@ -755,8 +770,13 @@ def claim_due_phone_check(cur, oid, now, *, token=None, owner=None):
         'occurrence_id': row[19] if len(row) > 19 else None,
         'claim_token': token,
         'claim_owner': owner,
-        'seen_at': now,
+        'seen_at': row[20] if len(row) > 20 else now,
     }
+    mark_source_events_seen_tx(
+        cur, claimed['user_id'], claimed['character_id'],
+        source_event_ids_from_claim(claimed), now, 'phone_check',
+        phone_check_id=claimed['id'])
+    return claimed
 
 
 def finish_claimed_reply(cur, oid, token, now):
@@ -783,7 +803,7 @@ def finish_claimed_reply(cur, oid, token, now):
 def finish_claimed_defer(cur, oid, token, now, new_next):
     cur.execute(
         '''UPDATE char_phone_check SET -- phone_check:finish_defer
-               check_state = 'pending',
+               check_state = 'deferred',
                can_reply = FALSE,
                next_phone_check_at = %s,
                fallback_promise_id = NULL,
@@ -833,7 +853,8 @@ def list_due_phone_check_ids(cur, now, *, limit=20):
                  )
              AND (
                    (next_phone_check_at IS NOT NULL AND next_phone_check_at <= %s)
-                   OR (sched_date < %s OR (sched_date = %s AND end_time <= %s))
+                   OR (check_state = 'pending' AND
+                       (sched_date < %s OR (sched_date = %s AND end_time <= %s)))
                  )
            ORDER BY next_phone_check_at NULLS LAST, id
            LIMIT %s''',
@@ -858,13 +879,13 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
         today = now.date()
         cur.execute(
             '''UPDATE char_phone_check
-               SET next_phone_check_at = COALESCE(next_phone_check_at, %s),
+               SET next_phone_check_at = COALESCE(LEAST(next_phone_check_at, %s), %s),
                    updated_at = CURRENT_TIMESTAMP
                WHERE id = %s
                  AND resolved_at IS NULL
-                 AND next_phone_check_at IS NULL
+                 AND check_state = 'pending'
                  AND (sched_date < %s OR (sched_date = %s AND end_time <= %s))''',
-            (now, oid, today, today, hhmm))
+            (now, now, oid, today, today, hhmm))
         claimed = claim_due_phone_check(cur, oid, now)
         if not claimed:
             conn.commit()
@@ -874,6 +895,7 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
         # stale phase occurrences on its own connection. The processing row is
         # then a durable immutable claim snapshot, not a held database lock.
         conn.commit()
+        log_phone_check_action('claim', claimed)
 
         character_id = claimed['character_id']
         user_id = claimed['user_id']
@@ -885,9 +907,13 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
         current_event = world.get('event') or {}
         current_phase = world.get('phase') or {}
         availability = world.get('availability') or {}
+        claimed['current_event_id'] = current_event.get('id')
+        claimed['current_phase_id'] = current_phase.get('id')
+        claimed['current_reply_state'] = availability.get('reply_state') or REPLY_FREE
+        log_phone_check_action('seen', claimed)
 
-        # A schedule transition may have happened after this occurrence was
-        # armed.  The old occurrence cannot generate against stale context.
+        # Origin metadata describes when these messages arrived. Availability
+        # and reply decisions always come from the current canonical world.
         claimed_event_id = claimed.get('schedule_event_id')
         claimed_phase_id = claimed.get('phase_id')
         claimed_revision = claimed.get('event_revision')
@@ -901,23 +927,9 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
             )
         )
         if stale_occurrence:
-            cur.execute(
-                '''UPDATE char_phone_check
-                   SET check_state='superseded', resolved_at=%s,
-                       claim_token=NULL, claim_owner=NULL, claim_expires_at=NULL,
-                       updated_at=CURRENT_TIMESTAMP
-                   WHERE id=%s AND claim_token=%s AND check_state='processing' ''',
-                (now, oid, claimed['claim_token']))
-            conn.commit()
-            return {'action': 'skip', 'claimed': None, 'reason': 'stale_schedule_occurrence'}
+            log_phone_check_action('historical_occurrence', claimed)
 
-        activity = dict(current or {
-            'start_time': claimed.get('start_time'),
-            'end_time': claimed.get('end_time'),
-            'title': claimed.get('activity_title') or '',
-            'reply_state': claimed.get('reply_state'),
-            'character_id': character_id,
-        })
+        activity = dict(current or {})
         state = availability.get('reply_state') or REPLY_FREE
         if state == REPLY_HARD_BUSY:
             phase_end = current_phase.get('planned_end_at')
@@ -925,6 +937,7 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
                          if isinstance(phase_end, datetime) else now + timedelta(minutes=1))
             finish_claimed_defer(cur, oid, claimed['claim_token'], now, postponed)
             conn.commit()
+            log_phone_check_action('postpone', claimed, next_at=postponed)
             return {
                 'action': 'postpone',
                 'claimed': claimed,
@@ -948,6 +961,7 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
             new_next = sample_next_phone_check_at(now, activity, after=now)
             finish_claimed_defer(cur, oid, claimed['claim_token'], now, new_next)
             conn.commit()
+            log_phone_check_action('defer', claimed, next_at=new_next)
             return {
                 'action': 'defer',
                 'claimed': claimed,
@@ -955,6 +969,7 @@ def evaluate_due_phone_check(oid, now, *, conn=None):
             }
 
         conn.commit()
+        log_phone_check_action('reply', claimed)
         return {'action': 'reply', 'claimed': claimed}
     except Exception:
         try:
@@ -1657,8 +1672,8 @@ def _advance_world_tx(cur, character_id, user_id, now):
             cur, completed_ids, now, user_id=user_id,
             character_id=character_id)
 
-    # A clock-driven phase boundary changes which phase owns availability.
-    # Carry unread inboxes to a successor before the old phase can fire.
+    # A clock-driven phase boundary changes availability, not ownership of
+    # already pending user messages.
     cur.execute(
         '''SELECT id, revision FROM char_schedule
            WHERE character_id=%s AND user_id=%s AND status=%s
@@ -1978,11 +1993,10 @@ def clear_canonical_schedule(character_id, user_id, sched_date, *, now=None):
 
 def _reconcile_phone_checks_tx(cur, event_ids, now, *, user_id=None,
                                character_id=None, replacement_event=None):
-    """Supersede old occurrences without discarding their unread bundle.
+    """Keep pending inboxes claimable across schedule transitions.
 
-    Any pending content is copied to one immediate successor first. The old
-    occurrence cannot fire after a schedule revision, while the user message
-    remains deliverable exactly once by the successor.
+    A processing claim is frozen and must remain retryable if generation fails.
+    New inbound in a changed phase uses the existing successor path.
     """
     event_ids = [int(event_id) for event_id in (event_ids or []) if event_id]
     if not event_ids:
@@ -1999,60 +2013,39 @@ def _reconcile_phone_checks_tx(cur, event_ids, now, *, user_id=None,
             replacement_event.get('phase_id'),
         )
     cur.execute(
-        '''SELECT id, user_id, character_id, schedule_id, sched_date, start_time,
-                  end_time, activity_title, reply_state, pending_count,
-                  first_source_event_id, last_source_event_id, pending_text,
-                  event_meta, seen_watermark, check_state, event_revision
+        '''SELECT id, pending_count, check_state
            FROM char_phone_check
            WHERE schedule_event_id = ANY(%s)
              AND check_state NOT IN ('consumed','resolved','expired','superseded')
            ''' + stale_filter + ''' FOR UPDATE''',
         (event_ids,) + filter_params)
     rows = cur.fetchall() or []
-    successors = []
-    for row in rows:
-        (oid, user_id, character_id, schedule_id, sched_date, start_time,
-         end_time, activity_title, reply_state, pending_count, first_source,
-         last_source, pending_text, event_meta, watermark, check_state,
-         event_revision) = row
-        pending_count = int(pending_count or 0)
-        watermark = int(watermark or 0)
-        outstanding = pending_count - watermark if check_state == PHONE_CHECK_PROCESSING else pending_count
-        successor_id = None
-        if outstanding > 0:
-            occurrence_id = str(uuid.uuid4())
-            replacement = (replacement_event if replacement_event
-                           and replacement_event.get('id') == schedule_id
-                           else None)
-            event_id = (replacement or {}).get('id')
-            phase_id = (replacement or {}).get('phase_id')
-            revision = (replacement or {}).get('revision')
+    armed = []
+    for oid, pending_count, check_state in rows:
+        if int(pending_count or 0) > 0:
+            # The recurring world reader also calls this for stale metadata.
+            # Do not undo a later defer on each read; explicit transitions
+            # arm once, and ended windows are also discoverable by the worker.
+            if (not (replacement_event or {}).get('only_stale')
+                    and check_state in PHONE_CHECK_CLAIMABLE):
+                cur.execute(
+                    '''UPDATE char_phone_check
+                       SET next_phone_check_at = COALESCE(
+                               LEAST(next_phone_check_at, %s), %s),
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE id=%s AND check_state IN ('pending','deferred')''',
+                    (now, now, oid))
+                armed.append(oid)
+            continue
+        if check_state != PHONE_CHECK_PROCESSING:
             cur.execute(
-                '''INSERT INTO char_phone_check
-                      (user_id, character_id, schedule_id, sched_date,
-                       start_time, end_time, activity_title, reply_state,
-                       seen, can_reply, pending_count, first_source_event_id,
-                       last_source_event_id, pending_text, event_meta,
-                       next_phone_check_at, seen_watermark, check_state,
-                       occurrence_id, successor_of_id, schedule_event_id,
-                       phase_id, event_revision)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,FALSE,FALSE,%s,%s,%s,%s,%s,
-                           %s,0,'pending',%s,%s,%s,%s,%s)
-                   RETURNING id''',
-                (user_id, character_id, event_id, sched_date, start_time, end_time,
-                 activity_title or '日程变化后待回复', REPLY_SOFT_BUSY, outstanding,
-                 first_source or '', last_source or '', pending_text or '',
-                 event_meta or '', now, occurrence_id, oid, event_id, phase_id,
-                 revision))
-            successor_id = cur.fetchone()[0]
-            successors.append(successor_id)
-        cur.execute(
-            '''UPDATE char_phone_check
-               SET check_state='superseded', resolved_at=%s,
-                   superseded_by_id=%s, claim_token=NULL, claim_owner=NULL,
-                   claim_expires_at=NULL, updated_at=CURRENT_TIMESTAMP
-               WHERE id=%s''', (now, successor_id, oid))
-    return successors
+                '''UPDATE char_phone_check
+                   SET check_state='superseded', resolved_at=%s,
+                       claim_token=NULL, claim_owner=NULL,
+                       claim_expires_at=NULL, updated_at=CURRENT_TIMESTAMP
+                   WHERE id=%s AND COALESCE(pending_count, 0) <= 0''',
+                (now, oid))
+    return armed
 
 
 def _fetch_event_for_transition_tx(cur, event_id, character_id, user_id):

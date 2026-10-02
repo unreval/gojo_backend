@@ -16,6 +16,7 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 import route_chat  # noqa: E402
+import db_read_receipt  # noqa: E402
 
 
 class GenerationAuditTraceTests(unittest.TestCase):
@@ -561,6 +562,7 @@ class GenerationAuditTraceTests(unittest.TestCase):
             stack.enter_context(patch.object(
                 route_chat, 'build_system_blocks', return_value=[{'type': 'text', 'text': 'safe'}]))
             stack.enter_context(patch.object(route_chat, 'save_user_short_memory_once'))
+            stack.enter_context(patch.object(db_read_receipt, 'mark_immediate_seen'))
             stack.enter_context(patch.object(
                 route_chat, '_gate_chat_generation',
                 return_value=({'claim_token': 'claim', 'source_event_id': 'evt-link'}, None)))

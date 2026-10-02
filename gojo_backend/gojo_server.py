@@ -50,11 +50,13 @@ from route_stats import router as stats_router
 from route_cognitive import router as cognitive_router
 from route_voice_stream import router as voice_stream_router   # ★ B档：流式语音通话
 from route_chatlog import router as chatlog_router              # ★ 聊天记录云端同步
+from route_read_receipt import router as read_receipt_router
 from route_schedule import router as schedule_router            # ★ 角色自己的日程
 from db_schedule import init_schedule_table
 from db_chatlog import init_chatlog_table
 from db_chat_media import init_chat_media_table
 from db_generation_receipt import init_generation_receipt_table
+from db_read_receipt import init_read_receipt_table
 from schedule_share import start_schedule_share 
 from route_courses import router as courses_router
 from db_course import init_course_tables                # ★ 日程驱动的主动分享
@@ -123,6 +125,7 @@ try:
 except Exception as e:
     print(f'[init] behavior tables skipped:{e}')
 init_schedule_table()  # ★ 角色日程表（忙的时候只已读不回）
+init_read_receipt_table()
 init_course_tables()   # ★ 课程表（日程驱动的主动分享）
 init_push_table()
 from memory_jobs import init_memory_jobs_table, start_memory_worker
@@ -166,6 +169,7 @@ app.include_router(cognitive_router)
 app.include_router(voice_stream_router) # ★ B档流式语音
 app.include_router(courses_router)  
 app.include_router(chatlog_router)        # ★ 聊天记录同步
+app.include_router(read_receipt_router)
 app.include_router(schedule_router)       # ★ 角色日程
 app.include_router(grumble_router)
 if _HAS_GAME:
@@ -192,6 +196,7 @@ async def health():
         'grumble_engine': False,
         'explore': _HAS_EXPLORE,
         'cognitive_worker': cognitive_worker.is_cognitive_worker_running(),
+        'delayed_reply_worker': delayed_reply.is_delayed_reply_worker_running(),
         'media_storage_ready': media_storage_ready,
     }
 

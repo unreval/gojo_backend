@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from tests import test_cognitive_deterministic as hard
 import db_chatlog
 import db_generation_receipt as receipt
+import db_read_receipt
 import generation_effects
 import memory_jobs
 import raw_events
@@ -22,12 +23,13 @@ class PrivateSourceFirstTests(unittest.TestCase):
 
     def setUp(self):
         hard.OfflineDatabaseTests.setUp(self)
-        for module in (db_chatlog, receipt, memory_jobs, user_memory):
+        for module in (db_chatlog, receipt, db_read_receipt, memory_jobs, user_memory):
             self.stack.enter_context(patch.object(module, 'get_conn', return_value=self.database))
         self.sql('DROP TABLE chat_log')
         db_chatlog.init_chatlog_table()
         memory_jobs.init_memory_jobs_table()
         receipt.init_generation_receipt_table()
+        db_read_receipt.init_read_receipt_table()
         self.sql("""CREATE TABLE short_memory (
             id SERIAL PRIMARY KEY, user_id TEXT, character_id TEXT, role TEXT,
             content TEXT, source_event_id TEXT, event_meta TEXT DEFAULT '',

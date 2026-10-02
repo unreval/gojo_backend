@@ -230,6 +230,40 @@ class ImageFailureTests(unittest.TestCase):
             self.client.messages.create.call_args.kwargs['max_tokens'], 1600)
         self.assertIn('红色', result['visual_summary'])
 
+    def test_free_image_marks_exact_event_seen_before_failed_generation(self):
+        seen = Mock()
+        free = {'can_reply': True, 'reply_state': 'free', 'seen': True}
+        with patch.dict(sys.modules, {
+            'reply_availability': stub(
+                'reply_availability', check_reply_availability=Mock(return_value=free)),
+            'db_read_receipt': stub('db_read_receipt', mark_immediate_seen=seen),
+        }):
+            self.client.messages.create.side_effect = [
+                model_response(), model_response(), model_response(),
+            ]
+            response, _result = self.send(source_event_id='image-A')
+        self.assertEqual(response.status_code, 502)
+        seen.assert_called_once_with('u', 'gojo', 'image-A')
+        self.memory.save_user_short_memory_once.assert_called()
+
+    def test_busy_image_vision_does_not_create_read_receipt(self):
+        seen = Mock()
+        busy = {
+            'can_reply': False, 'seen': False, 'reply_state': 'hard_busy',
+            'opportunity_id': 4, 'pending_count': 1,
+        }
+        with patch.dict(sys.modules, {
+            'reply_availability': stub(
+                'reply_availability', check_reply_availability=Mock(return_value=busy)),
+            'db_read_receipt': stub('db_read_receipt', mark_immediate_seen=seen),
+        }), patch.object(self.route, '_analyze_visual_summary', return_value='图像摘要'), \
+             patch.dict(sys.modules, {
+                 'db_schedule': stub('db_schedule', merge_phone_check_event_meta=Mock()),
+             }):
+            response, _result = self.send(source_event_id='image-B')
+        self.assertEqual(response.status_code, 200)
+        seen.assert_not_called()
+
     def test_image_reply_to_reaches_multimodal_prompt(self):
         self.client.messages.create.return_value = model_response(REPLY)
         self.send(reply_to={

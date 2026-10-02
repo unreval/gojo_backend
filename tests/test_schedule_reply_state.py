@@ -63,6 +63,7 @@ class PhoneCheckStore:
         self.rows = {}
         self.extra_rows = []
         self.schedule_rows = []
+        self.receipts = {}
         self.sql = []
         self.lock = threading.Lock()
 
@@ -131,6 +132,59 @@ class FakeCursor:
         params = tuple(params or ())
 
         if 'pg_advisory_xact_lock' in compact:
+            return
+
+        if compact.startswith('INSERT INTO chat_read_receipt'):
+            user_id, character_id, source_id, seen_at, seen_via, check_id = params
+            key = (user_id, character_id, source_id)
+            if key not in self.store.receipts:
+                self.store.receipts[key] = (seen_at, seen_via, check_id)
+                self._one = (source_id,)
+                self.rowcount = 1
+            return
+
+        if compact.startswith('SELECT source_event_id, seen_at, seen_via, phone_check_id FROM chat_read_receipt'):
+            user_id, character_id, source_ids = params
+            self._many = [
+                (source_id, *self.store.receipts[(user_id, character_id, source_id)])
+                for source_id in source_ids
+                if (user_id, character_id, source_id) in self.store.receipts
+            ]
+            return
+
+        if compact.startswith('SELECT id, pending_count, check_state FROM char_phone_check'):
+            event_ids = params[0]
+            revision = params[1] if len(params) > 1 else None
+            phase_id = params[2] if len(params) > 2 else None
+            for row in list(self.store.rows.values()) + self.store.extra_rows:
+                if row.get('schedule_event_id') not in event_ids:
+                    continue
+                if row.get('check_state') in ('consumed', 'resolved', 'expired', 'superseded'):
+                    continue
+                if len(params) > 1 and (row.get('event_revision') == revision
+                                        and row.get('phase_id') == phase_id):
+                    continue
+                self._many.append((row['id'], row.get('pending_count'),
+                                   row.get('check_state')))
+            return
+
+        if (compact.startswith('UPDATE char_phone_check SET next_phone_check_at = COALESCE(')
+                and len(params) == 3):
+            now, _now2, oid = params
+            row = self._find_by_id(oid)
+            if row and row.get('check_state') in ('pending', 'deferred'):
+                existing = row.get('next_phone_check_at')
+                row['next_phone_check_at'] = min(existing, now) if existing else now
+                self.rowcount = 1
+            return
+
+        if compact.startswith("UPDATE char_phone_check SET check_state='superseded', resolved_at="):
+            now, oid = params
+            row = self._find_by_id(oid)
+            if row and not row.get('pending_count'):
+                row['check_state'] = 'superseded'
+                row['resolved_at'] = now
+                self.rowcount = 1
             return
 
         if 'phone_check:recover' in compact:
@@ -208,8 +262,7 @@ class FakeCursor:
                     continue
                 if (row.get('pending_count') or 0) <= 0:
                     continue
-                if row.get('check_state') in (
-                        'consumed', 'resolved', 'expired', 'superseded'):
+                if row.get('check_state') != 'pending':
                     continue
                 ended = False
                 if today is not None and hhmm is not None:
@@ -268,7 +321,7 @@ class FakeCursor:
                 row['claim_owner'] = owner
                 row['claim_expires_at'] = expires
                 row['seen'] = True
-                row['seen_at'] = seen_at
+                row['seen_at'] = row.get('seen_at') or seen_at
                 row['seen_watermark'] = row.get('pending_count') or 0
                 self.rowcount = 1
                 self._one = (
@@ -280,6 +333,9 @@ class FakeCursor:
                     row.get('first_source_event_id'), row.get('last_source_event_id'),
                     row.get('activity_title'), row.get('start_time'),
                     row.get('end_time'), row.get('sched_date'),
+                    row.get('schedule_event_id'), row.get('phase_id'),
+                    row.get('event_revision'), row.get('occurrence_id'),
+                    row.get('seen_at'),
                 )
                 return
 
@@ -304,7 +360,7 @@ class FakeCursor:
             row = self._find_by_id(oid)
             if (row and row.get('claim_token') == token
                     and row.get('check_state') == 'processing'):
-                row['check_state'] = 'pending'
+                row['check_state'] = 'deferred'
                 row['can_reply'] = False
                 row['next_phone_check_at'] = new_next
                 row['fallback_promise_id'] = None
@@ -338,7 +394,7 @@ class FakeCursor:
                 next_at = row.get('next_phone_check_at')
                 if next_at is not None and now_due is not None and next_at <= now_due:
                     due = True
-                if today is not None and hhmm is not None:
+                if state == 'pending' and today is not None and hhmm is not None:
                     if row.get('sched_date') < today:
                         due = True
                     elif row.get('sched_date') == today and row.get('end_time') <= hhmm:
@@ -360,6 +416,8 @@ class FakeCursor:
                     row.get('next_phone_check_at'), row.get('seen_at'),
                     row.get('resolved_at'), row.get('seen_watermark', 0),
                     row.get('check_state', 'pending'),
+                    row.get('schedule_event_id'), row.get('phase_id'),
+                    row.get('event_revision'), row.get('consumed_at'),
                 )
             return
 
@@ -393,6 +451,11 @@ class FakeCursor:
                 'resolved_at': None,
                 'seen_watermark': seen_watermark or 0,
                 'check_state': check_state,
+                'occurrence_id': params[18] if len(params) > 18 else None,
+                'successor_of_id': params[19] if len(params) > 19 else None,
+                'schedule_event_id': params[20] if len(params) > 20 else None,
+                'phase_id': params[21] if len(params) > 21 else None,
+                'event_revision': params[22] if len(params) > 22 else None,
                 'claimed_at': None,
                 'claim_token': None,
                 'claim_owner': None,
@@ -463,17 +526,18 @@ class FakeCursor:
                 self.rowcount = 1
             return
 
-        if 'COALESCE(next_phone_check_at' in compact:
-            now, oid, today, _t2, hhmm = params
+        if 'COALESCE(LEAST(next_phone_check_at' in compact:
+            now, _now2, oid, today, _t2, hhmm = params
             row = self._find_by_id(oid)
-            if row and not row.get('resolved_at') and row.get('next_phone_check_at') is None:
+            if row and not row.get('resolved_at') and row.get('check_state') == 'pending':
                 ended = False
                 if row.get('sched_date') < today:
                     ended = True
                 elif row.get('sched_date') == today and row.get('end_time') <= hhmm:
                     ended = True
                 if ended:
-                    row['next_phone_check_at'] = now
+                    existing = row.get('next_phone_check_at')
+                    row['next_phone_check_at'] = min(existing, now) if existing else now
                     self.rowcount = 1
             return
 

@@ -26,6 +26,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Dimensions,
   Image,
   Keyboard,
@@ -42,6 +43,8 @@ import PendingTransactionCard, { Account as AcctType } from '../../components/Pe
 import VoiceCallModal from '../../components/VoiceCallModal';
 import { C, SERVER_URL, nowTime } from '../../constants/theme';
 import type { Message } from '../../types/message';
+import { mergeReadReceipts, unreadSourceEventIds } from '../../utils/readReceipts';
+import type { ReadReceipt } from '../../utils/readReceipts';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -333,6 +336,9 @@ export default function ChatRoom() {
   const searchRef       = useRef<TextInput>(null);
   const currentSoundRef = useRef<Audio.Sound | null>(null);
   const checkingProactiveRef = useRef(false);
+  const proactiveFetchInFlightRef = useRef(false);
+  const readReceiptInFlightRef = useRef(false);
+  const backgroundSyncRef = useRef<() => void>(() => {});
   const interactionActiveRef = useRef(false);  // ★ 群聊互动轮询是否在进行
   const [thinkingName, setThinkingName] = useState<string | null>(null);  // ★ 正在思考的角色名
   const [showMention, setShowMention] = useState(false);  // ★ @成员选择面板
@@ -624,14 +630,21 @@ export default function ChatRoom() {
       .catch(() => {});
   }, [isGroup]));
 
-  // ★ 主动消息:进入本页拉一次,把服务器上生成的主动汇报塞进聊天列表
-  //   (proactive_scheduler 会存到 proactive_msg 表,前端进来才知道)
+  // 单聊前台同步：phone-check 回执和后台生成的聊天气泡分别查询。
   useFocusEffect(useCallback(() => {
     if (!ready || isGroup) return;
-    // 稍延迟,让主 init 加载完成的 messages 先落地,避免和 fetchPendingProactive 的 setMessages 打架
-    const t = setTimeout(() => { fetchPendingProactive(); }, 300);
-    return () => clearTimeout(t);
-  }, [ready, chatId, isGroup]));
+    // 等初始化加载的 messages 先落地，避免和后台气泡合并打架。
+    const sync = () => {
+      if (!focusedRef.current || AppState.currentState !== 'active') return;
+      backgroundSyncRef.current();
+    };
+    const t = setTimeout(sync, 300);
+    const interval = setInterval(sync, 5000);
+    return () => {
+      clearTimeout(t);
+      clearInterval(interval);
+    };
+  }, [ready, isGroup]));
 
   // 五条单聊保留的"主动提醒"轮询
   useFocusEffect(useCallback(() => {
@@ -1020,7 +1033,8 @@ export default function ChatRoom() {
   // ★ 主动消息:拉服务器上"未读的主动汇报/问候",塞进聊天列表 + 标记已读
   //   —— 群聊不用;proactive_scheduler 只发给单聊角色
   const fetchPendingProactive = async () => {
-    if (isGroup) return;
+    if (isGroup || proactiveFetchInFlightRef.current) return;
+    proactiveFetchInFlightRef.current = true;
     try {
       const res = await axios.get(`${SERVER_URL}/proactive/pending`, {
         params: { user_id: FIXED_USER_ID, character_id: chatId },
@@ -1077,10 +1091,8 @@ export default function ChatRoom() {
       // 滚到底让新消息可见
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
 
-      // ★ 已读时机:他通过 proactive 发消息了 = 他"忙完/上线"看到了之前的消息 →
-      //   把之前所有未读的 user 消息标已读。这正是"他忙完再回你"的自然时机。
       if (newMsgs.length > 0) {
-        markPendingUserMessagesRead();
+        void refreshReadReceipts();
       }
 
       // 标记已读(失败也不管,反正下次进来还会拉,是幂等的)
@@ -1089,6 +1101,8 @@ export default function ChatRoom() {
       }
     } catch (e: any) {
       console.warn('fetchPendingProactive', e?.message);
+    } finally {
+      proactiveFetchInFlightRef.current = false;
     }
   };
 
@@ -1313,27 +1327,49 @@ export default function ChatRoom() {
     setGenerationFailed(true);
   };
 
-  // ★ 已读标记:把所有还没读的 user 消息标为"对方已读"
-  //   语义 = 微信式已读，但 seen 与 HTTP 200 / reply 分离：
-  //     · 只有后端明确返回 seen=true（phone-check 到点看过）或正常生成回复时才标已读
-  //     · busy=true 且 seen=false → 保持未读（角色还没看手机）
-  //     · HTTP 失败/超时 → 未读（消息可能没送到）
-  //
-  //   ★ 时机:加 800-2000ms 随机延迟,让"读"这个动作看起来自然,
-  //     不然 busy 响应几百毫秒就回来,已读瞬间亮起来很出戏。
-  //   ★ 持久化:同时写一份到本地 sidecar(read_at_${chatId})。
-  //     重进聊天时 server 数据没这个字段,得从 sidecar 合并回来才不会丢。
+  // 单聊的服务器回执是新 readAt 的唯一来源；sidecar 保留历史显示和离线缓存。
   const READ_AT_KEY = (id: string) => `read_at_${id}`;
 
-  const markPendingUserMessagesRead = async () => {
-    // 自然一点的"读"延迟 —— 别让人觉得对面是台机器
+  const refreshReadReceipts = async () => {
+    if (isGroup || readReceiptInFlightRef.current) return;
+    const sourceEventIds = unreadSourceEventIds(messagesRef.current);
+    if (sourceEventIds.length === 0) return;
+    readReceiptInFlightRef.current = true;
+    try {
+      const res = await axios.post(`${SERVER_URL}/chat/read_receipts/query`, {
+        user_id: FIXED_USER_ID,
+        character_id: chatId,
+        source_event_ids: sourceEventIds,
+      }, { timeout: 10000 });
+      const receipts: ReadReceipt[] = Array.isArray(res.data?.receipts)
+        ? res.data.receipts : [];
+      if (receipts.length === 0) return;
+      setMessages(prev => {
+        const updated = mergeReadReceipts(prev, receipts);
+        if (updated.every((m, index) => m === prev[index])) return prev;
+        const readAtMap: Record<string, number> = {};
+        updated.forEach(m => {
+          if (m.role === 'user' && m.readAt) readAtMap[m.id] = m.readAt;
+        });
+        AsyncStorage.setItem(READ_AT_KEY(chatId), JSON.stringify(readAtMap)).catch(() => {});
+        return updated;
+      });
+    } catch (e: any) {
+      console.warn('[read_receipt] sync failed:', e?.message);
+    } finally {
+      readReceiptInFlightRef.current = false;
+    }
+  };
+
+  // 群聊保留原来的独立已读行为。
+  const markGroupUserMessagesRead = async () => {
+    if (!isGroup) return;
     await sleep(800 + Math.floor(Math.random() * 1200));
     const now = Date.now();
     setMessages(prev => {
       const updated = prev.map(m =>
         m.role === 'user' && !m.readAt ? { ...m, readAt: now } : m
       );
-      // 顺手落地到 sidecar,重进不会丢
       const readAtMap: Record<string, number> = {};
       updated.forEach(m => {
         if (m.role === 'user' && m.readAt) readAtMap[m.id] = m.readAt;
@@ -1341,6 +1377,11 @@ export default function ChatRoom() {
       AsyncStorage.setItem(READ_AT_KEY(chatId), JSON.stringify(readAtMap)).catch(() => {});
       return updated;
     });
+  };
+
+  backgroundSyncRef.current = () => {
+    void refreshReadReceipts();
+    void fetchPendingProactive();
   };
 
   // ★ 从 sidecar 读回已读状态,合并到当前 messages 上。
@@ -1482,8 +1523,7 @@ export default function ChatRoom() {
           return;
         }
         await processResponseExtras(res.data);
-        // ★ busy 时 seen 和 reply 分离:看到了但没空回才标已读;没看见保持未读。
-        //   后台 Vision 摘要仍可先落在气泡上（系统看图 ≠ 角色 seen）。
+        // 后台 Vision 摘要仍可先落在气泡上；角色是否已读由回执同步。
         if (res.data?.visual_summary || res.data?.event_meta || res.data?.media) {
           setMessages(prev => prev.map(m => {
             if (m.id !== sourceEventId) return m;
@@ -1500,10 +1540,8 @@ export default function ChatRoom() {
           }));
         }
         if (res.data?.busy) {
-          if (res.data?.seen) markPendingUserMessagesRead();
           return;
         }
-        markPendingUserMessagesRead();
         const segments: Segment[] = res.data?.messages || [];
         if (segments.length === 0) { noteGenerationFailure(); return; }
         setGenerationFailed(false);
@@ -1533,7 +1571,10 @@ export default function ChatRoom() {
         console.warn('[sendImage] failed:', e?.message);
       }
       noteGenerationFailure();
-    } finally { setLoading(false); }
+    } finally {
+      if (!isGroup) void refreshReadReceipts();
+      setLoading(false);
+    }
   };
 
   const sendText = async (textOverride?: string, opts?: { retry?: boolean }) => {
@@ -1605,7 +1646,7 @@ export default function ChatRoom() {
           allow_interaction: false,
         });
         // ★ 群聊拿到 200 也算已读(哪怕没人接话)
-        markPendingUserMessagesRead();
+        markGroupUserMessagesRead();
         const replies: GroupReply[] = res.data?.replies || [];
         if (replies.length === 0) {
           const sys: Message = {
@@ -1648,12 +1689,9 @@ export default function ChatRoom() {
           return;
         }
         await processResponseExtras(res.data);
-        // ★ busy 时 seen 和 reply 分离:看到了但没空回才标已读;没看见保持未读。
         if (res.data?.busy) {
-          if (res.data?.seen) markPendingUserMessagesRead();
           return;
         }
-        markPendingUserMessagesRead();
         let segments: Segment[] = [];
         if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
           segments = res.data.messages;
@@ -1680,7 +1718,10 @@ export default function ChatRoom() {
         console.warn('[sendText] failed:', e?.message);
       }
       noteGenerationFailure();
-    } finally { setLoading(false); }
+    } finally {
+      if (!isGroup) void refreshReadReceipts();
+      setLoading(false);
+    }
   };
 
   const retryLastGeneration = () => {

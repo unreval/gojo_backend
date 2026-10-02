@@ -402,6 +402,7 @@ class ChatImagePersistRouteTests(unittest.TestCase):
             patch.object(route_image, 'enqueue_private_extraction', Mock()),
             patch.object(route_image, '_turn_context', return_value=(None, [])),
             patch('reply_availability.check_reply_availability', return_value={'can_reply': True}),
+            patch('db_read_receipt.mark_immediate_seen'),
             patch('context_layer.append_current_user_turn', side_effect=lambda msgs, content: list(msgs or []) + [{'role': 'user', 'content': content}]),
             patch('db_generation_receipt.resolve_generation', side_effect=lambda user_id, character_id, source_event_id, endpoint, **k: {
                 'action': 'generate',

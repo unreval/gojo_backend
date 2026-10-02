@@ -1039,6 +1039,17 @@ async def chat_text(data: dict):
             })
     except Exception as _e:
         print(f'[{user_id}] 日程检查跳过(不影响聊天):{_e}')
+    if availability and availability.get('can_reply'):
+        try:
+            from db_read_receipt import mark_immediate_seen
+            mark_immediate_seen(user_id, character_id, source_event_id)
+        except Exception as exc:
+            print(f'[read_receipt] immediate text failed source_event_id={source_event_id} '
+                  f'error={type(exc).__name__}')
+            _latency_emit()
+            return JSONResponse(
+                {'error': 'read_receipt_unavailable', 'retryable': True,
+                 'source_event_id': source_event_id}, status_code=503)
     _trace.mark('availability', (_time.perf_counter() - _tmark) * 1000.0)
     _tmark = _time.perf_counter()
 
@@ -1470,6 +1481,9 @@ async def chat_voice_text(data: dict):
 
     save_user_short_memory_once(
         user_id, user_text, character_id, source_event_id=source_event_id)
+    if availability and availability.get('can_reply'):
+        from db_read_receipt import mark_immediate_seen
+        mark_immediate_seen(user_id, character_id, source_event_id)
 
     result, committed_state = _generate_or_none(
         MODEL_JP_AUX, 500, system_blocks, messages,
@@ -1565,6 +1579,9 @@ async def chat_voice_story(data: dict):
 
     save_user_short_memory_once(
         user_id, user_text, character_id, source_event_id=source_event_id)
+    if availability and availability.get('can_reply'):
+        from db_read_receipt import mark_immediate_seen
+        mark_immediate_seen(user_id, character_id, source_event_id)
 
     result, committed_state = _generate_or_none(
         MODEL_MAIN, 3000, system_blocks, messages,

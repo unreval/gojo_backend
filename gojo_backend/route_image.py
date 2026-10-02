@@ -447,6 +447,7 @@ async def chat_image(data: dict):
     base_event_meta = _event_meta_base(
         kind, source_event_id, display_text, images, reply_to=reply_to)
     visual_summary = ''
+    availability = None
 
     try:
         from reply_availability import check_reply_availability
@@ -533,6 +534,18 @@ async def chat_image(data: dict):
         user_id, display_text, character_id, source_event_id=source_event_id,
         event_meta=base_event_meta,
     )
+    if availability and availability.get('can_reply'):
+        try:
+            from db_read_receipt import mark_immediate_seen
+            mark_immediate_seen(user_id, character_id, source_event_id)
+        except Exception as exc:
+            print(f'[read_receipt] immediate image failed source_event_id={source_event_id} '
+                  f'error={type(exc).__name__}')
+            _fail_image(user_id, character_id, source_event_id, claim_token,
+                        'read_receipt_unavailable')
+            return JSONResponse(
+                {'error': 'read_receipt_unavailable', 'retryable': True,
+                 'source_event_id': source_event_id}, status_code=503)
 
     # 用 caption 做背景记忆检索（聊到甜食的照片→召回喜久福那条）
     recall_query = user_text if user_text else ''

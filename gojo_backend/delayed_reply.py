@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 
 from reply_availability import format_pending_bundle_context, parse_pending_event_meta
+from db_read_receipt import source_event_ids_from_claim
 
 
 _thread = None
@@ -35,22 +36,7 @@ def delivery_event_id(phone_check_id, index):
 
 
 def _pending_source_event_ids(bundle):
-    ids = []
-    for meta in parse_pending_event_meta((bundle or {}).get('event_meta')):
-        sid = meta.get('source_event_id') or meta.get('event_id')
-        if sid:
-            ids.append(str(sid).strip())
-    for key in ('first_source_event_id', 'last_source_event_id'):
-        value = str((bundle or {}).get(key) or '').strip()
-        if value:
-            ids.append(value)
-    seen = set()
-    ordered = []
-    for item in ids:
-        if item and item not in seen:
-            seen.add(item)
-            ordered.append(item)
-    return ordered
+    return source_event_ids_from_claim(bundle)
 
 
 def assistant_already_committed(user_id, character_id, phone_check_id):
@@ -360,13 +346,18 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
                 # successor occurrence; consuming the old row without its
                 # claim watermark would silently lose that message.
                 print(f'[delayed_reply] finish #{oid} did not win watermark CAS; successor remains pending')
+            else:
+                db_schedule.log_phone_check_action('consumed', claimed)
             results.append({
                 'id': oid, 'action': 'replied', 'ok': True,
                 'resolved': resolved,
             })
         else:
+            db_schedule.log_phone_check_action('generation_failed', claimed)
             try:
-                db_schedule.abort_delayed_reply(oid, claimed['claim_token'])
+                released = db_schedule.abort_delayed_reply(oid, claimed['claim_token'])
+                if released:
+                    db_schedule.log_phone_check_action('released', claimed)
             except Exception as exc:
                 print(f'[delayed_reply] abort #{oid} failed: {exc}')
             results.append({
@@ -397,3 +388,7 @@ def start_delayed_reply_worker():
     _thread = threading.Thread(target=_loop, daemon=True)
     _thread.start()
     print('[delayed_reply] phone-check delayed reply worker started')
+
+
+def is_delayed_reply_worker_running():
+    return _thread is not None and _thread.is_alive()
