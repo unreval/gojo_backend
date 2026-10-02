@@ -302,19 +302,34 @@ def normalize_plaintext_reply(raw):
     return {'jp': text, 'zh': text}
 
 
-def valid_reply_msg(m: dict) -> bool:
-    """Require safe bilingual text, or an intentional nonverbal reply."""
+def reply_message_rejection_reason(m: dict):
+    """Return a stable protocol reason, or None for a safe bilingual message."""
     if not isinstance(m, dict):
-        return False
+        return 'invalid_message_field'
     if msg_has_json_debris(m):
-        return False
+        return 'invalid_message_field'
     jp, zh = m.get('jp'), m.get('zh')
     jp_kind, zh_kind = classify_reply_content(jp), classify_reply_content(zh)
     if 'invalid' in (jp_kind, zh_kind):
-        return False
+        return 'invalid_message_field'
     if 'text' in (jp_kind, zh_kind) and jp.strip() == zh.strip():
-        return False
-    return re.search(r'[\u3041-\u3096\u30a1-\u30fa\uff66-\uff9f]', zh) is None
+        return 'jp_equals_zh_verbal'
+    # A short quoted Japanese word can appear inside otherwise Chinese text.
+    without_short_quote = re.sub(
+        r'[「『“][\u3041-\u3096\u30a1-\u30fa\uff66-\uff9f]{1,6}[」』”]', '', zh)
+    gate_text = (without_short_quote if sum(
+        '\u3400' <= ch <= '\u9fff' for ch in without_short_quote) >= 2 else zh)
+    kana = sum('\u3041' <= ch <= '\u3096' or '\u30a1' <= ch <= '\u30fa'
+               or '\uff66' <= ch <= '\uff9f' for ch in gate_text)
+    han = sum('\u3400' <= ch <= '\u9fff' for ch in gate_text)
+    if kana > han:
+        return 'zh_contains_kana'
+    return None
+
+
+def valid_reply_msg(m: dict) -> bool:
+    """Require safe bilingual text, or an intentional nonverbal reply."""
+    return reply_message_rejection_reason(m) is None
 
 
 def valid_reply_pair(jp, zh) -> bool:

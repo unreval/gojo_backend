@@ -37,7 +37,7 @@ from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
     finalize_user_messages, classify_reply_content,
     has_visible_text, valid_reply_msg, commit_ready_msgs, msg_has_json_debris,
-    normalize_plaintext_reply,
+    normalize_plaintext_reply, reply_message_rejection_reason,
 )
 from ai_client import extract_text
 from context_budget import estimate_tokens
@@ -80,6 +80,12 @@ _TRACE_OUTCOMES = {
 }
 _TRACE_RETRY_REASONS = {
     'parse_invalid',
+    'plaintext_verbal',
+    'missing_messages',
+    'malformed_json',
+    'jp_equals_zh_verbal',
+    'zh_contains_kana',
+    'invalid_message_field',
     'provider_error',
     'candidate_rejected',
     'tomorrow_noon_rewritten_as_today',
@@ -296,7 +302,8 @@ def _trace_response_field(response, field):
 def _build_generation_trace_payload(
     *, model, max_tokens, system_blocks, messages, attempt, attempts,
     trace_context, response=None, error=None, outcome='accepted',
-    will_retry=False, retry_reason=None, acceptance_mode=None,
+    will_retry=False, retry_reason=None, parse_invalid_reason=None,
+    acceptance_mode=None,
 ):
     """Build one bounded, content-free audit record for a Generator attempt."""
     trace_context = trace_context if isinstance(trace_context, dict) else {}
@@ -341,6 +348,10 @@ def _build_generation_trace_payload(
         'retry_reason': (
             _trace_enum(retry_reason, _TRACE_RETRY_REASONS)
             if retrying else None
+        ),
+        'parse_invalid_reason': (
+            _trace_enum(parse_invalid_reason, _TRACE_RETRY_REASONS)
+            if normalized_outcome == 'parse_invalid' else None
         ),
         'error_type': (
             _trace_error_type(error)
@@ -512,12 +523,22 @@ def _commit_offline_state(user_id, character_id, state):
         print(f'[{user_id}][{character_id}] 保存 OFFLINE_CHARACTER_STATES 失败: {e}')
 
 
+def _protocol_rejection_reason(parsed, raw='', min_messages=1):
+    if not isinstance(parsed, dict):
+        return ('plaintext_verbal' if classify_reply_content(raw) == 'text'
+                else 'malformed_json')
+    messages = parsed.get('messages')
+    if not isinstance(messages, list) or len(messages) < min_messages:
+        return 'missing_messages'
+    for message in messages:
+        reason = reply_message_rejection_reason(message)
+        if reason:
+            return reason
+    return None
+
+
 def _parsed_ready(parsed, min_messages=1) -> bool:
-    if not parsed or not isinstance(parsed.get('messages'), list):
-        return False
-    if len(parsed['messages']) < min_messages:
-        return False
-    return all(_valid_msg(m) for m in parsed['messages'])
+    return _protocol_rejection_reason(parsed, min_messages=min_messages) is None
 
 
 def _generate_or_none(
@@ -528,9 +549,21 @@ def _generate_or_none(
     """LLM → parse → validate → retry。成功返回 (parsed, state)，失败 (None, None)。"""
     result = None
     committed_state = None
+    repair_reason = None
     for attempt in range(attempts):
+        request_system_blocks = system_blocks
+        if repair_reason:
+            request_system_blocks = [*system_blocks, {
+                'type': 'text',
+                'text': (
+                    f'上一候选未满足输出协议（{repair_reason}）。只返回合法 JSON；'
+                    'messages 数组每项必须有 jp（日语）和 zh（忠实中文翻译）。'
+                    '不要解释、不要 Markdown、不要把同一语言复制到两栏。'
+                ),
+            }]
         try:
-            raw, response = _create_json(model, max_tokens, system_blocks, messages)
+            raw, response = _create_json(
+                model, max_tokens, request_system_blocks, messages)
             log_cache_usage(cache_tag, response)
             print(f'[{log_tag}] attempt {attempt+1} chars={len(raw or "")}')
             parsed, visible, state = _parse_generation(raw)
@@ -547,19 +580,23 @@ def _generate_or_none(
                         'nonverbal' if classify_reply_content(salvaged['jp']) == 'nonverbal'
                         else 'plaintext')
                     parsed['_acceptance_mode'] = acceptance_mode
-            if not _parsed_ready(parsed, min_messages):
+            reason = _protocol_rejection_reason(parsed, raw, min_messages)
+            if reason:
                 will_retry = attempt + 1 < attempts
                 _emit_generation_trace(
-                    model=model, max_tokens=max_tokens, system_blocks=system_blocks,
+                    model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
                     messages=messages, attempt=attempt + 1, attempts=attempts,
                     trace_context=generation_trace, response=response,
                     outcome='parse_invalid',
                     will_retry=will_retry,
-                    retry_reason='parse_invalid',
+                    retry_reason=reason,
+                    parse_invalid_reason=reason,
                 )
                 if not will_retry:
                     break
+                repair_reason = reason
                 continue
+            repair_reason = None
             if reject_fn:
                 reason = reject_fn(parsed)
                 if reason:
@@ -567,7 +604,7 @@ def _generate_or_none(
                     if trace_reason in (None, 'unknown'):
                         trace_reason = 'candidate_rejected'
                     _emit_generation_trace(
-                        model=model, max_tokens=max_tokens, system_blocks=system_blocks,
+                        model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
                         messages=messages, attempt=attempt + 1, attempts=attempts,
                         trace_context=generation_trace, response=response,
                         outcome='candidate_rejected',
@@ -578,7 +615,7 @@ def _generate_or_none(
             result = parsed
             committed_state = state
             _emit_generation_trace(
-                model=model, max_tokens=max_tokens, system_blocks=system_blocks,
+                model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
                 messages=messages, attempt=attempt + 1, attempts=attempts,
                 trace_context=generation_trace, response=response,
                 outcome='accepted', will_retry=False, acceptance_mode=acceptance_mode,
@@ -586,7 +623,7 @@ def _generate_or_none(
             break
         except Exception as e:
             _emit_generation_trace(
-                model=model, max_tokens=max_tokens, system_blocks=system_blocks,
+                model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
                 messages=messages, attempt=attempt + 1, attempts=attempts,
                 trace_context=generation_trace, error=e,
                 outcome='provider_error',

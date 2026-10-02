@@ -226,14 +226,19 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.jobs.assert_not_called()
         self.record_turn.assert_not_called()
 
-    def test_identical_verbal_or_kana_in_zh_never_commits(self):
+    def test_identical_verbal_or_mostly_japanese_zh_never_commits(self):
         for raw in ('JP: そうだね\nZH: そうだね\n',
-                    'JP: そうだね\nZH: 是啊ね\n'):
+                    'JP: そうだね\nZH: ねえ、悟って呼んで。\n'):
             with self.subTest(raw=raw):
                 events = self.events(raw)
                 self.assertIn('generation_failed', self.types(events))
                 self.assertNotIn('audio', self.types(events))
                 self.save_short.assert_not_called()
+
+    def test_short_japanese_quote_in_chinese_zh_commits(self):
+        events = self.events('JP: そうだね\nZH: 他说「おはよう」。\n')
+        self.assertIn('audio', self.types(events))
+        self.assertNotIn('generation_failed', self.types(events))
 
     def test_user_event_saved_even_when_generation_fails(self):
         self.events('JP: \nZH: \n', source_event_id='voice-1')

@@ -69,6 +69,8 @@ class GenerationAuditTraceTests(unittest.TestCase):
         traces = self._trace_payloads(logged)
         self.assertEqual([trace['outcome'] for trace in traces], ['parse_invalid'] * 3)
         self.assertEqual([trace['will_retry'] for trace in traces], [True, True, False])
+        self.assertEqual([trace['parse_invalid_reason'] for trace in traces],
+                         ['plaintext_verbal'] * 3)
 
     def setUp(self):
         self.secret = 'PRIVATE-PROMPT-BODY-DO-NOT-LOG'
@@ -236,8 +238,10 @@ class GenerationAuditTraceTests(unittest.TestCase):
         self.assertEqual(create.call_count, 2)
         self.assertEqual(system_blocks, expected_system_blocks)
         self.assertEqual(messages, expected_messages)
+        self.assertEqual(create.call_args_list[0].args[2], expected_system_blocks)
+        self.assertEqual(create.call_args_list[1].args[2][:-1], expected_system_blocks)
+        self.assertIn('malformed_json', create.call_args_list[1].args[2][-1]['text'])
         for call in create.call_args_list:
-            self.assertEqual(call.args[2], expected_system_blocks)
             self.assertEqual(call.args[3], expected_messages)
         self.assertEqual(result['messages'][0]['jp'], 'そうだね')
 
@@ -276,9 +280,11 @@ class GenerationAuditTraceTests(unittest.TestCase):
             (row['attempt'], row['outcome'], row['will_retry'], row['retry_reason'])
             for row in self._trace_payloads(logged)
         ], [
-            (1, 'parse_invalid', True, 'parse_invalid'),
+            (1, 'parse_invalid', True, 'malformed_json'),
             (2, 'accepted', False, None),
         ])
+        self.assertEqual(self._trace_payloads(logged)[0]['parse_invalid_reason'],
+                         'malformed_json')
 
     def test_candidate_rejection_uses_a_controlled_reason_then_retries(self):
         rejection_code = 'active_event_completion_claim_without_intent'

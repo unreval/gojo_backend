@@ -96,6 +96,28 @@ class PlaintextContractTests(unittest.TestCase):
         self.assertEqual(reject.call_count, 3)
         self.assertEqual(traces[0]['outcome'], 'candidate_rejected')
 
+    def test_protocol_rejection_reasons_distinguish_shape_and_fields(self):
+        cases = (
+            ('{"emotion":"平静"}', 'missing_messages'),
+            ('{"messages":[', 'malformed_json'),
+            ('{"messages":[{"jp":"こんにちは"}]}', 'invalid_message_field'),
+            ('{"messages":[{"jp":"今日は","zh":"今日は"}]}',
+             'jp_equals_zh_verbal'),
+            ('{"messages":[{"jp":"そうだね","zh":"ねえ、悟って呼んで"}]}',
+             'zh_contains_kana'),
+            ('{"messages":[{"jp":"そうだね","zh":"「おはよう」"}]}',
+             'zh_contains_kana'),
+        )
+        for raw, reason in cases:
+            with self.subTest(reason=reason):
+                result, _, calls, traces = self.generate(raw)
+                self.assertIsNone(result)
+                self.assertEqual(calls, 3)
+                self.assertEqual([t['parse_invalid_reason'] for t in traces],
+                                 [reason] * 3)
+                self.assertEqual([t['retry_reason'] for t in traces],
+                                 [reason, reason, None])
+
 
 
 class StructuredBoundaryTests(unittest.TestCase):
