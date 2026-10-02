@@ -70,6 +70,17 @@ class ReadReceiptTests(unittest.TestCase):
     def _receipt(self, source_id):
         return self.store.receipts.get(('u', 'gojo', source_id))
 
+    def test_init_serializes_new_table_creation(self):
+        conn = Mock()
+        with patch.object(db_read_receipt, 'get_conn', return_value=conn):
+            db_read_receipt.init_read_receipt_table()
+        statements = conn.cursor.return_value.execute.call_args_list
+        self.assertEqual(len(statements), 2)
+        self.assertIn('pg_advisory_xact_lock', statements[0].args[0])
+        self.assertIn('CREATE TABLE IF NOT EXISTS chat_read_receipt',
+                      statements[1].args[0])
+        conn.commit.assert_called_once()
+
     def test_free_immediate_marks_only_current_source(self):
         db_read_receipt.mark_immediate_seen('u', 'gojo', 'A')
         self.assertEqual(self._receipt('A')[1], 'immediate')
@@ -306,6 +317,7 @@ class ReadReceiptPostgresTests(unittest.TestCase):
         )''')
         with patch.object(db_read_receipt, 'get_conn', return_value=conn):
             db_read_receipt.init_read_receipt_table()
+            db_read_receipt.init_read_receipt_table()
         conn.query('''INSERT INTO char_phone_check
             (user_id, character_id, pending_count, pending_text, event_meta,
              reply_state, next_phone_check_at, first_source_event_id,
@@ -330,6 +342,18 @@ class ReadReceiptPostgresTests(unittest.TestCase):
         self.assertIsNotNone(claimed)
         conn.commit()
         self.assertEqual(conn.query('SELECT count(*) AS n FROM chat_read_receipt')['rows'][0]['n'], 2)
+        conn.commit()
+
+        cur = conn.cursor()
+        db_read_receipt.mark_source_events_seen_tx(
+            cur, 'u', 'gojo', ['A'], LATER, 'immediate')
+        conn.commit()
+        row = conn.query('''SELECT
+            seen_at = TIMESTAMPTZ '2026-09-18T10:00:00Z' AS first_seen_kept,
+            seen_via = 'phone_check' AS first_via_kept
+            FROM chat_read_receipt WHERE source_event_id = 'A' ''')['rows'][0]
+        self.assertTrue(row['first_seen_kept'])
+        self.assertTrue(row['first_via_kept'])
         conn.commit()
 
 

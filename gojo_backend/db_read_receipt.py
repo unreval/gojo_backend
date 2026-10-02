@@ -36,6 +36,9 @@ def init_read_receipt_table():
     conn = get_conn()
     cur = conn.cursor()
     try:
+        # Serialize first-time DDL across concurrently starting app instances.
+        cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',
+                    ('chat_read_receipt_schema_init',))
         cur.execute('''CREATE TABLE IF NOT EXISTS chat_read_receipt (
             user_id TEXT NOT NULL,
             character_id TEXT NOT NULL,
