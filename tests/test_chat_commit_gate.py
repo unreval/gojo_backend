@@ -276,6 +276,8 @@ class ChatCommitGateTests(unittest.TestCase):
                 self.assertEqual(body['messages'][0]['zh'], '')
                 for field in ('pending_transaction', 'reminder', 'schedule_transition'):
                     self.assertNotIn(field, body)
+                self.assertNotIn('_proactive_promise', body)
+                self.promise.assert_not_called()
 
     def test_two_semantic_rejections_fail_closed_with_specific_reasons(self):
         private_raw = '今日は疲れたよ'

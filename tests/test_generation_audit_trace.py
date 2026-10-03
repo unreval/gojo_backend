@@ -52,6 +52,11 @@ class GenerationAuditTraceTests(unittest.TestCase):
             self.assertEqual(self._trace_payloads(logged)[0]['acceptance_mode'], mode)
             self.assertEqual(self._trace_payloads(logged)[0]['outcome'], 'accepted')
             self.assertFalse(self._trace_payloads(logged)[0]['will_retry'])
+            summary = self._result_payloads(logged)[0]
+            self.assertEqual(summary['status'],
+                             'nonverbal_ok' if mode == 'nonverbal' else 'structured_ok')
+            self.assertEqual((summary['provider_calls'], summary['semantic_retries']),
+                             (1, 0))
             translate.assert_not_called()
             if mode != 'structured':
                 self.assertEqual(set(result), {'emotion', 'messages', '_acceptance_mode'})
@@ -70,6 +75,11 @@ class GenerationAuditTraceTests(unittest.TestCase):
         self.assertEqual([trace['outcome'] for trace in traces], ['accepted'])
         self.assertEqual(traces[0]['acceptance_mode'], 'plaintext')
         self.assertEqual([trace['will_retry'] for trace in traces], [False])
+        summary = self._result_payloads(logged)[0]
+        self.assertEqual(summary['status'], 'degraded_plaintext')
+        self.assertEqual((summary['provider_calls'], summary['semantic_retries']), (1, 0))
+        self.assertNotIn(self.secret, json.dumps(summary))
+        self.assertNotIn(self.secret, str(logged.call_args_list))
 
     def setUp(self):
         self.secret = 'PRIVATE-PROMPT-BODY-DO-NOT-LOG'
@@ -263,6 +273,12 @@ class GenerationAuditTraceTests(unittest.TestCase):
                 payloads.append(json.loads(args[0].split(' ', 1)[1]))
         return payloads
 
+    def _result_payloads(self, logged):
+        return [json.loads(call.args[0].split(' ', 1)[1])
+                for call in logged.call_args_list
+                if call.args and isinstance(call.args[0], str)
+                and call.args[0].startswith('[generation_result] {')]
+
     def test_attempt_trace_marks_parse_invalid_then_accepted(self):
         create = Mock(side_effect=[
             (json.dumps({'messages': [{'jp': '今日は疲れたよ',
@@ -288,6 +304,10 @@ class GenerationAuditTraceTests(unittest.TestCase):
         ])
         self.assertEqual(self._trace_payloads(logged)[0]['parse_invalid_reason'],
                          'jp_equals_zh_verbal')
+        self.assertEqual(self._result_payloads(logged)[0]['status'], 'semantic_retry')
+        self.assertEqual(self._result_payloads(logged)[0]['provider_calls'], 2)
+        self.assertEqual(self._result_payloads(logged)[0]['semantic_retries'], 1)
+        self.assertNotIn('今日は疲れたよ', str(logged.call_args_list))
 
     def test_candidate_rejection_uses_a_controlled_reason_then_retries(self):
         rejection_code = 'active_event_completion_claim_without_intent'
@@ -314,6 +334,7 @@ class GenerationAuditTraceTests(unittest.TestCase):
         self.assertEqual(traces[0]['retry_reason'], rejection_code)
         self.assertEqual(traces[1]['outcome'], 'accepted')
         self.assertFalse(traces[1]['will_retry'])
+        self.assertEqual(self._result_payloads(logged)[0]['status'], 'semantic_retry')
 
     def test_provider_error_trace_only_includes_error_type(self):
         sensitive_error = 'PROVIDER-ERROR-BODY-DO-NOT-LOG'
@@ -339,6 +360,10 @@ class GenerationAuditTraceTests(unittest.TestCase):
         self.assertEqual(traces[0]['error_type'], 'TimeoutError')
         self.assertEqual(len(traces), 1)
         self.assertNotIn(sensitive_error, json.dumps(traces, ensure_ascii=False))
+        summary = self._result_payloads(logged)[0]
+        self.assertEqual(summary['status'], 'generation_failed')
+        self.assertEqual((summary['provider_calls'], summary['semantic_retries']), (1, 0))
+        self.assertNotIn(sensitive_error, str(logged.call_args_list))
 
     def test_trace_builder_or_trace_print_failure_does_not_change_retries(self):
         for failure_kind in ('builder', 'print'):

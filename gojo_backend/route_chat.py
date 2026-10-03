@@ -23,6 +23,7 @@
   - 修复原实现里 `except Exception:` 后 `print({e})` 但 e 未定义的 bug。
 """
 from datetime import datetime
+from contextvars import ContextVar
 import hashlib
 import json
 import re
@@ -58,6 +59,15 @@ from characters import get_character
 router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY, max_retries=1)
 _schema_unavailable_models = set()
+_provider_call_counter = ContextVar('provider_call_counter', default=None)
+
+
+def _provider_create(**kwargs):
+    counter = _provider_call_counter.get()
+    if counter is not None:
+        counter[0] += 1
+    return claude_client.messages.create(**kwargs)
+
 
 def _create_json(model, max_tokens, system_blocks, messages):
     """Request one GenerationEnvelope; fall back only if schema is unsupported."""
@@ -69,7 +79,7 @@ def _create_json(model, max_tokens, system_blocks, messages):
     )
     if model not in _schema_unavailable_models:
         try:
-            response = claude_client.messages.create(
+            response = _provider_create(
                 **kwargs,
                 output_config={'format': {
                     'type': 'json_schema',
@@ -89,9 +99,9 @@ def _create_json(model, max_tokens, system_blocks, messages):
             _schema_unavailable_models.add(model)
             print(f'[generation] schema unavailable model={model} '
                   f'error_type={type(exc).__name__}; using prompt contract')
-            response = claude_client.messages.create(**kwargs)
+            response = _provider_create(**kwargs)
     else:
-        response = claude_client.messages.create(**kwargs)
+        response = _provider_create(**kwargs)
     raw = extract_text(response).strip()
     return raw, response
 
@@ -411,6 +421,27 @@ def _emit_generation_trace(**kwargs):
             pass
 
 
+def _emit_generation_result(trace_context, scope, status, provider_calls, semantic_retries):
+    """One content-free result per non-streaming generation call."""
+    trace_context = trace_context if isinstance(trace_context, dict) else {}
+    if scope not in ('chat', 'delayed', 'story', 'proactive',
+                     'voice', 'voice_story', 'voice_proactive'):
+        scope = 'unknown'
+    try:
+        payload = {
+            'scope': scope,
+            'status': status,
+            'source_event_ref': _trace_ref(trace_context.get('source_event_id')),
+            'provider_calls': provider_calls,
+            'provider_call_level': 'sdk_create',
+            'semantic_retries': semantic_retries,
+        }
+        print('[generation_result] ' + json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+    except Exception:
+        pass
+
+
 def _emit_generation_turn_link(source_event_id, assistant_turn_id):
     """Link the pre-generation correlation id to the eventual assistant turn."""
     try:
@@ -559,6 +590,11 @@ def _generate_or_none(
     """One provider request per semantic candidate, with at most one repair."""
     semantic_attempts = min(attempts, 2)
     repair_reason = None
+    provider_calls = [0]
+    generation_calls = 0
+    scope = ('delayed' if isinstance(log_tag, str) and log_tag.startswith('delayed:')
+             else cache_tag.split(':', 1)[0] if isinstance(cache_tag, str)
+             else 'unknown')
     for attempt in range(semantic_attempts):
         request_system_blocks = system_blocks
         if repair_reason:
@@ -570,6 +606,8 @@ def _generate_or_none(
                     '不要解释、不要 Markdown、不要把同一语言复制到两栏。'
                 ),
             }]
+        generation_calls += 1
+        counter_token = _provider_call_counter.set(provider_calls)
         try:
             raw, response = _create_json(
                 model, max_tokens, request_system_blocks, messages)
@@ -580,10 +618,12 @@ def _generate_or_none(
                 trace_context=generation_trace, error=exc,
                 outcome='provider_error', will_retry=False,
             )
-            print(f'[{log_tag}] provider error: {type(exc).__name__}')
+            print(f'[generation] provider error: {type(exc).__name__}')
             break
+        finally:
+            _provider_call_counter.reset(counter_token)
         log_cache_usage(cache_tag, response)
-        print(f'[{log_tag}] attempt {attempt+1} chars={len(raw or "")}')
+        print(f'[generation] attempt {attempt+1} chars={len(raw or "")}')
         try:
             parsed, visible, state = _parse_generation(raw)
         except Exception as exc:
@@ -593,7 +633,7 @@ def _generate_or_none(
                 trace_context=generation_trace, response=response,
                 outcome='parse_invalid', parse_invalid_reason='malformed_json',
             )
-            print(f'[{log_tag}] parse error: {type(exc).__name__}')
+            print(f'[generation] parse error: {type(exc).__name__}')
             break
 
         # A model-supplied private marker can never grant the degraded exception.
@@ -634,7 +674,7 @@ def _generate_or_none(
         try:
             reason = reject_fn(parsed) if reject_fn else None
         except Exception as exc:
-            print(f'[{log_tag}] candidate guard error: {type(exc).__name__}')
+            print(f'[generation] candidate guard error: {type(exc).__name__}')
             reason = 'candidate_rejected'
         if reason:
             trace_reason = _trace_enum(reason, _TRACE_RETRY_REASONS)
@@ -658,7 +698,16 @@ def _generate_or_none(
             trace_context=generation_trace, response=response,
             outcome='accepted', will_retry=False, acceptance_mode=acceptance_mode,
         )
+        status = ('degraded_plaintext' if acceptance_mode == 'plaintext'
+                  else 'nonverbal_ok' if acceptance_mode == 'nonverbal'
+                  else 'semantic_retry' if attempt else 'structured_ok')
+        _emit_generation_result(
+            generation_trace, scope, status, max(provider_calls[0], generation_calls),
+            attempt)
         return parsed, state
+    _emit_generation_result(
+        generation_trace, scope, 'generation_failed',
+        max(provider_calls[0], generation_calls), max(0, generation_calls - 1))
     return None, None
 
 

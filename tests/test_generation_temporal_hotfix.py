@@ -37,7 +37,9 @@ class PlaintextContractTests(unittest.TestCase):
                 self.assertIsNone(state)
                 self.assertEqual(result['messages'], [{'jp': raw, 'zh': ''}])
                 self.assertEqual(result['_acceptance_mode'], 'plaintext')
-                self.assertNotIn('schedule_action_intent', result)
+                for field in ('schedule_action_intent', 'reminder', 'cancel_reminder',
+                              'pending_transaction', 'proactive_promise'):
+                    self.assertNotIn(field, result)
                 self.assertIsNone(utils.normalize_plaintext_reply(raw))
                 self.assertEqual(traces[0]['output_contract'], 'salvaged_plaintext')
                 self.assertFalse(traces[0]['will_retry'])
@@ -180,6 +182,29 @@ class GenerationEnvelopeTransportTests(unittest.TestCase):
             self.assertIn('output_config', provider.call_args_list[0].kwargs)
             self.assertNotIn('output_config', provider.call_args_list[1].kwargs)
             self.assertNotIn('output_config', provider.call_args_list[2].kwargs)
+        finally:
+            route_chat._schema_unavailable_models.discard(model)
+
+    def test_generation_result_counts_schema_fallback_as_two_provider_calls(self):
+        model = 'claude-schema-fallback-count-test'
+        route_chat._schema_unavailable_models.discard(model)
+        try:
+            with patch.object(route_chat.claude_client.messages, 'create', side_effect=[
+                    TypeError('unexpected keyword argument output_config'),
+                    self.response()]) as provider, patch('builtins.print') as logged:
+                result, _ = route_chat._generate_or_none(
+                    model, 100, [], [], attempts=2, log_tag='test', cache_tag='test',
+                    generation_trace={'source_event_id': 'test'})
+            summaries = [json.loads(call.args[0].split(' ', 1)[1])
+                         for call in logged.call_args_list
+                         if call.args and isinstance(call.args[0], str)
+                         and call.args[0].startswith('[generation_result] {')]
+            self.assertEqual(provider.call_count, 2)
+            self.assertIsNotNone(result)
+            self.assertEqual(len(summaries), 1)
+            self.assertEqual(summaries[0]['status'], 'structured_ok')
+            self.assertEqual((summaries[0]['provider_calls'],
+                              summaries[0]['semantic_retries']), (2, 0))
         finally:
             route_chat._schema_unavailable_models.discard(model)
 
