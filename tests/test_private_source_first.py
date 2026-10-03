@@ -122,7 +122,7 @@ class PrivateSourceFirstTests(unittest.TestCase):
                     'user_id': 'u', 'character_id': 'c',
                     'source_event_id': failure, 'text': '我的职业是「教师」。'}))
                 self.assertEqual(response.status_code, 502)
-                self.assertEqual(generate.call_count, 3)
+                self.assertEqual(generate.call_count, 1)
         self.drain_jobs()
         self.run_cycle()
         self.assertEqual(self.sql("SELECT count(*) FROM chat_log WHERE role='user'")[0][0], 3)

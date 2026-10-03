@@ -56,21 +56,20 @@ class GenerationAuditTraceTests(unittest.TestCase):
             if mode != 'structured':
                 self.assertEqual(set(result), {'emotion', 'messages', '_acceptance_mode'})
 
-    def test_plain_verbal_reply_records_retries_instead_of_acceptance(self):
+    def test_plain_verbal_reply_records_one_degraded_acceptance(self):
         with patch.object(route_chat, '_create_json', return_value=(
                 'こんにちは', self.response)) as generate, patch.object(
                 route_chat, 'log_cache_usage'), patch('builtins.print') as logged:
             result, state = route_chat._generate_or_none(
                 'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',
                 salvage=True, generation_trace=self.trace_context)
-        self.assertIsNone(result)
+        self.assertEqual(result['messages'], [{'jp': 'こんにちは', 'zh': ''}])
         self.assertIsNone(state)
-        self.assertEqual(generate.call_count, 3)
+        self.assertEqual(generate.call_count, 1)
         traces = self._trace_payloads(logged)
-        self.assertEqual([trace['outcome'] for trace in traces], ['parse_invalid'] * 3)
-        self.assertEqual([trace['will_retry'] for trace in traces], [True, True, False])
-        self.assertEqual([trace['parse_invalid_reason'] for trace in traces],
-                         ['plaintext_verbal'] * 3)
+        self.assertEqual([trace['outcome'] for trace in traces], ['accepted'])
+        self.assertEqual(traces[0]['acceptance_mode'], 'plaintext')
+        self.assertEqual([trace['will_retry'] for trace in traces], [False])
 
     def setUp(self):
         self.secret = 'PRIVATE-PROMPT-BODY-DO-NOT-LOG'
@@ -227,7 +226,10 @@ class GenerationAuditTraceTests(unittest.TestCase):
             'emotion': '平静',
             'messages': [{'jp': 'そうだね', 'zh': '是啊'}],
         }, ensure_ascii=False)
-        create = Mock(side_effect=[('', self.response), (valid, self.response)])
+        invalid = json.dumps({
+            'messages': [{'jp': '今日は疲れたよ', 'zh': '今日は疲れたよ'}],
+        }, ensure_ascii=False)
+        create = Mock(side_effect=[(invalid, self.response), (valid, self.response)])
         with patch.object(route_chat, '_create_json', create), \
                 patch('builtins.print'):
             result, _state = route_chat._generate_or_none(
@@ -240,7 +242,7 @@ class GenerationAuditTraceTests(unittest.TestCase):
         self.assertEqual(messages, expected_messages)
         self.assertEqual(create.call_args_list[0].args[2], expected_system_blocks)
         self.assertEqual(create.call_args_list[1].args[2][:-1], expected_system_blocks)
-        self.assertIn('malformed_json', create.call_args_list[1].args[2][-1]['text'])
+        self.assertIn('jp_equals_zh_verbal', create.call_args_list[1].args[2][-1]['text'])
         for call in create.call_args_list:
             self.assertEqual(call.args[3], expected_messages)
         self.assertEqual(result['messages'][0]['jp'], 'そうだね')
@@ -263,7 +265,8 @@ class GenerationAuditTraceTests(unittest.TestCase):
 
     def test_attempt_trace_marks_parse_invalid_then_accepted(self):
         create = Mock(side_effect=[
-            ('', self.response),
+            (json.dumps({'messages': [{'jp': '今日は疲れたよ',
+                                      'zh': '今日は疲れたよ'}]}, ensure_ascii=False), self.response),
             (self._valid_reply(), self.response),
         ])
         with patch.object(route_chat, '_create_json', create), \
@@ -280,11 +283,11 @@ class GenerationAuditTraceTests(unittest.TestCase):
             (row['attempt'], row['outcome'], row['will_retry'], row['retry_reason'])
             for row in self._trace_payloads(logged)
         ], [
-            (1, 'parse_invalid', True, 'malformed_json'),
+            (1, 'parse_invalid', True, 'jp_equals_zh_verbal'),
             (2, 'accepted', False, None),
         ])
         self.assertEqual(self._trace_payloads(logged)[0]['parse_invalid_reason'],
-                         'malformed_json')
+                         'jp_equals_zh_verbal')
 
     def test_candidate_rejection_uses_a_controlled_reason_then_retries(self):
         rejection_code = 'active_event_completion_claim_without_intent'
@@ -327,20 +330,22 @@ class GenerationAuditTraceTests(unittest.TestCase):
                 generation_trace=self.trace_context,
             )
 
-        self.assertEqual(result['messages'][0]['jp'], 'そうだね')
+        self.assertIsNone(result)
+        self.assertEqual(create.call_count, 1)
         traces = self._trace_payloads(logged)
         self.assertEqual(traces[0]['outcome'], 'provider_error')
-        self.assertTrue(traces[0]['will_retry'])
-        self.assertEqual(traces[0]['retry_reason'], 'provider_error')
+        self.assertFalse(traces[0]['will_retry'])
+        self.assertIsNone(traces[0]['retry_reason'])
         self.assertEqual(traces[0]['error_type'], 'TimeoutError')
-        self.assertEqual(traces[1]['outcome'], 'accepted')
+        self.assertEqual(len(traces), 1)
         self.assertNotIn(sensitive_error, json.dumps(traces, ensure_ascii=False))
 
     def test_trace_builder_or_trace_print_failure_does_not_change_retries(self):
         for failure_kind in ('builder', 'print'):
             with self.subTest(failure_kind=failure_kind):
                 create = Mock(side_effect=[
-                    ('', self.response),
+                    (json.dumps({'messages': [{'jp': '今日は疲れたよ',
+                                              'zh': '今日は疲れたよ'}]}, ensure_ascii=False), self.response),
                     (self._valid_reply(), self.response),
                 ])
                 with ExitStack() as stack:

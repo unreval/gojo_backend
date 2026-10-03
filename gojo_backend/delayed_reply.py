@@ -207,7 +207,7 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
     from config import MODEL_MAIN
     result, committed_state = helpers._generate_or_none(
         MODEL_MAIN, 1500, system_blocks, messages,
-        attempts=3,
+        attempts=2,
         log_tag=f'delayed:{user_id}][{character_id}',
         cache_tag=f'chat:{character_id}',
         salvage=True,

@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import route_chat
+from generation_contract import GENERATION_ENVELOPE_SCHEMA
 import temporal_awareness as temporal
 import utils
 import context_layer
@@ -28,16 +29,18 @@ class PlaintextContractTests(unittest.TestCase):
                   if c.args and isinstance(c.args[0], str) and c.args[0].startswith('[generation_trace] {')]
         return result, state, provider.call_count, traces
 
-    def test_plain_japanese_chinese_english_retry_without_salvage(self):
+    def test_plain_japanese_chinese_english_degrade_without_fake_translation(self):
         for raw in ('今日はゆっくり話そう', '现在我们慢慢聊吧', 'We can talk now'):
             with self.subTest(raw=raw):
                 result, state, calls, traces = self.generate(raw)
-                self.assertEqual(calls, 3)
+                self.assertEqual(calls, 1)
                 self.assertIsNone(state)
-                self.assertIsNone(result)
+                self.assertEqual(result['messages'], [{'jp': raw, 'zh': ''}])
+                self.assertEqual(result['_acceptance_mode'], 'plaintext')
+                self.assertNotIn('schedule_action_intent', result)
                 self.assertIsNone(utils.normalize_plaintext_reply(raw))
-                self.assertEqual([t['output_contract'] for t in traces], ['retry_invalid'] * 3)
-                self.assertEqual([t['will_retry'] for t in traces], [True, True, False])
+                self.assertEqual(traces[0]['output_contract'], 'salvaged_plaintext')
+                self.assertFalse(traces[0]['will_retry'])
 
     def test_nonverbal_plaintext_salvages_once(self):
         for raw in ('😒', '……', '...'):
@@ -48,7 +51,7 @@ class PlaintextContractTests(unittest.TestCase):
                 self.assertEqual(result['messages'], [{'jp': raw, 'zh': raw}])
                 self.assertEqual(traces[0]['acceptance_mode'], 'nonverbal')
 
-    def test_plaintext_then_bilingual_reply_uses_second_attempt(self):
+    def test_plaintext_does_not_call_the_model_again(self):
         response = types.SimpleNamespace(stop_reason='end_turn', usage=None)
         bilingual = '{"messages":[{"jp":"そうだね","zh":"是啊"}]}'
         with patch.object(route_chat, '_create_json', side_effect=[
@@ -56,11 +59,11 @@ class PlaintextContractTests(unittest.TestCase):
             result, state = route_chat._generate_or_none(
                 'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',
                 salvage=True)
-        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(provider.call_count, 1)
         self.assertIsNone(state)
-        self.assertEqual(result['messages'], [{'jp': 'そうだね', 'zh': '是啊'}])
+        self.assertEqual(result['messages'], [{'jp': 'そうだね', 'zh': ''}])
 
-    def test_invalid_or_protocol_output_retries_without_accepting_fragments(self):
+    def test_invalid_or_protocol_output_fails_without_repeating_generation(self):
         for raw in ('', '?!', 'null', '\x00hello', '{"messages":[',
                     '{"messages":[],"reminder":{"content":"sleep"}}',
                     'hello\nschedule_action_intent: complete',
@@ -70,18 +73,18 @@ class PlaintextContractTests(unittest.TestCase):
                 result, state, calls, traces = self.generate(raw)
                 self.assertIsNone(result)
                 self.assertIsNone(state)
-                self.assertEqual(calls, 3)
-                self.assertEqual([t['output_contract'] for t in traces], ['retry_invalid'] * 3)
+                self.assertEqual(calls, 1)
+                self.assertEqual([t['output_contract'] for t in traces], ['retry_invalid'])
 
     def test_incomplete_provider_output_and_required_structure_are_not_salvaged(self):
         for reason in ('max_tokens', 'length', 'tool_use', 'pause_turn', 'refusal', 'content_filter'):
             with self.subTest(reason=reason):
                 result, _, calls, _ = self.generate('話そう', stop_reason=reason)
                 self.assertIsNone(result)
-                self.assertEqual(calls, 3)
+                self.assertEqual(calls, 1)
         result, _, calls, _ = self.generate('話そう', min_messages=3)
         self.assertIsNone(result)
-        self.assertEqual(calls, 3)
+        self.assertEqual(calls, 1)
 
     def test_structured_success_and_truth_guard_keep_existing_contract(self):
         raw = '{"messages":[{"jp":"そうだね","zh":"是啊"}]}'
@@ -92,8 +95,8 @@ class PlaintextContractTests(unittest.TestCase):
         reject = Mock(return_value='active_event_completion_claim_without_intent')
         result, _, calls, traces = self.generate(raw, reject_fn=reject)
         self.assertIsNone(result)
-        self.assertEqual(calls, 3)
-        self.assertEqual(reject.call_count, 3)
+        self.assertEqual(calls, 2)
+        self.assertEqual(reject.call_count, 2)
         self.assertEqual(traces[0]['outcome'], 'candidate_rejected')
 
     def test_protocol_rejection_reasons_distinguish_shape_and_fields(self):
@@ -112,11 +115,89 @@ class PlaintextContractTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 result, _, calls, traces = self.generate(raw)
                 self.assertIsNone(result)
-                self.assertEqual(calls, 3)
+                expected_calls = 1 if reason in ('missing_messages', 'malformed_json') else 2
+                self.assertEqual(calls, expected_calls)
                 self.assertEqual([t['parse_invalid_reason'] for t in traces],
-                                 [reason] * 3)
+                                 [reason] * expected_calls)
                 self.assertEqual([t['retry_reason'] for t in traces],
-                                 [reason, reason, None])
+                                 [reason, None] if expected_calls == 2 else [None])
+
+    def test_model_cannot_spoof_the_degraded_mode(self):
+        raw = json.dumps({
+            '_acceptance_mode': 'plaintext',
+            'messages': [{'jp': '今日は話せるよ', 'zh': ''}],
+        }, ensure_ascii=False)
+        result, _, calls, traces = self.generate(raw)
+        self.assertIsNone(result)
+        self.assertEqual(calls, 2)
+        self.assertEqual(traces[0]['parse_invalid_reason'], 'invalid_message_field')
+
+    def test_short_structured_story_gets_only_one_semantic_repair(self):
+        response = types.SimpleNamespace(stop_reason='end_turn', usage=None)
+        bubble = {'jp': 'そうだね', 'zh': '是啊'}
+        short = json.dumps({'messages': [bubble]}, ensure_ascii=False)
+        complete = json.dumps({'messages': [bubble] * 3}, ensure_ascii=False)
+        with patch.object(route_chat, '_create_json', side_effect=[
+                (short, response), (complete, response)]) as provider:
+            result, _ = route_chat._generate_or_none(
+                'offline', 100, [], [], attempts=5, log_tag='story',
+                cache_tag='story', min_messages=3)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(len(result['messages']), 3)
+
+
+class GenerationEnvelopeTransportTests(unittest.TestCase):
+    @staticmethod
+    def response(raw='{"emotion":"平静","messages":[{"jp":"そうだね","zh":"是啊"}]}'):
+        return types.SimpleNamespace(
+            content=[types.SimpleNamespace(type='text', text=raw)],
+            stop_reason='end_turn', usage=None)
+
+    def test_request_uses_the_shared_json_schema(self):
+        model = 'claude-structured-contract-test'
+        route_chat._schema_unavailable_models.discard(model)
+        with patch.object(route_chat.claude_client.messages, 'create',
+                          return_value=self.response()) as provider:
+            raw, _ = route_chat._create_json(model, 100, [], [])
+        self.assertIn('そうだね', raw)
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(provider.call_args.kwargs['output_config']['format']['schema'],
+                         GENERATION_ENVELOPE_SCHEMA)
+        self.assertEqual(GENERATION_ENVELOPE_SCHEMA['required'], ['emotion', 'messages'])
+        self.assertFalse(GENERATION_ENVELOPE_SCHEMA['additionalProperties'])
+
+    def test_unsupported_schema_falls_back_and_caches_capability(self):
+        model = 'claude-unsupported-schema-test'
+        route_chat._schema_unavailable_models.discard(model)
+        try:
+            with patch.object(route_chat.claude_client.messages, 'create',
+                              side_effect=[TypeError('unexpected keyword argument output_config'),
+                                           self.response(), self.response()]) as provider, \
+                    patch('builtins.print'):
+                route_chat._create_json(model, 100, [], [])
+                route_chat._create_json(model, 100, [], [])
+            self.assertEqual(provider.call_count, 3)
+            self.assertIn('output_config', provider.call_args_list[0].kwargs)
+            self.assertNotIn('output_config', provider.call_args_list[1].kwargs)
+            self.assertNotIn('output_config', provider.call_args_list[2].kwargs)
+        finally:
+            route_chat._schema_unavailable_models.discard(model)
+
+    def test_provider_429_never_enters_semantic_retry(self):
+        class RateLimited(Exception):
+            status_code = 429
+
+        model = 'claude-rate-limited-test'
+        route_chat._schema_unavailable_models.discard(model)
+        with patch.object(route_chat.claude_client.messages, 'create',
+                          side_effect=RateLimited('429')) as provider, \
+                patch('builtins.print'):
+            result, state = route_chat._generate_or_none(
+                model, 100, [], [], attempts=3, log_tag='test', cache_tag='test',
+                salvage=True)
+        self.assertIsNone(result)
+        self.assertIsNone(state)
+        self.assertEqual(provider.call_count, 1)
 
 
 

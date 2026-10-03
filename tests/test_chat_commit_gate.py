@@ -221,7 +221,7 @@ class ChatCommitGateTests(unittest.TestCase):
         self.grumble.assert_not_called()
         self.record_assistant.assert_not_called()
 
-    def assert_generation_failed(self, response, body, attempts=3, user_saved=True):
+    def assert_generation_failed(self, response, body, attempts=1, user_saved=True):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(body['error'], 'generation_failed')
         self.assertTrue(body['generation_failed'])
@@ -231,7 +231,7 @@ class ChatCommitGateTests(unittest.TestCase):
         if user_saved:
             self.assertEqual(self.user_memory_roles(), ['user'])
             self.assertEqual(self.save_user_once.call_count, 1)
-        self.assertIn(f'generation_failed after {attempts} attempts; commit skipped',
+        self.assertIn('generation_failed; max_semantic_attempts=2; commit skipped',
                       ' '.join(str(c) for c in self.log.call_args_list))
 
     def test_prompt_messages_do_not_fallback_on_source_validity_error(self):
@@ -264,52 +264,51 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(self.route._create_json.call_count, 1)
         self.grumble.assert_not_called()
 
-    def test_verbal_plaintext_in_three_languages_recovers_on_second_attempt(self):
+    def test_verbal_plaintext_in_three_languages_displays_once_without_fake_zh(self):
         valid = chat_reply('そうだね', '是啊')
         for index, raw in enumerate(('今日はゆっくり話そう', '今天慢慢聊吧',
                                      'We can talk now')):
             with self.subTest(raw=raw):
                 response, body = self.send([raw, valid], source_event_id=f'plain-{index}')
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(self.route._create_json.call_count, 2)
-                self.assertEqual(body['messages'][0]['zh'], '是啊')
-                self.assertNotEqual(body['messages'][0]['jp'], body['messages'][0]['zh'])
+                self.assertEqual(self.route._create_json.call_count, 1)
+                self.assertEqual(body['messages'][0]['jp'], raw)
+                self.assertEqual(body['messages'][0]['zh'], '')
+                for field in ('pending_transaction', 'reminder', 'schedule_transition'):
+                    self.assertNotIn(field, body)
 
-    def test_three_protocol_rejections_fail_closed_with_specific_reasons(self):
-        private_raw = 'PRIVATE-VERBAL-OUTPUT-DO-NOT-LOG'
+    def test_two_semantic_rejections_fail_closed_with_specific_reasons(self):
+        private_raw = '今日は疲れたよ'
         response, body = self.send([
-            private_raw,
-            '{"messages":[',
-            chat_reply('今日は疲れたよ', '今日は疲れたよ'),
+            chat_reply(private_raw, private_raw),
+            chat_reply('そうだね', 'ねえ、悟って呼んで。'),
         ])
-        self.assert_generation_failed(response, body)
+        self.assert_generation_failed(response, body, attempts=2)
         traces = self.generation_traces()
         self.assertEqual([t['parse_invalid_reason'] for t in traces],
-                         ['plaintext_verbal', 'malformed_json', 'jp_equals_zh_verbal'])
+                         ['jp_equals_zh_verbal', 'zh_contains_kana'])
         self.assertEqual([t['retry_reason'] for t in traces],
-                         ['plaintext_verbal', 'malformed_json', None])
+                         ['jp_equals_zh_verbal', None])
         self.assertNotIn(private_raw, json.dumps(traces, ensure_ascii=False))
         calls = self.route._create_json.call_args_list
-        self.assertIn('plaintext_verbal', calls[1].args[2][-1]['text'])
-        self.assertIn('malformed_json', calls[2].args[2][-1]['text'])
-        self.assertNotIn(private_raw, calls[2].args[2][-1]['text'])
+        self.assertIn('jp_equals_zh_verbal', calls[1].args[2][-1]['text'])
+        self.assertNotIn(private_raw, calls[1].args[2][-1]['text'])
 
     def test_retry_prompt_is_transient_protocol_only_and_never_echoes_output(self):
-        private_raw = 'PRIVATE-VERBAL-OUTPUT-DO-NOT-ECHO'
+        private_raw = '今日は疲れたよ'
         original_blocks = [{'type': 'text', 'text': '角色设定'}]
         self.route.build_system_blocks.return_value = original_blocks
-        response, body = self.send([private_raw, private_raw,
-                                    chat_reply('そうだね', '是啊')])
+        response, body = self.send([
+            chat_reply(private_raw, private_raw), chat_reply('そうだね', '是啊')])
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.route._create_json.call_count, 3)
+        self.assertEqual(self.route._create_json.call_count, 2)
         calls = self.route._create_json.call_args_list
         self.assertEqual(calls[0].args[2], original_blocks)
         self.assertEqual(calls[1].args[2][:-1], original_blocks)
-        self.assertEqual(calls[2].args[2][:-1], original_blocks)
         self.assertEqual(original_blocks, [{'type': 'text', 'text': '角色设定'}])
         for call in calls[1:]:
             hint = call.args[2][-1]['text']
-            self.assertIn('plaintext_verbal', hint)
+            self.assertIn('jp_equals_zh_verbal', hint)
             self.assertIn('JSON', hint)
             self.assertIn('jp', hint)
             self.assertIn('zh', hint)
@@ -374,7 +373,7 @@ class ChatCommitGateTests(unittest.TestCase):
         self.rel.assert_not_called()
         self.assertEqual(self.save_user_once.call_args.args[1], '我接着说')
 
-    def test_empty_raw_retries_then_generation_failed(self):
+    def test_empty_raw_fails_without_format_retry(self):
         response, body = self.send(['', '', ''])
         self.assert_generation_failed(response, body)
 
@@ -423,22 +422,23 @@ class ChatCommitGateTests(unittest.TestCase):
                 self.client.messages.create.assert_not_called()
                 self.state.assert_not_called()
 
-    def test_safe_raw_bracket_notes_retry_without_copying_translation(self):
+    def test_safe_raw_bracket_notes_degrade_without_copying_translation(self):
         for index, text in enumerate(('配列の a[0] を見て。',
                                       '补充说明（可选）[第三章]，集合 {甲, 乙}。')):
             with self.subTest(text=text):
                 self.client.messages.create.reset_mock()
                 response, body = self.send([text] * 3, source_event_id=f'raw-bracket-{index}')
-                self.assertEqual(response.status_code, 502)
-                self.assertEqual(body['messages'], [])
-                self.assertEqual(self.route._create_json.call_count, 3)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(body['messages'][0]['jp'], text)
+                self.assertEqual(body['messages'][0]['zh'], '')
+                self.assertEqual(self.route._create_json.call_count, 1)
                 self.client.messages.create.assert_not_called()
                 self.state.assert_not_called()
 
     def test_json_debris_as_visible_text_is_rejected(self):
         debris = '{"jp":"...","zh":"..."}'
         response, body = self.send([chat_reply(debris, debris)])
-        self.assert_generation_failed(response, body)
+        self.assert_generation_failed(response, body, attempts=2)
 
     def test_valid_msg_punctuation_vs_kana(self):
         self.assertFalse(self.route._has_visible_text(None))
@@ -483,7 +483,7 @@ class ChatCommitGateTests(unittest.TestCase):
                                            source_event_id=f'invalid-pair-{index}')
                 self.assertEqual(response.status_code, 502)
                 self.assertEqual(body['messages'], [])
-                self.assertEqual(self.route._create_json.call_count, 3)
+                self.assertEqual(self.route._create_json.call_count, 2)
 
     def test_no_fallback_pool_in_source(self):
         src = Path(ROUTE_CHAT).read_text(encoding='utf-8')
@@ -542,7 +542,7 @@ class ChatCommitGateTests(unittest.TestCase):
 
     def test_story_empty_generation_does_not_fabricate_or_commit(self):
         response, body = self.send(['', '', '', '', ''], handler=self.route.chat_story)
-        self.assert_generation_failed(response, body, attempts=5)
+        self.assert_generation_failed(response, body)
         self.assertEqual(self.user_memory_roles(), ['user'])
 
     def test_story_valid_reply_commits_assistant_only_once(self):
@@ -575,9 +575,9 @@ class ChatCommitGateTests(unittest.TestCase):
 
     def test_voice_text_empty_generation_does_not_fabricate(self):
         response, body = self.send(['', '', ''], handler=self.route.chat_voice_text)
-        self.assert_generation_failed(response, body, attempts=3)
+        self.assert_generation_failed(response, body)
 
-    def test_text_voice_use_one_snapshot_and_retry_plaintext(self):
+    def test_text_voice_use_one_snapshot_and_degrade_plaintext(self):
         from datetime import datetime, timezone
         now = datetime(2026, 9, 30, 13, 30, tzinfo=timezone.utc)
         snapshot = {'now_utc': now, 'now_local': now}
@@ -589,11 +589,9 @@ class ChatCommitGateTests(unittest.TestCase):
                     '今日はゆっくり話そう', chat_reply('今日はゆっくり話そう。', '今天慢慢聊吧。')], handler=handler,
                                            source_event_id=handler.__name__)
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(body['messages'][0]['jp'], '今日はゆっくり話そう。')
-                self.assertEqual(body['messages'][0]['zh'], '今天慢慢聊吧。')
-                self.assertEqual(self.route._create_json.call_count, 2)
-                self.assertIn('plaintext_verbal',
-                              self.route._create_json.call_args_list[1].args[2][-1]['text'])
+                self.assertEqual(body['messages'][0]['jp'], '今日はゆっくり話そう')
+                self.assertEqual(body['messages'][0]['zh'], '')
+                self.assertEqual(self.route._create_json.call_count, 1)
                 clock.assert_called_once()
                 self.assertIs(context.call_args.kwargs['temporal_snapshot'], snapshot)
                 self.assertIs(self.route.build_system_blocks.call_args.kwargs['temporal_snapshot'], snapshot)
@@ -601,7 +599,7 @@ class ChatCommitGateTests(unittest.TestCase):
 
     def test_voice_story_empty_generation_does_not_fabricate(self):
         response, body = self.send(['', '', '', '', ''], handler=self.route.chat_voice_story)
-        self.assert_generation_failed(response, body, attempts=5)
+        self.assert_generation_failed(response, body)
 
     def test_voice_proactive_empty_generation_does_not_fabricate(self):
         response, body = self.send(
@@ -651,7 +649,7 @@ class ChatCommitGateTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 response, body = self.send([raw, raw, raw])
                 self.assertEqual(response.status_code, 502)
-                self.assertEqual(self.route._create_json.call_count, 3)
+                self.assertEqual(self.route._create_json.call_count, 1)
                 self.client.messages.create.assert_not_called()
                 self.assert_assistant_commit_skipped()
 

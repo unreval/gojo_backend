@@ -96,18 +96,15 @@ class ReceiptWindowTests(unittest.TestCase):
     def test_retry_preserves_canonical_assistant_and_memory_enqueue_once(self):
         from generation_side_effect_worker import process_one_side_effect
         raw = '今なら話せるよ。'
-        bilingual = json.dumps({'messages': [{'jp': raw, 'zh': '现在可以聊天了。'}]},
-                               ensure_ascii=False)
         with self.http() as (route, generate), patch.object(route, '_emit_generation_turn_link') as link:
-            generate.side_effect = [(raw, Mock(stop_reason='end_turn')),
-                                    (bilingual, Mock(stop_reason='end_turn'))]
+            generate.return_value = (raw, Mock(stop_reason='end_turn'))
             first = asyncio.run(route.chat_text(self.request('retry-sql')))
             replay = asyncio.run(route.chat_text(self.request('retry-sql')))
             self.assertEqual((first.status_code, replay.status_code), (200, 200))
             self.assertEqual(json.loads(first.body), json.loads(replay.body))
             self.assertEqual(json.loads(first.body)['messages'][0]['jp'], raw)
-            self.assertEqual(json.loads(first.body)['messages'][0]['zh'], '现在可以聊天了。')
-            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(json.loads(first.body)['messages'][0]['zh'], '')
+            self.assertEqual(generate.call_count, 1)
             link.assert_called_once_with('retry-sql', 'chat_reply:retry-sql')
         self.assertTrue(process_one_side_effect(self.assistant_effect('retry-sql')))
         self.assertFalse(process_one_side_effect(self.assistant_effect('retry-sql')))

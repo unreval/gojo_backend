@@ -6,10 +6,9 @@
     绝不能写成 build_system_blocks(...) + '字符串'（列表加字符串会直接 TypeError 崩溃）
   - 每次调用后 log_cache_usage 打印缓存命中，部署后看日志即可确认省了多少
 
-★ v-fix：预填 JSON（修"空循环"）
-  - 模型有时不输出 JSON、直接吐纯日语 → 解析失败 → 重试耗尽后返回 generation_failed，绝不伪造角色台词。
-  - 解法：在 messages 末尾预填一条 {'role':'assistant','content':'{'}，强制模型必须从 { 接着写 JSON，
-    拿到回复后把开头的 { 补回去再解析。所有产生 JSON 的端点都套用（见 _create_json）。
+★ Generator 协议：
+  - 非流式聊天请求优先使用 GenerationEnvelope JSON Schema；旧 SDK/API 不支持时回退到提示协议。
+  - 安全纯文本可作为单气泡显示，zh 留空；语义错误最多修复一次，格式错误不重复生成。
 
 ★ 记账升级：/chat/text 里,LLM 返回 pending_transaction 时,后端只透传给前端(不写库),
   由前端确认卡引导用户核对后再 POST /accounting/records 落库。其他 handler 一律不做记账检测。
@@ -37,7 +36,9 @@ from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
     finalize_user_messages, classify_reply_content,
     has_visible_text, valid_reply_msg, commit_ready_msgs, msg_has_json_debris,
-    normalize_plaintext_reply, reply_message_rejection_reason,
+)
+from generation_contract import (
+    GENERATION_ENVELOPE_SCHEMA, degraded_reply, rejection_reason,
 )
 from ai_client import extract_text
 from context_budget import estimate_tokens
@@ -55,20 +56,42 @@ from temporal_awareness import (
 from characters import get_character
 
 router = APIRouter()
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY, max_retries=1)
+_schema_unavailable_models = set()
 
-# ★ 预填：强制模型从 { 开始输出 JSON
 def _create_json(model, max_tokens, system_blocks, messages):
-    """统一的模型调用。
-    ★ 不再预填 assistant '{'——claude-sonnet-4-6 不支持 assistant prefill（会 400）。
-    改为直接调用，靠下面 _parse_reply 的宽松解析（从第一个 { 抠到最后一个 }）扛住
-    模型偶尔在 JSON 前多说两句的情况。返回 (raw_text, response)。"""
-    response = claude_client.messages.create(
+    """Request one GenerationEnvelope; fall back only if schema is unsupported."""
+    kwargs = dict(
         model=model,
         max_tokens=max_tokens,
         system=system_blocks,
         messages=messages,
     )
+    if model not in _schema_unavailable_models:
+        try:
+            response = claude_client.messages.create(
+                **kwargs,
+                output_config={'format': {
+                    'type': 'json_schema',
+                    'schema': GENERATION_ENVELOPE_SCHEMA,
+                }},
+            )
+        except Exception as exc:
+            detail = str(exc).lower()
+            unsupported = (
+                (isinstance(exc, TypeError) and 'output_config' in detail)
+                or (getattr(exc, 'status_code', None) == 400
+                    and any(token in detail for token in (
+                        'output_config', 'json_schema', 'schema')))
+            )
+            if not unsupported:
+                raise
+            _schema_unavailable_models.add(model)
+            print(f'[generation] schema unavailable model={model} '
+                  f'error_type={type(exc).__name__}; using prompt contract')
+            response = claude_client.messages.create(**kwargs)
+    else:
+        response = claude_client.messages.create(**kwargs)
     raw = extract_text(response).strip()
     return raw, response
 
@@ -482,8 +505,9 @@ def resolve_chat_proactive_event_id(data):
     return f'proactive:chat:{uuid.uuid4()}'
 
 
-def _generation_failed_response(user_id: str, character_id: str, total_days=None, attempts=3):
-    print(f'[{user_id}][{character_id}] generation_failed after {attempts} attempts; commit skipped')
+def _generation_failed_response(user_id: str, character_id: str, total_days=None, attempts=2):
+    print(f'[{user_id}][{character_id}] generation_failed; '
+          f'max_semantic_attempts={attempts}; commit skipped')
     body = {
         'error': 'generation_failed',
         'generation_failed': True,
@@ -523,22 +547,8 @@ def _commit_offline_state(user_id, character_id, state):
         print(f'[{user_id}][{character_id}] 保存 OFFLINE_CHARACTER_STATES 失败: {e}')
 
 
-def _protocol_rejection_reason(parsed, raw='', min_messages=1):
-    if not isinstance(parsed, dict):
-        return ('plaintext_verbal' if classify_reply_content(raw) == 'text'
-                else 'malformed_json')
-    messages = parsed.get('messages')
-    if not isinstance(messages, list) or len(messages) < min_messages:
-        return 'missing_messages'
-    for message in messages:
-        reason = reply_message_rejection_reason(message)
-        if reason:
-            return reason
-    return None
-
-
-def _parsed_ready(parsed, min_messages=1) -> bool:
-    return _protocol_rejection_reason(parsed, min_messages=min_messages) is None
+def _protocol_rejection_reason(parsed, raw='', min_messages=1, acceptance_mode=None):
+    return rejection_reason(parsed, raw, min_messages, acceptance_mode)
 
 
 def _generate_or_none(
@@ -546,11 +556,10 @@ def _generate_or_none(
     attempts, log_tag, cache_tag, min_messages=1, salvage=False, reject_fn=None,
     generation_trace=None,
 ):
-    """LLM → parse → validate → retry。成功返回 (parsed, state)，失败 (None, None)。"""
-    result = None
-    committed_state = None
+    """One provider request per semantic candidate, with at most one repair."""
+    semantic_attempts = min(attempts, 2)
     repair_reason = None
-    for attempt in range(attempts):
+    for attempt in range(semantic_attempts):
         request_system_blocks = system_blocks
         if repair_reason:
             request_system_blocks = [*system_blocks, {
@@ -564,74 +573,93 @@ def _generate_or_none(
         try:
             raw, response = _create_json(
                 model, max_tokens, request_system_blocks, messages)
-            log_cache_usage(cache_tag, response)
-            print(f'[{log_tag}] attempt {attempt+1} chars={len(raw or "")}')
-            parsed, visible, state = _parse_generation(raw)
-            acceptance_mode = 'structured'
-            if (not _parsed_ready(parsed, min_messages) and salvage
-                    and parsed is None and state is None
-                    and _trace_response_field(response, 'stop_reason') not in (
-                        'max_tokens', 'length', 'tool_use', 'pause_turn', 'refusal', 'content_filter')):
-                salvaged = normalize_plaintext_reply(raw)
-                if salvaged and min_messages == 1 and _valid_msg(salvaged):
-                    parsed = {'emotion': '平静', 'messages': [salvaged]}
-                    state = None
-                    acceptance_mode = (
-                        'nonverbal' if classify_reply_content(salvaged['jp']) == 'nonverbal'
-                        else 'plaintext')
-                    parsed['_acceptance_mode'] = acceptance_mode
-            reason = _protocol_rejection_reason(parsed, raw, min_messages)
-            if reason:
-                will_retry = attempt + 1 < attempts
-                _emit_generation_trace(
-                    model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
-                    messages=messages, attempt=attempt + 1, attempts=attempts,
-                    trace_context=generation_trace, response=response,
-                    outcome='parse_invalid',
-                    will_retry=will_retry,
-                    retry_reason=reason,
-                    parse_invalid_reason=reason,
-                )
-                if not will_retry:
-                    break
-                repair_reason = reason
-                continue
-            repair_reason = None
-            if reject_fn:
-                reason = reject_fn(parsed)
-                if reason:
-                    trace_reason = _trace_enum(reason, _TRACE_RETRY_REASONS)
-                    if trace_reason in (None, 'unknown'):
-                        trace_reason = 'candidate_rejected'
-                    _emit_generation_trace(
-                        model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
-                        messages=messages, attempt=attempt + 1, attempts=attempts,
-                        trace_context=generation_trace, response=response,
-                        outcome='candidate_rejected',
-                        will_retry=attempt + 1 < attempts,
-                        retry_reason=trace_reason,
-                    )
-                    continue
-            result = parsed
-            committed_state = state
+        except Exception as exc:
             _emit_generation_trace(
                 model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
-                messages=messages, attempt=attempt + 1, attempts=attempts,
-                trace_context=generation_trace, response=response,
-                outcome='accepted', will_retry=False, acceptance_mode=acceptance_mode,
+                messages=messages, attempt=attempt + 1, attempts=semantic_attempts,
+                trace_context=generation_trace, error=exc,
+                outcome='provider_error', will_retry=False,
             )
+            print(f'[{log_tag}] provider error: {type(exc).__name__}')
             break
-        except Exception as e:
+        log_cache_usage(cache_tag, response)
+        print(f'[{log_tag}] attempt {attempt+1} chars={len(raw or "")}')
+        try:
+            parsed, visible, state = _parse_generation(raw)
+        except Exception as exc:
             _emit_generation_trace(
                 model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
-                messages=messages, attempt=attempt + 1, attempts=attempts,
-                trace_context=generation_trace, error=e,
-                outcome='provider_error',
-                will_retry=attempt + 1 < attempts,
-                retry_reason='provider_error',
+                messages=messages, attempt=attempt + 1, attempts=semantic_attempts,
+                trace_context=generation_trace, response=response,
+                outcome='parse_invalid', parse_invalid_reason='malformed_json',
             )
-            print(f'[{log_tag}] attempt {attempt+1} error: {e}')
-    return result, committed_state
+            print(f'[{log_tag}] parse error: {type(exc).__name__}')
+            break
+
+        # A model-supplied private marker can never grant the degraded exception.
+        if isinstance(parsed, dict):
+            parsed.pop('_acceptance_mode', None)
+        acceptance_mode = 'structured'
+        unusable_stop = _trace_response_field(response, 'stop_reason') in (
+            'max_tokens', 'length', 'tool_use', 'pause_turn', 'refusal', 'content_filter')
+        if (salvage and not unusable_stop and parsed is None and state is None
+                and min_messages == 1):
+            recovered = degraded_reply(raw)
+            if recovered:
+                parsed = recovered
+                acceptance_mode = recovered['_acceptance_mode']
+        reason = ('malformed_json' if unusable_stop else _protocol_rejection_reason(
+            parsed, raw, min_messages, acceptance_mode))
+        if reason:
+            # Malformed transport shape fails immediately. Language and story
+            # length errors get at most one semantic regeneration.
+            short_story = (reason == 'missing_messages'
+                           and isinstance(parsed, dict)
+                           and isinstance(parsed.get('messages'), list)
+                           and 0 < len(parsed['messages']) < min_messages)
+            will_retry = ((reason in (
+                'jp_equals_zh_verbal', 'zh_contains_kana', 'invalid_message_field')
+                or short_story) and attempt + 1 < semantic_attempts)
+            _emit_generation_trace(
+                model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
+                messages=messages, attempt=attempt + 1, attempts=semantic_attempts,
+                trace_context=generation_trace, response=response,
+                outcome='parse_invalid', will_retry=will_retry,
+                retry_reason=reason, parse_invalid_reason=reason,
+            )
+            if not will_retry:
+                break
+            repair_reason = reason
+            continue
+        try:
+            reason = reject_fn(parsed) if reject_fn else None
+        except Exception as exc:
+            print(f'[{log_tag}] candidate guard error: {type(exc).__name__}')
+            reason = 'candidate_rejected'
+        if reason:
+            trace_reason = _trace_enum(reason, _TRACE_RETRY_REASONS)
+            if trace_reason in (None, 'unknown'):
+                trace_reason = 'candidate_rejected'
+            will_retry = attempt + 1 < semantic_attempts
+            _emit_generation_trace(
+                model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
+                messages=messages, attempt=attempt + 1, attempts=semantic_attempts,
+                trace_context=generation_trace, response=response,
+                outcome='candidate_rejected', will_retry=will_retry,
+                retry_reason=trace_reason,
+            )
+            if not will_retry:
+                break
+            repair_reason = trace_reason
+            continue
+        _emit_generation_trace(
+            model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
+            messages=messages, attempt=attempt + 1, attempts=semantic_attempts,
+            trace_context=generation_trace, response=response,
+            outcome='accepted', will_retry=False, acceptance_mode=acceptance_mode,
+        )
+        return parsed, state
+    return None, None
 
 
 def _finalize_committed(result, min_messages=1):
@@ -644,7 +672,9 @@ def _finalize_committed(result, min_messages=1):
     msgs = finalize_user_messages(
         result.get('messages', []),
         preserve_text=result.get('_acceptance_mode') in ('plaintext', 'nonverbal'))
-    if not _commit_ready(msgs) or len(msgs) < min_messages:
+    if _protocol_rejection_reason(
+            {'messages': msgs}, min_messages=min_messages,
+            acceptance_mode=result.get('_acceptance_mode')):
         return None, None
     return emotion, msgs
 
@@ -1167,7 +1197,7 @@ async def chat_text(data: dict):
             user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT, claim_token):
         result, committed_state = _generate_or_none(
             MODEL_MAIN, 1500, system_blocks, messages,
-            attempts=3,
+            attempts=2,
             log_tag=f'{user_id}][{character_id}',
             cache_tag=f'chat:{character_id}',
             salvage=True,
@@ -1187,7 +1217,7 @@ async def chat_text(data: dict):
         except Exception:
             pass
         _latency_emit()
-        return _generation_failed_response(user_id, character_id, total_days, attempts=3)
+        return _generation_failed_response(user_id, character_id, total_days, attempts=2)
 
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
@@ -1199,7 +1229,7 @@ async def chat_text(data: dict):
         except Exception:
             pass
         _latency_emit()
-        return _generation_failed_response(user_id, character_id, total_days, attempts=3)
+        return _generation_failed_response(user_id, character_id, total_days, attempts=2)
 
     # Structured transition commit happens before the visible reply is stored
     # or returned.  If a concurrent revision makes it stale, fail closed rather
@@ -1215,7 +1245,7 @@ async def chat_text(data: dict):
         except Exception:
             pass
         _latency_emit()
-        return _generation_failed_response(user_id, character_id, total_days, attempts=3)
+        return _generation_failed_response(user_id, character_id, total_days, attempts=2)
 
     _commit_offline_state(user_id, character_id, committed_state)
 
@@ -1351,13 +1381,13 @@ async def chat_story(data: dict):
 
     result, committed_state = _generate_or_none(
         MODEL_MAIN, 4000, system_blocks, messages,
-        attempts=5,
+        attempts=2,
         log_tag=f'story:{character_id}',
         cache_tag=f'story:{character_id}',
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
-        return _generation_failed_response(user_id, character_id, total_days, attempts=5)
+        return _generation_failed_response(user_id, character_id, total_days, attempts=2)
 
     _commit_offline_state(user_id, character_id, committed_state)
 
@@ -1427,14 +1457,14 @@ async def chat_proactive(data: dict):
 
     result, committed_state = _generate_or_none(
         MODEL_MAIN, 400, system_blocks, messages,
-        attempts=3,
+        attempts=2,
         log_tag=f'proactive:{character_id}',
         cache_tag=f'proactive:{character_id}',
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
         print(f'[{user_id}][{character_id}] proactive generation_failed mode={mode} task={task_title}')
-        return _generation_failed_response(user_id, character_id, attempts=3)
+        return _generation_failed_response(user_id, character_id, attempts=2)
 
     _commit_offline_state(user_id, character_id, committed_state)
 
@@ -1520,7 +1550,7 @@ async def chat_voice_text(data: dict):
 
     result, committed_state = _generate_or_none(
         MODEL_JP_AUX, 500, system_blocks, messages,
-        attempts=3,
+        attempts=2,
         log_tag=f'voice:{character_id}',
         cache_tag=f'voice:{character_id}',
         salvage=True,
@@ -1530,12 +1560,12 @@ async def chat_voice_text(data: dict):
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
-        return _generation_failed_response(user_id, character_id, attempts=3)
+        return _generation_failed_response(user_id, character_id, attempts=2)
 
     transition = _commit_schedule_candidate(
         character_id, user_id, result, source_event_id)
     if not transition.get('ok'):
-        return _generation_failed_response(user_id, character_id, attempts=3)
+        return _generation_failed_response(user_id, character_id, attempts=2)
 
     _commit_offline_state(user_id, character_id, committed_state)
 
@@ -1618,7 +1648,7 @@ async def chat_voice_story(data: dict):
 
     result, committed_state = _generate_or_none(
         MODEL_MAIN, 3000, system_blocks, messages,
-        attempts=5,
+        attempts=2,
         log_tag=f'voice_story:{character_id}',
         cache_tag=f'voice_story:{character_id}',
         min_messages=3,
@@ -1628,12 +1658,12 @@ async def chat_voice_story(data: dict):
     )
     emotion, msgs = _finalize_committed(result, min_messages=3)
     if msgs is None:
-        return _generation_failed_response(user_id, character_id, attempts=5)
+        return _generation_failed_response(user_id, character_id, attempts=2)
 
     transition = _commit_schedule_candidate(
         character_id, user_id, result, source_event_id)
     if not transition.get('ok'):
-        return _generation_failed_response(user_id, character_id, attempts=5)
+        return _generation_failed_response(user_id, character_id, attempts=2)
 
     _commit_offline_state(user_id, character_id, committed_state)
 
@@ -1757,7 +1787,7 @@ async def chat_voice_proactive(data: dict):
 
     result, committed_state = _generate_or_none(
         MODEL_JP_AUX, 300, system_blocks, messages,
-        attempts=3,
+        attempts=2,
         log_tag=f'voice_proactive:{character_id}',
         cache_tag=f'voice_proactive:{character_id}',
         reject_fn=lambda parsed: _reject_schedule_candidate(
@@ -1767,17 +1797,17 @@ async def chat_voice_proactive(data: dict):
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
         print(f'[{user_id}][{character_id}] voice_proactive generation_failed mode={mode}')
-        return _generation_failed_response(user_id, character_id, attempts=3)
+        return _generation_failed_response(user_id, character_id, attempts=2)
 
     event_id = resolve_voice_proactive_event_id(data)
     transition = _commit_schedule_candidate(
         character_id, user_id, result, event_id)
     if not transition.get('ok'):
-        return _generation_failed_response(user_id, character_id, attempts=3)
+        return _generation_failed_response(user_id, character_id, attempts=2)
 
     msgs = msgs[:2] if mode == 'greeting' else msgs[:1]
     if not _commit_ready(msgs):
-        return _generation_failed_response(user_id, character_id, attempts=3)
+        return _generation_failed_response(user_id, character_id, attempts=2)
 
     _commit_offline_state(user_id, character_id, committed_state)
 

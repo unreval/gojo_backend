@@ -76,6 +76,20 @@ class CanonicalPhaseContractTests(unittest.TestCase):
             None,
         )
 
+    def test_stale_revision_cannot_authorize_completion_statement(self):
+        from schedule_contract import completion_claim_conflict, normalize_action_intent
+
+        world = {'event': {'id': 7, 'status': 'active', 'revision': 4}}
+        stale_intent = normalize_action_intent({
+            'type': 'complete', 'event_id': 7, 'expected_revision': 3,
+        })
+        self.assertEqual(
+            completion_claim_conflict(
+                [{'jp': '会議はもう終わった。', 'zh': '会议已经结束了。'}],
+                world, stale_intent),
+            'active_event_completion_claim_without_intent',
+        )
+
     def test_overlapping_events_are_not_a_valid_canonical_timeline(self):
         from schedule_contract import timeline_is_valid
 
@@ -91,6 +105,24 @@ class CanonicalPhaseContractTests(unittest.TestCase):
 
 
 class ScheduleTransitionCommitContractTests(unittest.TestCase):
+    def test_stale_revision_fails_before_schedule_write(self):
+        import db_schedule
+        from unittest.mock import Mock
+
+        conn = Mock()
+        intent = {'type': 'complete', 'event_id': 7, 'expected_revision': 3}
+        with patch.object(db_schedule, 'get_conn', return_value=conn), \
+             patch.object(db_schedule, '_advance_world_tx', return_value=[]), \
+             patch.object(db_schedule, '_fetch_event_for_transition_tx',
+                          return_value={'id': 7, 'revision': 4, 'status': 'active'}):
+            result = db_schedule.commit_schedule_transition(
+                'gojo', 'u1', intent,
+                now=datetime(2026, 9, 27, 12, tzinfo=timezone.utc))
+        self.assertEqual(result['reason'], 'stale_event_revision')
+        self.assertEqual(result['current_revision'], 4)
+        conn.rollback.assert_called_once()
+        conn.cursor.return_value.execute.assert_not_called()
+
     def test_unavailable_world_does_not_reject_a_normal_reply(self):
         import db_schedule
         from schedule_transition import validate_generated_schedule_reply
