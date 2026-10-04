@@ -9,6 +9,7 @@
 """
 import base64
 import binascii
+import json
 import time
 
 import anthropic
@@ -36,19 +37,12 @@ router = APIRouter()
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY, max_retries=0)
 
 
-def _safe_reply_to(data):
+def _safe_reply_to(data, user_id, character_id):
     reply_to = data.get('reply_to') or data.get('replyTo')
     if not isinstance(reply_to, dict):
         return None
-    text = str(reply_to.get('text') or '').strip()[:500]
-    if not text:
-        return None
-    return {
-        'id': str(reply_to.get('id') or '')[:120],
-        'name': str(reply_to.get('name') or '')[:60],
-        'text': text,
-        'role': str(reply_to.get('role') or '')[:20],
-    }
+    from db_chatlog import resolve_reply_reference
+    return resolve_reply_reference(user_id, character_id, reply_to)
 
 
 def _prompt_messages(user_id, character_id, short_memories, limit=24):
@@ -170,18 +164,38 @@ def _event_meta_base(kind, source_event_id, display_text, images, reply_to=None)
         'caption': display_text,
         'frame_count': len(images),
         'media_types': [img.get('media_type') for img in images],
-        'reply_to': reply_to,
+        'reply_to_event_id': reply_to['source_event_id'] if reply_to else '',
+        'reply_to': {
+            'id': reply_to['client_msg_id'] or reply_to['source_event_id'],
+            'source_event_id': reply_to['source_event_id'],
+            'role': reply_to['role'], 'name': reply_to['name'],
+            'text': reply_to['text'][:500], 'subtitle': reply_to['subtitle'][:500],
+            'ts': reply_to['ts'],
+        } if reply_to else None,
     }
 
 
-def _with_reply_context(text, reply_to):
+def _with_reply_context(text, reply_to, *, requested=False):
     if not reply_to:
+        if requested:
+            return ('【引用原消息当前不可核验，不能使用客户端预览作为事实。】\n'
+                    f'【用户本次内容】{text}\n'
+                    '若用户要求核对旧话，请明确说明目前无法确认引用原话。')
         return text
-    speaker = reply_to.get('name') or '上一条消息'
+    original = reply_to.get('text') or ''
+    excerpt = original[:1200] + ('【原文截断】' if len(original) > 1200 else '')
+    subtitle = reply_to.get('subtitle') or ''
+    trusted_subtitle = (
+        f'\n译文：{subtitle[:500]}'
+        if subtitle and reply_to.get('translation_source') != 'user_supplied'
+        else '')
     return (
-        f'【引用回复】她这次是在回复 {speaker} 的这条消息：'
-        f'「{reply_to["text"]}」\n'
-        f'{text}'
+        f'【本轮明确引用 source_event_id={reply_to["source_event_id"]} '
+        f'说话者={reply_to["name"]}({reply_to["role"]}) '
+        f'发生时间={reply_to.get("ts") or "未知"}】\n'
+        f'原文：{excerpt}{trusted_subtitle}\n'
+        f'【用户本次内容】{text}\n'
+        '说过某事不等于该事实际发生；请基于可见图片和可核验原话回答。'
     )
 
 
@@ -355,7 +369,6 @@ async def chat_image(data: dict):
     is_video     = bool(data.get('is_video'))
     from db_generation_receipt import assign_source_event_id
     source_event_id, _legacy = assign_source_event_id(data.get('source_event_id'))
-    reply_to = _safe_reply_to(data)
 
     # 统一成图片列表：单图和多图（视频抽帧）走同一条路
     raw_images = data.get('images')
@@ -387,6 +400,14 @@ async def chat_image(data: dict):
             missing['media'] = media_payload
         return JSONResponse(missing, status_code=404)
 
+    requested_reply = isinstance(data.get('reply_to') or data.get('replyTo'), dict)
+    try:
+        reply_to = _safe_reply_to(data, user_id, character_id)
+    except Exception:
+        return JSONResponse(
+            {'error': 'reply_source_unavailable', 'retryable': True,
+             'source_event_id': source_event_id}, status_code=503)
+
     from db_generation_receipt import ENDPOINT_CHAT_IMAGE
     gate, gated = _gate_image_generation(user_id, character_id, source_event_id)
     if gated is not None:
@@ -395,6 +416,7 @@ async def chat_image(data: dict):
     source_event_id = gate.get('source_event_id') or source_event_id
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
     total_days = update_chat_days(user_id)
 
     user_content = [
@@ -427,25 +449,49 @@ async def chat_image(data: dict):
         if user_text:
             user_content.append({
                 'type': 'text',
-                'text': video_hint + '\n她说：' + _with_reply_context(user_text, reply_to),
+                'text': video_hint + '\n她说：' + _with_reply_context(
+                    user_text, reply_to, requested=requested_reply),
             })
             display_text = '🎬 ' + user_text
         else:
             user_content.append({
                 'type': 'text',
-                'text': video_hint + _with_reply_context('她没有附文字，你看完自然反应就好。', reply_to),
+                'text': video_hint + _with_reply_context(
+                    '她没有附文字，你看完自然反应就好。', reply_to,
+                    requested=requested_reply),
             })
             display_text = '🎬 [视频]'
     elif user_text:
-        user_content.append({'type': 'text', 'text': _with_reply_context(user_text, reply_to)})
+        user_content.append({'type': 'text', 'text': _with_reply_context(
+            user_text, reply_to, requested=requested_reply)})
         display_text = '📷 ' + user_text
     else:
-        user_content.append({'type': 'text', 'text': _with_reply_context(NO_TEXT_HINT, reply_to)})
+        user_content.append({'type': 'text', 'text': _with_reply_context(
+            NO_TEXT_HINT, reply_to, requested=requested_reply)})
         display_text = '📷 [图片]'
 
     kind = 'video' if is_video else 'image'
     base_event_meta = _event_meta_base(
         kind, source_event_id, display_text, images, reply_to=reply_to)
+    if requested_reply and not reply_to:
+        base_event_meta['reply_unavailable'] = True
+    try:
+        from db_chatlog import append_messages_confirmed
+        receipt = append_messages_confirmed(user_id, character_id, [{
+            'client_msg_id': source_event_id, 'event_id': source_event_id,
+            'role': 'user', 'text': display_text, 'kind': kind,
+            'extra': json.dumps(base_event_meta, ensure_ascii=False),
+            'reply_to_event_id': reply_to['source_event_id'] if reply_to else '',
+        }])[0]
+        if receipt['status'] not in (
+                'inserted', 'already_identical', 'metadata_enriched'):
+            return JSONResponse(
+                {'error': receipt.get('reason') or receipt['status'],
+                 'source_event_id': source_event_id}, status_code=409)
+    except Exception:
+        return JSONResponse(
+            {'error': 'canonical_source_unavailable', 'retryable': True,
+             'source_event_id': source_event_id}, status_code=503)
     visual_summary = ''
     availability = None
 
@@ -475,6 +521,7 @@ async def chat_image(data: dict):
                     user_id, display_text, character_id,
                     source_event_id=source_event_id,
                     event_meta=base_event_meta,
+                    reply_to_event_id=reply_to['source_event_id'] if reply_to else None,
                 )
                 try:
                     from temporal_awareness import record_user_message
@@ -533,6 +580,7 @@ async def chat_image(data: dict):
     save_user_short_memory_once(
         user_id, display_text, character_id, source_event_id=source_event_id,
         event_meta=base_event_meta,
+        reply_to_event_id=reply_to['source_event_id'] if reply_to else None,
     )
     if availability and availability.get('can_reply'):
         try:
@@ -553,6 +601,7 @@ async def chat_image(data: dict):
         user_id, character_id, recall_query,
         temporal_snapshot=temporal_snapshot,
         context_pack=pack,
+        time_anchor_text=user_text,
     )
     system_blocks = system_blocks + [{
         'type': 'text',
@@ -570,6 +619,7 @@ async def chat_image(data: dict):
     result = None
     offline_state = None
     retryable = True
+    time_repair_used = False
     max_tokens = 1600
     deadline = time.monotonic() + 45
     from db_generation_receipt import GenerationHeartbeat
@@ -603,9 +653,29 @@ async def chat_image(data: dict):
                 _visible, parsed, state = ingest_model_output(raw)
                 if parsed and isinstance(parsed.get('messages'), list) and parsed['messages']:
                     if all(valid_reply_msg(m) for m in parsed['messages']):
+                        from temporal_awareness import find_reply_calendar_conflict
+                        candidate_text = ' '.join(
+                            f'{msg.get("jp", "")} {msg.get("zh", "")}'
+                            for msg in parsed['messages'])
+                        time_conflict = find_reply_calendar_conflict(
+                            user_text, candidate_text,
+                            now_utc=temporal_snapshot.get('now_utc'))
+                        if time_conflict:
+                            if time_repair_used:
+                                retryable = False
+                                break
+                            time_repair_used = True
+                            system_blocks = system_blocks + [{
+                                'type': 'text',
+                                'text': (
+                                    f'上一候选与本轮时间快照冲突，错误代码：{time_conflict}。'
+                                    '请按当前完整日期和24小时制时刻修正。'),
+                            }]
+                            continue
                         from schedule_transition import validate_generated_schedule_reply
                         schedule_conflict, _world = validate_generated_schedule_reply(
-                            character_id, user_id, parsed)
+                            character_id, user_id, parsed,
+                            now=temporal_snapshot.get('now_local'))
                         if not schedule_conflict:
                             result = parsed
                             offline_state = state
@@ -650,6 +720,31 @@ async def chat_image(data: dict):
         if media_payload:
             failed['media'] = media_payload
         return JSONResponse(failed, status_code=502)
+
+    if requested_reply:
+        try:
+            if _safe_reply_to(data, user_id, character_id) != reply_to:
+                raise ValueError('reply_source_changed')
+        except Exception:
+            _fail_image(user_id, character_id, source_event_id, claim_token,
+                        'reply_source_changed')
+            return JSONResponse({
+                'error': 'reply_source_changed', 'retryable': True,
+                'source_event_id': source_event_id,
+            }, status_code=409)
+
+    from temporal_awareness import find_commit_clock_conflict
+    commit_clock_conflict = find_commit_clock_conflict(
+        user_text, ' '.join(f'{msg.get("jp", "")} {msg.get("zh", "")}'
+                            for msg in result.get('messages') or []),
+        temporal_snapshot, time.monotonic() - snapshot_started)
+    if commit_clock_conflict:
+        _fail_image(user_id, character_id, source_event_id, claim_token,
+                    commit_clock_conflict)
+        return JSONResponse({
+            'error': commit_clock_conflict, 'retryable': True,
+            'source_event_id': source_event_id,
+        }, status_code=409)
 
     from schedule_transition import commit_generated_schedule_intent
     transition = commit_generated_schedule_intent(

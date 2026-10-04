@@ -205,7 +205,7 @@ def append_raw_event(
     if content_type == 'voice':
         kind = 'text'
         extra['channel'] = 'voice_stream'
-    extra_text = json.dumps(extra, ensure_ascii=False)[:6000] if extra else ''
+    extra_text = json.dumps(extra, ensure_ascii=False) if extra else ''
 
     msg = {
         'client_msg_id': client_msg_id or '',
@@ -234,7 +234,17 @@ def append_raw_event(
         try:
             cur.execute('SELECT pg_advisory_xact_lock(%s)',
                         (stable_advisory_lock_key(user_id, character_id),))
-            written = append_messages(user_id, character_id, [msg], conn=database)
+            if role == 'user' and reply_to_event_id:
+                from db_chatlog import append_messages_confirmed
+                receipt = append_messages_confirmed(
+                    user_id, character_id, [msg], conn=database)[0]
+                if receipt['status'] not in (
+                        'inserted', 'already_identical', 'metadata_enriched'):
+                    raise SourceValidityError(
+                        receipt.get('reason') or receipt['status'])
+                written = int(receipt['status'] == 'inserted')
+            else:
+                written = append_messages(user_id, character_id, [msg], conn=database)
             sources = get_active_events_by_ids(
                 user_id, character_id, [client_msg_id], conn=database, lock=True)
             if (len(sources) != 1 or sources[0]['role'] != _prompt_role(role)
@@ -352,6 +362,11 @@ def get_active_events_by_ids(user_id, character_id, event_ids, conn=None, *, loc
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s
                  AND COALESCE(status, 'active') = 'active'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM chat_log_tombstone tomb
+                     WHERE tomb.user_id=chat_log.user_id
+                       AND tomb.chat_id=chat_log.chat_id
+                       AND tomb.client_msg_id=chat_log.client_msg_id)
                  AND COALESCE(NULLIF(event_id, ''), client_msg_id) = ANY(%s)'''
             + (' FOR SHARE' if lock else ''),
             (user_id, character_id, ids),
@@ -629,6 +644,11 @@ def get_recent_events(user_id, character_id, n=40, hours=24):
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s
                  AND COALESCE(status, 'active') = 'active'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM chat_log_tombstone tomb
+                     WHERE tomb.user_id=chat_log.user_id
+                       AND tomb.chat_id=chat_log.chat_id
+                       AND tomb.client_msg_id=chat_log.client_msg_id)
                  AND created_at >= NOW() - (%s * INTERVAL '1 hour')
                ORDER BY created_at DESC, id DESC
                LIMIT %s''',

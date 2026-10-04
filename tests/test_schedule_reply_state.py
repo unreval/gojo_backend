@@ -996,9 +996,14 @@ class BusyImageVisionTests(unittest.TestCase):
             'temporal_awareness': stub(
                 'temporal_awareness',
                 get_temporal_snapshot=Mock(return_value={}),
+                find_reply_calendar_conflict=Mock(return_value=None),
+                find_commit_clock_conflict=Mock(return_value=None),
                 record_turn=Mock(),
                 record_user_message=Mock(),
             ),
+            'db_chatlog': stub(
+                'db_chatlog', append_messages_confirmed=Mock(
+                    return_value=[{'status': 'inserted', 'server_id': 1}])),
             'characters': stub(
                 'characters',
                 get_character=Mock(return_value={'id': 'gojo', 'voice_id': 'v'}),

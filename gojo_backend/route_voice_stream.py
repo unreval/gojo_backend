@@ -2,10 +2,9 @@
 
 流程:
 1. 客户端 POST { text, user_id, character_id }
-2. 服务器建 AsyncAnthropic 流,LLM 边生成边输出 token
-3. 服务器按行解析:遇到完整的 JP + ZH 一对 → 立刻用线程池调 Fish TTS 合成
-4. 每合成完一句 → 立刻 yield 一个 NDJSON 事件推给客户端
-5. 客户端边收边播,首字延迟从"生成完 + 全部 TTS 完"变成"第一句生成完 + 第一句 TTS 完"
+2. 服务器建 AsyncAnthropic 流,按行收集完整的 JP + ZH 对
+3. 整轮候选经过日历、时钟和日程校验后，才开始合成语音
+4. 校验通过后逐句 yield NDJSON 文本和音频事件
 
 返回 NDJSON:每行一个独立的 JSON 事件对象。
 事件类型:
@@ -22,6 +21,7 @@
 import asyncio
 import json
 import re
+import time
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -32,7 +32,7 @@ from prompt import build_system_blocks
 from user_memory import save_short_memory, save_user_short_memory_once, get_short_memory
 from characters import get_character
 from temporal_awareness import get_temporal_snapshot, record_turn
-from utils import has_visible_text, valid_reply_pair
+from utils import valid_reply_pair
 
 router = APIRouter()
 
@@ -103,6 +103,7 @@ async def chat_voice_stream(data: dict):
         return _err(f'character {character_id} not found')
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
     availability = None
 
     # Streaming voice is an inbound chat surface, so it enters through the
@@ -206,68 +207,33 @@ async def chat_voice_stream(data: dict):
         buffer = ''
         current_jp = ''
         seq = 0
-        all_jps = []  # 结束时保存 short_memory 用
+        pairs = []
+        all_jps = []
         loop = asyncio.get_event_loop()
 
         async def _process_line(line: str):
-            """处理一整行输入,如果拿到完整 JP+ZH 就 TTS + yield。
-            用列表返回 yield 内容,交由外层 yield(内嵌 async gen 太绕)。"""
-            nonlocal emotion, current_jp, seq
-            out = []
+            """Stage complete pairs until the entire candidate passes validation."""
+            nonlocal emotion, current_jp
             parsed = _parse_line(line)
             if not parsed:
-                return out
+                return
             tag, value = parsed
             if tag == 'EMOTION':
                 if value in EMOTIONS:
                     emotion = value
-                return out
+                return
             if tag == 'JP':
                 current_jp = value
-                # 纯标点不预显示；有效短句（ん？）可以预显示
-                if has_visible_text(value):
-                    out.append(json.dumps({'type': 'text_jp', 'jp': value}) + '\n')
-                return out
+                return
             if tag == 'ZH':
-                # 有 JP 才可以合成；segment-level gate：过校验才 TTS / yield / 持久化
                 if not current_jp:
-                    return out
-                jp_to_tts = current_jp
-                zh_final = value
+                    return
+                jp = current_jp
                 current_jp = ''
-                if not valid_reply_pair(jp_to_tts, zh_final):
-                    print(f'[voice_stream] skip invalid pair jp={jp_to_tts!r} zh={zh_final!r}')
-                    return out
-                try:
-                    import db_schedule
-                    from schedule_contract import completion_claim_conflict
-                    world = db_schedule.get_current_world_state(
-                        character_id, user_id, temporal_snapshot.get('now_local'))
-                    if completion_claim_conflict(
-                            [{'jp': jp_to_tts, 'zh': zh_final}], world, None):
-                        print('[voice_stream] dropped uncommitted completion claim')
-                        return out
-                except Exception as exc:
-                    print(f'[voice_stream] schedule truth guard skipped:{exc}')
-                try:
-                    audio_b64 = await loop.run_in_executor(
-                        None, tts_to_b64, jp_to_tts, emotion, voice_id
-                    )
-                except Exception as e:
-                    print(f'[voice_stream] TTS 出错:{e}')
-                    audio_b64 = ''
-                out.append(json.dumps({
-                    'type': 'audio',
-                    'seq': seq,
-                    'jp': jp_to_tts,
-                    'zh': zh_final,
-                    'emotion': emotion,
-                    'audio_b64': audio_b64,
-                }) + '\n')
-                all_jps.append(jp_to_tts)
-                seq += 1
-                return out
-            return out
+                if valid_reply_pair(jp, value):
+                    pairs.append({'jp': jp, 'zh': value})
+                else:
+                    print(f'[voice_stream] skip invalid pair jp={jp!r} zh={value!r}')
 
         try:
             async with async_claude.messages.stream(
@@ -284,20 +250,17 @@ async def chat_voice_stream(data: dict):
                         line = line.strip()
                         if not line:
                             continue
-                        outs = await _process_line(line)
-                        for o in outs:
-                            yield o.encode()
+                        await _process_line(line)
 
             # 流结束后 flush 剩余 buffer
             if buffer.strip():
-                outs = await _process_line(buffer.strip())
-                for o in outs:
-                    yield o.encode()
+                await _process_line(buffer.strip())
         except Exception as e:
             print(f'[voice_stream] 主流程出错:{e}')
             yield (json.dumps({'type': 'error', 'msg': str(e)}) + '\n').encode()
+            return
 
-        if not all_jps:
+        if not pairs:
             print(f'[voice_stream] ⚠️ {character_id} 无有效 JP+ZH pair，generation_failed')
             yield (json.dumps({
                 'type': 'generation_failed',
@@ -311,6 +274,51 @@ async def chat_voice_stream(data: dict):
                 'generation_failed': True,
             }) + '\n').encode()
             return
+
+        from temporal_awareness import (
+            find_commit_clock_conflict, find_reply_calendar_conflict)
+        candidate_text = ' '.join(
+            f'{pair["jp"]} {pair["zh"]}' for pair in pairs)
+        conflict = find_reply_calendar_conflict(
+            user_text, candidate_text,
+            now_utc=temporal_snapshot.get('now_utc'))
+        if not conflict:
+            conflict = find_commit_clock_conflict(
+                user_text, candidate_text, temporal_snapshot,
+                time.monotonic() - snapshot_started)
+        if not conflict:
+            try:
+                import db_schedule
+                from schedule_contract import completion_claim_conflict
+                world = db_schedule.get_current_world_state(
+                    character_id, user_id, temporal_snapshot.get('now_local'))
+                if completion_claim_conflict(pairs, world, None):
+                    conflict = 'schedule_truth_conflict'
+            except Exception:
+                conflict = 'schedule_truth_unavailable'
+        if conflict:
+            yield (json.dumps({
+                'type': 'generation_failed', 'error': conflict,
+                'generation_failed': True, 'messages': [], 'segments': 0,
+            }) + '\n').encode()
+            return
+
+        # Validate the complete candidate before any subtitle or audio is sent.
+        for pair in pairs:
+            yield (json.dumps({'type': 'text_jp', 'jp': pair['jp']}) + '\n').encode()
+            try:
+                audio_b64 = await loop.run_in_executor(
+                    None, tts_to_b64, pair['jp'], emotion, voice_id)
+            except Exception as e:
+                print(f'[voice_stream] TTS 出错:{e}')
+                audio_b64 = ''
+            yield (json.dumps({
+                'type': 'audio', 'seq': seq,
+                'jp': pair['jp'], 'zh': pair['zh'],
+                'emotion': emotion, 'audio_b64': audio_b64,
+            }) + '\n').encode()
+            all_jps.append(pair['jp'])
+            seq += 1
 
         # 已通过 gate 并 yield 过的 segment 是真实角色行为，即使后续流失败也要持久化
         yield (json.dumps({

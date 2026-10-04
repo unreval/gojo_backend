@@ -45,6 +45,12 @@ import { C, SERVER_URL, nowTime } from '../../constants/theme';
 import type { Message } from '../../types/message';
 import { mergeReadReceipts, unreadSourceEventIds } from '../../utils/readReceipts';
 import type { ReadReceipt } from '../../utils/readReceipts';
+import {
+  buildQuotePreview, confirmedReceipt, mergeServerAndPending,
+  missingTranslation, quotedTimestamp, replyTargetEventId, submitChatLogBatches,
+  translationRepairIdentity,
+} from '../../utils/chatLogSync';
+import type { ChatLogReceipt } from '../../utils/chatLogSync';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -70,6 +76,9 @@ const msgStorageKey = (id: string) => `chat_msgs_${id}`;
 //   之前单聊气泡只存 AsyncStorage,卸载重装/换手机就全没了。
 //   现在写一份到服务器,本地保留当缓存(加载快、离线也能看)。
 const CHATLOG_SYNCED_KEY = (id: string) => `chatlog_synced_${id}`;
+const CHATLOG_PENDING_KEY = (id: string) => `chatlog_pending_${id}`;
+const CHATLOG_MIGRATING_KEY = (id: string) => `chatlog_migrating_${id}`;
+const CHATLOG_DELETED_KEY = (id: string) => `chatlog_deleted_${id}`;
 
 function isLocalMediaUri(uri?: string): boolean {
   if (!uri || typeof uri !== 'string') return false;
@@ -132,6 +141,7 @@ function toServerMsg(m: any) {
     kind: messageKind(m),
     extra: Object.keys(extra).length > 0 ? JSON.stringify(extra) : '',
     has_audio: !!m.audioB64 || !!m.hasAudio,
+    reply_to_event_id: replyTargetEventId(m),
   };
 }
 
@@ -166,12 +176,19 @@ function assistantSegmentId(
 function fromServerMsg(m: any): any {
   let extra: any = {};
   try { extra = m.extra ? JSON.parse(m.extra) : {}; } catch {}
+  const rawReply = extra.reply_to || extra.replyTo;
+  const replyTo = rawReply && typeof rawReply === 'object' ? {
+    ...rawReply,
+    eventId: rawReply.source_event_id || rawReply.eventId || rawReply.event_id,
+    timestamp: quotedTimestamp(rawReply.ts) ?? rawReply.timestamp,
+  } : undefined;
   let tsStr = m.ts || '';
   if (tsStr && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(tsStr)) tsStr += 'Z';
   const d = tsStr ? new Date(tsStr) : new Date();
   const media = m.media;
   return {
-    id: m.client_msg_id || `srv_${m.id}`,
+    id: m.client_msg_id || m.event_id || `srv_${m.id}`,
+    eventId: m.event_id || m.client_msg_id || undefined,
     // ★ 保留服务端原始数字 ID —— 分页用 before_id 时要用它,
     //   不然拿 client_msg_id("1723..." 这种时间戳字符串)传过去会出错
     serverId: typeof m.id === 'number' ? m.id : undefined,
@@ -184,9 +201,12 @@ function fromServerMsg(m: any): any {
     mediaUrl: media?.url,
     mediaKind: media?.kind || extra.media_kind,
     mediaMimeType: media?.mime_type,
-    replyTo: extra.reply_to || extra.replyTo,
-    sourceEventId: extra.source_event_id,
-    replyToSourceEventId: extra.reply_to_source_event_id,
+    replyTo,
+    replyUnavailable: !!extra.reply_unavailable,
+    translationMissing: typeof m.translation_missing === 'boolean' ? m.translation_missing : undefined,
+    translationSource: m.translation_source || extra.translation_source || undefined,
+    sourceEventId: extra.source_event_id || (m.role === 'user' ? (m.event_id || m.client_msg_id) : undefined),
+    replyToSourceEventId: extra.reply_to_source_event_id || (m.role !== 'user' ? m.reply_to_event_id : undefined),
     visualSummary: extra.visual_summary,
     eventMeta: extra.event_meta,
     time: `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
@@ -195,20 +215,21 @@ function fromServerMsg(m: any): any {
   };
 }
 
-/** 追加到服务器。失败不阻断 UI —— 本地还有,下次进聊天页会补传。 */
-async function syncToServer(userId: string, chatId: string, msgs: any[]) {
+/** The caller updates local confirmation only after every item has a receipt. */
+async function syncToServer(
+  userId: string, chatId: string, msgs: any[],
+  onBatch: (receipts: ChatLogReceipt[]) => Promise<void> | void,
+) {
   const persistable = (msgs || []).filter(m => !isEphemeralUiMessage(m));
   if (persistable.length === 0) return;
-  try {
-    await axios.post(`${SERVER_URL}/chatlog/append`, {
-      user_id: userId,
-      chat_id: chatId,
-      messages: persistable.map(toServerMsg),
+  await submitChatLogBatches(persistable.map(toServerMsg), async batch => {
+    const response = await axios.post(`${SERVER_URL}/chatlog/append`, {
+      user_id: userId, chat_id: chatId, messages: batch,
     }, { timeout: 8000 });
-  } catch (e: any) {
-    console.warn('[chatlog] 同步失败(本地已保留):', e?.message);
-  }
+    return response.data;
+  }, (_batch, receipts) => onBatch(receipts));
 }
+
 const audioDir       = (id: string) => `${FileSystem.documentDirectory}chat_audio_${id}/`;
 
 interface Character {
@@ -238,6 +259,8 @@ interface Segment {
   audio_b64: string;
   event_id?: string;
   segment_index?: number;
+  translation_missing?: boolean;
+  translation_source?: string;
 }
 interface GroupReply {
   msg_id?: number;
@@ -296,6 +319,19 @@ export default function ChatRoom() {
   const [messages, setMessages]   = useState<Message[]>([]);
   // ★ 已同步到服务器的消息 id,避免重复上传
   const syncedIdsRef = useRef<Set<string>>(new Set());
+  const pendingMsgsRef = useRef<Map<string, Message>>(new Map());
+  const newlyConfirmedRef = useRef<Map<string, Message>>(new Map());
+  const deletedIdsRef = useRef<Set<string>>(new Set());
+  const syncConflictsRef = useRef<Set<string>>(new Set());
+  const syncInFlightRef = useRef<Set<string>>(new Set());
+  const syncRunningRef = useRef(false);
+  const syncPausedRef = useRef(false);
+  const activeSyncRef = useRef<Promise<void> | null>(null);
+  const syncRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const deletedWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const legacyMigrationIdsRef = useRef<Set<string> | null>(null);
+  const syncPendingRef = useRef<() => Promise<void>>(async () => {});
   const legacyBackfillAttemptedRef = useRef<Set<string>>(new Set());
   const [inputText, setInputText] = useState('');
   const [loading, setLoading]     = useState(false);
@@ -322,6 +358,9 @@ export default function ChatRoom() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);  // ★ 手动监听键盘高度
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [replyingTo, setReplyingTo] = useState<any | null>(null);   // ★ 引用回复
+  const [repairingTranslation, setRepairingTranslation] = useState<Message | null>(null);
+  const [translationDraft, setTranslationDraft] = useState('');
+  const [translationSaving, setTranslationSaving] = useState(false);
   const [searchMode, setSearchMode]   = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [serverSearchResults, setServerSearchResults] = useState<Message[]>([]);  // ★ 服务器全量搜索结果
@@ -348,6 +387,90 @@ export default function ChatRoom() {
   const justLoadedEarlierRef = useRef(false);   // ★ 加载历史时禁止滚到底
   const messagesRef = useRef<Message[]>([]);  // ★ 消息镜像（离开后仍能落盘）
   const lastSentRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });  // ★ 防抖：挡网络卡顿导致的重复发送
+
+  const persistPending = () => {
+    pendingWriteRef.current = pendingWriteRef.current.catch(() => {}).then(() =>
+      AsyncStorage.setItem(CHATLOG_PENDING_KEY(chatId),
+        JSON.stringify([...pendingMsgsRef.current.values()])));
+    return pendingWriteRef.current;
+  };
+
+  const persistDeleted = () => {
+    deletedWriteRef.current = deletedWriteRef.current.catch(() => {}).then(() =>
+      AsyncStorage.setItem(CHATLOG_DELETED_KEY(chatId),
+        JSON.stringify([...deletedIdsRef.current])));
+    return deletedWriteRef.current;
+  };
+
+  const scheduleSyncRetry = () => {
+    if (syncPausedRef.current || syncRetryTimerRef.current) return;
+    if (![...pendingMsgsRef.current.keys()].some(id => !syncConflictsRef.current.has(id))) return;
+    syncRetryTimerRef.current = setTimeout(() => {
+      syncRetryTimerRef.current = null;
+      void syncPendingRef.current();
+    }, 5000);
+  };
+
+  syncPendingRef.current = async () => {
+    if (isGroup || syncPausedRef.current || syncRunningRef.current) return;
+    const pending = [...pendingMsgsRef.current.values()].filter(message =>
+      !syncConflictsRef.current.has(message.id)
+      && !syncInFlightRef.current.has(message.id)
+      && !deletedIdsRef.current.has(message.id));
+    if (pending.length === 0) return;
+    syncRunningRef.current = true;
+    pending.forEach(message => syncInFlightRef.current.add(message.id));
+    const task = syncToServer(FIXED_USER_ID, chatId, pending, async receipts => {
+      for (const receipt of receipts) {
+        const message = pendingMsgsRef.current.get(receipt.id);
+        if (confirmedReceipt(receipt)) {
+          if (message && !deletedIdsRef.current.has(receipt.id)) {
+            newlyConfirmedRef.current.set(receipt.id, message);
+          }
+          syncedIdsRef.current.add(receipt.id);
+          pendingMsgsRef.current.delete(receipt.id);
+          syncConflictsRef.current.delete(receipt.id);
+        } else if (receipt.status === 'deleted_rejected') {
+          deletedIdsRef.current.add(receipt.id);
+          pendingMsgsRef.current.delete(receipt.id);
+          syncConflictsRef.current.delete(receipt.id);
+          newlyConfirmedRef.current.delete(receipt.id);
+        } else if (receipt.reference_status === 'unavailable') {
+          // The body is durable, but its quote link still needs an exact source.
+          syncConflictsRef.current.delete(receipt.id);
+        } else {
+          syncConflictsRef.current.add(receipt.id);
+        }
+      }
+      await persistDeleted();
+      await persistPending();
+      setMessages(prev => prev
+        .filter(message => !deletedIdsRef.current.has(message.id))
+        .map(message => {
+          if (syncConflictsRef.current.has(message.id)) return { ...message, syncStatus: 'conflict' as const };
+          if (syncedIdsRef.current.has(message.id) && message.syncStatus) {
+            const { syncStatus: _status, ...confirmed } = message;
+            return confirmed;
+          }
+          return message;
+        }));
+      const migrationIds = legacyMigrationIdsRef.current;
+      if (migrationIds && [...migrationIds].every(id => !pendingMsgsRef.current.has(id))) {
+        await AsyncStorage.setItem(CHATLOG_SYNCED_KEY(chatId), '1');
+        await AsyncStorage.removeItem(CHATLOG_MIGRATING_KEY(chatId));
+        legacyMigrationIdsRef.current = null;
+      }
+    }).catch((error: any) => {
+      console.warn('[chatlog] 同步失败，保留待同步消息:', error?.message);
+    }).finally(() => {
+      pending.forEach(message => syncInFlightRef.current.delete(message.id));
+      syncRunningRef.current = false;
+      activeSyncRef.current = null;
+      scheduleSyncRetry();
+    });
+    activeSyncRef.current = task;
+    await task;
+  };
 
   // ── 语音文件工具 ──
   const ensureAudioDir = async () => {
@@ -483,50 +606,79 @@ export default function ChatRoom() {
             const accRes = await axios.get(`${SERVER_URL}/accounts?user_id=${FIXED_USER_ID}`);
             setAccounts(accRes.data?.accounts || []);
           } catch (e) { console.warn('load accounts error', e); }
-          // ★ 服务器优先:卸载重装/换手机后本地是空的,但服务器有完整记录
-          let loaded = false;
+          // 本地只保留明确待确认的消息；已确认的历史以服务器为准。
+          let localMsgs: Message[] = [];
+          try {
+            const saved = await AsyncStorage.getItem(STORAGE_KEY);
+            if (saved) localMsgs = JSON.parse(saved).map(sanitizeStoredMessage);
+            const deletedSaved = await AsyncStorage.getItem(CHATLOG_DELETED_KEY(chatId));
+            const deleted: string[] = deletedSaved ? JSON.parse(deletedSaved) : [];
+            deleted.forEach(id => deletedIdsRef.current.add(String(id)));
+            const savedPending = await AsyncStorage.getItem(CHATLOG_PENDING_KEY(chatId));
+            const pending: Message[] = savedPending ? JSON.parse(savedPending) : [];
+            for (const message of pending) {
+              if (message?.id && !deletedIdsRef.current.has(String(message.id))
+                  && !isEphemeralUiMessage(message)) {
+                pendingMsgsRef.current.set(String(message.id), message);
+              }
+            }
+          } catch (e: any) {
+            console.warn('[chatlog] 本地待同步记录读取失败:', e?.message);
+          }
+          let serverLoaded = false;
+          let serverMsgs: Message[] = [];
           try {
             const logRes = await axios.get(`${SERVER_URL}/chatlog`, {
               params: { user_id: FIXED_USER_ID, chat_id: chatId, limit: 500 },  // ★ 200→500,覆盖几个月的日常聊天
               timeout: 15000,
             });
-            const srv = (logRes.data?.messages || []).map(fromServerMsg);
-            if (srv.length > 0) {
-              // 从服务器来的都算已同步,别再传回去
-              srv.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
-              // ★ server 数据没有 readAt 字段,从本地 sidecar 合并回来,不然重进会丢已读
-              const withRead = await applyReadStatusFromStorage(srv);
-              setMessages(withRead);
-              setHasMore(!!logRes.data?.has_more);
-              AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(withRead)).catch(() => {});
-              loaded = true;
-              recoverLegacyImages(withRead);
-            }
+            serverMsgs = (logRes.data?.messages || []).map(fromServerMsg);
+            serverMsgs.forEach(message => syncedIdsRef.current.add(String(message.id)));
+            serverLoaded = true;
+            setMessages(await applyReadStatusFromStorage(serverMsgs));
+            setHasMore(!!logRes.data?.has_more);
           } catch (e: any) {
             console.warn('[chatlog] 拉取失败,改用本地缓存:', e?.message);
           }
-
-          if (!loaded) {
-            // 服务器没有(第一次用)或拉取失败 → 用本地缓存
-            const saved = await AsyncStorage.getItem(STORAGE_KEY);
-            if (saved) {
-              const localMsgs = JSON.parse(saved).map(sanitizeStoredMessage);
-              const withRead = await applyReadStatusFromStorage(localMsgs);
-              setMessages(withRead);
-              recoverLegacyImages(withRead);
-              // ★ 本地有、服务器没有 → 补传上去(老用户首次升级的迁移)
-              const syncedFlag = await AsyncStorage.getItem(CHATLOG_SYNCED_KEY(chatId));
-              if (!syncedFlag && localMsgs.length > 0) {
-                const toMigrate = localMsgs.slice(-500).filter((m: any) => !isEphemeralUiMessage(m));
-                toMigrate.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
-                if (toMigrate.length > 0) {
-                  syncToServer(FIXED_USER_ID, chatId, toMigrate)
-                    .then(() => AsyncStorage.setItem(CHATLOG_SYNCED_KEY(chatId), '1'))
-                    .catch(() => {});
-                }
-              }
+          const syncedFlag = await AsyncStorage.getItem(CHATLOG_SYNCED_KEY(chatId));
+          const migratingFlag = await AsyncStorage.getItem(CHATLOG_MIGRATING_KEY(chatId));
+          if (!syncedFlag && !migratingFlag && localMsgs.length > 0) {
+            const migrationIds = new Set<string>();
+            for (const message of localMsgs.slice(-500)) {
+              const id = String(message.id || '');
+              if (!id || id.startsWith('srv_') || deletedIdsRef.current.has(id)
+                  || isEphemeralUiMessage(message)) continue;
+              migrationIds.add(id);
+              if (!pendingMsgsRef.current.has(id)) pendingMsgsRef.current.set(id, message);
+            }
+            legacyMigrationIdsRef.current = migrationIds;
+            await persistPending();
+            await AsyncStorage.setItem(CHATLOG_MIGRATING_KEY(chatId), '1');
+          } else if (!syncedFlag && migratingFlag) {
+            legacyMigrationIdsRef.current = new Set(pendingMsgsRef.current.keys());
+            if (pendingMsgsRef.current.size === 0) {
+              await AsyncStorage.setItem(CHATLOG_SYNCED_KEY(chatId), '1');
+              await AsyncStorage.removeItem(CHATLOG_MIGRATING_KEY(chatId));
+              legacyMigrationIdsRef.current = null;
             }
           }
+          if (pendingMsgsRef.current.size > 0) {
+            await persistPending();
+            await syncPendingRef.current();
+          }
+          const stillPending = [...pendingMsgsRef.current.values()].map(message => ({
+            ...message,
+            syncStatus: syncConflictsRef.current.has(message.id) ? 'conflict' as const : 'pending' as const,
+          }));
+          const acknowledged = [...newlyConfirmedRef.current.values()];
+          const pendingById = new Map(stillPending.map(message => [message.id, message]));
+          const offlineLocal = localMsgs.map(message => pendingById.get(message.id) || message);
+          const merged = serverLoaded
+            ? mergeServerAndPending([...acknowledged, ...serverMsgs], stillPending, deletedIdsRef.current)
+            : mergeServerAndPending(offlineLocal, stillPending, deletedIdsRef.current);
+          const withRead = await applyReadStatusFromStorage(merged);
+          setMessages(withRead);
+          recoverLegacyImages(withRead);
         }
 
         await loadAudioIndex();
@@ -579,22 +731,21 @@ export default function ChatRoom() {
       console.warn('[本地缓存] 写入失败(服务器仍有记录):', e?.message);
     });
 
-    // ★ 同步新消息到服务器(群聊本来就在服务器上,不用重复存)
-    //   注意:这段【不依赖】上面的本地写入,本地坏了服务器照常收
+    // 新消息先进入持久待同步队列；只有逐条回执才能移出。
     if (!isGroup && messages.length > 0) {
-      const pending = messages.filter(m => {
-        if (isEphemeralUiMessage(m)) return false;
-        if ((m as any).localOnly) return false;
-        if ((m as any).generationFailure) return false;
-        const mid = String((m as any).id || '');
-        if (!mid || syncedIdsRef.current.has(mid)) return false;
-        if (mid.startsWith('srv_')) return false;      // 从服务器拉下来的,别再传回去
-        return true;
-      });
-      if (pending.length > 0) {
-        pending.forEach(m => syncedIdsRef.current.add(String((m as any).id)));
-        syncToServer(FIXED_USER_ID, chatId, pending);
+      let changed = false;
+      for (const message of messages) {
+        const id = String(message.id || '');
+        if (!id || id.startsWith('srv_') || isEphemeralUiMessage(message)
+            || syncedIdsRef.current.has(id) || deletedIdsRef.current.has(id)) continue;
+        const previous = pendingMsgsRef.current.get(id);
+        if (!previous || JSON.stringify(toServerMsg(previous)) !== JSON.stringify(toServerMsg(message))) {
+          pendingMsgsRef.current.set(id, { ...message, syncStatus: message.syncStatus || 'pending' });
+          changed = true;
+        }
       }
+      if (changed) void persistPending().then(() => syncPendingRef.current())
+        .catch((e: any) => console.warn('[chatlog] 待同步记录保存失败:', e?.message));
     }
   }, [messages, ready, isGroup, chatId]);
 
@@ -1061,12 +1212,17 @@ export default function ChatRoom() {
         const t = new Date(ts);
         newMsgs.push({
           id: msgId,
+          eventId: msgId,
           role: 'gojo',
           text: p.jp || '',
           subtitle: p.zh || undefined,
+          translationMissing: typeof p.translation_missing === 'boolean'
+            ? p.translation_missing : undefined,
+          translationSource: p.translation_source || undefined,
           time: `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`,
           timestamp: ts,
           sourceEventId: eventId,
+          syncStatus: 'pending',
           eventMeta: {
             assistant_turn_id: p.assistant_turn_id || eventId,
             segment_index: p.segment_index ?? 0,
@@ -1208,14 +1364,19 @@ export default function ChatRoom() {
       }
       const msg: Message = {
         id: msgId,
+        eventId: msgId,
         role: 'gojo',
         text: seg.jp,
         subtitle: seg.zh,
+        translationMissing: typeof seg.translation_missing === 'boolean'
+          ? seg.translation_missing : undefined,
+        translationSource: seg.translation_source || undefined,
         time: nowTime(),
         timestamp: Date.now(),
         sourceEventId: meta?.sourceEventId ? `${meta.sourceEventId}:reply:${i}` : undefined,
         replyToSourceEventId: meta?.sourceEventId,
         replyTo: meta?.replyTo,
+        syncStatus: 'pending',
         visualSummary: meta?.visualSummary,
         eventMeta: {
           ...(meta?.eventMeta || {}),
@@ -1417,21 +1578,18 @@ export default function ChatRoom() {
       : Date.now().toString();
     const imageReplyTo: Message['replyTo'] = opts?.retry && lastFailedSendRef.current?.kind === 'image'
       ? lastFailedSendRef.current.replyTo
-      : (replyingTo ? {
-          id: replyingTo.id,
-          text: replyingTo.subtitle || replyingTo.text || '',
-          name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')),
-          role: replyingTo.role,
-        } : undefined);
+      : (replyingTo ? buildQuotePreview(replyingTo, character?.name || '') : undefined);
     lastFailedSendRef.current = {
       kind: 'image', base64, mediaType, localUri, caption, video, sourceEventId, replyTo: imageReplyTo,
     };
     const userMsg: Message = {
       id: sourceEventId, role: 'user',
+      eventId: sourceEventId,
       text: caption || (video ? '🎬 [视频]' : '📷 [图片]'),
       time: nowTime(), timestamp: Date.now(), imageUri: localUri,
       sourceEventId,
       replyTo: imageReplyTo,
+      syncStatus: isGroup ? undefined : 'pending',
       eventMeta: {
         kind: video ? 'video' : 'image',
         source_event_id: sourceEventId,
@@ -1442,6 +1600,11 @@ export default function ChatRoom() {
     if (!opts?.retry) {
       setReplyingTo(null);
       setMessages(prev => [...prev, userMsg]);
+      if (!isGroup) {
+        pendingMsgsRef.current.set(sourceEventId, userMsg);
+        await persistPending();
+        void syncPendingRef.current();
+      }
       scrollRef.current?.scrollToEnd({ animated: true });
       if (isGroup) bumpRead(1);
     }
@@ -1609,21 +1772,24 @@ export default function ChatRoom() {
       setShowMention(false);
       if (searchMode) { setSearchMode(false); setSearchQuery(''); }
 
-      const replyToPayload: Message['replyTo'] = replyingTo ? {
-        id: replyingTo.id,
-        text: replyingTo.subtitle || replyingTo.text || '',
-        name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')),
-        role: replyingTo.role,
-      } : undefined;
+      const replyToPayload: Message['replyTo'] = replyingTo
+        ? buildQuotePreview(replyingTo, character?.name || '') : undefined;
       const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now(),
         sourceEventId: '',
         replyTo: replyToPayload,
+        syncStatus: isGroup ? undefined : 'pending',
       };
       sourceEventId = userMsg.id;
+      userMsg.eventId = sourceEventId;
       userMsg.sourceEventId = sourceEventId;
       lastFailedSendRef.current = { kind: 'text', text, sourceEventId, replyTo: replyToPayload };
       setReplyingTo(null);   // ★ 发送后清掉引用
       setMessages(prev => [...prev, userMsg]);
+      if (!isGroup) {
+        pendingMsgsRef.current.set(sourceEventId, userMsg);
+        await persistPending();
+        void syncPendingRef.current();
+      }
       if (isGroup) bumpRead(1);
     }
     setLoading(true);
@@ -1765,24 +1931,41 @@ export default function ChatRoom() {
       { text: '取消', style: 'cancel' },
       { text: '清空', style: 'destructive',
         onPress: async () => {
-          setMessages([]);
-          audioCacheRef.current = {};
-          await AsyncStorage.removeItem(STORAGE_KEY);
-          try { await FileSystem.deleteAsync(AUDIO_DIR, { idempotent: true }); } catch {}
-          // ★ 群聊以服务器为准：不清服务器的话，一进群又全回来了
           if (isGroup && groupId != null) {
             try { await axios.delete(`${SERVER_URL}/group/${groupId}/messages`); } catch {}
             try { await AsyncStorage.setItem(`group_read_count_${groupId}`, '0'); } catch {}
           } else {
-            // ★ 单聊同理:不清服务器的话,重进聊天页记录又全回来了
+            syncPausedRef.current = true;
+            if (syncRetryTimerRef.current) clearTimeout(syncRetryTimerRef.current);
+            syncRetryTimerRef.current = null;
+            await activeSyncRef.current;
             try {
               await axios.delete(`${SERVER_URL}/chatlog`, {
                 params: { user_id: FIXED_USER_ID, chat_id: chatId },
               });
-            } catch (e: any) { console.warn('[chatlog] 清空服务器失败:', e?.message); }
-            try { await AsyncStorage.removeItem(CHATLOG_SYNCED_KEY(chatId)); } catch {}
+            } catch (e: any) {
+              syncPausedRef.current = false;
+              scheduleSyncRetry();
+              console.warn('[chatlog] 清空服务器失败:', e?.message);
+              Alert.alert('清空失败', '云端记录没有清空，请稍后再试。');
+              return;
+            }
+            pendingMsgsRef.current.clear();
+            newlyConfirmedRef.current.clear();
+            syncConflictsRef.current.clear();
             syncedIdsRef.current.clear();
+            await pendingWriteRef.current.catch(() => {});
+            await deletedWriteRef.current.catch(() => {});
+            await AsyncStorage.removeItem(CHATLOG_PENDING_KEY(chatId));
+            await AsyncStorage.removeItem(CHATLOG_SYNCED_KEY(chatId));
+            await AsyncStorage.removeItem(CHATLOG_MIGRATING_KEY(chatId));
+            await AsyncStorage.removeItem(CHATLOG_DELETED_KEY(chatId));
+            syncPausedRef.current = false;
           }
+          setMessages([]);
+          audioCacheRef.current = {};
+          await AsyncStorage.removeItem(STORAGE_KEY);
+          try { await FileSystem.deleteAsync(AUDIO_DIR, { idempotent: true }); } catch {}
         }
       },
     ]);
@@ -1806,7 +1989,7 @@ export default function ChatRoom() {
       { text: '删除', style: 'destructive', onPress: async () => {
         if (!isGroup) {
           try {
-            await axios.delete(`${SERVER_URL}/chatlog/message`, {
+            const response = await axios.delete(`${SERVER_URL}/chatlog/message`, {
               params: {
                 user_id: FIXED_USER_ID,
                 chat_id: chatId,
@@ -1815,11 +1998,20 @@ export default function ChatRoom() {
               },
               timeout: 8000,
             });
+            if (response.data?.ok !== true) throw new Error('chatlog_delete_unconfirmed');
           } catch (e: any) {
             console.warn('[chatlog] 单条删除服务器失败:', e?.message);
             Alert.alert('删除失败', '云端记录没有删掉，请稍后再试。');
             return;
           }
+        }
+        if (!isGroup) {
+          deletedIdsRef.current.add(msg.id);
+          pendingMsgsRef.current.delete(msg.id);
+          newlyConfirmedRef.current.delete(msg.id);
+          syncConflictsRef.current.delete(msg.id);
+          await persistDeleted();
+          await persistPending();
         }
         setMessages(prev => prev.filter(m => m.id !== msg.id));
         // 顺手删掉这条的本地语音文件（如果有）
@@ -1832,16 +2024,81 @@ export default function ChatRoom() {
     ]);
   };
 
+  const applySavedTranslation = (message: Message, result: any) => {
+    const savedZh = String(result?.zh || '').trim();
+    if (!savedZh) throw new Error('translation_source_empty');
+    setMessages(prev => prev.map(item => item.id === message.id ? {
+      ...item, subtitle: savedZh,
+      translationMissing: false,
+      translationSource: result?.translation_source || undefined,
+    } : item));
+    setRepairingTranslation(null);
+    setTranslationDraft('');
+  };
+
+  const beginTranslationRepair = async (message: Message) => {
+    const identity = translationRepairIdentity(message);
+    if (!identity) return;
+    setTranslationSaving(true);
+    try {
+      await syncPendingRef.current();
+      const response = await axios.post(`${SERVER_URL}/chat/translation/restore`, {
+        user_id: FIXED_USER_ID, character_id: chatId,
+        source_event_id: identity.sourceEventId,
+        endpoint: identity.endpoint, event_id: identity.eventId,
+        jp: message.text,
+      }, { timeout: 10000 });
+      if (['repaired', 'already_identical'].includes(response.data?.status)) {
+        applySavedTranslation(message, response.data);
+      } else if (response.data?.status === 'translation_unavailable') {
+        setRepairingTranslation(message);
+        setTranslationDraft('');
+      } else {
+        throw new Error(response.data?.status || 'restore_failed');
+      }
+    } catch (error: any) {
+      Alert.alert('译文未恢复', error?.response?.data?.status || error?.message || '请稍后重试');
+    } finally {
+      setTranslationSaving(false);
+    }
+  };
+
+  const submitTranslationRepair = async () => {
+    const message = repairingTranslation;
+    const identity = message ? translationRepairIdentity(message) : null;
+    const zh = translationDraft.trim();
+    if (!message || !identity || !zh) return;
+    setTranslationSaving(true);
+    try {
+      await syncPendingRef.current();
+      const response = await axios.post(`${SERVER_URL}/chat/translation/repair`, {
+        user_id: FIXED_USER_ID, character_id: chatId,
+        source_event_id: identity.sourceEventId,
+        endpoint: identity.endpoint, event_id: identity.eventId,
+        jp: message.text, zh,
+      }, { timeout: 10000 });
+      if (!['repaired', 'already_identical'].includes(response.data?.status)) {
+        throw new Error(response.data?.status || 'repair_failed');
+      }
+      applySavedTranslation(message, response.data);
+    } catch (error: any) {
+      Alert.alert('译文未保存', error?.response?.data?.status || error?.message || '请稍后重试');
+    } finally {
+      setTranslationSaving(false);
+    }
+  };
+
   // ★ 长按气泡：复制 / 引用 / 删除
   const onBubbleLongPress = (msg: Message) => {
-    Alert.alert('这条消息', '', [
+    const actions: any[] = [
       { text: '📋 复制', onPress: () => copyMessage(msg) },
       { text: '💬 引用', onPress: () => {
         setReplyingTo(msg);
       }},
       { text: '🗑 删除', style: 'destructive', onPress: () => deleteMessage(msg) },
       { text: '取消', style: 'cancel' },
-    ]);
+    ];
+    Alert.alert('这条消息', '', actions);
   };
 
   // ── 时间分隔条工具 ──
@@ -2101,12 +2358,26 @@ export default function ChatRoom() {
                     isHighlighted && s.bubbleHighlight,
                   ]}>
                     {/* ★ 引用的消息显示 */}
-                    {(msg as any).replyTo && (
+                    {msg.replyUnavailable && (
+                      <View style={s.quotedMsg}>
+                        <View style={s.quotedLine} />
+                        <Text style={s.quotedText}>原消息不可用</Text>
+                      </View>
+                    )}
+                    {!msg.replyUnavailable && msg.replyTo && (
                       <View style={s.quotedMsg}>
                         <View style={s.quotedLine} />
                         <View style={{ flex: 1 }}>
-                          <Text style={s.quotedName} numberOfLines={1}>{(msg as any).replyTo.name || ''}</Text>
-                          <Text style={s.quotedText} numberOfLines={2}>{(msg as any).replyTo.text || ''}</Text>
+                          <Text style={s.quotedName} numberOfLines={1}>
+                            {msg.replyTo?.name || ''}
+                            {msg.replyTo?.timestamp ? ` · ${new Date(msg.replyTo.timestamp).toLocaleString('zh-CN', { hour12: false })}` : ''}
+                          </Text>
+                          <Text style={s.quotedText} numberOfLines={2}>
+                            {msg.replyTo?.text || ''}
+                          </Text>
+                          {!!msg.replyTo?.subtitle && (
+                            <Text style={s.quotedText} numberOfLines={1}>{msg.replyTo.subtitle}</Text>
+                          )}
                         </View>
                       </View>
                     )}
@@ -2123,6 +2394,19 @@ export default function ChatRoom() {
                         {msg.role === 'user' ? msg.subtitle : sanitizeUserReply(msg.subtitle)}
                       </Text>
                     )}
+                    {missingTranslation(msg) && (
+                      !isGroup && translationRepairIdentity(msg) ? (
+                        <TouchableOpacity onPress={event => {
+                          event.stopPropagation();
+                          void beginTranslationRepair(msg);
+                        }}>
+                          <Text style={s.subtitle}>中文译文缺失 · 点击恢复已有译文或手动补录</Text>
+                        </TouchableOpacity>
+                      ) : <Text style={s.subtitle}>中文译文缺失</Text>
+                    )}
+                    {msg.translationSource === 'user_supplied' && !!msg.subtitle && (
+                      <Text style={s.subtitle}>你提供的译文</Text>
+                    )}
                     {msg.role === 'gojo' && hasAudio && (
                       <Text style={s.replayHint}>
                         {resynthing === msg.id
@@ -2134,6 +2418,11 @@ export default function ChatRoom() {
                 </TouchableOpacity>
                 <View style={s.msgBottom}>
                   <Text style={s.msgTime}>{msg.time}</Text>
+                  {msg.syncStatus && !isGroup && (
+                    <Text style={s.msgTime}>
+                      {msg.syncStatus === 'conflict' ? '同步冲突' : '未同步'}
+                    </Text>
+                  )}
                   {/* ★ 已读标识:只在 user 消息且拿到 readAt 后显示 —— 微信语义,对方看到了就亮 */}
                   {msg.role === 'user' && msg.readAt && (
                     <Text style={s.msgReadMark}>已读</Text>
@@ -2167,12 +2456,36 @@ export default function ChatRoom() {
               {replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || ''))}
             </Text>
             <Text style={s.replyBarText} numberOfLines={1}>
-              {replyingTo.subtitle || replyingTo.text || ''}
+              {replyingTo.text || ''}
             </Text>
           </View>
           <TouchableOpacity onPress={() => setReplyingTo(null)} style={s.replyBarClose}>
             <Text style={s.replyBarCloseText}>✕</Text>
           </TouchableOpacity>
+        </View>
+      )}
+
+      {repairingTranslation && (
+        <View style={[s.replyBar, { flexDirection: 'column', alignItems: 'stretch' }]}>
+          <Text style={s.replyBarName}>手动补录译文（由你提供，仅用于显示）</Text>
+          <TextInput
+            style={[s.input, { minHeight: 44 }]}
+            value={translationDraft}
+            onChangeText={setTranslationDraft}
+            placeholder="输入对应的中文译文"
+            placeholderTextColor={C.textMute}
+            multiline
+            editable={!translationSaving}
+          />
+          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 16 }}>
+            <TouchableOpacity onPress={() => setRepairingTranslation(null)} disabled={translationSaving}>
+              <Text style={s.replyBarCloseText}>取消</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={submitTranslationRepair}
+              disabled={translationSaving || !translationDraft.trim()}>
+              <Text style={s.replyBarName}>{translationSaving ? '保存中…' : '保存译文'}</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 

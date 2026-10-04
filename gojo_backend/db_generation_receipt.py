@@ -13,6 +13,7 @@ import time
 import uuid
 
 from db import get_conn
+from generation_contract import translation_missing
 
 
 ENDPOINT_CHAT_TEXT = 'chat_text'
@@ -976,6 +977,10 @@ def hydrate_replay(body, character_id, user_id=None, chat_id=None,
             payload.pop(key, None)
     emotion = payload.get('emotion') or '平静'
     msgs = list(payload.get('messages') or [])
+    for item in msgs:
+        item['translation_missing'] = translation_missing(item)
+    payload['translation_missing'] = any(
+        item['translation_missing'] for item in msgs)
     # Historical payload audio must not survive silence or failed hydration.
     for item in msgs:
         item['audio_b64'] = ''

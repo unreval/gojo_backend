@@ -733,6 +733,7 @@ class RouteIdempotencyTests(unittest.TestCase):
                 'temporal_awareness',
                 get_temporal_snapshot=Mock(return_value={'now_utc': None}),
                 find_reply_calendar_conflict=Mock(return_value=None),
+                find_commit_clock_conflict=Mock(return_value=None),
                 record_turn=self.record_turn,
                 record_user_message=Mock(),
                 record_assistant_message=Mock(),
@@ -1561,9 +1562,14 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
             'temporal_awareness': stub(
                 'temporal_awareness',
                 get_temporal_snapshot=Mock(return_value={}),
+                find_reply_calendar_conflict=Mock(return_value=None),
+                find_commit_clock_conflict=Mock(return_value=None),
                 record_turn=Mock(),
                 record_user_message=Mock(),
             ),
+            'db_chatlog': stub(
+                'db_chatlog', append_messages_confirmed=Mock(
+                    return_value=[{'status': 'inserted', 'server_id': 1}])),
             'characters': stub(
                 'characters', get_character=Mock(return_value={'voice_id': None})),
             'tasks': stub(
@@ -1696,6 +1702,15 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
         self.assertEqual(body2['media']['id'], body1['media']['id'])
         self.assertTrue(str(body2['media']['url']).startswith('https://r2.example/'))
         self.assertEqual(body2['messages'][0]['jp'], body1['messages'][0]['jp'])
+
+    def test_image_midnight_gate_precedes_audio_and_assistant_commit(self):
+        sys.modules['temporal_awareness'].find_commit_clock_conflict.return_value = (
+            'time_snapshot_stale')
+        response, body = self.send('img-midnight', drain=False)
+        self.assertEqual((response.status_code, body['error']),
+                         (409, 'time_snapshot_stale'))
+        sys.modules['tts'].tts_to_b64.assert_not_called()
+        self.jobs.assert_not_called()
 
     def test_r2_success_generation_failed_keeps_media_and_retries(self):
         self.client.messages.create.side_effect = RuntimeError('llm down')

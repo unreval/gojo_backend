@@ -46,12 +46,52 @@ def parse_pending_event_meta(event_meta):
     return items
 
 
-def format_pending_bundle_context(bundle):
+def _bounded_source_text(value, limit=500):
+    value = str(value or '')
+    return value if len(value) <= limit else value[:limit] + '【原文截断】'
+
+
+def format_pending_bundle_context(bundle, events=None):
     """INTERNAL CONTEXT for the normal chat pipeline. Not a final reply."""
     if not bundle:
         return ''
     title = bundle.get('activity_title') or bundle.get('title') or ''
     state = bundle.get('reply_state') or 'soft_busy'
+    if events is not None:
+        lines = []
+        selected = list(events)[-20:]
+        for event in selected:
+            ts = event.get('timestamp')
+            when = ts.isoformat() if hasattr(ts, 'isoformat') else (ts or '未知')
+            sid = event.get('event_id') or '未知'
+            lines.append(
+                f'【积压消息 source_event_id={sid} 说话者=用户 发生时间={when}】\n'
+                f'{_bounded_source_text(event.get("content"))}')
+            meta = event.get('metadata') or {}
+            visual = meta.get('visual_summary') or ''
+            if visual:
+                lines.append(f'【该消息图片摘要】{_bounded_source_text(visual, 400)}')
+            quote = event.get('verified_reply')
+            if quote:
+                lines.append(
+                    f'【该消息明确引用 source_event_id={quote["source_event_id"]} '
+                    f'说话者={quote["name"]}({quote["role"]}) '
+                    f'发生时间={quote["ts"] or "未知"}】\n'
+                    f'原文：{_bounded_source_text(quote["text"])}')
+                if quote.get('subtitle') and quote.get('translation_source') != 'user_supplied':
+                    lines.append('译文：' + _bounded_source_text(quote['subtitle']))
+            elif event.get('reply_unavailable'):
+                lines.append('【该消息引用的原始事件不可用；不得使用缓存预览作事实】')
+        omitted = max(0, len(events) - len(selected))
+        if omitted:
+            lines.insert(0, f'【另有 {omitted} 条较早消息未注入，不能猜测其内容】')
+        return (
+            '【内部上下文——忙碌期间积压的消息，不是用户此刻新发的一条】\n'
+            f'角色此前在「{title}」({state})。现在按每条原始事件回复，'
+            '不要把来源时间当作当前时间。\n'
+            + '\n'.join(lines)
+            + '\n引用只证明对应说话者曾说过原话，不证明内容已经发生。'
+        )
     pending_text = (bundle.get('pending_text') or '').strip()
     count = bundle.get('pending_count') or 0
     metas = parse_pending_event_meta(bundle.get('event_meta'))

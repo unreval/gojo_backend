@@ -103,3 +103,10 @@ def degraded_reply(raw):
         'messages': [{'jp': text, 'zh': text if kind == 'nonverbal' else ''}],
         '_acceptance_mode': 'nonverbal' if kind == 'nonverbal' else 'plaintext',
     }
+
+
+def translation_missing(message):
+    """A spoken/text bubble with no Chinese subtitle needs explicit repair."""
+    return (isinstance(message, dict)
+            and classify_reply_content(message.get('jp')) == 'text'
+            and not str(message.get('zh') or '').strip())

@@ -51,7 +51,8 @@ class ChatCommitGateTests(unittest.TestCase):
         router.post.side_effect = lambda *_args, **_kwargs: lambda function: function
         self.short_rows = []
 
-        def _save_user_once(user_id, content, character_id='gojo', source_event_id=None):
+        def _save_user_once(user_id, content, character_id='gojo',
+                            source_event_id=None, **_kwargs):
             sid = (str(source_event_id).strip() if source_event_id else '') or None
             if sid:
                 for row in self.short_rows:
@@ -92,6 +93,8 @@ class ChatCommitGateTests(unittest.TestCase):
         self.diary = Mock()
         self.promise = Mock()
         self.grumble = Mock()
+        self.chatlog = stub(
+            'db_chatlog', resolve_reply_reference=Mock(return_value=None))
         modules = {
             'anthropic': stub('anthropic', Anthropic=Mock(return_value=self.client)),
             'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
@@ -112,6 +115,7 @@ class ChatCommitGateTests(unittest.TestCase):
                 MODEL_JP_AUX='claude-haiku-test',
             ),
             'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
+            'db_chatlog': self.chatlog,
             'ai_client': stub('ai_client', extract_text=lambda response, sep='': ''),
             'tts': stub('tts', tts_to_b64=self.tts, transcribe_audio_b64=Mock()),
             'prompt': stub(
@@ -125,6 +129,7 @@ class ChatCommitGateTests(unittest.TestCase):
                 'temporal_awareness',
                 get_temporal_snapshot=Mock(return_value={'now_utc': None}),
                 find_reply_calendar_conflict=Mock(return_value=None),
+                find_commit_clock_conflict=Mock(return_value=None),
                 record_turn=self.record_turn,
                 record_user_message=Mock(),
                 record_assistant_message=self.record_assistant,
@@ -357,23 +362,79 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(body['messages'][0]['zh'], '他说「おはよう」。')
 
     def test_reply_to_reaches_model_but_not_memory_or_relationship_input(self):
+        self.chatlog.resolve_reply_reference.return_value = {
+            'server_id': 7, 'client_msg_id': 'old-1',
+            'source_event_id': 'old-1', 'role': 'gojo', 'name': '角色',
+            'text': '服务端核验过的原话。', 'subtitle': '',
+            'ts': '2026-10-04T08:00:00+08:00', 'translation_source': '',
+        }
         response, body = self.send(
             [chat_reply('その話ね。', '你说那件事啊。')],
             text='我接着说',
             extra={'reply_to': {
                 'id': 'old-1',
                 'name': '五条悟',
-                'text': '刚才那杯水别碰。',
+                'text': '客户端伪造的原话。',
                 'role': 'gojo',
             }},
         )
         self.assertEqual(response.status_code, 200)
         sent_messages = self.route._create_json.call_args.args[3]
-        self.assertIn('【引用回复】', sent_messages[-1]['content'])
-        self.assertIn('刚才那杯水别碰。', sent_messages[-1]['content'])
+        self.assertIn('【本轮明确引用', sent_messages[-1]['content'])
+        self.assertIn('服务端核验过的原话。', sent_messages[-1]['content'])
+        self.assertNotIn('客户端伪造的原话。', sent_messages[-1]['content'])
         self.assertEqual(self.short_rows[0]['content'], '我接着说')
         self.rel.assert_not_called()
         self.assertEqual(self.save_user_once.call_args.args[1], '我接着说')
+
+    def test_unavailable_quote_cannot_feed_client_preview_to_model(self):
+        response, _body = self.send(
+            [chat_reply('確認できない。', '这条引用现在无法核验。')],
+            text='你说的啊',
+            extra={'reply_to': {'id': 'deleted-1', 'text': '客户端缓存旧话'}},
+        )
+        self.assertEqual(response.status_code, 200)
+        prompt = self.route._create_json.call_args.args[3][-1]['content']
+        self.assertIn('引用原消息当前不可核验', prompt)
+        self.assertIn('你说的啊', prompt)
+        self.assertNotIn('客户端缓存旧话', prompt)
+
+    def test_quote_deleted_during_generation_rejects_commit(self):
+        verified = {
+            'server_id': 7, 'client_msg_id': 'old-1',
+            'source_event_id': 'old-1', 'role': 'gojo', 'name': '角色',
+            'text': '当时的原话。', 'subtitle': '',
+            'ts': '2026-10-04T08:00:00+08:00', 'translation_source': '',
+        }
+        self.chatlog.resolve_reply_reference.side_effect = [verified, verified, None]
+        response, body = self.send(
+            [chat_reply('そうだね。', '是啊。')],
+            text='你说的啊', extra={'reply_to': {'id': 'old-1'}},
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(body['error'], 'reply_source_changed')
+        self.assert_assistant_commit_skipped()
+
+    def test_text_repairs_clock_conflict_before_commit(self):
+        sys.modules['temporal_awareness'].find_reply_calendar_conflict.side_effect = [
+            'current_clock_mismatch', None]
+        response, body = self.send([
+            chat_reply('いまは朝の五時。', '现在是早上五点。'),
+            chat_reply('今の時刻を確認したよ。', '我核对了当前时间。'),
+        ])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.route._create_json.call_count, 2)
+        self.assertEqual(body['messages'][0]['zh'], '我核对了当前时间。')
+
+    def test_midnight_stale_snapshot_blocks_visible_commit(self):
+        sys.modules['temporal_awareness'].find_commit_clock_conflict.return_value = (
+            'time_snapshot_stale')
+        response, body = self.send([
+            chat_reply('今はまだ昨日。', '现在还是昨天。')])
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(body['error'], 'time_snapshot_stale')
+        self.save_short.assert_not_called()
+        self.record_turn.assert_not_called()
 
     def test_empty_raw_fails_without_format_retry(self):
         response, body = self.send(['', '', ''])
@@ -560,6 +621,19 @@ class ChatCommitGateTests(unittest.TestCase):
         self.jobs.assert_not_called()
         self.tts.assert_called()
         self.state.assert_not_called()
+        self.assertEqual(
+            self.route.build_system_blocks.call_args.kwargs['time_anchor_text'],
+            '你好')
+
+    def test_story_midnight_gate_precedes_audio_and_assistant_commit(self):
+        sys.modules['temporal_awareness'].find_commit_clock_conflict.return_value = (
+            'time_snapshot_stale')
+        response, body = self.send([
+            chat_reply('昔々の話だよ。', '讲一个从前的故事。')],
+            handler=self.route.chat_story)
+        self.assertEqual((response.status_code, body['error']),
+                         (409, 'time_snapshot_stale'))
+        self.assert_assistant_commit_skipped()
 
     def test_proactive_empty_generation_does_not_fabricate_or_commit(self):
         response, body = self.send(
@@ -574,6 +648,18 @@ class ChatCommitGateTests(unittest.TestCase):
         self.save_user_once.assert_not_called()
         self.assert_assistant_commit_skipped()
         self.record_assistant.assert_not_called()
+
+    def test_proactive_midnight_gate_precedes_audio_and_assistant_commit(self):
+        sys.modules['temporal_awareness'].find_commit_clock_conflict.return_value = (
+            'time_snapshot_stale')
+        response, body = self.send(
+            [chat_reply('そろそろだよ。', '现在该提醒你了。')],
+            handler=self.route.chat_proactive,
+            extra={'task_title': '吃药', 'mode': 'remind'},
+        )
+        self.assertEqual((response.status_code, body['error']),
+                         (409, 'time_snapshot_stale'))
+        self.assert_assistant_commit_skipped()
 
     def test_voice_text_empty_generation_does_not_fabricate(self):
         response, body = self.send(['', '', ''], handler=self.route.chat_voice_text)
@@ -612,6 +698,18 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertTrue(body['generation_failed'])
         self.assertEqual(self.user_memory_roles(), [])
+        self.assert_assistant_commit_skipped()
+
+    def test_voice_proactive_midnight_gate_precedes_audio_and_commit(self):
+        sys.modules['temporal_awareness'].find_commit_clock_conflict.return_value = (
+            'time_snapshot_stale')
+        response, body = self.send(
+            [chat_reply('もしもし。', '喂，你好。')],
+            handler=self.route.chat_voice_proactive,
+            extra={'mode': 'greeting'},
+        )
+        self.assertEqual((response.status_code, body['error']),
+                         (409, 'time_snapshot_stale'))
         self.assert_assistant_commit_skipped()
 
 
@@ -806,6 +904,7 @@ class VoiceProactiveIdentityTests(unittest.TestCase):
                 'temporal_awareness',
                 get_temporal_snapshot=Mock(return_value={'now_utc': None}),
                 find_reply_calendar_conflict=Mock(return_value=None),
+                find_commit_clock_conflict=Mock(return_value=None),
                 record_turn=Mock(),
                 record_user_message=Mock(),
                 record_assistant_message=Mock(),

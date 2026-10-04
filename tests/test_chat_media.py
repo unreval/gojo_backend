@@ -169,6 +169,7 @@ class FakeCursor:
             event_id = client_msg_id
             if len(params) >= 11:
                 event_id = params[10] or client_msg_id
+            reply_to_event_id = params[11] if len(params) >= 12 else ''
             row = {
                 'id': self.store.next_log_id,
                 'user_id': user_id,
@@ -184,10 +185,27 @@ class FakeCursor:
                 'has_audio': bool(has_audio),
                 'created_at': datetime.now(timezone.utc),
                 'status': 'active',
+                'reply_to_event_id': reply_to_event_id,
             }
             self.store.next_log_id += 1
             self.store.chat_log.append(row)
+            if 'RETURNING id' in compact:
+                self._one = (row['id'],)
             self.rowcount = 1
+            return
+        if compact.startswith('SELECT id, client_msg_id, event_id, role, text'):
+            user_id, chat_id, client_msg_id, event_id = params
+            for row in reversed(self.store.chat_log):
+                if (row['user_id'] == user_id and row['chat_id'] == chat_id
+                        and (row['client_msg_id'] == client_msg_id
+                             or row['event_id'] == event_id)):
+                    self._one = (
+                        row['id'], row['client_msg_id'], row['event_id'],
+                        row['role'], row['text'], row['subtitle'], row['emotion'],
+                        row['kind'], row['extra'], row['has_audio'],
+                        row['reply_to_event_id'], row['status'],
+                    )
+                    return
             return
         if compact.startswith('SELECT event_id, client_msg_id, role, extra'):
             user_id, chat_id = params
@@ -388,6 +406,7 @@ class ChatImagePersistRouteTests(unittest.TestCase):
         route_image.claude_client = types.SimpleNamespace(messages=types.SimpleNamespace(create=self.llm))
         self.patchers = [
             patch.object(db_chat_media, 'get_conn', side_effect=lambda: FakeConn(self.store)),
+            patch.object(db_chatlog, 'get_conn', side_effect=lambda: FakeConn(self.store)),
             patch.object(route_image, 'persist_image', wraps=db_chat_media.persist_image),
             patch.object(media_storage, 'is_configured', return_value=True),
             patch.object(media_storage, 'put_bytes', self.put),
@@ -441,6 +460,9 @@ class ChatImagePersistRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(body['error'], 'generation_failed')
         self.assertEqual(len(self.store.rows), 1)
+        self.assertEqual(len(self.store.chat_log), 1)
+        self.assertEqual(self.store.chat_log[0]['event_id'], 'img-keep-1')
+        self.assertEqual(self.store.chat_log[0]['text'], '📷 看')
         self.assertEqual(self.put.call_count, 1)
         self.assertEqual(body['media']['id'], self.store.rows[0]['id'])
         self.assertEqual(body['media']['url'], 'https://r2.example/v1')
@@ -458,6 +480,7 @@ class ChatImagePersistRouteTests(unittest.TestCase):
         self.assertEqual(body['error'], 'media_persist_failed')
         self.assertTrue(body['retryable'])
         self.assertEqual(self.store.rows, [])
+        self.assertEqual(self.store.chat_log, [])
         self.llm.assert_not_called()
 
     def test_video_frames_are_not_persisted_as_original(self):

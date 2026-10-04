@@ -197,8 +197,273 @@ def append_messages(user_id, chat_id, msgs, *, conn=None):
     return written
 
 
-def _row_to_message(row):
+def _reply_row(cur, user_id, chat_id, reference_id):
+    """Read one active quoted event in this conversation, never its client preview."""
+    reference_id = str(reference_id or '').strip()[:120]
+    if not reference_id:
+        return None
+    if reference_id.startswith('srv_') and reference_id[4:].isdigit():
+        where = 'id=%s'
+        key = int(reference_id[4:])
+    else:
+        where = '(event_id=%s OR client_msg_id=%s)'
+        key = (reference_id, reference_id)
+    params = (user_id, chat_id, *(key if isinstance(key, tuple) else (key,)))
+    cur.execute(
+        '''SELECT id, client_msg_id, COALESCE(NULLIF(event_id, ''), client_msg_id),
+                  role, text, subtitle, created_at, extra
+           FROM chat_log
+           WHERE user_id=%s AND chat_id=%s AND ''' + where + '''
+             AND COALESCE(status, 'active') = 'active'
+             AND deleted_at IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM chat_log_tombstone tomb
+                 WHERE tomb.user_id=chat_log.user_id
+                   AND tomb.chat_id=chat_log.chat_id
+                   AND tomb.client_msg_id=chat_log.client_msg_id)
+           LIMIT 2 FOR SHARE''',
+        params)
+    rows = cur.fetchall()
+    if len(rows) != 1 or not rows[0][2]:
+        return None
+    row = rows[0]
     return {
+        'server_id': row[0], 'client_msg_id': row[1] or '',
+        'source_event_id': row[2], 'role': row[3],
+        'name': '角色' if row[3] in ('gojo', 'assistant') else '用户',
+        'text': row[4] or '', 'subtitle': row[5] or '',
+        'ts': row[6].isoformat() if row[6] else None,
+        'translation_source': _parse_extra(row[7]).get('translation_source') or '',
+    }
+
+
+def resolve_reply_reference(user_id, chat_id, reference, *, conn=None):
+    """Resolve every supplied identifier to the same active chat_log event."""
+    if not reference:
+        return None
+    if isinstance(reference, dict):
+        ids = [reference.get(key) for key in
+               ('source_event_id', 'sourceEventId', 'event_id',
+                'eventId', 'id')]
+    else:
+        ids = [reference]
+    ids = list(dict.fromkeys(str(value).strip()[:120] for value in ids if value))
+    if not ids:
+        return None
+    owned = conn is None
+    conn = get_conn() if owned else conn
+    cur = conn.cursor()
+    try:
+        targets = [_reply_row(cur, user_id, chat_id, value) for value in ids]
+        if any(target is None for target in targets):
+            return None
+        first = targets[0]
+        if any(target['server_id'] != first['server_id'] for target in targets[1:]):
+            return None
+        return first
+    finally:
+        cur.close()
+        if owned:
+            conn.close()
+
+
+def _reply_preview(target):
+    text = target['text']
+    return {
+        'id': target['client_msg_id'] or target['source_event_id'],
+        'source_event_id': target['source_event_id'],
+        'role': target['role'],
+        'name': '角色' if target['role'] in ('gojo', 'assistant') else '用户',
+        'text': text[:500],
+        'subtitle': target['subtitle'][:500],
+        'translation_source': target['translation_source'],
+        'ts': target['ts'],
+        'truncated': len(text) > 500,
+    }
+
+
+def append_messages_confirmed(user_id, chat_id, msgs, *, conn=None):
+    """Append with per-message receipts; never accept an ID alone as a retry."""
+    if not msgs:
+        return []
+    owns_connection = conn is None
+    conn = get_conn() if owns_connection else conn
+    cur = conn.cursor()
+    results = []
+    try:
+        for m in msgs:
+            client_id = str(m.get('client_msg_id') or '').strip()[:120]
+            event_id = str(m.get('event_id') or client_id).strip()[:120]
+            role = str(m.get('role') or '').strip()
+            receipt = {'id': client_id or event_id}
+            if not client_id or role not in ('user', 'gojo'):
+                results.append({**receipt, 'status': 'conflict',
+                                'reason': 'invalid_message_identity'})
+                continue
+            cur.execute(
+                '''SELECT 1 FROM chat_log_tombstone
+                   WHERE user_id=%s AND chat_id=%s AND client_msg_id=%s''',
+                (user_id, chat_id, client_id))
+            if cur.fetchone():
+                results.append({**receipt, 'status': 'deleted_rejected'})
+                continue
+
+            raw_extra = m.get('extra') or ''
+            if raw_extra and not isinstance(raw_extra, dict):
+                try:
+                    if not isinstance(json.loads(raw_extra), dict):
+                        raise ValueError('extra must be an object')
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    results.append({**receipt, 'status': 'conflict',
+                                    'reason': 'invalid_extra'})
+                    continue
+            extra = _parse_extra(raw_extra)
+            if role == 'gojo':
+                import raw_events
+                extra = raw_events.infer_assistant_identity(role, event_id, extra)
+            preview = extra.get('reply_to') or extra.get('replyTo') if role == 'user' else None
+            identifiers = [m.get('reply_to_event_id'), extra.get('reply_to_event_id')]
+            if role == 'user':
+                identifiers.append(extra.get('reply_to_source_event_id'))
+            if role == 'user' and isinstance(preview, dict):
+                identifiers.extend(preview.get(key) for key in
+                                   ('source_event_id', 'sourceEventId',
+                                    'event_id', 'eventId', 'id'))
+            identifiers = list(dict.fromkeys(
+                str(value).strip()[:120] for value in identifiers if value))
+            target = resolve_reply_reference(
+                user_id, chat_id,
+                {'source_event_id': identifiers[0]} if len(identifiers) == 1
+                else identifiers[0] if identifiers else None,
+                conn=conn) if identifiers else None
+            if target and any(
+                    resolve_reply_reference(user_id, chat_id, value, conn=conn)
+                    != target for value in identifiers[1:]):
+                results.append({**receipt, 'status': 'conflict',
+                                'reason': 'reference_identity_mismatch'})
+                continue
+            if target and target['source_event_id'] == event_id:
+                target = None
+            if role == 'user':
+                for key in ('reply_to', 'replyTo', 'reply_to_event_id',
+                            'reply_to_source_event_id'):
+                    extra.pop(key, None)
+            if target:
+                extra['reply_to_event_id'] = target['source_event_id']
+                if role == 'user':
+                    extra['reply_to'] = _reply_preview(target)
+            reply_id = target['source_event_id'] if target else ''
+            if (identifiers or isinstance(preview, dict)) and not target:
+                receipt['reference_status'] = 'unavailable'
+                if role == 'user':
+                    extra['reply_unavailable'] = True
+
+            text = str(m.get('text') or '')[:4000]
+            subtitle = str(m.get('subtitle') or '')[:4000]
+            emotion = str(m.get('emotion') or '')[:20]
+            kind = str(m.get('kind') or 'text')[:20]
+            has_audio = bool(m.get('has_audio'))
+            extra_json = json.dumps(extra, ensure_ascii=False) if extra else ''
+            cur.execute(
+                '''SELECT id, client_msg_id, event_id, role, text, subtitle,
+                          emotion, kind, extra, has_audio, reply_to_event_id,
+                          COALESCE(status, 'active')
+                   FROM chat_log WHERE user_id=%s AND chat_id=%s
+                     AND (client_msg_id=%s OR event_id=%s)
+                   ORDER BY id DESC LIMIT 1 FOR UPDATE''',
+                (user_id, chat_id, client_id, event_id))
+            row = cur.fetchone()
+            if row is None:
+                ts = str(m.get('ts') or '').strip()
+                columns = '''(user_id,chat_id,client_msg_id,role,text,subtitle,
+                              emotion,kind,extra,has_audio,event_id,status,
+                              reply_to_event_id'''
+                values = '''(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s'''
+                args = [user_id, chat_id, client_id, role, text, subtitle,
+                        emotion, kind, extra_json, has_audio, event_id, reply_id]
+                if ts:
+                    columns += ',created_at'
+                    values += ',%s'
+                    args.append(ts)
+                cur.execute(
+                    'INSERT INTO chat_log ' + columns + ') VALUES ' + values
+                    + ') ON CONFLICT DO NOTHING RETURNING id', args)
+                inserted = cur.fetchone()
+                if inserted:
+                    results.append({**receipt, 'status': 'inserted',
+                                    'server_id': inserted[0],
+                                    'reply_to_event_id': reply_id})
+                    continue
+                cur.execute(
+                    '''SELECT id, client_msg_id, event_id, role, text, subtitle,
+                              emotion, kind, extra, has_audio, reply_to_event_id,
+                              COALESCE(status, 'active')
+                       FROM chat_log WHERE user_id=%s AND chat_id=%s
+                         AND (client_msg_id=%s OR event_id=%s)
+                       ORDER BY id DESC LIMIT 1 FOR UPDATE''',
+                    (user_id, chat_id, client_id, event_id))
+                row = cur.fetchone()
+            if not row:
+                results.append({**receipt, 'status': 'conflict',
+                                'reason': 'identity_unavailable'})
+                continue
+            if row[11] != 'active':
+                results.append({**receipt, 'status': 'deleted_rejected'})
+                continue
+            # A repaired subtitle is display metadata. A stale client with an
+            # empty subtitle may retry the same assistant event, but may never
+            # replace the server's repaired translation or the Japanese text.
+            same_subtitle = (row[5] == subtitle or
+                             (role == 'gojo' and not subtitle and bool(row[5])))
+            same = (row[1] == client_id and (not row[2] or row[2] == event_id)
+                    and row[3] == role and row[4] == text
+                    and same_subtitle and row[6:8] == (emotion, kind)
+                    and bool(row[9]) == has_audio)
+            if not same:
+                results.append({**receipt, 'status': 'conflict',
+                                'reason': 'semantic_identity_mismatch'})
+                continue
+            old_reply = row[10] or ''
+            if reply_id and old_reply and old_reply != reply_id:
+                results.append({**receipt, 'status': 'conflict',
+                                'reason': 'reference_conflict'})
+                continue
+            old_extra = _parse_extra(row[8] or '')
+            needs_preview = role == 'user' and old_extra.get('reply_to') != _reply_preview(target) if target else False
+            if reply_id and (not old_reply or old_extra.get('reply_to_event_id') != reply_id
+                             or needs_preview):
+                old_extra['reply_to_event_id'] = reply_id
+                if role == 'user':
+                    old_extra['reply_to'] = _reply_preview(target)
+                cur.execute(
+                    '''UPDATE chat_log SET reply_to_event_id=%s, extra=%s
+                       WHERE id=%s AND user_id=%s AND chat_id=%s
+                         AND COALESCE(status, 'active')='active'
+                         AND COALESCE(reply_to_event_id, '') IN ('', %s)''',
+                    (reply_id, json.dumps(old_extra, ensure_ascii=False),
+                     row[0], user_id, chat_id, reply_id))
+                results.append({**receipt, 'status': 'metadata_enriched',
+                                'server_id': row[0],
+                                'reply_to_event_id': reply_id})
+            else:
+                results.append({**receipt, 'status': 'already_identical',
+                                'server_id': row[0],
+                                'reply_to_event_id': old_reply})
+        if owns_connection:
+            conn.commit()
+        return results
+    except Exception:
+        if owns_connection:
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+        if owns_connection:
+            conn.close()
+
+
+def _row_to_message(row):
+    message = {
         'id': row[0],
         'client_msg_id': row[1] or '',
         'role': row[2],
@@ -210,7 +475,15 @@ def _row_to_message(row):
         'has_audio': bool(row[8]),
         'ts': row[9].isoformat() if row[9] else None,
         'event_id': (row[10] if len(row) > 10 else '') or '',
+        'reply_to_event_id': (row[11] if len(row) > 11 else '') or '',
     }
+    if message['role'] == 'gojo':
+        from generation_contract import translation_missing
+        message['translation_missing'] = translation_missing({
+            'jp': message['text'], 'zh': message['subtitle']})
+        message['translation_source'] = _parse_extra(message['extra']).get(
+            'translation_source') or ''
+    return message
 
 
 def _fetch_message_page(user_id, chat_id, limit, before_id=None):
@@ -220,19 +493,31 @@ def _fetch_message_page(user_id, chat_id, limit, before_id=None):
         if before_id:
             cur.execute(
                 '''SELECT id, client_msg_id, role, text, subtitle, emotion,
-                          kind, extra, has_audio, created_at, event_id
+                          kind, extra, has_audio, created_at, event_id,
+                          reply_to_event_id
                    FROM chat_log
                    WHERE user_id=%s AND chat_id=%s AND id < %s
                      AND COALESCE(status, 'active') = 'active'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM chat_log_tombstone tomb
+                         WHERE tomb.user_id=chat_log.user_id
+                           AND tomb.chat_id=chat_log.chat_id
+                           AND tomb.client_msg_id=chat_log.client_msg_id)
                    ORDER BY id DESC LIMIT %s''',
                 (user_id, chat_id, before_id, limit))
         else:
             cur.execute(
                 '''SELECT id, client_msg_id, role, text, subtitle, emotion,
-                          kind, extra, has_audio, created_at, event_id
+                          kind, extra, has_audio, created_at, event_id,
+                          reply_to_event_id
                    FROM chat_log
                    WHERE user_id=%s AND chat_id=%s
                      AND COALESCE(status, 'active') = 'active'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM chat_log_tombstone tomb
+                         WHERE tomb.user_id=chat_log.user_id
+                           AND tomb.chat_id=chat_log.chat_id
+                           AND tomb.client_msg_id=chat_log.client_msg_id)
                    ORDER BY id DESC LIMIT %s''',
                 (user_id, chat_id, limit))
         return [_row_to_message(row) for row in cur.fetchall()]
@@ -309,7 +594,33 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
     out = visible[:limit]
     out.reverse()
     _attach_chat_media(user_id, chat_id, out)
+    _attach_reply_display(user_id, chat_id, out)
     return out, has_more
+
+
+def _attach_reply_display(user_id, chat_id, msgs):
+    """Derive quote previews from active sources for this response only."""
+    for msg in msgs:
+        if msg.get('role') != 'user':
+            continue
+        extra = _parse_extra(msg.get('extra'))
+        preview = extra.get('reply_to') or extra.get('replyTo')
+        ref = (msg.get('reply_to_event_id') or extra.get('reply_to_event_id')
+               or extra.get('reply_to_source_event_id')
+               or ((preview.get('source_event_id') or preview.get('id'))
+                   if isinstance(preview, dict) else ''))
+        if not ref and not preview:
+            continue
+        target = resolve_reply_reference(user_id, chat_id, ref)
+        extra.pop('replyTo', None)
+        if target:
+            extra['reply_to'] = _reply_preview(target)
+            extra['reply_to_source_event_id'] = target['source_event_id']
+            extra.pop('reply_unavailable', None)
+        else:
+            extra.pop('reply_to', None)
+            extra['reply_unavailable'] = True
+        msg['extra'] = json.dumps(extra, ensure_ascii=False)
 
 
 def _attach_chat_media(user_id, chat_id, msgs):
@@ -395,6 +706,8 @@ def list_message_event_keys(user_id, chat_id, client_msg_id='', server_id=None):
 
 
 def _parse_extra(extra):
+    if isinstance(extra, dict):
+        return dict(extra)
     if not extra:
         return {}
     try:
@@ -406,10 +719,15 @@ def _parse_extra(extra):
 
 def _history_content(role, text, subtitle, kind, extra):
     bits = []
-    reply_to = extra.get('reply_to') or extra.get('replyTo')
-    if isinstance(reply_to, dict) and reply_to.get('text'):
-        name = reply_to.get('name') or '上一条消息'
-        bits.append(f'【引用】{name}: {str(reply_to.get("text") or "")[:500]}')
+    reply_to = extra.get('verified_reply_to')
+    if isinstance(reply_to, dict):
+        bits.append(
+            f'【明确引用 source_event_id={reply_to["source_event_id"]} '
+            f'说话者={reply_to["name"]}({reply_to["role"]}) '
+            f'发生时间={reply_to["ts"] or "未知"}】'
+            f'{reply_to["text"][:500]}')
+    elif extra.get('reply_unavailable'):
+        bits.append('【引用原始事件不可用；缓存预览不作为事实】')
 
     visual = extra.get('visual_summary') or extra.get('visualSummary')
     event_meta = extra.get('event_meta') or extra.get('eventMeta')
@@ -422,7 +740,7 @@ def _history_content(role, text, subtitle, kind, extra):
 
     if text:
         bits.append(text)
-    if role != 'user' and subtitle:
+    if role != 'user' and subtitle and extra.get('translation_source') != 'user_supplied':
         bits.append(f'（中文：{subtitle}）')
     return '\n'.join(bits).strip()
 
@@ -441,10 +759,15 @@ def get_prompt_history(user_id, chat_id, limit=24):
     try:
         cur.execute(
             '''SELECT role, text, subtitle, kind, extra,
-                      event_id, client_msg_id
+                      event_id, client_msg_id, reply_to_event_id
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s
                  AND COALESCE(status, 'active') = 'active'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM chat_log_tombstone tomb
+                     WHERE tomb.user_id=chat_log.user_id
+                       AND tomb.chat_id=chat_log.chat_id
+                       AND tomb.client_msg_id=chat_log.client_msg_id)
                ORDER BY id DESC LIMIT %s''',
             (user_id, chat_id, fetch_limit))
         rows = cur.fetchall()
@@ -466,6 +789,7 @@ def get_prompt_history(user_id, chat_id, limit=24):
             'extra': extra or '',
             'event_id': event_id or client_msg_id or '',
             'client_msg_id': client_msg_id or '',
+            'reply_to_event_id': row[7] if len(row) > 7 else '',
         })
     events = collapse_assistant_logical_turns(
         events, turn_facts=assistant_turn_facts(user_id, chat_id))[-limit:]
@@ -478,6 +802,21 @@ def get_prompt_history(user_id, chat_id, limit=24):
             extra_data = extra
         else:
             extra_data = _parse_extra(extra or '')
+        extra_data = dict(extra_data)
+        if role == 'user':
+            top_ref = event.get('reply_to_event_id') or ''
+            extra_ref = extra_data.get('reply_to_event_id') or ''
+            extra_data.pop('reply_to', None)
+            extra_data.pop('replyTo', None)
+            if top_ref and extra_ref and top_ref != extra_ref:
+                extra_data['reply_unavailable'] = True
+            elif top_ref or extra_ref:
+                target = resolve_reply_reference(
+                    user_id, chat_id, top_ref or extra_ref)
+                if target:
+                    extra_data['verified_reply_to'] = target
+                else:
+                    extra_data['reply_unavailable'] = True
         content = _history_content(
             role, event.get('text') or '', event.get('subtitle') or '',
             event.get('kind') or 'text', extra_data)

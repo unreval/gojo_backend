@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from reply_availability import format_pending_bundle_context, parse_pending_event_meta
+from reply_availability import format_pending_bundle_context
 from db_read_receipt import source_event_ids_from_claim
 
 
@@ -98,44 +98,49 @@ def cancel_orphan_busy_promises(now=None):
         return 0
 
 
-def _persist_pending_user_messages(bundle):
+def _load_pending_events(bundle):
+    """Pair pending IDs with their canonical rows, including explicit quotes."""
+    from raw_events import SourceValidityError, get_active_events_by_ids
+    from db_chatlog import resolve_reply_reference
+
+    ids = _pending_source_event_ids(bundle)
+    if not ids:
+        raise SourceValidityError('pending_source_ids_missing')
+    events = get_active_events_by_ids(
+        bundle['user_id'], bundle['character_id'], ids)
+    if len(events) != len(ids):
+        raise SourceValidityError('pending_source_unavailable')
+    for event in events:
+        meta = event.get('metadata') or {}
+        preview = meta.get('reply_to') or {}
+        reference_id = (meta.get('reply_to_event_id')
+                        or (preview.get('source_event_id') if isinstance(preview, dict) else None))
+        if reference_id:
+            target = resolve_reply_reference(
+                bundle['user_id'], bundle['character_id'], reference_id)
+            if target:
+                event['verified_reply'] = target
+            else:
+                event['reply_unavailable'] = True
+    return events
+
+
+def _persist_pending_user_messages(bundle, events):
     from user_memory import save_user_short_memory_once
 
     user_id = bundle.get('user_id')
     character_id = bundle.get('character_id')
-    metas = parse_pending_event_meta(bundle.get('event_meta'))
-    pending_lines = [
-        line for line in str(bundle.get('pending_text') or '').split('\n')
-        if line.strip()
-    ]
-    for index, meta in enumerate(metas):
-        text = (
-            meta.get('caption')
-            or meta.get('display_text')
-            or meta.get('text')
-            or (pending_lines[index] if index < len(pending_lines) else '')
-        )
-        event_id = meta.get('source_event_id') or meta.get('event_id')
-        if not text and not event_id:
-            continue
+    for event in events:
+        meta = dict(event.get('metadata') or {})
+        if event.get('reply_unavailable'):
+            for key in ('reply_to', 'reply_to_event_id', 'reply_to_source_event_id'):
+                meta.pop(key, None)
         save_user_short_memory_once(
-            user_id, text or '(pending)', character_id,
-            source_event_id=event_id,
+            user_id, event.get('content') or '', character_id,
+            source_event_id=event.get('event_id'),
             event_meta=meta,
+            reply_to_event_id=(event.get('verified_reply') or {}).get('source_event_id'),
         )
-    if not metas:
-        first_id = bundle.get('first_source_event_id') or None
-        last_id = bundle.get('last_source_event_id') or None
-        ids = []
-        if first_id:
-            ids.append(first_id)
-        if last_id and last_id != first_id:
-            ids.append(last_id)
-        for index, line in enumerate(pending_lines):
-            event_id = ids[index] if index < len(ids) else (
-                ids[-1] if ids else None)
-            save_user_short_memory_once(
-                user_id, line, character_id, source_event_id=event_id)
 
 
 def _push_delayed_reply(user_id, character_id, char_name, msgs):
@@ -187,22 +192,46 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
             'turn_id': delivery_event_id(phone_check_id, 0),
         }
 
-    pending_text = (bundle.get('pending_text') or '').strip()
-    pending_ids = _pending_source_event_ids(bundle)
-    extra_suffix = '\n\n' + format_pending_bundle_context(bundle)
+    try:
+        pending_events = _load_pending_events(bundle)
+    except Exception as exc:
+        return {'ok': False, 'reason': str(exc) or 'pending_source_unavailable'}
+    pending_text = ' '.join(event.get('content') or '' for event in pending_events)
+    pending_ids = [event['event_id'] for event in pending_events]
+    extra_suffix = '\n\n' + format_pending_bundle_context(bundle, pending_events)
     trigger = (
         '【系统内部】你现在有空看手机了。请根据 INTERNAL CONTEXT 里忙碌期间'
         '积压的消息，用正常聊天回复。这不是用户此刻新发的一条，也不是主动搭讪。'
     )
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
     pack, messages = helpers._turn_context(
         user_id, character_id, '', profile='text',
-        current_event_id=pending_ids or None)
+        current_event_id=pending_ids or None,
+        temporal_snapshot=temporal_snapshot)
     messages = helpers._history_plus_current(messages, trigger)
     recall_query = pending_text or trigger
     system_blocks = build_system_blocks(
         user_id, character_id, recall_query, extra_suffix=extra_suffix,
-        temporal_snapshot=temporal_snapshot, context_pack=pack)
+        temporal_snapshot=temporal_snapshot, context_pack=pack,
+        time_anchor_text='')
+
+    def reject_reply(parsed):
+        from temporal_awareness import find_reply_calendar_conflict
+        reply_text = ' '.join(
+            f'{msg.get("jp", "")} {msg.get("zh", "")}'
+            for msg in parsed.get('messages') or [])
+        conflict = find_reply_calendar_conflict(
+            pending_text, reply_text,
+            now_utc=temporal_snapshot.get('now_utc'))
+        if conflict:
+            system_blocks.append({'type': 'text', 'text': (
+                f'上一候选违反当前时间快照，错误代码：{conflict}。'
+                '请按本轮确定性时间事实修正，不改变历史消息时间。')})
+            return conflict
+        return route_chat._reject_schedule_candidate(
+            character_id, user_id, parsed, system_blocks,
+            now=temporal_snapshot.get('now_local'))
 
     from config import MODEL_MAIN
     result, committed_state = helpers._generate_or_none(
@@ -211,6 +240,7 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
         log_tag=f'delayed:{user_id}][{character_id}',
         cache_tag=f'chat:{character_id}',
         salvage=True,
+        reject_fn=reject_reply,
     )
     # Delayed replies use the same truth guard/commit path as immediate text.
     # A phone-check may have completed an old phase while the model was running.
@@ -223,6 +253,28 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
     emotion, msgs = helpers._finalize_committed(result)
     if msgs is None:
         return {'ok': False, 'reason': 'generation_failed'}
+
+    try:
+        current_pending_events = _load_pending_events(bundle)
+    except Exception:
+        return {'ok': False, 'reason': 'pending_source_unavailable'}
+    if any(
+            old.get('event_id') != new.get('event_id')
+            or old.get('content') != new.get('content')
+            or old.get('timestamp') != new.get('timestamp')
+            or old.get('verified_reply') != new.get('verified_reply')
+            or bool(old.get('reply_unavailable')) != bool(new.get('reply_unavailable'))
+            for old, new in zip(pending_events, current_pending_events)):
+        return {'ok': False, 'reason': 'pending_reference_changed'}
+
+    from temporal_awareness import find_commit_clock_conflict
+    clock_conflict = find_commit_clock_conflict(
+        pending_text,
+        ' '.join(f'{msg.get("jp", "")} {msg.get("zh", "")}'
+                 for msg in result.get('messages') or []),
+        temporal_snapshot, time.monotonic() - snapshot_started)
+    if clock_conflict:
+        return {'ok': False, 'reason': clock_conflict}
 
     from schedule_transition import commit_generated_schedule_intent
     transition = commit_generated_schedule_intent(
@@ -241,7 +293,7 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
             print(f'[delayed_reply] TTS skipped: {exc}')
             msg['audio_b64'] = ''
 
-    _persist_pending_user_messages(bundle)
+    _persist_pending_user_messages(bundle, current_pending_events)
     short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
 
     turn_id = delivery_event_id(phone_check_id, 0)
@@ -290,10 +342,14 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
 
     _push_delayed_reply(user_id, character_id, char.get('name') or character_id, msgs)
     update_chat_days(user_id)
+    from generation_contract import translation_missing
+    for msg in msgs:
+        msg['translation_missing'] = translation_missing(msg)
     return {
         'ok': True,
         'emotion': emotion,
         'messages': msgs,
+        'translation_missing': any(msg['translation_missing'] for msg in msgs),
         'full_jp': full_jp,
         'turn_id': turn_id,
     }

@@ -444,7 +444,7 @@ class ExplicitAnswerSQLTests(ExplicitAnswerFixture, unittest.TestCase):
         self.stack.enter_context(patch('episodic_index._USE_MEMORY_STORE',False))
         context_layer.init_context_layer_tables()
         episodic_index.init_episodic_index_tables()
-        self.sql('CREATE TABLE chat_log_tombstone(user_id TEXT,chat_id TEXT,client_msg_id TEXT)')
+        self.sql('CREATE TABLE IF NOT EXISTS chat_log_tombstone(user_id TEXT,chat_id TEXT,client_msg_id TEXT)')
         self.database.commit()
         self.exchange()
         conclusion = self.answers()[0][2]['memory_content']

@@ -74,15 +74,25 @@ async def append_chatlog(data: dict):
     user_id = (data.get('user_id') or '').strip()
     chat_id = (data.get('chat_id') or '').strip()
     msgs = data.get('messages')
-    if not user_id or not chat_id or not isinstance(msgs, list):
+    if (not user_id or not chat_id or not isinstance(msgs, list)
+            or not all(isinstance(msg, dict) for msg in msgs)):
         return JSONResponse(
             {'error': '需要 user_id / chat_id / messages(数组)'}, status_code=400)
+    if len(msgs) > 100:
+        return JSONResponse(
+            {'ok': False, 'error': 'batch_limit_exceeded', 'limit': 100,
+             'unprocessed_ids': [str(m.get('client_msg_id') or '') for m in msgs
+                                 if isinstance(m, dict)]}, status_code=400)
     try:
-        written = db_chatlog.append_messages(user_id, chat_id, msgs[:100])
+        results = db_chatlog.append_messages_confirmed(user_id, chat_id, msgs)
     except Exception as e:
         print(f'[chatlog] 写入失败:{e}')
         return JSONResponse({'ok': False, 'error': str(e)}, status_code=500)
-    return JSONResponse({'ok': True, 'written': written})
+    return JSONResponse({
+        'ok': True,
+        'written': sum(item['status'] == 'inserted' for item in results),
+        'results': results,
+    })
 
 
 @router.delete('/chatlog/message')

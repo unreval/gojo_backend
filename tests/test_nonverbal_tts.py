@@ -13,6 +13,9 @@ from tests import test_receipt_windows as windows
 from tests import test_voice_stream_commit_gate as voice
 
 REAL_TTS = tts.tts_to_b64
+if not hasattr(tts.requests, 'post'):
+    # Other offline suites may install a minimal requests module before import.
+    tts.requests.post = Mock(side_effect=AssertionError('provider HTTP called'))
 SILENT = ('🥺', '🥺...？！', '...', '…', '……', '👩🏽‍💻', '❤️', '🇯🇵', '1️⃣',
           '・', '・・・', '…・…', '... ・ ……', '・…🥺')
 BRACKET_TEXT = ('明天复习 [第三章]。', '配列の a[0] を見て。',
@@ -146,7 +149,9 @@ class NonverbalTTSTests(unittest.TestCase):
                             side_effect=RuntimeError('character read unavailable') if unavailable else None):
                         body = {'messages': [{'jp': text, 'zh': text, 'audio_b64': 'old-audio'}]}
                         replay = receipt.hydrate_replay(body, 'c')
-                        self.assertEqual(replay['messages'][0], {'jp': text, 'zh': text, 'audio_b64': ''})
+                        self.assertEqual(replay['messages'][0], {
+                            'jp': text, 'zh': text, 'audio_b64': '',
+                            'translation_missing': False})
                         self.assertEqual(body['messages'][0]['audio_b64'], 'old-audio')
                         provider.assert_not_called()
 
@@ -165,6 +170,13 @@ class NonverbalTTSTests(unittest.TestCase):
         import delayed_reply
         from tests.test_delayed_reply import HelpersStub
         with ExitStack() as stack:
+            stack.enter_context(patch('raw_events.get_active_events_by_ids',
+                side_effect=lambda _user, _character, ids: [{
+                    'event_id': event_id, 'role': 'user', 'content': '你好',
+                    'kind': 'text', 'metadata': {},
+                    'timestamp': datetime(2026, 9, 18, 10, tzinfo=timezone.utc),
+                    'subtitle': '',
+                } for event_id in ids if event_id == 'u1']))
             for target, value in (
                 ('characters.get_character', {'name': 'offline', 'voice_id': 'offline'}),
                 ('user_memory.save_user_short_memory_once', True),
@@ -186,7 +198,9 @@ class NonverbalTTSTests(unittest.TestCase):
                         id=9, user_id='u', character_id='c', pending_text='你好',
                         pending_count=1, last_source_event_id='u1', reply_state='free'), helpers=helpers)
                     self.assertTrue(result['ok'], result)
-                    self.assertEqual(result['messages'], [{'jp': text, 'zh': text, 'audio_b64': ''}])
+                    self.assertEqual(result['messages'], [{
+                        'jp': text, 'zh': text, 'audio_b64': '',
+                        'translation_missing': False}])
                     self.assertEqual(commit.call_args.args[1], text)
                     self.assertEqual(commit.call_args.kwargs['subtitle'], text)
                     self.assertEqual(helpers.generate_calls, 1)

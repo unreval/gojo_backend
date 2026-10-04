@@ -314,11 +314,15 @@ def reply_message_rejection_reason(m: dict):
         return 'invalid_message_field'
     if 'text' in (jp_kind, zh_kind) and jp.strip() == zh.strip():
         return 'jp_equals_zh_verbal'
-    # A short quoted Japanese word can appear inside otherwise Chinese text.
-    without_short_quote = re.sub(
-        r'[「『“][\u3041-\u3096\u30a1-\u30fa\uff66-\uff9f]{1,6}[」』”]', '', zh)
-    gate_text = (without_short_quote if sum(
-        '\u3400' <= ch <= '\u9fff' for ch in without_short_quote) >= 2 else zh)
+    # A bounded Japanese teaching example may appear inside Chinese text.
+    # Count the explanation outside the quotation before ignoring its kana.
+    without_quote = re.sub(
+        r'「[^」\n]{1,80}」|『[^』\n]{1,80}』|“[^”\n]{1,80}”',
+        lambda match: '' if any(
+            '\u3041' <= ch <= '\u30fa' or '\uff66' <= ch <= '\uff9f'
+            for ch in match.group()) else match.group(), zh)
+    gate_text = (without_quote if sum(
+        '\u3400' <= ch <= '\u9fff' for ch in without_quote) >= 2 else zh)
     kana = sum('\u3041' <= ch <= '\u3096' or '\u30a1' <= ch <= '\u30fa'
                or '\uff66' <= ch <= '\uff9f' for ch in gate_text)
     han = sum('\u3400' <= ch <= '\u9fff' for ch in gate_text)

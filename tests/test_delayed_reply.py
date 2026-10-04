@@ -51,15 +51,16 @@ def _seed_soft_busy_bundle(store, texts, *, due=None, event_metas=None):
          patch.object(db_schedule, 'sample_next_phone_check_at', return_value=due), \
          patch.object(db_schedule, 'postpone_past_hard_busy',
                       side_effect=lambda *a, **k: (a[2] if len(a) > 2 else due, False)):
-        first_meta = (event_metas or [None] * len(texts))[0]
+        first_meta = (event_metas or [None] * len(texts))[0] or {
+            'kind': 'text', 'source_event_id': 'e1'}
         first = db_schedule.decide_phone_check(
             'gojo', 'u', start, ACTIVITY,
             source_event_id='e1', pending_text=texts[0], event_meta=first_meta)
         oid = first['opportunity_id']
         for index, text in enumerate(texts[1:], start=2):
-            meta = None
+            meta = {'kind': 'text', 'source_event_id': f'e{index}'}
             if event_metas and index - 1 < len(event_metas):
-                meta = event_metas[index - 1]
+                meta = event_metas[index - 1] or meta
             db_schedule.decide_phone_check(
                 'gojo', 'u', start + timedelta(minutes=index), ACTIVITY,
                 source_event_id=f'e{index}', pending_text=text, event_meta=meta)
@@ -92,7 +93,7 @@ class HelpersStub:
         self.extra_messages = None
 
     def _turn_context(self, user_id, character_id, user_message='', profile='default',
-                      current_event_id=None):
+                      current_event_id=None, temporal_snapshot=None):
         self.context_calls += 1
         self.user_message = user_message
         self.current_event_id = current_event_id
@@ -137,7 +138,21 @@ class HelpersStub:
 
 class DelayedReplyTests(unittest.TestCase):
     def setUp(self):
+        canonical = {
+            'e1': ('一', {}), 'e2': ('二', {}), 'e3': ('三', {}),
+            'img-1': ('📷 看这个', {'visual_summary': '蓝色马克杯，杯沿有裂纹'}),
+        }
+
+        def active_events(_user_id, _character_id, event_ids):
+            return [{
+                'event_id': event_id, 'role': 'user', 'content': canonical[event_id][0],
+                'kind': 'image' if event_id == 'img-1' else 'text',
+                'metadata': dict(canonical[event_id][1]), 'timestamp': NOW,
+                'subtitle': '',
+            } for event_id in event_ids if event_id in canonical]
+
         self._io_patches = [
+            patch('raw_events.get_active_events_by_ids', side_effect=active_events),
             patch('behavior_evidence.record_reply_cycle', Mock()),
             patch('push_notify.push_to_user', Mock()),
             patch.object(delayed_reply, 'assistant_already_committed',
@@ -219,7 +234,9 @@ class DelayedReplyTests(unittest.TestCase):
         bundle = {
             'id': 9, 'user_id': 'u', 'character_id': 'gojo',
             'pending_text': '一\n二\n三', 'pending_count': 3,
-            'event_meta': '', 'last_source_event_id': 'e3',
+            'event_meta': '\n'.join(json.dumps({'source_event_id': f'e{i}'})
+                                    for i in range(1, 4)),
+            'last_source_event_id': 'e3',
             'reply_state': 'soft_busy',
         }
         with patch('characters.get_character',
@@ -432,8 +449,48 @@ class DelayedReplyTests(unittest.TestCase):
             if item.get('role') != 'user' or '系统内部' not in (item.get('content') or '')
         )
         self.assertNotIn('一', history_text)
-        self.assertIn('【积压原文】\n一\n二\n三', captured['extra_suffix'])
-        self.assertEqual(captured['extra_suffix'].count('【积压原文】'), 1)
+        for event_id, original in (('e1', '一'), ('e2', '二'), ('e3', '三')):
+            self.assertEqual(captured['extra_suffix'].count(
+                f'【积压消息 source_event_id={event_id} '), 1)
+            self.assertIn(f'\n{original}', captured['extra_suffix'])
+
+    def test_multiline_pending_messages_keep_their_own_verified_quotes(self):
+        bundle = {
+            'id': 81, 'user_id': 'u', 'character_id': 'gojo',
+            'pending_text': '第一行\n第二行\n另一条', 'pending_count': 2,
+            'event_meta': '\n'.join(json.dumps({'source_event_id': event_id})
+                                    for event_id in ('e1', 'e2')),
+            'first_source_event_id': 'e1', 'last_source_event_id': 'e2',
+            'reply_state': 'soft_busy',
+        }
+        events = [
+            {'event_id': 'e1', 'role': 'user', 'content': '第一行\n第二行',
+             'kind': 'text', 'metadata': {'reply_to_event_id': 'q1'},
+             'timestamp': NOW, 'subtitle': ''},
+            {'event_id': 'e2', 'role': 'user', 'content': '另一条',
+             'kind': 'text', 'metadata': {'reply_to_event_id': 'q2'},
+             'timestamp': NOW + timedelta(minutes=1), 'subtitle': ''},
+        ]
+        quotes = {
+            event_id: {'source_event_id': event_id, 'role': 'assistant',
+                       'name': '五条', 'text': original, 'subtitle': '',
+                       'ts': NOW.isoformat()}
+            for event_id, original in (('q1', '第一句原话'), ('q2', '第二句原话'))
+        }
+        with patch('raw_events.get_active_events_by_ids', return_value=events) as read, \
+             patch('db_chatlog.resolve_reply_reference',
+                   side_effect=lambda _u, _c, event_id: quotes.get(event_id)) as resolve:
+            loaded = delayed_reply._load_pending_events(bundle)
+        read.assert_called_once_with('u', 'gojo', ['e1', 'e2'])
+        self.assertEqual([call.args[2] for call in resolve.call_args_list], ['q1', 'q2'])
+        context = reply_availability.format_pending_bundle_context(bundle, loaded)
+        first, second = context.split('【积压消息 source_event_id=e2 ', 1)
+        self.assertIn('第一行\n第二行', first)
+        self.assertIn('第一句原话', first)
+        self.assertNotIn('第二句原话', first)
+        self.assertIn('另一条', second)
+        self.assertIn('第二句原话', second)
+        self.assertNotIn('第一句原话', second)
 
     def test_crash_after_commit_does_not_resend(self):
         helpers = HelpersStub()
@@ -552,7 +609,9 @@ class DelayedReplyTests(unittest.TestCase):
         bundle = {
             'id': 8, 'user_id': 'u', 'character_id': 'gojo',
             'pending_text': '一\n二\n三', 'pending_count': 3,
-            'event_meta': '', 'last_source_event_id': 'e3',
+            'event_meta': '\n'.join(json.dumps({'source_event_id': f'e{i}'})
+                                    for i in range(1, 4)),
+            'last_source_event_id': 'e3',
             'reply_state': 'soft_busy',
         }
         commits = []

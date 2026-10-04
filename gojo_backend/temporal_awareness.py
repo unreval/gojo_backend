@@ -6,7 +6,8 @@
 它不做"过了 X 天所以感情 +/-N"这种线性情绪/关系改动，只把真实经过时间
 交给 prompt、记忆提取和关系 observer/reader 当上下文使用。
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+import re
 from typing import Dict, Optional
 
 from config import CN_TZ
@@ -296,6 +297,207 @@ def clock_phase(local_dt: Optional[datetime]) -> Optional[str]:
     return 'late_night(深夜)'
 
 
+_CN_NUMBERS = {'零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3,
+               '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+_CLOCK_PART = r'凌晨|早上|上午|中午|下午|傍晚|晚上|深夜|午前|午後'
+_CLOCK_NUM = r'[0-9]{1,2}|[零〇一二两三四五六七八九十]{1,3}'
+_COLON_CLOCK = re.compile(r'(?<!\d)(\d{1,2}):(\d{2})(?!\d)')
+_SPOKEN_CLOCK = re.compile(
+    rf'(?P<part>{_CLOCK_PART})?\s*(?P<hour>{_CLOCK_NUM})\s*[点時时]'
+    rf'(?:(?P<half>半)|(?P<quarter>一刻|三刻)|'
+    rf'(?P<minute>{_CLOCK_NUM})\s*分?)?')
+_DATE_PATTERN = re.compile(r'(?<!\d)(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?')
+
+
+def _clock_number(value):
+    if not value:
+        return 0
+    if value.isdigit():
+        return int(value)
+    if '十' in value:
+        left, right = value.split('十', 1)
+        tens = _CN_NUMBERS.get(left, 1) if left else 1
+        ones = _CN_NUMBERS.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return _CN_NUMBERS.get(value)
+
+
+class Clock24:
+    """Pure view of one temporal_awareness snapshot; no independent clock."""
+
+    def __init__(self, now_utc, display_timezone):
+        self.now_utc = now_utc.astimezone(timezone.utc)
+        self.display_timezone = display_timezone
+        self.now_local = self.now_utc.astimezone(display_timezone)
+
+    @classmethod
+    def from_snapshot(cls, snapshot, display_timezone=CN_TZ):
+        value = (snapshot or {}).get('now_utc')
+        if not isinstance(value, datetime):
+            raise ValueError('snapshot.now_utc is required')
+        # This one adapter knows that the existing snapshot returns naive UTC.
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return cls(value, display_timezone)
+
+    def local_candidates(self, local_date, hour, minute):
+        """Return valid UTC instants; zero means a DST gap, two a fold."""
+        naive = datetime(local_date.year, local_date.month, local_date.day,
+                         hour, minute)
+        candidates = []
+        for fold in (0, 1):
+            aware = naive.replace(tzinfo=self.display_timezone, fold=fold)
+            utc = aware.astimezone(timezone.utc)
+            back = utc.astimezone(self.display_timezone)
+            if (back.replace(tzinfo=None) == naive
+                    and all(known != utc for known in candidates)):
+                candidates.append(utc)
+        return candidates
+
+    def parse_expression(self, text):
+        """Parse a deliberately limited Chinese/Japanese date and clock phrase."""
+        text = str(text or '')
+        date_match = _DATE_PATTERN.search(text)
+        explicit_date = None
+        if date_match:
+            try:
+                explicit_date = date(*(int(part) for part in date_match.groups()))
+            except ValueError:
+                return {'error': 'invalid_clock_expression'}
+        else:
+            for token, offset in (
+                    ('后天', 2), ('明後日', 2), ('明天', 1), ('明日', 1),
+                    ('昨天', -1), ('昨日', -1), ('今天', 0), ('今日', 0)):
+                if token in text:
+                    explicit_date = self.now_local.date() + timedelta(days=offset)
+                    break
+
+        clock_match = _COLON_CLOCK.search(text)
+        part = None
+        if clock_match:
+            hour, minute = (int(item) for item in clock_match.groups())
+            leading = text[max(0, clock_match.start() - 8):clock_match.start()]
+            part_match = re.search(rf'({_CLOCK_PART})\s*$', leading)
+            part = part_match.group(1) if part_match else None
+            if part in ('下午', '傍晚', '晚上', '午後') and 1 <= hour < 12:
+                hours = [hour + 12]
+            elif part in ('凌晨', '早上', '上午', '深夜', '午前') and hour == 12:
+                hours = [0]
+            else:
+                hours = [hour]
+        else:
+            clock_match = _SPOKEN_CLOCK.search(text)
+            if clock_match:
+                part = clock_match.group('part')
+                hour = _clock_number(clock_match.group('hour'))
+                if clock_match.group('half'):
+                    minute = 30
+                elif clock_match.group('quarter'):
+                    minute = 15 if clock_match.group('quarter') == '一刻' else 45
+                else:
+                    minute = _clock_number(clock_match.group('minute')) or 0
+                if hour is None:
+                    return {'error': 'invalid_clock_expression'}
+                if part in ('下午', '傍晚', '晚上', '午後') and 1 <= hour < 12:
+                    hours = [hour + 12]
+                elif part in ('凌晨', '早上', '上午', '深夜', '午前'):
+                    hours = [0 if hour == 12 else hour]
+                elif part == '中午' and 1 <= hour <= 3:
+                    hours = [hour + 12]
+                elif not part and 1 <= hour <= 12:
+                    hours = [hour % 12, hour] if hour == 12 else [hour, hour + 12]
+                else:
+                    hours = [hour]
+            else:
+                hours, minute = [], None
+        if any(hour < 0 or hour > 23 for hour in hours) or (minute is not None and minute > 59):
+            return {'error': 'invalid_clock_expression'}
+        return {
+            'date': explicit_date,
+            'date_unspecified': explicit_date is None,
+            'hours': tuple(dict.fromkeys(hours)),
+            'minute': minute,
+            'minute_unspecified': bool(clock_match and not _COLON_CLOCK.search(text)
+                                       and not (clock_match.group('half')
+                                                or clock_match.group('quarter')
+                                                or clock_match.group('minute'))),
+            'daypart': part,
+        }
+
+    def utc_after(self, *, hours=0, minutes=0):
+        return self.now_utc + timedelta(hours=hours, minutes=minutes)
+
+
+_CURRENT_CLAIM = re.compile(r'现在(?:已经)?(?:是|到)?|当前(?:时间)?是|今は|いまは')
+_DAYPART_HOURS = {
+    '凌晨': set(range(0, 5)), '早上': set(range(5, 9)),
+    '上午': set(range(5, 12)), '中午': set(range(11, 14)),
+    '下午': set(range(12, 18)), '傍晚': set(range(17, 20)),
+    '晚上': set(range(18, 24)), '深夜': set(range(22, 24)) | set(range(0, 5)),
+    '午前': set(range(0, 12)), '午後': set(range(12, 24)),
+}
+
+
+def find_current_clock_conflict(reply_text, clock):
+    """Reject only explicit claims about now; past, quotes and hypotheticals pass."""
+    text = str(reply_text or '')
+    for match in _CURRENT_CLAIM.finditer(text):
+        prefix = text[max(0, match.start() - 12):match.start()]
+        if any(token in prefix for token in (
+                '你说', '她说', '刚才', '之前', '引用', '假如', '如果',
+                '说“', '说「', '说『', '说‘', '说"',
+                'さっき', '言った', 'もし')):
+            continue
+        clause = re.split(r'[。！？!?，,\n]', text[match.end():], maxsplit=1)[0][:60]
+        if clause.lstrip().startswith(('不', '非', '没', '如果', '假如', 'なら')):
+            continue
+        parsed = clock.parse_expression(clause)
+        if parsed.get('error'):
+            return 'invalid_clock_expression'
+        if parsed.get('date') and parsed['date'] != clock.now_local.date():
+            return 'current_date_mismatch'
+        part = parsed.get('daypart')
+        if not part:
+            part = next((name for name in _DAYPART_HOURS if clause.startswith(name)), None)
+        if part and clock.now_local.hour not in _DAYPART_HOURS[part]:
+            return 'current_daypart_mismatch'
+        hours = parsed.get('hours') or ()
+        if hours and clock.now_local.hour not in hours:
+            return 'current_clock_mismatch'
+        minute = parsed.get('minute')
+        if (hours and clock.now_local.hour in hours
+                and not parsed.get('minute_unspecified')
+                and minute is not None
+                and abs(clock.now_local.minute - minute) > 1):
+            return 'current_clock_mismatch'
+    return None
+
+
+def find_commit_clock_conflict(user_text, reply_text, snapshot, elapsed_seconds):
+    """Check a completed candidate against the turn clock advanced by elapsed time.
+
+    The monotonic elapsed duration advances the original snapshot. A new request
+    after a midnight rejection obtains a new authoritative snapshot; this check
+    does not create another clock or write event timestamps.
+    """
+    try:
+        clock = Clock24.from_snapshot(snapshot, CN_TZ)
+        elapsed = max(0.0, float(elapsed_seconds))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if elapsed <= 0:
+        return None
+    projected_utc = clock.now_utc + timedelta(seconds=elapsed)
+    projected_local = projected_utc.astimezone(clock.display_timezone)
+    if projected_local.date() != clock.now_local.date():
+        return 'time_snapshot_stale'
+    if projected_local.replace(second=0, microsecond=0) == clock.now_local.replace(
+            second=0, microsecond=0):
+        return None
+    return find_reply_calendar_conflict(
+        user_text, reply_text, now_utc=projected_utc)
+
+
 def semantic_gap_category(seconds, same_calendar_day=None) -> str:
     bucket = classify_gap(seconds)
     if bucket in ('first_contact', 'unknown', 'continuous', 'short_gap'):
@@ -345,7 +547,8 @@ def build_calendar_grounding(now_utc: Optional[datetime] = None,
         current = datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    now_cn = current.astimezone(CN_TZ).replace(second=0, microsecond=0)
+    clock = Clock24.from_snapshot({'now_utc': current}, CN_TZ)
+    now_cn = clock.now_local.replace(second=0, microsecond=0)
 
     today_morning = _local_anchor(now_cn, 8)
     today_noon = _local_anchor(now_cn, 12)
@@ -383,6 +586,28 @@ def build_calendar_grounding(now_utc: Optional[datetime] = None,
             f'{_describe_delta(today_noon, now_cn)}。'
         )
 
+    parsed_time = clock.parse_expression(normalized_text)
+    if (not parsed_time.get('error') and parsed_time.get('date')
+            and len(parsed_time.get('hours') or ()) == 1):
+        target_date = parsed_time['date']
+        hour = parsed_time['hours'][0]
+        minute = parsed_time['minute'] or 0
+        instants = clock.local_candidates(target_date, hour, minute)
+        if len(instants) == 1:
+            target = instants[0].astimezone(CN_TZ)
+            explicit_rule += (
+                f'\n- 本轮明确时间锚点：{target.strftime("%Y-%m-%d %H:%M")}；'
+                f'{_describe_delta(target, now_cn)}。'
+            )
+        elif not instants:
+            explicit_rule += '\n- 本轮明确时间在该显示时区不存在；应向用户确认。'
+        else:
+            explicit_rule += '\n- 本轮明确时间在该显示时区重复；须确认偏移或地点。'
+    elif parsed_time.get('hours') and parsed_time.get('date_unspecified'):
+        explicit_rule += '\n- 本轮仅给时刻、未给日期；不能自动推到明天。'
+    if len(parsed_time.get('hours') or ()) > 1:
+        explicit_rule += '\n- 本轮时刻缺早晚：保留两个候选，不擅自选择。'
+
     return f'''【确定性日历锚点——后端已计算，不得凭感觉改写】
 - 当前：{now_cn.strftime("%Y-%m-%d %H:%M")}（{CN_TZ}）
 {_anchor_line('今天早上', today_morning, now_cn)}
@@ -406,7 +631,11 @@ def find_reply_calendar_conflict(user_text: str, assistant_text: str,
         current = datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    now_cn = current.astimezone(CN_TZ).replace(second=0, microsecond=0)
+    clock = Clock24.from_snapshot({'now_utc': current}, CN_TZ)
+    now_cn = clock.now_local.replace(second=0, microsecond=0)
+    current_conflict = find_current_clock_conflict(assistant_text, clock)
+    if current_conflict:
+        return current_conflict
     today_noon = _local_anchor(now_cn, 12)
 
     user = str(user_text or '')

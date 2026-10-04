@@ -16,6 +16,7 @@
 from datetime import datetime
 from config import CN_TZ
 from db import get_conn
+from generation_contract import translation_missing
 
 
 def init_proactive_table():
@@ -38,6 +39,8 @@ def init_proactive_table():
         'ALTER TABLE proactive_msg ADD COLUMN IF NOT EXISTS assistant_turn_id TEXT')
     cur.execute(
         'ALTER TABLE proactive_msg ADD COLUMN IF NOT EXISTS segment_index INTEGER')
+    cur.execute(
+        "ALTER TABLE proactive_msg ADD COLUMN IF NOT EXISTS translation_source TEXT DEFAULT ''")
     cur.execute(
         '''CREATE INDEX IF NOT EXISTS idx_proactive_msg_event_id
            ON proactive_msg (event_id)''')
@@ -95,7 +98,8 @@ def get_pending(user_id, character_id=None):
     if character_id:
         cur.execute(
             '''SELECT id, character_id, kind, jp, zh, emotion, audio_b64,
-                      created_at, event_id, assistant_turn_id, segment_index
+                      created_at, event_id, assistant_turn_id, segment_index,
+                      translation_source
                FROM proactive_msg
                WHERE user_id=%s AND character_id=%s AND is_read=FALSE
                ORDER BY created_at ASC''',
@@ -104,7 +108,8 @@ def get_pending(user_id, character_id=None):
     else:
         cur.execute(
             '''SELECT id, character_id, kind, jp, zh, emotion, audio_b64,
-                      created_at, event_id, assistant_turn_id, segment_index
+                      created_at, event_id, assistant_turn_id, segment_index,
+                      translation_source
                FROM proactive_msg
                WHERE user_id=%s AND is_read=FALSE
                ORDER BY created_at ASC''',
@@ -126,6 +131,8 @@ def get_pending(user_id, character_id=None):
             'event_id': event_id,
             'assistant_turn_id': stored_turn_id or event_id,
             'segment_index': 0 if r[10] is None else int(r[10]),
+            'translation_source': (r[11] if len(r) > 11 else '') or '',
+            'translation_missing': translation_missing({'jp': r[3], 'zh': r[4]}),
         })
     return pending
 

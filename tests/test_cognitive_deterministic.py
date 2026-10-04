@@ -42,6 +42,9 @@ class OfflineDatabaseTests(unittest.TestCase):
     def setUp(self):
         import cognitive_db
         import cognitive_worker
+        # This module imports its provider functions by value. Import it before
+        # fail-on-call guards so later suites do not inherit a cached Mock.
+        import relationship_signals  # noqa: F401
         self.database.rollback()
         self.database.query('DROP SCHEMA public CASCADE')
         self.database.query('CREATE SCHEMA public')
@@ -52,6 +55,8 @@ class OfflineDatabaseTests(unittest.TestCase):
             event_id TEXT, client_msg_id TEXT, role TEXT, text TEXT, kind TEXT DEFAULT 'text',
             extra TEXT DEFAULT '{}', created_at TIMESTAMPTZ, subtitle TEXT DEFAULT '',
             status TEXT DEFAULT 'active', reply_to_event_id TEXT)''')
+        cur.execute('''CREATE TABLE chat_log_tombstone (
+            user_id TEXT, chat_id TEXT, client_msg_id TEXT)''')
         from tests.memory_schema import create_memory_tables
         create_memory_tables(cur)
         self.database.commit()

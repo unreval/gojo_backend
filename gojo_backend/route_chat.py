@@ -27,6 +27,7 @@ from contextvars import ContextVar
 import hashlib
 import json
 import re
+import time
 import uuid
 import anthropic
 from fastapi import APIRouter
@@ -34,7 +35,7 @@ from fastapi.responses import JSONResponse
 
 from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
 from utils import (
-    ingest_model_output, sanitize_user_reply, contains_offline_marker,
+    ingest_model_output, contains_offline_marker,
     finalize_user_messages, classify_reply_content,
     has_visible_text, valid_reply_msg, commit_ready_msgs, msg_has_json_debris,
 )
@@ -51,7 +52,8 @@ from user_memory import (
 )
 from memory_jobs import enqueue_private_extraction
 from temporal_awareness import (
-    find_reply_calendar_conflict, get_temporal_snapshot, record_assistant_message,
+    find_commit_clock_conflict, find_reply_calendar_conflict,
+    get_temporal_snapshot, record_assistant_message,
     record_turn, record_user_message,
 )
 from characters import get_character
@@ -123,6 +125,11 @@ _TRACE_RETRY_REASONS = {
     'candidate_rejected',
     'tomorrow_noon_rewritten_as_today',
     'past_noon_used_as_future_deadline',
+    'current_clock_mismatch',
+    'current_daypart_mismatch',
+    'current_date_mismatch',
+    'invalid_clock_expression',
+    'time_snapshot_stale',
     'active_event_completion_claim_without_intent',
 }
 _TRACE_PROVIDERS = {'anthropic'}
@@ -728,19 +735,12 @@ def _finalize_committed(result, min_messages=1):
     return emotion, msgs
 
 
-def _safe_reply_to(data):
+def _safe_reply_to(data, user_id, character_id):
     reply_to = data.get('reply_to') or data.get('replyTo')
     if not isinstance(reply_to, dict):
         return None
-    text = sanitize_user_reply(str(reply_to.get('text') or ''))[:500]
-    if not text:
-        return None
-    return {
-        'id': str(reply_to.get('id') or '')[:120],
-        'name': str(reply_to.get('name') or '')[:60],
-        'text': text,
-        'role': str(reply_to.get('role') or '')[:20],
-    }
+    from db_chatlog import resolve_reply_reference
+    return resolve_reply_reference(user_id, character_id, reply_to)
 
 
 def _busy_response(availability):
@@ -800,20 +800,76 @@ def _reject_schedule_candidate(character_id, user_id, parsed, system_blocks, *, 
     return reason
 
 
+def _reject_time_candidate(user_text, parsed, system_blocks, temporal_snapshot):
+    reply_text = ' '.join(
+        f'{msg.get("jp", "")} {msg.get("zh", "")}'
+        for msg in parsed.get('messages') or [])
+    conflict = find_reply_calendar_conflict(
+        user_text, reply_text,
+        now_utc=temporal_snapshot.get('now_utc'))
+    if conflict:
+        system_blocks.append({
+            'type': 'text',
+            'text': (
+                f'上一候选与本轮权威时间快照冲突，错误代码：{conflict}。'
+                f'当前本地完整日期时间为 {temporal_snapshot.get("current_timestamp")}。'
+                '请只修正时间矛盾，不把历史消息时间当作现在。'),
+        })
+    return conflict
+
+
+def _reject_time_and_schedule(user_text, character_id, user_id, parsed,
+                              system_blocks, temporal_snapshot):
+    return (_reject_time_candidate(user_text, parsed, system_blocks, temporal_snapshot)
+            or _reject_schedule_candidate(
+                character_id, user_id, parsed, system_blocks,
+                now=temporal_snapshot.get('now_local')))
+
+
+def _commit_time_candidate(user_text, result, temporal_snapshot, started):
+    reply_text = ' '.join(
+        f'{msg.get("jp", "")} {msg.get("zh", "")}'
+        for msg in (result or {}).get('messages') or [])
+    return find_commit_clock_conflict(
+        user_text, reply_text, temporal_snapshot,
+        time.monotonic() - started)
+
+
+def _clock_retry_response(reason):
+    return JSONResponse(
+        {'error': reason, 'retryable': True, 'messages': []}, status_code=409)
+
+
 def _commit_schedule_candidate(character_id, user_id, result, source_event_id=''):
     from schedule_transition import commit_generated_schedule_intent
     return commit_generated_schedule_intent(
         character_id, user_id, result, source_event_id=source_event_id)
 
 
-def _user_prompt_with_reply(user_text, reply_to):
+def _user_prompt_with_reply(user_text, reply_to, *, requested=False):
     if not reply_to:
+        if requested:
+            return (f'【引用原消息当前不可核验，不能使用客户端预览作为事实。】\n'
+                    f'【用户本次新发原文】{user_text}\n'
+                    '若用户要求核对旧话，请明确说明目前无法确认引用原话。')
         return user_text
-    speaker = reply_to.get('name') or '上一条消息'
+    speaker = reply_to.get('name') or '原消息说话者'
+    original = reply_to.get('text') or ''
+    excerpt = original[:1200] + ('【原文截断】' if len(original) > 1200 else '')
+    subtitle = reply_to.get('subtitle') or ''
+    trusted_subtitle = (
+        f'\n【原消息译文】{subtitle[:500]}'
+        if subtitle and reply_to.get('translation_source') != 'user_supplied'
+        else '')
     return (
-        f'【引用回复】她这次是在回复 {speaker} 的这条消息：'
-        f'「{reply_to["text"]}」\n'
-        f'【她的新消息】{user_text}'
+        f'【本轮明确引用：source_event_id={reply_to["source_event_id"]}，'
+        f'说话者={speaker}({reply_to["role"]})，'
+        f'发生时间={reply_to.get("ts") or "未知"}】\n'
+        f'【原消息原文】{excerpt}{trusted_subtitle}\n'
+        f'【用户本次新发原文】{user_text}\n'
+        '先围绕这条可核验原话及前后说法回答；若是在核对“你说的啊”，'
+        '请明确指出所核对的是哪句。说过某事不等于该事实际发生；'
+        '证据不足时说明无法确认，不要猜测或用空泛追问代替回应。'
     )
 
 
@@ -1074,8 +1130,6 @@ async def chat_text(data: dict):
     character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
     from db_generation_receipt import assign_source_event_id
     source_event_id, _legacy = assign_source_event_id(data.get('source_event_id'))
-    reply_to = _safe_reply_to(data)
-
     if not user_text:
         _latency_emit()
         return JSONResponse({'error': 'no input'}, status_code=400)
@@ -1085,16 +1139,47 @@ async def chat_text(data: dict):
         _latency_emit()
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    requested_reply = isinstance(data.get('reply_to') or data.get('replyTo'), dict)
+    try:
+        reply_to = _safe_reply_to(data, user_id, character_id)
+    except Exception:
+        _latency_emit()
+        return JSONResponse(
+            {'error': 'reply_source_unavailable', 'retryable': True,
+             'source_event_id': source_event_id}, status_code=503)
+
     try:
         save_user_short_memory_once(
-            user_id, user_text, character_id, source_event_id=source_event_id)
+            user_id, user_text, character_id, source_event_id=source_event_id,
+            event_meta={
+                'reply_to_event_id': reply_to['source_event_id'],
+                'reply_to': {
+                    'id': reply_to['client_msg_id'] or reply_to['source_event_id'],
+                    'source_event_id': reply_to['source_event_id'],
+                    'role': reply_to['role'], 'name': reply_to['name'],
+                    'text': reply_to['text'][:500],
+                    'subtitle': reply_to['subtitle'][:500],
+                    'ts': reply_to['ts'],
+                },
+            } if reply_to else None,
+            reply_to_event_id=reply_to['source_event_id'] if reply_to else None)
     except Exception:
         _latency_emit()
         return JSONResponse(
             {'error': 'canonical_source_unavailable', 'retryable': True,
              'source_event_id': source_event_id}, status_code=503)
 
+    if reply_to:
+        try:
+            reply_to = _safe_reply_to(data, user_id, character_id)
+        except Exception:
+            _latency_emit()
+            return JSONResponse(
+                {'error': 'reply_source_unavailable', 'retryable': True,
+                 'source_event_id': source_event_id}, status_code=503)
+
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
 
     # ★ 角色日程:free / soft_busy / hard_busy。
     #   inbound busy 只写入 char_phone_check inbox，本请求不生成。
@@ -1182,7 +1267,8 @@ async def chat_text(data: dict):
         current_event_id=source_event_id,
         temporal_snapshot=temporal_snapshot)
     messages = _history_plus_current(
-        messages, _user_prompt_with_reply(user_text, reply_to))
+        messages, _user_prompt_with_reply(
+            user_text, reply_to, requested=requested_reply))
     if 'hot' not in _trace.marks:
         _trace.mark('hot', (_time.perf_counter() - _tmark) * 1000.0)
     _tmark = _time.perf_counter()
@@ -1198,33 +1284,13 @@ async def chat_text(data: dict):
 
     system_blocks = build_system_blocks(
         user_id, character_id, recall_query, temporal_snapshot=temporal_snapshot,
-        context_pack=pack)
+        context_pack=pack, time_anchor_text=user_text)
     _trace.mark('prompt', (_time.perf_counter() - _tmark) * 1000.0)
     _tmark = _time.perf_counter()
 
     def reject_calendar(parsed):
-        reply_text = ' '.join(
-            f'{m.get("jp", "")} {m.get("zh", "")}'
-            for m in parsed['messages']
-        )
-        calendar_conflict = find_reply_calendar_conflict(
-            user_text,
-            reply_text,
-            now_utc=temporal_snapshot.get('now_utc'),
-        )
-        if not calendar_conflict:
-            return None
-        system_blocks.append({
-            'type': 'text',
-            'text': (
-                '上一候选回复违反了后端确定的日历事实，错误代码：'
-                f'{calendar_conflict}。必须按“确定性日历锚点”重新生成；'
-                '已经过去的今天中午不能当作未来，明天中午也不能改成今天中午。'
-            ),
-        })
-        print(f'[{user_id}][{character_id}] 时间矛盾，拒绝候选并重试：'
-              f'{calendar_conflict}')
-        return calendar_conflict
+        return _reject_time_candidate(
+            user_text, parsed, system_blocks, temporal_snapshot)
 
     def reject_schedule(parsed):
         return _reject_schedule_candidate(
@@ -1279,6 +1345,38 @@ async def chat_text(data: dict):
             pass
         _latency_emit()
         return _generation_failed_response(user_id, character_id, total_days, attempts=2)
+
+    commit_clock_conflict = _commit_time_candidate(
+        user_text, result, temporal_snapshot, snapshot_started)
+    if commit_clock_conflict:
+        try:
+            from db_generation_receipt import fail_generation
+            fail_generation(
+                user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
+                claim_token, last_error=commit_clock_conflict)
+        except Exception:
+            pass
+        _latency_emit()
+        return JSONResponse(
+            {'error': commit_clock_conflict, 'retryable': True,
+             'source_event_id': source_event_id}, status_code=409)
+
+    if requested_reply:
+        try:
+            if _safe_reply_to(data, user_id, character_id) != reply_to:
+                raise ValueError('reply_source_changed')
+        except Exception:
+            try:
+                from db_generation_receipt import fail_generation
+                fail_generation(
+                    user_id, character_id, source_event_id, ENDPOINT_CHAT_TEXT,
+                    claim_token, last_error='reply_source_changed')
+            except Exception:
+                pass
+            _latency_emit()
+            return JSONResponse(
+                {'error': 'reply_source_changed', 'retryable': True,
+                 'source_event_id': source_event_id}, status_code=409)
 
     # Structured transition commit happens before the visible reply is stored
     # or returned.  If a concurrent revision makes it stale, fail closed rather
@@ -1404,6 +1502,7 @@ async def chat_story(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
     total_days = update_chat_days(user_id)
     pack, messages = _turn_context(
         user_id, character_id, user_text, profile='story',
@@ -1422,7 +1521,8 @@ async def chat_story(data: dict):
 
     system_blocks = build_system_blocks(
         user_id, character_id, recall_query, extra_suffix=STORY_SCENE,
-        temporal_snapshot=temporal_snapshot, context_pack=pack)
+        temporal_snapshot=temporal_snapshot, context_pack=pack,
+        time_anchor_text=user_text)
 
     source_event_id = str(data.get('source_event_id') or '').strip() or f'story:{uuid.uuid4()}'
     save_user_short_memory_once(
@@ -1433,10 +1533,17 @@ async def chat_story(data: dict):
         attempts=2,
         log_tag=f'story:{character_id}',
         cache_tag=f'story:{character_id}',
+        reject_fn=lambda parsed: _reject_time_candidate(
+            user_text, parsed, system_blocks, temporal_snapshot),
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
         return _generation_failed_response(user_id, character_id, total_days, attempts=2)
+
+    clock_conflict = _commit_time_candidate(
+        user_text, result, temporal_snapshot, snapshot_started)
+    if clock_conflict:
+        return _clock_retry_response(clock_conflict)
 
     _commit_offline_state(user_id, character_id, committed_state)
 
@@ -1483,6 +1590,7 @@ async def chat_proactive(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
     if mode == 'remind':
         trigger = f'【系统触发：到提醒时间了】现在该主动提醒对方去做这件事："{task_title}"。语气慵懒又带点关心，1条气泡。'
     else:
@@ -1509,11 +1617,18 @@ async def chat_proactive(data: dict):
         attempts=2,
         log_tag=f'proactive:{character_id}',
         cache_tag=f'proactive:{character_id}',
+        reject_fn=lambda parsed: _reject_time_candidate(
+            task_title, parsed, system_blocks, temporal_snapshot),
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
         print(f'[{user_id}][{character_id}] proactive generation_failed mode={mode} task={task_title}')
         return _generation_failed_response(user_id, character_id, attempts=2)
+
+    clock_conflict = _commit_time_candidate(
+        task_title, result, temporal_snapshot, snapshot_started)
+    if clock_conflict:
+        return _clock_retry_response(clock_conflict)
 
     _commit_offline_state(user_id, character_id, committed_state)
 
@@ -1573,6 +1688,7 @@ async def chat_voice_text(data: dict):
     source_event_id = (str(data.get('source_event_id') or '').strip()
                        or f'voice_inbound:{uuid.uuid4()}')
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
     availability, busy = _gate_voice_inbound(
         user_id, character_id, user_text, source_event_id,
         now=temporal_snapshot.get('now_local'))
@@ -1603,13 +1719,18 @@ async def chat_voice_text(data: dict):
         log_tag=f'voice:{character_id}',
         cache_tag=f'voice:{character_id}',
         salvage=True,
-        reject_fn=lambda parsed: _reject_schedule_candidate(
-            character_id, user_id, parsed, system_blocks,
-            now=temporal_snapshot.get('now_local')),
+        reject_fn=lambda parsed: _reject_time_and_schedule(
+            user_text, character_id, user_id, parsed,
+            system_blocks, temporal_snapshot),
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
         return _generation_failed_response(user_id, character_id, attempts=2)
+
+    clock_conflict = _commit_time_candidate(
+        user_text, result, temporal_snapshot, snapshot_started)
+    if clock_conflict:
+        return _clock_retry_response(clock_conflict)
 
     transition = _commit_schedule_candidate(
         character_id, user_id, result, source_event_id)
@@ -1671,6 +1792,7 @@ async def chat_voice_story(data: dict):
     source_event_id = (str(data.get('source_event_id') or '').strip()
                        or f'voice_story:{uuid.uuid4()}')
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
     availability, busy = _gate_voice_inbound(
         user_id, character_id, user_text, source_event_id,
         now=temporal_snapshot.get('now_local'))
@@ -1701,13 +1823,18 @@ async def chat_voice_story(data: dict):
         log_tag=f'voice_story:{character_id}',
         cache_tag=f'voice_story:{character_id}',
         min_messages=3,
-        reject_fn=lambda parsed: _reject_schedule_candidate(
-            character_id, user_id, parsed, system_blocks,
-            now=temporal_snapshot.get('now_local')),
+        reject_fn=lambda parsed: _reject_time_and_schedule(
+            user_text, character_id, user_id, parsed,
+            system_blocks, temporal_snapshot),
     )
     emotion, msgs = _finalize_committed(result, min_messages=3)
     if msgs is None:
         return _generation_failed_response(user_id, character_id, attempts=2)
+
+    clock_conflict = _commit_time_candidate(
+        user_text, result, temporal_snapshot, snapshot_started)
+    if clock_conflict:
+        return _clock_retry_response(clock_conflict)
 
     transition = _commit_schedule_candidate(
         character_id, user_id, result, source_event_id)
@@ -1758,6 +1885,7 @@ async def chat_voice_proactive(data: dict):
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
+    snapshot_started = time.monotonic()
     try:
         import db_schedule
         world = db_schedule.get_current_world_state(
@@ -1839,14 +1967,19 @@ async def chat_voice_proactive(data: dict):
         attempts=2,
         log_tag=f'voice_proactive:{character_id}',
         cache_tag=f'voice_proactive:{character_id}',
-        reject_fn=lambda parsed: _reject_schedule_candidate(
-            character_id, user_id, parsed, system_blocks,
-            now=temporal_snapshot.get('now_local')),
+        reject_fn=lambda parsed: _reject_time_and_schedule(
+            '', character_id, user_id, parsed,
+            system_blocks, temporal_snapshot),
     )
     emotion, msgs = _finalize_committed(result)
     if msgs is None:
         print(f'[{user_id}][{character_id}] voice_proactive generation_failed mode={mode}')
         return _generation_failed_response(user_id, character_id, attempts=2)
+
+    clock_conflict = _commit_time_candidate(
+        '', result, temporal_snapshot, snapshot_started)
+    if clock_conflict:
+        return _clock_retry_response(clock_conflict)
 
     event_id = resolve_voice_proactive_event_id(data)
     transition = _commit_schedule_candidate(

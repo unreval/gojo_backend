@@ -111,6 +111,11 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
                 'db_generation_receipt',
                 assign_source_event_id=lambda value: (value or 'voice-test', False),
             ),
+            'reply_availability': stub(
+                'reply_availability', check_reply_availability=Mock(
+                    return_value={'can_reply': True, 'reply_state': 'free'})),
+            'db_read_receipt': stub(
+                'db_read_receipt', mark_immediate_seen=Mock()),
             'tts': stub('tts', tts_to_b64=self.tts),
             'prompt': stub(
                 'prompt',
@@ -159,8 +164,14 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
             'temporal_awareness': stub(
                 'temporal_awareness',
                 get_temporal_snapshot=Mock(return_value={}),
+                find_reply_calendar_conflict=Mock(return_value=None),
+                find_commit_clock_conflict=Mock(return_value=None),
                 record_turn=self.record_turn,
             ),
+            'db_schedule': stub(
+                'db_schedule', get_current_world_state=Mock(return_value={})),
+            'schedule_contract': stub(
+                'schedule_contract', completion_claim_conflict=Mock(return_value=False)),
         }
         module_patch = patch.dict(sys.modules, modules)
         module_patch.start()
@@ -193,6 +204,22 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
 
     def types(self, events):
         return [e.get('type') for e in events]
+
+    def test_clock_conflict_emits_no_audio_or_subtitle(self):
+        sys.modules['temporal_awareness'].find_reply_calendar_conflict.return_value = (
+            'current_clock_mismatch')
+        events = self.events('JP: いまは朝の五時。\nZH: 现在是早上五点。\n')
+        self.assertEqual(self.types(events), ['generation_failed'])
+        self.assertEqual(events[0]['error'], 'current_clock_mismatch')
+        self.tts.assert_not_called()
+
+    def test_midnight_stale_snapshot_emits_no_audio(self):
+        sys.modules['temporal_awareness'].find_commit_clock_conflict.return_value = (
+            'time_snapshot_stale')
+        events = self.events('JP: おはよう。\nZH: 早上好。\n')
+        self.assertEqual(self.types(events), ['generation_failed'])
+        self.assertEqual(events[0]['error'], 'time_snapshot_stale')
+        self.tts.assert_not_called()
 
     def test_ellipsis_pair_commits_intentional_silence(self):
         events = self.events('EMOTION: 平静\nJP: ...\nZH: ...\n')

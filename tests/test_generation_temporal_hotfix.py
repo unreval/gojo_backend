@@ -311,6 +311,14 @@ class TemporalApplicabilityTests(unittest.TestCase):
         self.assertIn('kind: latest_canonical_assistant_reply', text)
         self.assertIn('elapsed: 8小时12分钟（29520 seconds）', text)
 
+    def test_evening_1724_keeps_early_morning_reply_historical(self):
+        snap = self.snapshot(self.at(17, 24), self.at(5, 18), self.at(17, 24))
+        text = temporal.build_prompt_context('u', 'gojo', snap)
+        self.assertEqual(snap['conversational_state']['applicability'], 'historical')
+        self.assertIn('17:24', text)
+        self.assertIn('05:18', text)
+        self.assertIn('不证明用户现在仍准备睡觉', text)
+
     def test_seven_minute_insomnia_conversation_keeps_continuity(self):
         snap = self.snapshot(self.at(5, 25), self.at(5, 18), self.at(5, 25))
         self.assertEqual(snap['conversational_state']['applicability'], 'continuing')

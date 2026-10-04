@@ -11,17 +11,20 @@
 
 这是 route_chatlog.py 的搜索扩展,挂载时加到 gojo_server.py 即可。
 """
+import json
+
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from db import get_conn
 
 import db_chatlog
+from generation_contract import translation_missing
 
 router = APIRouter()
 
 
 def _search_row(row):
-    return {
+    message = {
         'id': row[0],
         'client_msg_id': row[1] or '',
         'role': row[2],
@@ -33,7 +36,18 @@ def _search_row(row):
         'has_audio': bool(row[8]),
         'ts': row[9].isoformat() if row[9] else None,
         'event_id': (row[10] if len(row) > 10 else '') or '',
+        'reply_to_event_id': (row[11] if len(row) > 11 else '') or '',
     }
+    if message['role'] in ('gojo', 'assistant'):
+        message['translation_missing'] = translation_missing({
+            'jp': message['text'], 'zh': message['subtitle']})
+        try:
+            extra = json.loads(message['extra']) if message['extra'] else {}
+            if isinstance(extra, dict) and extra.get('translation_source'):
+                message['translation_source'] = extra['translation_source']
+        except (TypeError, ValueError):
+            pass
+    return message
 
 
 @router.get('/chatlog/search')
@@ -52,10 +66,15 @@ async def search_chatlog(user_id: str, chat_id: str,
         pattern = f'%{keyword}%'
         cur.execute(
             '''SELECT id, client_msg_id, role, text, subtitle, emotion,
-                      kind, extra, has_audio, created_at, event_id
+                      kind, extra, has_audio, created_at, event_id, reply_to_event_id
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s
                  AND COALESCE(status, 'active') = 'active'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM chat_log_tombstone tomb
+                     WHERE tomb.user_id=chat_log.user_id
+                       AND tomb.chat_id=chat_log.chat_id
+                       AND tomb.client_msg_id=chat_log.client_msg_id)
                  AND (text ILIKE %s OR subtitle ILIKE %s)
                ORDER BY created_at DESC
                LIMIT %s''',
@@ -68,6 +87,7 @@ async def search_chatlog(user_id: str, chat_id: str,
 
     results = db_chatlog.filter_visible_messages(
         user_id, chat_id, [_search_row(r) for r in rows])
+    db_chatlog._attach_reply_display(user_id, chat_id, results)
     return JSONResponse({'results': results, 'count': len(results)})
 
 
@@ -81,6 +101,12 @@ async def chatlog_dates(user_id: str, chat_id: str):
             '''SELECT DISTINCT DATE(created_at) as d
                FROM chat_log
                WHERE user_id=%s AND chat_id=%s AND created_at IS NOT NULL
+                 AND COALESCE(status, 'active')='active'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM chat_log_tombstone tomb
+                     WHERE tomb.user_id=chat_log.user_id
+                       AND tomb.chat_id=chat_log.chat_id
+                       AND tomb.client_msg_id=chat_log.client_msg_id)
                ORDER BY d DESC''',
             (user_id, chat_id)
         )
@@ -109,6 +135,12 @@ async def chatlog_by_date(user_id: str, chat_id: str,
         cur.execute(
             '''SELECT id FROM chat_log
                WHERE user_id=%s AND chat_id=%s AND DATE(created_at) = %s
+                 AND COALESCE(status, 'active')='active'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM chat_log_tombstone tomb
+                     WHERE tomb.user_id=chat_log.user_id
+                       AND tomb.chat_id=chat_log.chat_id
+                       AND tomb.client_msg_id=chat_log.client_msg_id)
                ORDER BY id ASC LIMIT 1''',
             (user_id, chat_id, date)
         )
@@ -120,17 +152,27 @@ async def chatlog_by_date(user_id: str, chat_id: str,
         # 拿 anchor_id 前后各 around 条
         cur.execute(
             '''(SELECT id, client_msg_id, role, text, subtitle, emotion,
-                       kind, extra, has_audio, created_at, event_id
+                       kind, extra, has_audio, created_at, event_id, reply_to_event_id
                 FROM chat_log
                 WHERE user_id=%s AND chat_id=%s AND id < %s
                   AND COALESCE(status, 'active') = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM chat_log_tombstone tomb
+                      WHERE tomb.user_id=chat_log.user_id
+                        AND tomb.chat_id=chat_log.chat_id
+                        AND tomb.client_msg_id=chat_log.client_msg_id)
                 ORDER BY id DESC LIMIT %s)
                UNION ALL
                (SELECT id, client_msg_id, role, text, subtitle, emotion,
-                       kind, extra, has_audio, created_at, event_id
+                       kind, extra, has_audio, created_at, event_id, reply_to_event_id
                 FROM chat_log
                 WHERE user_id=%s AND chat_id=%s AND id >= %s
                   AND COALESCE(status, 'active') = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM chat_log_tombstone tomb
+                      WHERE tomb.user_id=chat_log.user_id
+                        AND tomb.chat_id=chat_log.chat_id
+                        AND tomb.client_msg_id=chat_log.client_msg_id)
                 ORDER BY id ASC LIMIT %s)
                ORDER BY id ASC''',
             (user_id, chat_id, anchor_id, around,
@@ -144,10 +186,14 @@ async def chatlog_by_date(user_id: str, chat_id: str,
         if rows:
             first_id = rows[0][0]
             last_id = rows[-1][0]
-            cur.execute('SELECT EXISTS(SELECT 1 FROM chat_log WHERE user_id=%s AND chat_id=%s AND id < %s)',
+            cur.execute('''SELECT EXISTS(SELECT 1 FROM chat_log
+                           WHERE user_id=%s AND chat_id=%s AND id < %s
+                             AND COALESCE(status, 'active')='active')''',
                         (user_id, chat_id, first_id))
             has_before = cur.fetchone()[0]
-            cur.execute('SELECT EXISTS(SELECT 1 FROM chat_log WHERE user_id=%s AND chat_id=%s AND id > %s)',
+            cur.execute('''SELECT EXISTS(SELECT 1 FROM chat_log
+                           WHERE user_id=%s AND chat_id=%s AND id > %s
+                             AND COALESCE(status, 'active')='active')''',
                         (user_id, chat_id, last_id))
             has_after = cur.fetchone()[0]
     finally:
@@ -156,6 +202,7 @@ async def chatlog_by_date(user_id: str, chat_id: str,
 
     msgs = db_chatlog.filter_visible_messages(
         user_id, chat_id, [_search_row(r) for r in rows])
+    db_chatlog._attach_reply_display(user_id, chat_id, msgs)
 
     return JSONResponse({
         'messages': msgs,

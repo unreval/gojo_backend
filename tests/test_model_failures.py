@@ -95,6 +95,12 @@ class ImageFailureTests(unittest.TestCase):
             'sha256': 'abc',
             'source_event_id': 'evt',
         })
+        self.chatlog = stub(
+            'db_chatlog',
+            append_messages_confirmed=Mock(return_value=[{
+                'status': 'inserted', 'id': 'evt', 'server_id': 1}]),
+            resolve_reply_reference=Mock(return_value=None),
+        )
         modules = {
             'anthropic': stub('anthropic', Anthropic=Mock(return_value=self.client)),
             'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
@@ -102,6 +108,7 @@ class ImageFailureTests(unittest.TestCase):
                                       types.SimpleNamespace(body=json.dumps(content).encode(),
                                                             status_code=status_code)),
             'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
+            'db_chatlog': self.chatlog,
             'ai_client': self.ai,
             'tts': stub('tts', tts_to_b64=Mock(return_value='')),
             'prompt': stub('prompt', build_system_blocks=Mock(return_value=[
@@ -110,6 +117,8 @@ class ImageFailureTests(unittest.TestCase):
             'memory_jobs': stub('memory_jobs', enqueue_private_extraction=self.jobs),
             'temporal_awareness': stub('temporal_awareness',
                                       get_temporal_snapshot=Mock(return_value={}),
+                                      find_reply_calendar_conflict=Mock(return_value=None),
+                                      find_commit_clock_conflict=Mock(return_value=None),
                                       record_turn=self.record_turn),
             'characters': stub('characters', get_character=Mock(return_value={'voice_id': None})),
             'tasks': stub('tasks', find_duplicate_task=Mock(),
@@ -266,16 +275,33 @@ class ImageFailureTests(unittest.TestCase):
 
     def test_image_reply_to_reaches_multimodal_prompt(self):
         self.client.messages.create.return_value = model_response(REPLY)
+        self.chatlog.resolve_reply_reference.return_value = {
+            'server_id': 7, 'client_msg_id': 'old-1',
+            'source_event_id': 'old-1', 'role': 'gojo', 'name': '角色',
+            'text': '已核验的原话。', 'subtitle': '',
+            'ts': '2026-10-04T08:00:00+08:00', 'translation_source': '',
+        }
         self.send(reply_to={
             'id': 'old-1',
             'name': '五条悟',
-            'text': '刚才那张照片有点糊。',
+            'text': '客户端伪造的原话。',
             'role': 'gojo',
         })
         blocks = self._reply_calls()[0].kwargs['messages'][-1]['content']
         text_blocks = [b['text'] for b in blocks if b['type'] == 'text']
-        self.assertIn('【引用回复】', text_blocks[-1])
-        self.assertIn('刚才那张照片有点糊。', text_blocks[-1])
+        self.assertIn('【本轮明确引用', text_blocks[-1])
+        self.assertIn('已核验的原话。', text_blocks[-1])
+        self.assertNotIn('客户端伪造的原话。', text_blocks[-1])
+
+    def test_image_repairs_clock_conflict_before_commit(self):
+        sys.modules['temporal_awareness'].find_reply_calendar_conflict.side_effect = [
+            'current_clock_mismatch', None]
+        self.client.messages.create.side_effect = [
+            model_response(REPLY), model_response(REPLY)]
+        response, result = self.send()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self._reply_calls()), 2)
+        self.assertEqual(result['messages'][0]['jp'], '赤い画像が見えるよ。')
 
     def test_thinking_only_truncation_retries_with_more_tokens_and_same_image(self):
         self.client.messages.create.side_effect = [
@@ -424,7 +450,7 @@ class ImageFailureTests(unittest.TestCase):
 
     def test_exhausted_time_budget_stops_requests(self):
         self.client.messages.create.return_value = model_response(REPLY)
-        self.route.time = types.SimpleNamespace(monotonic=Mock(side_effect=[0, 46]))
+        self.route.time = types.SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 46]))
         response, result = self.send()
         self.client.messages.create.assert_not_called()
         self.assert_generation_failed(response, result)

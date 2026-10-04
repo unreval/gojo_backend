@@ -30,7 +30,7 @@ class MemoryAuthorityTests(unittest.TestCase):
         for target in ('user_memory.get_conn', 'smart_recall.get_conn', 'memory_search.get_conn', 'memory_jobs.get_conn'):
             self.stack.enter_context(patch(target, return_value=self.database))
         self.stack.enter_context(patch('user_memory._bg_embed'))
-        self.sql('CREATE TABLE chat_log_tombstone (user_id TEXT,chat_id TEXT,client_msg_id TEXT)')
+        self.sql('CREATE TABLE IF NOT EXISTS chat_log_tombstone (user_id TEXT,chat_id TEXT,client_msg_id TEXT)')
         self.sql('CREATE TABLE groups (id INTEGER,owner_user_id TEXT)')
         self.sql('CREATE TABLE group_members (group_id INTEGER,member_type TEXT,member_id TEXT)')
         self.sql("INSERT INTO groups VALUES (1,'u'),(2,'other')")

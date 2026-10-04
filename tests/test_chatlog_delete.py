@@ -71,7 +71,7 @@ class ChatlogStore:
 
     def insert_row(self, user_id, chat_id, client_msg_id, role, text,
                    subtitle, emotion, kind, extra, has_audio, created_at=None,
-                   event_id=None):
+                   event_id=None, reply_to_event_id=''):
         if client_msg_id:
             for row in self.rows:
                 if (row['user_id'] == user_id
@@ -102,7 +102,7 @@ class ChatlogStore:
             'created_at': created_at or datetime.now(timezone.utc),
             'status': 'active',
             'deleted_at': None,
-            'reply_to_event_id': '',
+            'reply_to_event_id': reply_to_event_id,
         }
         self.next_id += 1
         self.rows.append(row)
@@ -161,11 +161,35 @@ class FakeCursor:
             if 'created_at' in compact.lower() and len(params) >= 12:
                 created_at = params[10] or created_at
                 event_id = params[11] or client_msg_id
+                reply_to_event_id = params[12] if len(params) > 12 else ''
             elif len(params) >= 11:
                 event_id = params[10] or client_msg_id
+                reply_to_event_id = params[11] if len(params) > 11 else ''
+            else:
+                reply_to_event_id = ''
             self.rowcount = self.store.insert_row(
                 user_id, chat_id, client_msg_id, role, text, subtitle,
-                emotion, kind, extra, has_audio, created_at, event_id)
+                emotion, kind, extra, has_audio, created_at, event_id,
+                reply_to_event_id)
+            return
+        if compact.startswith('SELECT id, client_msg_id, COALESCE(NULLIF(event_id'):
+            user_id, chat_id = params[:2]
+            references = params[2:]
+            matches = [
+                row for row in self.store.rows
+                if row['user_id'] == user_id and row['chat_id'] == chat_id
+                and row.get('status', 'active') == 'active'
+                and row.get('deleted_at') is None
+                and not self.store.has_tombstone(user_id, chat_id, row['client_msg_id'])
+                and (row['id'] in references or row['event_id'] in references
+                     or row['client_msg_id'] in references)
+            ][:2]
+            self._many = [
+                (row['id'], row['client_msg_id'], row['event_id'] or row['client_msg_id'],
+                 row['role'], row['text'], row['subtitle'], row['created_at'],
+                 row['extra'])
+                for row in matches
+            ]
             return
         if compact.startswith('SELECT client_msg_id, event_id FROM chat_log'):
             if 'WHERE id=%s' in compact:
@@ -266,7 +290,8 @@ class FakeCursor:
             matched = matched[:limit]
             self._many = [
                 (r['role'], r['text'], r['subtitle'], r['kind'], r['extra'],
-                 r.get('event_id') or '', r.get('client_msg_id') or '')
+                 r.get('event_id') or '', r.get('client_msg_id') or '',
+                 r.get('reply_to_event_id') or '')
                 for r in matched
             ]
             return
@@ -503,24 +528,43 @@ class ChatlogDeleteTests(unittest.TestCase):
         image_extra = json.dumps({
             'visual_summary': '照片里是一只蓝色马克杯，杯沿有裂纹。',
             'event_meta': {'kind': 'image', 'source_event_id': 'img-1'},
-            'reply_to': {'name': '五条悟', 'text': '刚才那个杯子别乱放。'},
+            'reply_to_event_id': 'quote-src',
+            'reply_to': {'name': '伪造', 'text': '这段缓存预览不能进 prompt。'},
         }, ensure_ascii=False)
         reply_extra = json.dumps({
             'reply_to_source_event_id': 'img-1',
             'source_event_id': 'img-1:reply:0',
         }, ensure_ascii=False)
         db_chatlog.append_messages('u1', 'gojo', [
+            _msg('quote-src', '刚才那个杯子别乱放。', 'gojo'),
             {**_msg('img-1', '看这个杯子', 'user'), 'kind': 'image',
+             'reply_to_event_id': 'quote-src',
              'extra': image_extra},
             {**_msg('img-1-r', '割れてるな。', 'gojo'), 'subtitle': '裂了啊。',
              'extra': reply_extra},
         ])
 
-        history = db_chatlog.get_prompt_history('u1', 'gojo', limit=10)
+        history = db_chatlog.get_prompt_history('u1', 'gojo', limit=2)
         self.assertEqual([m['role'] for m in history], ['user', 'assistant'])
         self.assertIn('【图片摘要】照片里是一只蓝色马克杯', history[0]['content'])
-        self.assertIn('【引用】五条悟: 刚才那个杯子别乱放。', history[0]['content'])
+        self.assertIn('【明确引用 source_event_id=quote-src 说话者=角色(gojo) 发生时间=',
+                      history[0]['content'])
+        self.assertIn('刚才那个杯子别乱放。', history[0]['content'])
+        self.assertNotIn('这段缓存预览不能进 prompt。', history[0]['content'])
         self.assertIn('割れてるな。', history[1]['content'])
+
+    def test_prompt_history_rejects_unbound_quote_preview(self):
+        extra = json.dumps({
+            'reply_to': {'name': '伪造', 'text': '缓存声称这件事发生了。'},
+        }, ensure_ascii=False)
+        db_chatlog.append_messages('u1', 'gojo', [
+            {**_msg('unbound-quote', '你说的啊'), 'extra': extra},
+        ])
+        history = db_chatlog.get_prompt_history('u1', 'gojo', limit=1)
+        self.assertEqual([m['role'] for m in history], ['user'])
+        self.assertIn('你说的啊', history[0]['content'])
+        self.assertNotIn('缓存声称这件事发生了。', history[0]['content'])
+        self.assertNotIn('【明确引用', history[0]['content'])
 
 
 class ChatlogDeleteRouteTests(unittest.TestCase):

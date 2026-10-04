@@ -1725,6 +1725,49 @@ def build_chat_context(
                     event.get('content') or '', event.get('metadata'))
             except Exception:
                 event['prompt_text'] = event.get('content') or ''
+            if event.get('role') == 'user':
+                meta = event.get('metadata') or {}
+                top_ref = event.get('reply_to_event_id') or ''
+                extra_ref = meta.get('reply_to_event_id') or ''
+                if top_ref and extra_ref and top_ref != extra_ref:
+                    event['prompt_text'] += '\n【引用关联不一致，原话不可用】'
+                    continue
+                ref = top_ref or extra_ref
+                if ref:
+                    try:
+                        from db_chatlog import resolve_reply_reference
+                        target = resolve_reply_reference(
+                            user_id, character_id, ref)
+                    except Exception as exc:
+                        raise raw_events.SourceValidityError(
+                            'quoted_source_lookup_failed') from exc
+                    if not target:
+                        event['prompt_text'] += '\n【被引用原始事件不可用，不能使用缓存预览】'
+                        continue
+                    original = target['text']
+                    original = original[:500] + (
+                        '【原文截断】' if len(original) > 500 else '')
+                    event['prompt_text'] += (
+                        f'\n【该消息明确引用 source_event_id={target["source_event_id"]} '
+                        f'说话者={target["name"]}({target["role"]}) '
+                        f'发生时间={target["ts"] or "未知"}】\n'
+                        f'原话：{original}')
+                    if (target.get('subtitle')
+                            and target.get('translation_source') != 'user_supplied'):
+                        event['prompt_text'] += '\n译文：' + target['subtitle'][:500]
+            occurred = event.get('timestamp')
+            display_now = temporal_snapshot.get('now_local')
+            if (isinstance(occurred, datetime) and occurred.tzinfo is not None
+                    and isinstance(display_now, datetime)
+                    and display_now.tzinfo is not None):
+                happened_at = occurred.astimezone(display_now.tzinfo).isoformat(timespec='minutes')
+            else:
+                happened_at = '未知'
+            speaker = '用户' if event.get('role') == 'user' else '角色'
+            event['prompt_text'] = (
+                f'【历史消息 source_event_id={event.get("event_id") or "未知"} '
+                f'说话者={speaker} 发生时间={happened_at}】\n'
+                + event['prompt_text'])
         return assemble_from_events(
             events,
             user_id=user_id,

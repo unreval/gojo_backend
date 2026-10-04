@@ -5,7 +5,6 @@
     - _accounts_block() 在动态尾里注入当前用户的账户列表(dynamic_tail,不缓存)
     - OUTPUT_SPEC 末尾追加 pending_transaction 字段规范(静态,进缓存头)
 """
-from datetime import timedelta
 from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID
 from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock, load_core
@@ -46,17 +45,11 @@ def get_time_context(user_message='', now=None):
     else:
         period, greeting_hint = '深夜（深夜・夜中）', '深夜不要说おはよう，可以说「こんな時間に？」「まだ起きてるの？」'
 
-    # ★ 深夜「生活日」：0~5 点在日常口语里还算前一天的延续。
-    #   她凌晨 0:20 说"今天早上爬山"，指的是【日历上昨天】的早上，不是马上要到的这个白天。
     night_note = ''
     if hour < 5:
-        life_day = (now - timedelta(days=1)).strftime('%m月%d日')
         night_note = f'''
-★ 现在是凌晨——日常口语里这还属于"昨天晚上"的延续，别死套日历：
-  · 她说"今天" → 多半指 {life_day}（日历上的昨天，也就是她还醒着的这一整天）。
-  · 她说"明天" → 多半指 {now.strftime("%m月%d日")}（日历上的今天，太阳升起后的那个白天）。
-  · 她说"昨天早上/昨天" → 指 {life_day} 再往前一天。
-  先想清楚她说的是哪一天再回，拿不准就自然确认一句，别言之凿凿地推翻她。'''
+现在是凌晨；“今天/明天/昨天”默认按当前完整日历日期计算。
+用户若明确沿用昨晚的口语说法而指向另一日，应依据明确上下文理解；拿不准就确认，不猜用户何时睡觉。'''
 
     return f'''【现在的时间——必须遵守】
 当前时间：{now.strftime("%Y年%m月%d日 %H:%M")}（{weekday_jp}）
@@ -103,7 +96,7 @@ def get_time_context(user_message='', now=None):
 - 【严禁】编造"次元不同所以有时差""我这边和你那边时间不一样"这类说法来自圆其说
 - 【严禁】为了跟自己上一句保持一致,硬把当前时间往错的方向掰
 
-你们【共用同一个时间】,没有任何时差。
+本轮默认使用应用配置的显示时区；谈到其他地点时明确标注地点与时区，并换算同一 UTC 时刻。
 维护面子不如把事实说对——真人发现自己看错钟也会直接说"啊我看错了"。
 
 如果你不确定,就【明说具体数字】:"现在 20:52,离九点还有 8 分钟"——不要给"三分钟""快到了"这种含糊的话。'''
@@ -385,7 +378,7 @@ _REPLY_SCOPE_RULES = '''【★ 这一条回复的分寸——最后再确认一�
 
 def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
                         user_message='', extra_suffix='', temporal_snapshot=None,
-                        context_pack=None):
+                        context_pack=None, time_anchor_text=None):
     if temporal_snapshot is None:
         temporal_snapshot = getattr(context_pack, 'temporal_snapshot', None)
     if temporal_snapshot is None:
@@ -621,7 +614,9 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     except Exception as _e:
         schedule_text = ''
         print(f'[prompt] 日程注入跳过：{_e}')
-    time_ctx = get_time_context(user_message, now=now_local)
+    time_ctx = get_time_context(
+        user_message if time_anchor_text is None else time_anchor_text,
+        now=now_local)
     emotion_list = ', '.join(EMOTIONS)
 
     # ════════════════════════════════════════════════════════
@@ -645,7 +640,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 
 def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID,
                         user_message='', extra_suffix='', temporal_snapshot=None,
-                        context_pack=None):
+                        context_pack=None, time_anchor_text=None):
     """★ 返回 Anthropic system 数组（带缓存断点）。
 
     结构：
@@ -657,7 +652,7 @@ def build_system_blocks(user_id, character_id=DEFAULT_CHARACTER_ID,
     """
     static_head, fixed_rules, dynamic_tail = _build_prompt_parts(
         user_id, character_id, user_message, extra_suffix, temporal_snapshot,
-        context_pack=context_pack,
+        context_pack=context_pack, time_anchor_text=time_anchor_text,
     )
     return [
         {'type': 'text', 'text': static_head, 'cache_control': {'type': 'ephemeral'}},

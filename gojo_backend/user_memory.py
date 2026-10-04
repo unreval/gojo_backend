@@ -268,7 +268,8 @@ RETURNING id
 
 
 def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER_ID,
-                                source_event_id=None, event_meta=None):
+                                source_event_id=None, event_meta=None,
+                                reply_to_event_id=None):
     """保存真实发生的用户发言。同一 source_event_id 用原子 INSERT ON CONFLICT 去重。
 
     content 只存用户原文/媒体占位；visual_summary 放 event_meta，prompt 读取时再拼。
@@ -285,7 +286,7 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
     _persist_raw_event(
         user_id, character_id, role='user', content=content, event_id=event_id,
         content_type=kind if kind in ('image', 'video', 'voice') else 'text',
-        metadata=meta,
+        metadata=meta, reply_to_event_id=reply_to_event_id,
     )
     inserted = False
     conn = None

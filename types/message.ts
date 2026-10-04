@@ -5,6 +5,7 @@ import type { PendingTransaction } from '../components/PendingTransactionCard';
 
 export interface Message {
   id: string;
+  eventId?: string;  // canonical ID of this bubble, separate from the turn it replies to
   role: 'user' | 'gojo';
   text: string;
   subtitle?: string;
@@ -15,7 +16,21 @@ export interface Message {
   mediaUrl?: string;
   mediaKind?: string;
   mediaMimeType?: string;
-  replyTo?: { id?: string; text: string; name?: string; role?: string };
+  replyTo?: {
+    id?: string;
+    eventId?: string;
+    source_event_id?: string;
+    ts?: string;
+    text: string;
+    subtitle?: string;
+    name?: string;
+    role?: string;
+    timestamp?: number;
+  };
+  syncStatus?: 'pending' | 'conflict';
+  replyUnavailable?: boolean;
+  translationMissing?: boolean;
+  translationSource?: string;
   sourceEventId?: string;
   replyToSourceEventId?: string;
   visualSummary?: string;
