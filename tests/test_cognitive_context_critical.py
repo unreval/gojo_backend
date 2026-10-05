@@ -113,10 +113,10 @@ class CriticalContextTests(unittest.TestCase):
     def test_expired_sticky_and_duplicate_are_filtered(self):
         current = state()
         current['sticky_notes'] = [
-            {'content': '宝宝称呼待跟进', 'status': 'active',
-             'expires_at': NOW + timedelta(days=1)},
-            {'content': '宝宝称呼待跟进', 'status': 'active',
-             'expires_at': NOW + timedelta(days=1)},
+            {'note_key': 'same-note', 'content': '宝宝称呼待跟进', 'status': 'active',
+              'expires_at': NOW + timedelta(days=1)},
+            {'note_key': 'same-note', 'content': '宝宝称呼待跟进', 'status': 'active',
+              'expires_at': NOW + timedelta(days=1)},
             {'content': '宝宝旧称呼过期提醒', 'status': 'active',
              'expires_at': NOW - timedelta(seconds=1)},
         ]

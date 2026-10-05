@@ -60,6 +60,11 @@ class RecallDatabase:
                     self.rows = database.reflections
                 elif 'FROM char_diary' in compact:
                     self.rows = database.diaries
+                elif compact.startswith(
+                        'SELECT id, content, projection_version, semantic_payload, character_id FROM long_memory'):
+                    assert 'long_memory.authority' in compact
+                    self.rows = [(row[0], row[1], 'legacy_v1', None, 'gojo')
+                                 for row in database.facts]
                 elif compact.startswith('SELECT id, content FROM long_memory'):
                     # This fixture contains only current authoritative facts;
                     # SQL provenance behavior has separate real database tests.

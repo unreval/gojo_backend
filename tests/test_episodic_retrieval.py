@@ -454,7 +454,7 @@ class EpisodicRetrievalTests(unittest.TestCase):
         prompt_source = Path(BACKEND, 'prompt.py').read_text(encoding='utf-8')
 
         self.assertIn('【你们以前一起经历过的事】', block)
-        self.assertIn('当前用户消息/当前直接事件', block)
+        self.assertIn('她当前的消息/当前直接事件', block)
         self.assertIn('不得补写未记录的心理、动机、关系含义或细节', block)
         self.assertIn('episode_prompt_text', prompt_source)
 
@@ -504,7 +504,7 @@ class EpisodicRetrievalTests(unittest.TestCase):
                 now=NOW, include_recall=True,
             )
 
-        self.assertIn('用户明确自述：我喜欢「抹茶」', pack.memory_text)
+        self.assertIn('她喜欢「抹茶」', pack.memory_text)
         self.assertIn('近期正在准备考试', pack.memory_text)
         self.assertEqual(pack.episode_prompt_text, '')
         self.assertEqual(pack.relationship_prompt_text, '')

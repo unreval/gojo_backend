@@ -166,6 +166,14 @@ export default function MemoryScreen() {
   };
 
   // ── 保存（修改 / 新增）──
+  const isContentLocked = (module: ModuleKey, id?: number) => {
+    if (id == null) return false;
+    if (module === 'facts') return facts.some(m => m.id === id && m.content_locked);
+    if (module === 'between') return between.some(m => m.id === id && m.content_locked);
+    if (module === 'told') return told.some(m => m.id === id && m.content_locked);
+    return false;
+  };
+
   const saveEdit = async () => {
     if (!editing) return;
     const content = editing.content.trim();
@@ -173,7 +181,10 @@ export default function MemoryScreen() {
     setSaving(true);
     try {
       if (editing.module === 'facts' && editing.id != null) {
-        await axios.put(`${SERVER_URL}/long_memory/${editing.id}`, { content, category: editing.category });
+        await axios.put(`${SERVER_URL}/long_memory/${editing.id}`,
+          isContentLocked('facts', editing.id)
+            ? { category: editing.category }
+            : { content, category: editing.category });
       } else if (editing.module === 'background') {
         if (editing.id != null) {
           await axios.put(`${SERVER_URL}/character_memory/${editing.id}`, { content });
@@ -411,6 +422,7 @@ export default function MemoryScreen() {
                 style={s.modalInput}
                 value={editing.content}
                 onChangeText={t => setEditing(p => p ? { ...p, content: t } : p)}
+                editable={!isContentLocked(editing.module, editing.id)}
                 multiline
                 placeholder="记忆内容…"
                 placeholderTextColor={C.textMute}
@@ -442,9 +454,11 @@ export default function MemoryScreen() {
                 <TouchableOpacity style={[s.modalBtn, s.modalBtnGhost]} onPress={() => setEditing(null)} disabled={saving}>
                   <Text style={s.modalBtnGhostText}>取消</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.modalBtn, s.modalBtnPrimary]} onPress={saveEdit} disabled={saving}>
-                  {saving ? <ActivityIndicator color="#fff" /> : <Text style={s.modalBtnPrimaryText}>保存</Text>}
-                </TouchableOpacity>
+                {(!isContentLocked(editing.module, editing.id) || editing.module === 'facts') && (
+                  <TouchableOpacity style={[s.modalBtn, s.modalBtnPrimary]} onPress={saveEdit} disabled={saving}>
+                    {saving ? <ActivityIndicator color="#fff" /> : <Text style={s.modalBtnPrimaryText}>保存</Text>}
+                  </TouchableOpacity>
+                )}
               </View>
             </View>
           </View>

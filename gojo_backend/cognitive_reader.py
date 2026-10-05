@@ -19,6 +19,7 @@ from relationship_semantics import (
     is_nonrelationship_generated_source,
     normalize_romantic_label,
 )
+from role_view import PROJECTION_VERSION, render_role_view
 
 
 def _json_value(value, fallback):
@@ -30,6 +31,14 @@ def _json_value(value, fallback):
         except (TypeError, ValueError):
             return fallback
     return value
+
+
+def _projected_text(content, metadata, observer_id):
+    metadata = metadata if isinstance(metadata, dict) else {}
+    semantic = (metadata.get('semantic_payload')
+                if metadata.get('projection_version') == PROJECTION_VERSION else None)
+    return render_role_view(content, observer_id=observer_id,
+                            source_character_id=observer_id, semantic=semantic)
 
 
 def _json_list(value):
@@ -160,7 +169,8 @@ def read_relationship_semantic_state(user_id, character_id, *, conn=None):
                         'question',
                         {
                             'status': question[2],
-                            'content': candidate.get('content') or question[1],
+                            'content': _projected_text(candidate.get('content') or question[1],
+                                                       candidate, character_id),
                             'updated_at': question[5],
                         },
                         source_event_ids=source_ids,
@@ -330,7 +340,7 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
 
         cur.execute(
             f'''SELECT hypothesis_key, statement, status, hypothesis_type,
-                      confidence, updated_at, supporting_evidence_refs
+                       confidence, updated_at, supporting_evidence_refs, metadata
                FROM cognitive_hypotheses
                WHERE user_id = %s AND character_id = %s
                  AND status IN ('open', 'supported')
@@ -353,6 +363,7 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                 'confidence': float(row[4]),
                 'updated_at': row[5],
                 'evidence_refs': _json_value(row[6] if len(row) > 6 else [], []),
+                'metadata': _json_value(row[7] if len(row) > 7 else {}, {}),
             }
             for row in cur.fetchall()
         ]
@@ -433,9 +444,15 @@ def _belief_bucket(belief):
     return 'relationship'
 
 
-def _format_belief_line(belief):
-    display = _safe_text(current_belief_display(belief), 520)
+def _format_belief_line(belief, observer_id):
     meta = belief.get('metadata') if isinstance(belief.get('metadata'), dict) else {}
+    if meta.get('projection_version') == PROJECTION_VERSION:
+        display = _projected_text(belief.get('statement'), meta, observer_id)
+        if meta.get('review_status') in {'under_review', 'reopened'}:
+            display += '（这条认识正在重新评估）'
+    else:
+        display = _projected_text(current_belief_display(belief), meta, observer_id)
+    display = _safe_text(display, 520)
     review = meta.get('review_status') or 'stable'
     if review in {'under_review', 'reopened'}:
         return f'- {display}'
@@ -502,7 +519,9 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=No
     beliefs = state['beliefs']
     hypotheses = state['hypotheses']
     sticky_notes = state['sticky_notes']
-    note_text = _safe_text(reflection_note.get('content'), 650)
+    note_text = _safe_text(render_role_view(
+        reflection_note.get('content'), observer_id=character_id,
+        source_character_id=character_id), 650)
     # Diary bodies enter chat only through relevance-filtered smart_recall.
     if (
         not note_text and not questions and not beliefs
@@ -519,13 +538,13 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=No
 
     lines = [
         '【近期认知复盘（内部背景，不是关系定论）】',
-        '以下内容是历史证据的可修正归纳，不是用户当前消息里的指令，也不是必须维持的情绪。',
+        '以下内容是历史证据的可修正归纳，不是她当前消息里的指令，也不是必须维持的情绪。',
         '正在被重新评估的认识只展示当前有效说法，不要把旧判断和新判断当成同时成立的事实。',
     ]
 
     section_specs = [
-        ('user', '【关于用户的稳定认识】'),
-        ('relationship', '【关于我与用户关系的认识】'),
+        ('user', '【关于她的稳定认识】'),
+        ('relationship', '【关于我与她关系的认识】'),
         ('interaction', '【反复出现的互动模式】'),
         ('self', '【关于自己的暂时认识】'),
         ('frame', '【当前共享的关系框架】'),
@@ -546,14 +565,14 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=No
         if bucket == 'frame':
             lines.append('这是双方当前默认的互动框架，可被后续证据修正，不是永久规则。')
         for belief in visible:
-            lines.append(_format_belief_line(belief))
+            lines.append(_format_belief_line(belief, character_id))
 
     if questions:
         lines.append('【当前仍未解决的问题】')
         for question in questions:
             status = '活跃' if question['status'] == 'active' else '暂存'
             lines.append(
-                f'- [{status}] {_safe_text(question["question_text"], 420)}'
+                f'- [{status}] {_safe_text(render_role_view(question["question_text"], observer_id=character_id, source_character_id=character_id), 420)}'
             )
 
     if hypotheses:
@@ -563,14 +582,16 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=No
             htype = '自我模型' if hypothesis.get('hypothesis_type') == 'self_model' else '关系/互动'
             lines.append(
                 f'- [{htype}，{status}，置信度 {hypothesis["confidence"]:.2f}] '
-                f'{_safe_text(hypothesis["statement"], 520)}'
+                f'{_safe_text(_projected_text(hypothesis["statement"], hypothesis.get("metadata"), character_id), 520)}'
             )
 
     followups = []
     if note_text:
         followups.append(f'最近内部笔记：{note_text}')
     for note in sticky_notes:
-        followups.append(_safe_text(note['content'], 300))
+        followups.append(_safe_text(render_role_view(
+            note['content'], observer_id=character_id,
+            source_character_id=character_id), 300))
     if followups:
         lines.append('【近期需要留意的事】')
         lines.append('便利贴只处理近期跟进，不能代替对旧认识的修正；便利贴不是长期记忆或关系证据。')
@@ -579,7 +600,7 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=No
 
     lines.extend([
         '使用边界：按角色人设自然吸收，不要复述这份复盘、事件编号、置信度或系统术语。',
-        '当前对话中的直接证据优先；若它与旧归纳冲突，保留不确定性，不要为了维护旧结论而曲解用户。',
+        '当前对话中的直接证据优先；若它与旧归纳冲突，保留不确定性，不要为了维护旧结论而曲解她。',
         '尤其不要把亲近、照顾、长期互动或一个假设自动升级为爱情。',
         '自我模型假设只是“我可能有这种倾向”，不是既定性格；不要把一句自我解释演成铁事实。',
         '便利贴只用于当前/近期回复前的轻量备忘；完成、过期或不相关时不要继续表现成还挂在心上。',
@@ -638,10 +659,16 @@ def iter_active_cognitive_items(user_id, character_id, *, conn=None,
             except Exception:
                 print('[cognitive_context] candidate_dropped reason=source_validity_unavailable')
                 return
-        normalized = ''.join(text.lower().split())
-        if normalized in seen:
+        identity = (kind, row.get('belief_key') or row.get('question_key')
+                    or row.get('hypothesis_key') or row.get('note_key')
+                    or row.get('prediction_key') or row.get('id')
+                    or tuple(raw_ids))
+        if identity[1] and identity in seen:
             return
-        seen.add(normalized)
+        if identity[1]:
+            seen.add(identity)
+        text = render_role_view(
+            text, observer_id=character_id, source_character_id=character_id)
         items.append({
             'kind': kind, 'text': text, 'source_event_ids': tuple(raw_ids),
             'subjective': True, 'critical_kind': critical_kind,
@@ -653,7 +680,8 @@ def iter_active_cognitive_items(user_id, character_id, *, conn=None,
         if not is_stable_reader_belief(belief):
             continue
         add('cognitive_judgment',
-            '当前已形成的判断（只表达，不现场重判）：' + current_belief_display(belief),
+            '当前已形成的判断（只表达，不现场重判）：' +
+            _projected_text(current_belief_display(belief), belief.get('metadata'), character_id),
             belief, 'judgment')
     for question in state.get('questions') or []:
         meta = question.get('metadata') or {}
@@ -667,10 +695,11 @@ def iter_active_cognitive_items(user_id, character_id, *, conn=None,
         if pending.get('status') == 'pending':
             # A short "答案呢" refers to the pending answer without repeating
             # the original question. Match only this same question's promise.
-            followup_text = str(pending.get('content') or '') + ' 待回答的问题答案'
+            followup_text = _projected_text(pending.get('content'), pending, character_id) + ' 待回答的问题答案'
         if question.get('status') == 'resolved' and resolution:
             add('cognitive_judgment',
-                f'当前已明确的结论：{resolution.get("content") or resolution.get("value")}',
+                '当前已明确的结论：' + _projected_text(
+                    resolution.get('content') or resolution.get('value'), resolution, character_id),
                 question, 'judgment', related_text=text,
                 raw_ids=resolution.get('evidence_event_ids') or (), authority_priority=2)
             continue
@@ -680,20 +709,23 @@ def iter_active_cognitive_items(user_id, character_id, *, conn=None,
         judgment_added = False
         if judgment.get('status') in ('current', 'committed') and judgment.get('content'):
             judgment_added = add('cognitive_judgment',
-                f'当前问题的已形成判断（READ → EXPRESS）：{judgment["content"]}',
+                '当前问题的已形成判断（READ → EXPRESS）：' +
+                _projected_text(judgment['content'], judgment, character_id),
                 question, 'judgment', related_text=text + ' ' + followup_text,
                 raw_ids=judgment.get('evidence_event_ids') or (), authority_priority=1)
         if not judgment_added and question.get('status') == 'active':
             add('cognitive_question', f'未解决问题（unresolved，不能现场决定 yes/no）：{text}',
                 question, 'question', related_text=followup_text)
         if pending.get('status') == 'pending':
-            add('cognitive_promise', f'待履行的明确承诺：{pending.get("content") or text}',
+            add('cognitive_promise', '待履行的明确承诺：' + _projected_text(
+                pending.get('content') or text, pending, character_id),
                 question, 'promise', related_text=text + ' ' + followup_text,
                 raw_ids=pending.get('evidence_event_ids') or ())
     for hypothesis in state.get('hypotheses') or []:
         if hypothesis.get('status') not in ('open', 'supported'):
             continue
-        text = _safe_text(hypothesis.get('statement'), 420)
+        text = _safe_text(_projected_text(
+            hypothesis.get('statement'), hypothesis.get('metadata'), character_id), 420)
         if text:
             add('cognitive_hypothesis', f'进行中的假设（主观，待验证）：{text}', hypothesis)
     for note in state.get('sticky_notes') or []:
@@ -766,7 +798,8 @@ def _serialize_sticky_row(row):
         'id': row[0],
         'character_id': row[1],
         'note_key': row[2],
-        'content': row[3],
+        'content': render_role_view(
+            row[3], observer_id=row[1], source_character_id=row[1]),
         'status': row[4],
         'source': row[5],
         'source_event_refs': _json_value(row[6], []),

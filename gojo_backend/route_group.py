@@ -28,6 +28,7 @@ from ai_client import extract_text
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
+from role_view import role_label
 from user_memory import update_chat_days
 from temporal_awareness import record_assistant_message, record_turn
 
@@ -213,11 +214,16 @@ def _save_group_message(gid, sender_type, sender_id, jp, zh, emotion='平静',
     return mid
 
 
-def _history_text(history):
+def _history_text(history, observer_id=None):
     """把群历史拼成给模型看的纯文本。"""
     lines = []
     for h in history:
-        who = h['sender_name'] if h['sender_type'] == 'character' else '群主'
+        if observer_id:
+            subject = (f'character:{h["sender_id"]}'
+                       if h['sender_type'] == 'character' else 'user')
+            who = role_label(subject, observer_id=observer_id)
+        else:
+            who = h['sender_name'] if h['sender_type'] == 'character' else '群主'
         # 角色用日语原文，用户用中文原话
         content = h['jp'] if h['sender_type'] == 'character' and h['jp'] else h['zh']
         lines.append(f'{who}：{content}')
@@ -390,11 +396,11 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
             ))
         kept = ContextBudgetManager(cfg).allocate(items)
         if kept:
-            hist_txt = _history_text(hist_rows[-len(kept):])
+            hist_txt = _history_text(hist_rows[-len(kept):], member['id'])
         else:
-            hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
+            hist_txt = _history_text(history[-10:], member['id']) if history else '（群里还没人说话）'
     except Exception:
-        hist_txt = _history_text(history[-10:]) if history else '（群里还没人说话）'
+        hist_txt = _history_text(history[-10:], member['id']) if history else '（群里还没人说话）'
 
     # ★ 声纹隔离:防止多个角色输出趋同,像"一个AI套了几个名字"
     voice_lock = f'''
@@ -434,21 +440,21 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
         group_scene = voice_lock + f'''
 
 【★ 群聊场景——你现在在一个群里】
-这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
+这个群里还有：{others}（都是别的角色），以及她（群主）。
 下面是群里最近的对话记录：
 {hist_txt}
 
-群主刚说："{user_text}"{image_hint}{said_block}
+她刚说："{user_text}"{image_hint}{said_block}
 
 现在轮到你（{member['name']}）说话。要求：
-1. 这是在回应群主的话,符合你的人设。
+1. 这是在回应她的话,符合你的人设。
 2. 用 1~3 条气泡回复,像真人聊天一样自然。简单的话1条就够,想展开就拆2~3条。
 3. jp 必须是纯日语,zh 是中文翻译。
 
 只返回单行 JSON：
 {{"emotion":"情绪","messages":[{{"jp":"日语","zh":"中文"}}]}}'''
 
-        user_msg = f'（群主刚说：{user_text}）请你在群里接话。'
+        user_msg = f'（她刚说：{user_text}）请你在群里接话。'
 
     else:
         # 互动场景:接前一个角色刚说的话
@@ -458,26 +464,26 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
         group_scene = voice_lock + f'''
 
 【★ 群聊场景——你现在在一个群里】
-这个群里还有：{others}（都是别的角色）,以及群主（用户本人）。
+这个群里还有：{others}（都是别的角色），以及她（群主）。
 下面是群里最近的对话记录：
 {hist_txt}
 
-群主一开始说："{user_text}"
+她一开始说："{user_text}"
 然后 {prev_name} 刚说了一句："{prev_content}"
 
 ★★★ 现在轮到你（{member['name']}）接 {prev_name} 的话 ★★★
-你不是在重新回应群主——群主的那句已经被 {prev_name} 接过了。
+你不是在重新回应她——她的那句已经被 {prev_name} 接过了。
 你要做的是:对 {prev_name} 刚说的话做出【自然】的反应。反应方式是多样的,
 按此刻的语境和你的心情挑**最自然**的一种,不要总选同一种:
 - 顺着聊/附和("确实""就是说")
 - 补充点什么,或聊起自己相关的事
 - 简单搭一句腔——不必句句都有观点
-- 话题关于群主时,自然地关心她
+- 话题关于她时,自然地关心她
 - 开个小玩笑、轻轻调侃
 - **只有真的不同意时才反驳**——朋友不会为了热闹而抬杠,别把每次接话都变成对线
 
 要求：
-1. 你的话要**明显是针对 {prev_name} 那句**,不是在和群主对话。偶尔提一下对方名字可以,但**不要每句都喊名字**——真朋友之间大部分时候不用叫名字也知道在跟谁说话。
+1. 你的话要**明显是针对 {prev_name} 那句**,不是在和她对话。偶尔提一下对方名字可以,但**不要每句都喊名字**——真朋友之间大部分时候不用叫名字也知道在跟谁说话。
 2. 符合你自己的人设,但要让人看出来你是在接他的话。
 3. 用 1~3 条气泡回复,像真人聊天一样自然。**绝对不要重复 {prev_name} 刚才说的话**,你要说点新的。
    群里已经有人给过的建议/观点,你换个说法再讲一遍也算重复——禁止。

@@ -25,7 +25,8 @@ from datetime import datetime, timezone
 
 from db import get_conn
 from memory_authority import authoritative_memory_sql
-from config import CN_TZ
+from role_view import PROJECTION_VERSION, render_role_view
+from config import CN_TZ, DEFAULT_CHARACTER_ID
 from cognitive_config import COGNITIVE_DIARY_RECALL_LIMIT
 
 # ══════════════════════════════════════════════
@@ -258,11 +259,13 @@ def two_level_recall(user_id, character_id, user_message,
                       COALESCE(pinned, FALSE) as pinned,
                       COALESCE(lifecycle_kind, 'legacy') as lifecycle_kind,
                       COALESCE(recall_weight, 1.0) as recall_weight,
-                      source_event_refs
+                      source_event_refs, character_id, semantic_payload, projection_version
                FROM long_memory
                WHERE user_id = %s AND character_id IN (%s, %s)
                  AND {authoritative_memory_sql('long_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                 AND (category IS DISTINCT FROM '状态' OR timestamp IS NULL
+                      OR timestamp >= CURRENT_TIMESTAMP - INTERVAL '{STATUS_EXPIRE_HOURS} hours')
                ORDER BY timestamp DESC''',
             (user_id, character_id, shared_id)
         )
@@ -286,8 +289,6 @@ def two_level_recall(user_id, character_id, user_message,
         # ── 2. 分离 pinned 和普通记忆 ──
         pinned = []
         pool = []
-        now_utc = datetime.utcnow()
-
         recent_exclude = {
             str(item).strip() for item in (exclude_event_ids or []) if str(item).strip()
         }
@@ -297,6 +298,9 @@ def two_level_recall(user_id, character_id, user_message,
         )
 
         for row in all_facts:
+            source_character_id = row[10] if len(row) > 10 else character_id
+            projection_version = row[12] if len(row) > 12 else 'legacy_v1'
+            semantic = row[11] if projection_version == PROJECTION_VERSION else None
             if len(row) >= 10:
                 (fid, content, ts, category, mention_count, last_mentioned,
                  is_pinned, lifecycle_kind, recall_weight, source_refs) = row[:10]
@@ -304,13 +308,10 @@ def two_level_recall(user_id, character_id, user_message,
                 (fid, content, ts, category, mention_count, last_mentioned,
                  is_pinned, lifecycle_kind, recall_weight) = row[:9]
                 source_refs = []
+            content = render_role_view(
+                content, observer_id=character_id,
+                source_character_id=source_character_id, semantic=semantic)
             category = category or '其他'
-
-            # 状态类过期检查
-            if category == '状态' and ts is not None:
-                age_hours = (now_utc - ts).total_seconds() / 3600
-                if age_hours > STATUS_EXPIRE_HOURS:
-                    continue
 
             entry = {
                 'authority': 'canonical_evidence_v1', 'id': fid, 'content': content, 'timestamp': ts,
@@ -321,6 +322,8 @@ def two_level_recall(user_id, character_id, user_message,
                 'recall_weight': recall_weight,
                 'source_event_refs': source_refs,
                 'source_event_ids': parse_source_ids(source_refs),
+                'source_character_id': source_character_id,
+                'semantic_payload': semantic, 'projection_version': projection_version,
             }
 
             if is_pinned:
@@ -368,7 +371,7 @@ def two_level_recall(user_id, character_id, user_message,
             # 用 linked_fact_id 查关联 bond
             placeholders = ','.join(['%s'] * len(fact_ids))
             cur.execute(
-                f'''SELECT id, content, timestamp, linked_fact_id
+                f'''SELECT id, content, timestamp, linked_fact_id, semantic_payload, projection_version
                     FROM bond_memory
                     WHERE user_id = %s AND character_id = %s
                       AND kind = 'between'
@@ -377,12 +380,20 @@ def two_level_recall(user_id, character_id, user_message,
                     ORDER BY timestamp DESC''',
                 (user_id, character_id, *fact_ids)
             )
-            for bid, bcontent, bts, linked_id in cur.fetchall():
+            for row in cur.fetchall():
+                bid, bcontent, bts, linked_id = row[:4]
+                projection_version = row[5] if len(row) > 5 else 'legacy_v1'
+                semantic = row[4] if projection_version == PROJECTION_VERSION else None
                 if linked_id not in linked_bonds:
                     linked_bonds[linked_id] = []
                 if len(linked_bonds[linked_id]) < BOND_PER_FACT:
                     linked_bonds[linked_id].append({
-                        'authority': 'canonical_evidence_v1', 'id': bid, 'content': bcontent, 'timestamp': bts
+                        'authority': 'canonical_evidence_v1', 'id': bid,
+                        'content': render_role_view(
+                            bcontent, observer_id=character_id,
+                            source_character_id=character_id, semantic=semantic),
+                        'timestamp': bts, 'source_character_id': character_id,
+                        'semantic_payload': semantic, 'projection_version': projection_version,
                     })
 
         try:
@@ -410,7 +421,7 @@ def two_level_recall(user_id, character_id, user_message,
                 linked_bond_ids.add(b['id'])
 
         cur.execute(
-            f'''SELECT id, content, timestamp FROM bond_memory
+            f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = 'between'
                   AND (linked_fact_id IS NULL OR linked_fact_id = 0)
                   AND {authoritative_memory_sql('bond_memory')}
@@ -432,9 +443,15 @@ def two_level_recall(user_id, character_id, user_message,
         # 对独立 bond 打分；bond 表没有 per-row recall_weight，因此固定为 1.0。
         # LOOSE_BOND_K 只是最终注入上限，0 分的不硬塞。
         loose_bonds = []
-        for bid, bcontent, bts in loose_candidates:
+        for row in loose_candidates:
+            bid, bcontent, bts = row[:3]
+            projection_version = row[4] if len(row) > 4 else 'legacy_v1'
+            semantic = row[3] if projection_version == PROJECTION_VERSION else None
             if bid in linked_bond_ids:
                 continue
+            bcontent = render_role_view(
+                bcontent, observer_id=character_id,
+                source_character_id=character_id, semantic=semantic)
             mem_emb = bond_embeddings.get(bid)
             score, relevance = _score_bond_candidate(
                 bcontent, bts, user_message,
@@ -447,6 +464,8 @@ def two_level_recall(user_id, character_id, user_message,
             loose_bonds.append({
                 'authority': 'canonical_evidence_v1', 'id': bid, 'content': bcontent, 'timestamp': bts,
                 'score': score, 'relevance_score': relevance,
+                'source_character_id': character_id, 'semantic_payload': semantic,
+                'projection_version': projection_version,
             })
 
         try:
@@ -466,7 +485,7 @@ def two_level_recall(user_id, character_id, user_message,
 
         # ── 6. told 桶 ──
         cur.execute(
-            f'''SELECT id, content, timestamp FROM bond_memory
+            f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = 'told'
                   AND {authoritative_memory_sql('bond_memory')}
                ORDER BY timestamp DESC LIMIT %s''',
@@ -474,7 +493,13 @@ def two_level_recall(user_id, character_id, user_message,
         )
         told_candidates = cur.fetchall()
         tolds = []
-        for tid, tcontent, tts in told_candidates:
+        for row in told_candidates:
+            tid, tcontent, tts = row[:3]
+            projection_version = row[4] if len(row) > 4 else 'legacy_v1'
+            semantic = row[3] if projection_version == PROJECTION_VERSION else None
+            tcontent = render_role_view(
+                tcontent, observer_id=character_id,
+                source_character_id=character_id, semantic=semantic)
             score, relevance = _score_bond_candidate(
                 tcontent, tts, user_message,
                 query_embedding=query_embedding,
@@ -486,6 +511,8 @@ def two_level_recall(user_id, character_id, user_message,
             tolds.append({
                 'authority': 'canonical_evidence_v1', 'id': tid, 'content': tcontent, 'timestamp': tts,
                 'score': score, 'relevance_score': relevance,
+                'source_character_id': character_id, 'semantic_payload': semantic,
+                'projection_version': projection_version,
             })
         tolds.sort(
             key=lambda x: (x['score'], x['timestamp'] or datetime.min),
@@ -562,6 +589,7 @@ def two_level_recall(user_id, character_id, user_message,
 
         return {
             'facts': selected_facts,
+            'observer_id': character_id,
             'loose_bonds': loose_bonds,
             'tolds': tolds,
             'lifecycle_memories': lifecycle_memories,
@@ -676,7 +704,7 @@ def link_bond_to_fact(user_id, character_id, bond_content, shared_id='shared'):
 #  Prompt 组装辅助
 # ══════════════════════════════════════════════
 
-def format_recall_for_prompt(recall_result):
+def format_recall_for_prompt(recall_result, observer_id=None):
     """把 two_level_recall 的结果格式化成 prompt 文本。
 
     返回 (memory_text, bond_text, told_text) 三个字符串，
@@ -684,6 +712,15 @@ def format_recall_for_prompt(recall_result):
     """
     if not recall_result:
         return '', '', ''
+
+    observer_id = observer_id or recall_result.get('observer_id') or DEFAULT_CHARACTER_ID
+
+    def visible(item):
+        return render_role_view(
+            item.get('content', ''), observer_id=observer_id,
+            source_character_id=item.get('source_character_id') or observer_id,
+            semantic=(item.get('semantic_payload')
+                      if item.get('projection_version') == PROJECTION_VERSION else None))
 
     from memory_authority import AUTHORITY
     facts = [dict(row) for row in recall_result.get('facts', []) if row.get('authority') == AUTHORITY]
@@ -711,12 +748,12 @@ def format_recall_for_prompt(recall_result):
             date_str = ts.strftime('%Y-%m-%d') if ts else '?'
             tag = '（当时的状态，仅当天有效）' if f['category'] == '状态' else ''
             pin_mark = '📌 ' if f.get('pinned') else ''
-            lines.append(f'- {pin_mark}[{date_str}] {f["content"]}{tag}')
+            lines.append(f'- {pin_mark}[{date_str}] {visible(f)}{tag}')
 
             # 关联的 bond 缩进显示
             for b in f.get('bonds', []):
                 bdate = b['timestamp'].strftime('%Y-%m-%d') if b.get('timestamp') else '?'
-                lines.append(f'  · [{bdate}] {b["content"]}')
+                lines.append(f'  · [{bdate}] {visible(b)}')
 
         memory_text = f'''{memory_text}
 
@@ -724,7 +761,7 @@ def format_recall_for_prompt(recall_result):
 {chr(10).join(lines)}
 
 使用规则：
-1. 这些是【对方/用户本人】明确说过的话，保留原话中的对象、时间和自述限定，不扩写隐含心理。但它们只约束"你对用户的了解"，绝不能拿来推翻或补充角色自己的原作设定——一旦涉及角色设定，一律以上面的【设定铁律】为准。
+1. 这些是【她本人】明确说过的话，保留原话中的对象、时间和自述限定，不扩写隐含心理。但它们只约束你对她的了解，绝不能拿来推翻或补充角色自己的原作设定——一旦涉及角色设定，一律以上面的【设定铁律】为准。
 2. 自然融入回复，不要刻意背诵清单。
 3. 列表里有的事必须当作记得，没有的可以说不记得。
 4. 标着"（当时的状态）"的条目只代表记录当天的情况——不代表此刻仍然成立。她说过已经好了/过去了，就是过去了。
@@ -743,7 +780,7 @@ def format_recall_for_prompt(recall_result):
             ts = item.get('updated_at') or item.get('created_at')
             date_str = ts.strftime('%Y-%m-%d') if ts else '?'
             kind = kind_labels.get(item.get('memory_kind'), item.get('memory_kind') or '生命周期')
-            lifecycle_lines.append(f'- [{date_str}] [{kind}] {item["content"]}')
+            lifecycle_lines.append(f'- [{date_str}] [{kind}] {visible(item)}')
         block = f'''
 
 【生成的短期/候选回忆——未经权威证据确认，仅作表达参考】
@@ -762,7 +799,7 @@ def format_recall_for_prompt(recall_result):
         for note in sticky_notes:
             exp = note.get('expires_at')
             exp_text = exp.strftime('%Y-%m-%d %H:%M') if exp else '未设期限'
-            sticky_lines.append(f'- [到期 {exp_text}] {note["content"]}')
+            sticky_lines.append(f'- [到期 {exp_text}] {visible(note)}')
         block = f'''
 
 【便利贴备忘——短期、可完成/可过期，不是长期记忆】
@@ -816,7 +853,7 @@ def format_recall_for_prompt(recall_result):
         bond_lines = []
         for b in loose_bonds:
             bdate = b['timestamp'].strftime('%Y-%m-%d') if b.get('timestamp') else '?'
-            bond_lines.append(f'- [{bdate}] {b["content"]}')
+            bond_lines.append(f'- [{bdate}] {visible(b)}')
         bond_text = f'''
 
 【有当前原始来源的话语和明确约定】
@@ -834,7 +871,7 @@ def format_recall_for_prompt(recall_result):
         told_lines = []
         for t in tolds:
             tdate = t['timestamp'].strftime('%Y-%m-%d') if t.get('timestamp') else '?'
-            told_lines.append(f'- [{tdate}] {t["content"]}')
+            told_lines.append(f'- [{tdate}] {visible(t)}')
         told_text = f'''
 
 【她告诉过你的事——关于你自己或你的世界】

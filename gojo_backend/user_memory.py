@@ -43,6 +43,8 @@ from difflib import SequenceMatcher
 from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
 from memory_authority import authoritative_memory_sql
+from role_view import PROJECTION_VERSION, render_role_view
+from smart_recall import STATUS_EXPIRE_HOURS
 from structured_output import (
     StructuredOutputError,
     invoke_structured_llm,
@@ -734,17 +736,22 @@ def get_long_memory(user_id, character_id=DEFAULT_CHARACTER_ID):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        f'''SELECT content, timestamp, category FROM long_memory
+        f'''SELECT content, timestamp, category, character_id, semantic_payload, projection_version FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
              AND {authoritative_memory_sql('long_memory')}
              AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+             AND (category IS DISTINCT FROM '状态' OR timestamp IS NULL
+                  OR timestamp >= CURRENT_TIMESTAMP - INTERVAL '{STATUS_EXPIRE_HOURS} hours')
            ORDER BY timestamp DESC LIMIT 40''',
         (user_id, character_id, SHARED_CHARACTER_ID)
     )
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [(r[0], r[1], r[2] or '其他') for r in rows]
+    return [(render_role_view(r[0], observer_id=character_id,
+                              source_character_id=r[3] if len(r) > 3 else character_id,
+                              semantic=r[4] if len(r) > 5 and r[5] == PROJECTION_VERSION else None),
+             r[1], r[2] or '其他') for r in rows]
 
 
 def _get_memories_with_id(user_id, character_id=DEFAULT_CHARACTER_ID):
@@ -1239,7 +1246,7 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
     cur = conn.cursor()
     if kind:
         cur.execute(
-            f'''SELECT id, content, timestamp FROM bond_memory
+            f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
                  AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
@@ -1248,7 +1255,7 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
         )
     else:
         cur.execute(
-            f'''SELECT id, content, timestamp FROM bond_memory
+            f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s
                  AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
@@ -1258,7 +1265,10 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return rows
+    return [(r[0], render_role_view(r[1], observer_id=character_id,
+                                    source_character_id=character_id,
+                                    semantic=r[3] if len(r) > 4 and r[4] == PROJECTION_VERSION else None),
+             r[2]) for r in rows]
 
 
 def delete_bond_memory(memory_id):

@@ -1,6 +1,4 @@
 """用户记忆相关路由（★ 记忆列表 / 重分类均包含 shared 共享桶）"""
-from datetime import datetime, timedelta
-
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -9,6 +7,7 @@ from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID
 from ai_client import extract_text
 from db import get_conn
 from memory_authority import AUTHORITY, authoritative_memory_sql
+from role_view import PROJECTION_VERSION, render_role_view
 from smart_recall import STATUS_EXPIRE_HOURS
 from user_memory import (
     get_short_memory, get_long_memory, get_chat_days,
@@ -46,24 +45,28 @@ async def get_stats(user_id: str = 'default'):
 async def list_long_memory(user_id: str = 'default', character_id: str = DEFAULT_CHARACTER_ID):
     conn = get_conn()
     cur = conn.cursor()
-    status_cutoff = datetime.utcnow() - timedelta(hours=STATUS_EXPIRE_HOURS)
     # ★ 把 shared 共享桶一起查出来，不然记忆页看不到新提取的共享记忆
     cur.execute(
         f'''SELECT id, content, category, timestamp,
                   (({authoritative_memory_sql('long_memory')})
                    AND (category IS DISTINCT FROM '状态'
-                        OR timestamp IS NULL OR timestamp >= %s)) AS recallable,
-                  authority = '{AUTHORITY}' AS content_locked
+                        OR timestamp IS NULL
+                        OR timestamp >= CURRENT_TIMESTAMP - INTERVAL '{STATUS_EXPIRE_HOURS} hours')) AS recallable,
+                  authority = '{AUTHORITY}' AS content_locked,
+                  character_id, semantic_payload, projection_version
            FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
            ORDER BY timestamp DESC''',
-        (status_cutoff, user_id, character_id, SHARED_CHARACTER_ID)
+        (user_id, character_id, SHARED_CHARACTER_ID)
     )
     rows = cur.fetchall()
     cur.close()
     conn.close()
     memories = [{
-        'id': r[0], 'content': r[1],
+        'id': r[0], 'content': render_role_view(
+            r[1], observer_id=character_id,
+            source_character_id=r[6],
+            semantic=r[7] if r[8] == PROJECTION_VERSION else None),
         'category': r[2] or '其他',
         'timestamp': str(r[3]) if r[3] else None,
         'recallable': bool(r[4]),
@@ -76,7 +79,7 @@ async def list_long_memory(user_id: str = 'default', character_id: str = DEFAULT
 async def update_long_memory(memory_id: int, data: dict):
     content = (data.get('content') or '').strip()
     category = data.get('category')
-    if not content:
+    if not content and not category:
         return JSONResponse({'error': '内容不能为空'}, status_code=400)
     conn = get_conn()
     cur = conn.cursor()
@@ -84,10 +87,23 @@ async def update_long_memory(memory_id: int, data: dict):
                 (memory_id,))
     existing = cur.fetchone()
     if existing and existing[1] == AUTHORITY and existing[0] != content:
+        if not content and category:
+            cur.execute('UPDATE long_memory SET category = %s WHERE id = %s',
+                        (category, memory_id))
+            conn.commit()
+            cur.close()
+            conn.close()
+            notify_memory_changed('long_memory')
+            return JSONResponse({'ok': True, 'id': memory_id})
         conn.rollback()
         cur.close()
         conn.close()
         return JSONResponse({'error': '这条事实已有原始对话证据，请在聊天中明确更正，不能直接改写内容'}, status_code=409)
+    if not content:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return JSONResponse({'error': '内容不能为空'}, status_code=400)
     if category:
         cur.execute('UPDATE long_memory SET content = %s, category = %s WHERE id = %s',
                     (content, category, memory_id))
@@ -223,7 +239,9 @@ async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT
     if not include_history:
         rows = get_bond_memories(user_id, character_id, kind=kind or None, limit=100)
         return JSONResponse({'memories': [{
-            'id': r[0], 'content': r[1],
+            'id': r[0], 'content': render_role_view(
+                r[1], observer_id=character_id,
+                source_character_id=character_id),
             'timestamp': str(r[2]) if r[2] else None,
             'recallable': True, 'content_locked': True,
         } for r in rows]})
@@ -234,7 +252,8 @@ async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT
         cur.execute(
             f'''SELECT id, content, timestamp,
                       ({authoritative_memory_sql('bond_memory')}) AS recallable,
-                      authority = '{AUTHORITY}' AS content_locked
+                      authority = '{AUTHORITY}' AS content_locked,
+                      semantic_payload, projection_version
                FROM bond_memory
                WHERE user_id = %s AND character_id = %s {kind_filter}
                ORDER BY timestamp DESC''',
@@ -244,7 +263,10 @@ async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT
         cur.close()
         conn.close()
     return JSONResponse({'memories': [{
-        'id': r[0], 'content': r[1],
+        'id': r[0], 'content': render_role_view(
+            r[1], observer_id=character_id,
+            source_character_id=character_id,
+            semantic=r[5] if r[6] == PROJECTION_VERSION else None),
         'timestamp': str(r[2]) if r[2] else None,
         'recallable': bool(r[3]), 'content_locked': bool(r[4]),
     } for r in rows]})

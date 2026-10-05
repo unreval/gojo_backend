@@ -7,6 +7,7 @@ read only from declared stances and source-valid Cognitive items.
 from relationship_state import read_state, list_declared_stances
 from cognitive_reader import read_relationship_semantic_state
 from relationship_semantics import normalize_romantic_label
+from role_view import render_role_view
 
 
 def _legacy_projection(state):
@@ -35,12 +36,14 @@ def _ledger_dimension(state, name):
     }
 
 
-def _stance_rows(stances, kind):
+def _stance_rows(stances, kind, observer_id):
     return [
         {
             'id': row.get('id'),
             'type': row.get('type'),
-            'content': str(row.get('content') or ''),
+            'content': render_role_view(
+                row.get('content'), observer_id=observer_id,
+                source_character_id=observer_id),
             'status': row.get('status') or 'active',
             'declared_at': row.get('declared_at'),
             'source_event_ref': row.get('source_event_ref'),
@@ -61,7 +64,7 @@ def _stance_dimension(rows):
     }
 
 
-def _cognitive_dimension(item, *, default_status='unassessed'):
+def _cognitive_dimension(item, observer_id, *, default_status='unassessed'):
     if not isinstance(item, dict):
         return {
             'status': default_status,
@@ -69,6 +72,9 @@ def _cognitive_dimension(item, *, default_status='unassessed'):
             'source': 'cognitive',
         }
     value = item.get('statement') or item.get('content') or item.get('value')
+    if isinstance(value, str):
+        value = render_role_view(
+            value, observer_id=observer_id, source_character_id=observer_id)
     return {
         'status': item.get('kind') or 'cognitive',
         'value': value,
@@ -91,12 +97,12 @@ def build_relationship_panel(user_id, character_id):
     cognition = read_relationship_semantic_state(user_id, character_id)
     cognition = cognition if isinstance(cognition, dict) else {}
 
-    engagement = _cognitive_dimension(cognition.get('engagement_style'))
-    openness = _cognitive_dimension(cognition.get('romantic_openness'))
+    engagement = _cognitive_dimension(cognition.get('engagement_style'), character_id)
+    openness = _cognitive_dimension(cognition.get('romantic_openness'), character_id)
     conflict_item = cognition.get('internal_conflict')
     if isinstance(conflict_item, dict):
         internal_conflict = {
-            **_cognitive_dimension(conflict_item),
+            **_cognitive_dimension(conflict_item, character_id),
             'status': 'present',
         }
     else:
@@ -112,7 +118,9 @@ def build_relationship_panel(user_id, character_id):
         'status': 'cognitive' if isinstance(label_item, dict) else 'unresolved',
         'value': label_value,
         'content': (
-            label_item.get('content') if isinstance(label_item, dict) else
+            render_role_view(
+                label_item.get('content'), observer_id=character_id,
+                source_character_id=character_id) if isinstance(label_item, dict) else
             '缺少已形成的窄结论；保持未决。'
         ),
         'source_event_ids': tuple(
@@ -122,9 +130,9 @@ def build_relationship_panel(user_id, character_id):
         'source': 'cognitive',
     }
 
-    care_rows = _stance_rows(stances, {'care_admission'})
-    boundary_rows = _stance_rows(stances, {'retreat_boundary', 'boundary_stated'})
-    all_stance_rows = _stance_rows(stances, None)
+    care_rows = _stance_rows(stances, {'care_admission'}, character_id)
+    boundary_rows = _stance_rows(stances, {'retreat_boundary', 'boundary_stated'}, character_id)
+    all_stance_rows = _stance_rows(stances, None, character_id)
     return {
         'attachment': _ledger_dimension(state, 'attachment'),
         'commitment': _ledger_dimension(state, 'commitment'),

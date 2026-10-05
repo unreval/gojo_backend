@@ -292,11 +292,11 @@ def compute_pursue_withdraw(user_id, character_id) -> Dict:
     if user_ratio >= PURSUE_WITHDRAW_IMBALANCE_THRESHOLD:
         return {
             'pattern': 'user_more_initiative',
-            'desc': '记录中用户侧发起次数明显偏多，仅供回复节奏参考',
+            'desc': '记录中她发起的次数明显偏多，仅供回复节奏参考',
         }
     if user_ratio <= 1 - PURSUE_WITHDRAW_IMBALANCE_THRESHOLD:
         return {
             'pattern': 'character_more_initiative',
-            'desc': '记录中角色侧发起次数明显偏多，仅供回复节奏参考',
+            'desc': '记录中我发起的次数明显偏多，仅供回复节奏参考',
         }
     return {'pattern': None}

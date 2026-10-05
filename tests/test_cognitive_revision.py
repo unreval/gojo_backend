@@ -526,8 +526,8 @@ class ReaderStructureTests(unittest.TestCase):
         text = cognitive_reader.build_cognitive_prompt_context(
             'u', 'gojo', conn=Conn(),
         )
-        self.assertIn('【关于用户的稳定认识】', text)
-        self.assertIn('【关于我与用户关系的认识】', text)
+        self.assertIn('【关于她的稳定认识】', text)
+        self.assertIn('【关于我与她关系的认识】', text)
         self.assertIn('【反复出现的互动模式】', text)
         self.assertIn('【关于自己的暂时认识】', text)
         self.assertIn('【当前共享的关系框架】', text)

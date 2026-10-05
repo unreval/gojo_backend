@@ -25,6 +25,7 @@ from config import DEFAULT_CHARACTER_ID
 import db_diary
 import diary_engine
 import diary_scheduler
+from role_view import render_role_view
 
 router = APIRouter()
 
@@ -36,7 +37,12 @@ DEFAULT_USER = 'user_mofpiyd7442ia7'
 @router.get('/diary/char/{character_id}')
 async def get_char_diary(character_id: str, user_id: str = DEFAULT_USER):
     diaries = db_diary.list_char_diaries(character_id, user_id, limit=50)
-    return JSONResponse({'diaries': diaries})
+    return JSONResponse({'diaries': [
+        {**entry, 'content': render_role_view(
+            entry.get('content'), observer_id=character_id,
+            source_character_id=character_id)}
+        for entry in diaries
+    ]})
 
 
 @router.post('/diary/char/{diary_id}/comment')
@@ -155,7 +161,12 @@ async def write_now(character_id: str, data: dict):
     if not r:
         return JSONResponse({'ok': False, 'error': 'generate failed'})
     did, content, emotion = r
-    return JSONResponse({'ok': True, 'diary_id': did, 'content': content, 'emotion': emotion})
+    return JSONResponse({
+        'ok': True, 'diary_id': did,
+        'content': render_role_view(
+            content, observer_id=character_id, source_character_id=character_id),
+        'emotion': emotion,
+    })
 
 
 @router.post('/diary/peek_now')

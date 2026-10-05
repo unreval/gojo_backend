@@ -442,7 +442,8 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
         from smart_recall import format_recall_for_prompt
         _recall_result = filter_recall_authority(
             getattr(context_pack, 'recall_result', None) or {}, user_id, character_id)
-        memory_text, bond_text, told_text = format_recall_for_prompt(_recall_result)
+        memory_text, bond_text, told_text = format_recall_for_prompt(
+            _recall_result, observer_id=character_id)
     else:
         try:
             from smart_recall import two_level_recall, format_recall_for_prompt
@@ -464,7 +465,8 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
             if _recall_result is not None:
                 from memory_authority import filter_recall_authority
                 _recall_result = filter_recall_authority(_recall_result, user_id, character_id)
-                memory_text, bond_text, told_text = format_recall_for_prompt(_recall_result)
+                memory_text, bond_text, told_text = format_recall_for_prompt(
+                    _recall_result, observer_id=character_id)
         except Exception as _e:
             print(f'[prompt] 两级召回失败，退回旧逻辑：{_e}')
             _recall_result = None
@@ -478,15 +480,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
                 user_id, character_id, _SHARED, user_message, top_k=8)
         if long_memories is None:
             long_memories = get_long_memory(user_id, character_id)
-        from datetime import timezone as _tz
-        frozen_utc = now_utc.astimezone(_tz.utc).replace(tzinfo=None)
-        fresh_memories = []
-        for content, ts, category in long_memories:
-            if category == '状态' and ts is not None:
-                if (frozen_utc - ts).total_seconds() / 3600 > 48:
-                    continue
-            fresh_memories.append((content, ts, category))
-        long_memories = fresh_memories
+        # Both factual readers apply the same database-time status gate.
         try:
             _all_facts = get_long_memory(user_id, character_id)
             _existing = {c for c, _t, _cat in long_memories}

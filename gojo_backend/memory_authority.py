@@ -1,5 +1,6 @@
 """Current canonical provenance for long/bond projections, shared by readers."""
 import json
+from role_view import PROJECTION_VERSION, render_role_view
 
 AUTHORITY = 'canonical_evidence_v1'
 MEMORY_AUTHORITY_DDL = tuple(
@@ -10,6 +11,8 @@ MEMORY_AUTHORITY_DDL = tuple(
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS authority_event_id BIGINT",
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS authority_belief_key TEXT",
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS authority_operation_id TEXT NOT NULL DEFAULT 'main'",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS projection_version TEXT NOT NULL DEFAULT 'legacy_v1'",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS semantic_payload JSONB",
         f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_authority_operation ON {table}(authority_event_id, authority_operation_id) WHERE authority_event_id IS NOT NULL",
         f"DROP INDEX IF EXISTS idx_{table}_authority_event",
     )
@@ -50,7 +53,10 @@ def current_answer_question_sql(alias='cognitive_questions'):
               AND op.value->>'question_key'={alias}.question_key
               AND ae.id::text={alias}.metadata->'current_judgment'->>'event_id'
               AND op.key={alias}.metadata->'current_judgment'->>'operation_id'
-              AND op.value->>'memory_content'={alias}.metadata->'current_judgment'->>'content'
+              AND ((op.value->>'projection_version'='{PROJECTION_VERSION}'
+                    AND op.value->'semantic_payload'={alias}.metadata->'current_judgment'->'semantic_payload')
+                   OR (op.value->>'projection_version' IS DISTINCT FROM '{PROJECTION_VERSION}'
+                       AND op.value->>'memory_content'={alias}.metadata->'current_judgment'->>'content'))
         )))"""
 
 
@@ -111,8 +117,8 @@ def answer_question_is_current(user_id, character_id, question, conn=None):
 def authoritative_memory_sql(table):
     """SQL is correlated to a fixed table name, never supplied by a request.
 
-    A badge or source id alone proves nothing: compare the canonical text,
-    adjudication, projected content, owner, scope, and effective belief too.
+    A badge or source id alone proves nothing: compare the adjudicated semantic
+    record (or a bounded legacy projection), owner, scope, and effective belief.
     This also rechecks cached/vector candidates and late legacy writes.
     """
     if table not in ('long_memory', 'bond_memory'):
@@ -134,7 +140,27 @@ def authoritative_memory_sql(table):
                 AND raw.text=ce.payload->>'content'
                 AND ce.adjudication->>'status'='applied'
                 AND decision->>'status'='applied'
-                AND decision->>'memory_content'={table}.content
+                AND (
+                    ({table}.projection_version='{PROJECTION_VERSION}'
+                     AND {table}.semantic_payload IS NOT NULL
+                     AND decision->>'projection_version'='{PROJECTION_VERSION}'
+                     AND decision->'semantic_payload'={table}.semantic_payload
+                     AND {table}.semantic_payload->>'source_event_id'=ce.source_event_id
+                     AND {table}.semantic_payload->>'source_scope'=ce.character_id
+                     AND (decision->>'action' NOT IN ('reported','corrected')
+                          OR ({table}.semantic_payload->>'subject_ref'='user:' || ce.user_id
+                              AND ((ce.payload ? 'claim'
+                                    AND {table}.semantic_payload->>'predicate'=ce.payload->'claim'->>'predicate'
+                                    AND {table}.semantic_payload->>'object'=ce.payload->'claim'->>'object'
+                                    AND {table}.semantic_payload->>'value'=ce.payload->'claim'->>'value'
+                                    AND {table}.semantic_payload->>'time_scope'=ce.payload->'claim'->>'time_scope'
+                                    AND {table}.semantic_payload->>'evidence_text'=ce.payload->'claim'->>'text')
+                                   OR (NOT (ce.payload ? 'claim')
+                                       AND position({table}.semantic_payload->>'evidence_text' in ce.payload->>'content')>0)))))
+                    OR ({table}.projection_version IS DISTINCT FROM '{PROJECTION_VERSION}'
+                        AND (decision->>'memory_content'={table}.content
+                             OR (decision->>'memory_content' LIKE '用户%'
+                                 AND replace(decision->>'memory_content','用户','她')={table}.content))))
                 AND decision->>'memory_table'='{table}'
                 AND (NOT (decision ? 'dependencies') OR
                      {dependencies_current_sql("decision->'dependencies'", 'ce.user_id', 'ce.character_id')})
@@ -151,7 +177,10 @@ def authoritative_memory_sql(table):
                         WHERE b.user_id=ce.user_id AND b.character_id=ce.character_id
                           AND b.belief_key={table}.authority_belief_key
                           AND b.status='active' AND b.metadata->>'review_status'='stable'
-                          AND b.statement={table}.content)))
+                           AND (({table}.projection_version='{PROJECTION_VERSION}'
+                                 AND decision->>'belief_key'=b.belief_key)
+                                OR ({table}.projection_version IS DISTINCT FROM '{PROJECTION_VERSION}'
+                                    AND b.statement=decision->>'memory_content')))))
                 ))"""
 
 
@@ -173,14 +202,38 @@ def current_literal_belief_sql(alias):
             AND op.value->>'belief_key'={alias}.belief_key
             AND raw.role='user' AND COALESCE(raw.status, 'active')='active'
             AND raw.text=ce.payload->>'content'
-            AND COALESCE(op.value->>'memory_content',
-                '用户明确自述：' || (ce.payload->'claim'->>'text') ||
-                '（仅限这次自述，不推断隐含心理）')={alias}.statement)"""
+            AND ((op.value->>'projection_version'='{PROJECTION_VERSION}'
+                  AND op.value->>'belief_key'={alias}.belief_key
+                  AND op.value->'semantic_payload'={alias}.metadata->'semantic_payload')
+                 OR (op.value->>'projection_version' IS DISTINCT FROM '{PROJECTION_VERSION}'
+                     AND COALESCE(op.value->>'memory_content',
+                         '用户明确自述：' || (ce.payload->'claim'->>'text') ||
+                         '（仅限这次自述，不推断隐含心理）')={alias}.statement)))"""
+
+
+def canonical_semantic_payload(*, user_id, character_id, source_id, claim=None,
+                               semantic=None):
+    """Copy the deterministic decision into a versioned projection identity."""
+    payload = {'source_event_id': source_id, 'source_scope': character_id,
+               'observer_ref': character_id}
+    if claim:
+        payload.update(subject_ref='user:' + user_id,
+                       predicate=claim['predicate'], object=claim['object'],
+                       value=claim['value'], time_scope=claim['time_scope'],
+                       evidence_text=claim['text'])
+        if claim.get('deadline'):
+            payload['deadline'] = claim['deadline']
+    else:
+        payload.update(semantic or {})
+    if not payload.get('subject_ref') or not payload.get('predicate'):
+        raise ValueError('canonical_projection_requires_semantic_decision')
+    return payload
 
 
 def project_canonical_memory(cur, *, user_id, character_id, event_id,
                              source_id, content, claim=None, belief_key=None,
-                             occurred_at=None, operation_id='main', dependencies=None):
+                             occurred_at=None, operation_id='main', dependencies=None,
+                             semantic=None):
     """Project an adjudicated literal report/utterance in its cycle transaction.
 
     The caller has locked and reloaded the original message. Generic memory
@@ -188,6 +241,12 @@ def project_canonical_memory(cur, *, user_id, character_id, event_id,
     Readers independently verify the resulting row against its adjudication.
     """
     predicate = (claim or {}).get('predicate')
+    semantic_payload = canonical_semantic_payload(
+        user_id=user_id, character_id=character_id, source_id=source_id,
+        claim=claim, semantic=semantic)
+    content = render_role_view(content, observer_id=character_id,
+                               source_character_id=character_id,
+                               semantic=semantic_payload)
     is_bond = not claim or predicate in ('explicit_boundary', 'explicit_refusal', 'explicit_promise', 'reported_fulfillment')
     table = 'bond_memory' if is_bond else 'long_memory'
     from datetime import timedelta
@@ -197,26 +256,32 @@ def project_canonical_memory(cur, *, user_id, character_id, event_id,
     if table == 'long_memory':
         cur.execute("""INSERT INTO long_memory
             (user_id,character_id,content,category,timestamp,source_event_refs,
-             authority,authority_event_id,authority_belief_key,expires_at,authority_operation_id)
-            VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)
+              authority,authority_event_id,authority_belief_key,expires_at,authority_operation_id,
+              projection_version,semantic_payload)
+             VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s::jsonb)
             ON CONFLICT (authority_event_id,authority_operation_id) WHERE authority_event_id IS NOT NULL
             DO NOTHING RETURNING id""",
             (user_id, character_id, content, category, occurred_at,
-             json.dumps(dependencies or [{'source_id': source_id}]), AUTHORITY, event_id, belief_key, expires_at, operation_id))
+              json.dumps(dependencies or [{'source_id': source_id}]), AUTHORITY, event_id, belief_key, expires_at, operation_id,
+              PROJECTION_VERSION, json.dumps(semantic_payload, ensure_ascii=False)))
     else:
         cur.execute("""INSERT INTO bond_memory
-            (user_id,character_id,kind,content,timestamp,authority,authority_event_id,authority_belief_key,authority_operation_id)
-            VALUES (%s,%s,'between',%s,%s,%s,%s,%s,%s)
+            (user_id,character_id,kind,content,timestamp,authority,authority_event_id,authority_belief_key,authority_operation_id,
+             projection_version,semantic_payload)
+             VALUES (%s,%s,'between',%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
             ON CONFLICT (authority_event_id,authority_operation_id) WHERE authority_event_id IS NOT NULL
             DO NOTHING RETURNING id""",
-            (user_id, character_id, content, occurred_at, AUTHORITY, event_id, belief_key, operation_id))
+             (user_id, character_id, content, occurred_at, AUTHORITY, event_id, belief_key, operation_id,
+              PROJECTION_VERSION, json.dumps(semantic_payload, ensure_ascii=False)))
     row = cur.fetchone()
     if row:
         for dependency in dependencies or [{'source_id': source_id}]:
             cur.execute("""INSERT INTO memory_source_events(memory_type,memory_id,source_event_id)
                            VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
                         (table, row[0], dependency['source_id']))
-    return {'memory_table': table, 'memory_content': content}
+    return {'memory_table': table, 'memory_content': content,
+            'projection_version': PROJECTION_VERSION,
+            'semantic_payload': semantic_payload}
 
 
 def filter_recall_authority(result, user_id, character_id):
@@ -237,30 +302,41 @@ def filter_recall_authority(result, user_id, character_id):
     try:
         for table, candidates in (('long_memory', facts), ('bond_memory', bonds)):
             ids = list({row['id'] for row in candidates if isinstance(row.get('id'), int)})
-            allowed[table] = set()
+            allowed[table] = {}
             if not ids:
                 continue
             if database is None:
                 database = get_conn()
             cur = database.cursor()
             try:
-                cur.execute(f"""SELECT id, content FROM {table}
+                cur.execute(f"""SELECT id, content, projection_version, semantic_payload, character_id FROM {table}
                     WHERE user_id=%s AND character_id IN (%s,%s) AND id=ANY(%s)
                       AND {authoritative_memory_sql(table)}""",
                     (user_id, character_id, 'shared' if table == 'long_memory' else character_id, ids))
-                allowed[table] = set(cur.fetchall())
+                allowed[table] = {row[0]: row for row in cur.fetchall()}
             finally:
                 cur.close()
     except Exception:
         # A source-check failure must not expose a cached generated assertion.
-        allowed = {'long_memory': set(), 'bond_memory': set()}
+        allowed = {'long_memory': {}, 'bond_memory': {}}
     finally:
         if database is not None:
             database.close()
 
     def keep(rows, table):
-        return [dict(row, authority=AUTHORITY) for row in rows
-                if (row.get('id'), row.get('content')) in allowed[table]]
+        kept = []
+        for row in rows:
+            stored = allowed[table].get(row.get('id'))
+            if stored is None:
+                continue
+            _, content, version, semantic, source_character_id = stored
+            kept.append(dict(row, authority=AUTHORITY,
+                content=render_role_view(content, observer_id=character_id,
+                                         source_character_id=source_character_id,
+                                         semantic=semantic if version == PROJECTION_VERSION else None),
+                projection_version=version, semantic_payload=semantic,
+                source_character_id=source_character_id))
+        return kept
 
     result['facts'] = keep(facts, 'long_memory')
     for fact in result['facts']:

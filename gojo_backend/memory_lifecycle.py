@@ -830,6 +830,11 @@ def recall_lifecycle_memories(user_id, character_id, user_message='', limit=6,
             f'linked_long_vectors={len(long_memory_embeddings)}'
         )
         _trace_lifecycle_selection(selected)
+        from role_view import render_role_view
+        for item in selected:
+            item['content'] = render_role_view(
+                item['content'], observer_id=character_id,
+                source_character_id=character_id)
         return selected
     except Exception as e:
         print(f'[memory_lifecycle] lifecycle recall failed: {e}')
@@ -870,7 +875,13 @@ def recall_sticky_notes(user_id, character_id, user_message='', limit=3):
             item['score'] = _score_recall_entry(item['content'], user_message, 0.85, item['updated_at'])
             items.append(item)
         items.sort(key=lambda it: (it['score'], it['updated_at'] or datetime.min), reverse=True)
-        return items[:limit]
+        from role_view import render_role_view
+        selected = items[:limit]
+        for item in selected:
+            item['content'] = render_role_view(
+                item['content'], observer_id=character_id,
+                source_character_id=character_id)
+        return selected
     except Exception as e:
         print(f'[memory_lifecycle] sticky recall failed: {e}')
         return []
@@ -1051,7 +1062,13 @@ def recall_diary_memories(user_id, character_id, user_message='', limit=3):
             }
             item['source_ref'] = dict(item['source_event_refs'][0])
             items.append(item)
-        return _select_diary_memories(items, terms, limit)
+        from role_view import render_role_view
+        selected = _select_diary_memories(items, terms, limit)
+        for item in selected:
+            item['content'] = render_role_view(
+                item['content'], observer_id=character_id,
+                source_character_id=character_id)
+        return selected
     except Exception as e:
         print(f'[memory_lifecycle] diary recall failed: {e}')
         return []

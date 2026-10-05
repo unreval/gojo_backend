@@ -114,7 +114,7 @@ class ExplicitAnswerSQLTests(ExplicitAnswerFixture, unittest.TestCase):
     def test_original_character_yes_has_full_chain_and_no_romance(self):
         self.exchange()
         decision = self.assert_answer()
-        self.assertIn('角色被用户称作', decision['memory_content'])
+        self.assertIn('我明确答复：接受她称呼我', decision['memory_content'])
         before = self.snapshot()
         cached = self.recall()
         self.sql("UPDATE chat_log SET status='deleted' WHERE event_id='q'")
@@ -128,7 +128,7 @@ class ExplicitAnswerSQLTests(ExplicitAnswerFixture, unittest.TestCase):
 
     def test_reverse_user_yes_is_scoped(self):
         self.exchange(reverse=True)
-        self.assertIn('用户被角色称作', self.assert_answer('user')['memory_content'])
+        self.assertIn('她明确答复：接受我称呼她', self.assert_answer('user')['memory_content'])
 
 
     def test_both_directions_are_independent(self):

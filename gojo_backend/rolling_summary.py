@@ -16,7 +16,7 @@ from context_budget import BudgetConfig, estimate_tokens
 from structured_output import StructuredOutputError, invoke_structured_llm
 
 
-SUMMARY_PROCESSOR_VERSION = 'rolling_summary_v1'
+SUMMARY_PROCESSOR_VERSION = 'rolling_summary_role_view_v2'
 KIND = 'rolling_summary'
 
 _LOCK = threading.Lock()
@@ -166,6 +166,8 @@ def _summary_system():
     return (
         '你是对话情景摘要器。只根据给定原文归纳，禁止文学化，禁止脑补动机，'
         '禁止把假设写成事实，禁止扩写不存在的事件。'
+        '从当前角色视角写：说话者“她”指对方，“我”指当前角色；'
+        '不要用“用户表示”“用户明确自述”等机械措辞。'
         '只输出 JSON。'
     )
 
@@ -173,7 +175,7 @@ def _summary_system():
 def _summary_user(events: Sequence[dict], previous_text=''):
     lines = []
     for ev in events:
-        role = '用户' if (ev.get('role') == 'user') else '角色'
+        role = '她' if (ev.get('role') == 'user') else '我'
         content = re_sub_ws(ev.get('content') or '')[:240]
         if content:
             lines.append(f'{role}: {content}')

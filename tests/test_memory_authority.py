@@ -84,9 +84,9 @@ class MemoryAuthorityTests(unittest.TestCase):
         self.assertEqual(self.sql('SELECT COUNT(*) FROM bond_memory')[0][0], 0)
         facts = user_memory.get_long_memory('u', 'c')
         self.assertEqual(len(facts), 1)
-        self.assertIn('我喜欢咖啡', facts[0][0])
+        self.assertIn('她喜欢咖啡', facts[0][0])
         text = self.prompt_memory(self.current_result())
-        self.assertIn('我喜欢咖啡', text)
+        self.assertIn('她喜欢咖啡', text)
         self.assertNotIn('火星', text)
         self.assertNotIn('已确认事实', text)
 
@@ -120,7 +120,7 @@ class MemoryAuthorityTests(unittest.TestCase):
         self.process_group(2)
         bonds = user_memory.get_bond_memories('u', 'c')
         self.assertEqual(len(bonds), 2)
-        quote = next(text for _, text, _ in bonds if '角色实际说过' in text)
+        quote = next(text for _, text, _ in bonds if '我实际说过' in text)
         self.assertIn('不证明话中内容或关系', quote)
         self.assertEqual(user_memory.get_bond_memories('u', 'd'), [])
         self.assertEqual(self.sql("SELECT COUNT(*) FROM cognitive_beliefs WHERE statement LIKE '%结婚%'")[0][0], 0)
@@ -208,10 +208,77 @@ class MemoryAuthorityTests(unittest.TestCase):
         self.report('raw','我喜欢咖啡')
         cached = self.current_result()
         cached['facts'][0]['content']='她住在火星'
-        self.assertEqual(filter_recall_authority(cached,'u','c')['facts'], [])
+        self.assertIn('她喜欢咖啡', filter_recall_authority(cached,'u','c')['facts'][0]['content'])
+        self.assertNotIn('火星', str(filter_recall_authority(cached,'u','c')))
         self.sql("UPDATE long_memory SET content='她住在火星'")
         self.database.commit()
-        self.assertEqual(user_memory.get_long_memory('u','c'), [])
+        self.assertIn('她喜欢咖啡', user_memory.get_long_memory('u','c')[0][0])
+
+    def test_versioned_semantic_survives_display_edit_and_repeated_ddl(self):
+        from memory_authority import MEMORY_AUTHORITY_DDL
+        self.report('raw', '我喜欢咖啡')
+        original = self.sql("SELECT text FROM chat_log WHERE event_id='raw'")[0][0]
+        before = self.sql('SELECT semantic_payload,authority,authority_event_id FROM long_memory')[0]
+        self.sql("UPDATE long_memory SET content='过期的显示文字'")
+        for _ in range(3):
+            for ddl in MEMORY_AUTHORITY_DDL:
+                self.sql(ddl)
+        self.database.commit()
+        self.assertEqual(self.sql("SELECT text FROM chat_log WHERE event_id='raw'")[0][0], original)
+        self.assertEqual(self.sql('SELECT semantic_payload,authority,authority_event_id FROM long_memory')[0], before)
+        self.assertEqual(self.sql("SELECT content FROM long_memory")[0][0], '过期的显示文字')
+        self.assertIn('她喜欢咖啡', user_memory.get_long_memory('u', 'c')[0][0])
+        self.assertIn('她喜欢咖啡', self.prompt_memory(self.current_result()))
+
+    def test_cognitive_display_edit_does_not_change_role_visible_fact(self):
+        self.report('raw', '我喜欢咖啡')
+        metadata = self.sql('SELECT metadata FROM cognitive_questions')[0][0]
+        metadata['current_judgment']['content'] = '她住在火星'
+        self.sql('UPDATE cognitive_questions SET metadata=%s::jsonb',
+                 (json.dumps(metadata, ensure_ascii=False),))
+        self.sql("UPDATE cognitive_beliefs SET statement='她住在火星'")
+        self.sql("UPDATE cognitive_hypotheses SET statement='她住在火星'")
+        self.database.commit()
+        from cognitive_reader import build_cognitive_prompt_context, iter_active_cognitive_items
+        context = build_cognitive_prompt_context('u', 'c', conn=self.database)
+        items = iter_active_cognitive_items('u', 'c', conn=self.database, query='咖啡')
+        self.assertIn('她喜欢咖啡', context)
+        self.assertNotIn('火星', context)
+        self.assertTrue(any('她喜欢咖啡' in item['text'] for item in items))
+        self.assertNotIn('火星', str(items))
+
+    def test_legacy_canonical_and_startup_changed_projection_still_read(self):
+        self.report('raw', '我喜欢咖啡')
+        legacy = '用户明确自述：我喜欢咖啡（仅限这次自述，不推断隐含心理）'
+        decision = self.sql('SELECT adjudication FROM cognitive_events')[0][0]
+        for operation in (decision, decision['operations']['main']):
+            operation['memory_content'] = legacy
+            operation.pop('semantic_payload', None)
+            operation.pop('projection_version', None)
+        self.sql('UPDATE cognitive_events SET adjudication=%s::jsonb',
+                 (json.dumps(decision, ensure_ascii=False),))
+        self.sql("UPDATE cognitive_beliefs SET statement=%s,metadata=metadata-'semantic_payload'-'projection_version'",
+                 (legacy,))
+        self.sql("UPDATE long_memory SET content=%s,projection_version='legacy_v1',semantic_payload=NULL",
+                 (legacy,))
+        self.database.commit()
+        self.assertIn('她喜欢咖啡', user_memory.get_long_memory('u', 'c')[0][0])
+        self.sql('UPDATE long_memory SET content=%s', (legacy.replace('用户', '她'),))
+        self.database.commit()
+        self.assertIn('她喜欢咖啡', user_memory.get_long_memory('u', 'c')[0][0])
+        self.sql("UPDATE long_memory SET content='她住在火星'")
+        self.database.commit()
+        self.assertEqual(user_memory.get_long_memory('u', 'c'), [])
+
+    def test_private_and_shared_facts_keep_their_original_audience(self):
+        self.report('private', '我喜欢咖啡')
+        self.assertIn('她喜欢咖啡', user_memory.get_long_memory('u', 'c')[0][0])
+        self.assertEqual(user_memory.get_long_memory('u', 'd'), [])
+        self.group_source(1, '我喜欢茶')
+        self.process_group(1)
+        other_view = [text for text, _timestamp, _category in user_memory.get_long_memory('u', 'd')]
+        self.assertTrue(any('她喜欢茶' in text for text in other_view))
+        self.assertFalse(any('咖啡' in text for text in other_view))
 
     def test_forged_group_scope_is_rechecked_at_commit(self):
         self.group_source(1, '我喜欢你')
@@ -374,7 +441,7 @@ class MemoryAuthorityTests(unittest.TestCase):
         self.report('private-done', f'我已兑现截至{deadline}的承诺「寄明信片」')
         self.assertEqual(self.sql('SELECT status FROM cognitive_predictions'), [('pending',)])
         self.assertEqual(self.sql("SELECT adjudication->>'reason' FROM cognitive_events WHERE source_event_id='private-done'"), [('fulfillment_source_scope_mismatch',)])
-        self.assertIn('我承诺', user_memory.get_bond_memories('u','c')[0][1])
+        self.assertIn('她承诺', user_memory.get_bond_memories('u','c')[0][1])
         self.group_source(2, f'我已兑现截至{deadline}的承诺「寄明信片」', target='c')
         # Commit a later occurrence so it is eligible to settle the prediction.
         self.sql("UPDATE chat_log SET created_at=%s WHERE event_id='group:1:message:2'", (self.now,))

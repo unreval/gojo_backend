@@ -1195,32 +1195,40 @@ def revalidate_pack_blocks(pack, user_id, character_id, query):
     except Exception:
         cognitive = ''
     return dict(cognitive_prompt_text=cognitive,
-                pinned_prompt_text=_format_pinned_block([i for i in items if i.item_type == 'pinned']),
-                summary_prompt_text=_format_summary_block([i for i in items if i.item_type == 'rolling_summary']),
-                episode_prompt_text=_format_episode_block([i for i in items if i.item_type == 'episodic_memory']))
+                pinned_prompt_text=_format_pinned_block([i for i in items if i.item_type == 'pinned'], character_id),
+                summary_prompt_text=_format_summary_block([i for i in items if i.item_type == 'rolling_summary'], character_id),
+                episode_prompt_text=_format_episode_block([i for i in items if i.item_type == 'episodic_memory'], character_id))
 
 
-def _format_pinned_block(items: Sequence[ContextItem]) -> str:
+def _view_text(text, observer_id):
+    if not observer_id:
+        return text
+    from role_view import render_role_view
+    return render_role_view(text, observer_id=observer_id,
+                            source_character_id=observer_id)
+
+
+def _format_pinned_block(items: Sequence[ContextItem], observer_id=None) -> str:
     if not items:
         return ''
     lines = ['【当前重要事项——工作集，不是永久记忆】']
     for item in items:
         kind = (item.metadata or {}).get('pin_type') or 'item'
-        lines.append(f'- [{kind}] {item.text}')
+        lines.append(f'- [{kind}] {_view_text(item.text, observer_id)}')
     lines.append('这些是当前仍需记住的事项；完成后不要继续当作未决。')
     return '\n' + '\n'.join(lines) + '\n'
 
 
-def _format_summary_block(items: Sequence[ContextItem]) -> str:
+def _format_summary_block(items: Sequence[ContextItem], observer_id=None) -> str:
     if not items:
         return ''
     lines = ['【稍早连续讨论的滚动摘要——不能替代原文 Raw Event】']
     for item in items:
-        lines.append(f'- {item.text}')
+        lines.append(f'- {_view_text(item.text, observer_id)}')
     return '\n' + '\n'.join(lines) + '\n'
 
 
-def _format_episode_block(items: Sequence[ContextItem]) -> str:
+def _format_episode_block(items: Sequence[ContextItem], observer_id=None) -> str:
     """Render selected episodes as derived history, never as new facts."""
     if not items:
         return ''
@@ -1230,11 +1238,11 @@ def _format_episode_block(items: Sequence[ContextItem]) -> str:
         stamp = raw.get('range_end') or raw.get('updated_at')
         date = stamp.strftime('%Y-%m-%d') if hasattr(stamp, 'strftime') else ''
         prefix = f'[{date}] ' if date else ''
-        lines.append(f'- {prefix}{item.text}')
+        lines.append(f'- {prefix}{_view_text(item.text, observer_id)}')
     lines.extend((
         '使用规则：',
         '1. 这是从可追溯 Raw Event 组织出的历史经历，不是新的事实、关系结论或情感判断。',
-        '2. 优先级始终是：当前用户消息/当前直接事件 > 当前重要事项、active 关系状态、较新的明确事实 > 这段历史经历。',
+        '2. 优先级始终是：她当前的消息/当前直接事件 > 当前重要事项、active 关系状态、较新的明确事实 > 这段历史经历。',
         '3. 只能自然记得这里已经描述的经过；不得补写未记录的心理、动机、关系含义或细节。',
         '4. 当前消息已说明旧事完成、取消、变化或相反时，以当前证据为准，不要坚持旧摘要。',
     ))
@@ -1647,9 +1655,9 @@ def assemble_from_events(
             str(ev.get('event_id') or '') for ev in spill if ev.get('event_id')
         ],
         items=hot_kept + pin_kept + sum_kept + recall_kept + rel_kept + cog_kept + aux_kept,
-        pinned_prompt_text=_format_pinned_block(pin_kept),
-        summary_prompt_text=_format_summary_block(sum_kept),
-        episode_prompt_text=_format_episode_block(episode_kept),
+        pinned_prompt_text=_format_pinned_block(pin_kept, character_id),
+        summary_prompt_text=_format_summary_block(sum_kept, character_id),
+        episode_prompt_text=_format_episode_block(episode_kept, character_id),
         relationship_prompt_text=_format_plain_block('', rel_kept),
         cognitive_prompt_text=_format_plain_block(
             '【当前认知——结论只表达，未决保持未决】', cog_kept),

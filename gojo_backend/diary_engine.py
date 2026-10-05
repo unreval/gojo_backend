@@ -10,6 +10,7 @@ import anthropic
 
 from characters import get_character
 from user_memory import get_bond_memories, get_short_memory, get_long_memory, get_first_interaction_days
+from role_view import render_role_view
 import db_diary
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -56,19 +57,19 @@ def _gather_daily_diary_material(character_id, user_id, now):
         summary = note.get('summary') or ''
         change = note.get('salient_change') or ''
         if summary:
-            cycle_lines.append(f'- 复盘：{summary}')
+            cycle_lines.append(f'- 复盘：{render_role_view(summary, observer_id=character_id, source_character_id=character_id)}')
         if change:
-            cycle_lines.append(f'- 变化：{change}')
+            cycle_lines.append(f'- 变化：{render_role_view(change, observer_id=character_id, source_character_id=character_id)}')
     for question in cycle_notes.get('questions') or []:
         text = question.get('question_text') or ''
         if text:
             cycle_lines.append(
-                f'- 问题[{question.get("status") or ""}]：{text}')
+                f'- 问题[{question.get("status") or ""}]：{render_role_view(text, observer_id=character_id, source_character_id=character_id)}')
     for prediction in cycle_notes.get('settled_predictions') or []:
         status = prediction.get('status') or ''
         statement = prediction.get('statement') or ''
         if statement:
-            cycle_lines.append(f'- 预测{status}：{statement}')
+            cycle_lines.append(f'- 预测{status}：{render_role_view(statement, observer_id=character_id, source_character_id=character_id)}')
     cycle_text = '\n'.join(cycle_lines) if cycle_lines else '（今天没有额外的复盘记录）'
     return event_text, cycle_text, len(events)
 
@@ -119,9 +120,13 @@ def generate_char_diary(character_id, user_id, topic=None):
                 f'{"她" if r=="user" else "我"}：{c}' for r, c in shorts
             ) if shorts else '（最近没怎么聊）'
         bonds = get_bond_memories(user_id, character_id, kind='between', limit=8)
-        bond_text = '\n'.join(f'- {b[1]}' for b in bonds) if bonds else '（还没什么共同的事）'
+        bond_text = '\n'.join(
+            f'- {render_role_view(b[1], observer_id=character_id, source_character_id=character_id)}'
+            for b in bonds) if bonds else '（还没什么共同的事）'
         tolds = get_bond_memories(user_id, character_id, kind='told', limit=6)
-        told_text = '\n'.join(f'- {t[1]}' for t in tolds) if tolds else '（她还没告诉过你什么）'
+        told_text = '\n'.join(
+            f'- {render_role_view(t[1], observer_id=character_id, source_character_id=character_id)}'
+            for t in tolds) if tolds else '（她还没告诉过你什么）'
         if pack is not None and getattr(pack, 'recall_result', None) is not None:
             from memory_authority import filter_recall_authority
             from smart_recall import format_recall_for_prompt
@@ -136,7 +141,7 @@ def generate_char_diary(character_id, user_id, topic=None):
             for row in long_mems[:12]:
                 content = row[0] if isinstance(row, (tuple, list)) else row
                 if content:
-                    fact_lines.append(f'- {content}')
+                    fact_lines.append(f'- {render_role_view(content, observer_id=character_id, source_character_id=character_id)}')
             facts_text = '\n'.join(fact_lines) if fact_lines else '（还不了解她的具体情况）'
         fact_lines = [ln for ln in (facts_text or '').split('\n') if ln.strip()]
         try:

@@ -577,8 +577,12 @@ def _exchange_role(source):
 
 def _question_spec(source, part):
     speaker = _exchange_role(source)
+    # The raw question remains in chat_log; this is its character-facing view.
+    speaker_view = '她' if speaker == 'user' else '我'
+    respondent_view = '我' if speaker == 'user' else '她'
+    question_view = f'{speaker_view}问{respondent_view}是否接受{speaker_view}叫{respondent_view}「{part["value"]}」。'
     return {'question_key': 'answer.' + _digest(source['source_id'] + ':' + part['operation_id']),
-            'question_text': part['text'], 'object': part['value'],
+            'question_text': question_view, 'object': part['value'],
             'speaker': speaker, 'respondent': 'character' if speaker == 'user' else 'user',
             'predicate': 'nickname_permission', 'time_scope': 'this_exchange',
             'dependencies': [dict(source, evidence_role='question')]}
@@ -636,8 +640,9 @@ def _answer_candidates(cur, user_id, character_id, source, name=None):
 
 
 def _apply_exchange_operation(cur, *, cycle_id, user_id, character_id, event_id,
-                              source, part, now):
-    from memory_authority import project_canonical_memory
+                               source, part, now):
+    from memory_authority import canonical_semantic_payload, project_canonical_memory
+    from role_view import PROJECTION_VERSION, render_role_view
     op = part['operation_id']
     decision = {'status': 'pending', 'action': 'pending', 'authority': 'explicit_answer_v1',
                 'operation_id': op, 'reason': 'question_not_unique_or_active'}
@@ -680,16 +685,21 @@ def _apply_exchange_operation(cur, *, cycle_id, user_id, character_id, event_id,
         decision.update(status='applied', action='question', question_key=qkey, dependencies=deps)
     else:
         deps.append(dict(source, evidence_role='answer'))
-        actor = '角色' if spec['respondent'] == 'character' else '用户'
-        caller = '用户' if spec['speaker'] == 'user' else '角色'
-        scope = f'{actor}被{caller}称作「{spec["object"]}」'
         value = (part['value'] or {}).get('value')
         pending = part['kind'] == 'deferred'
-        content = (f'{actor}在该次对话中表示「{part["text"]}」，关于{scope}的问题仍待回答。'
-                   if pending else f'{actor}在该次对话中明确答复：{"接受" if value == "yes" else "不接受"}{scope}（仅记录该答复，不推断感情或其他许可）。')
+        semantic = canonical_semantic_payload(user_id=user_id,
+            character_id=character_id, source_id=source['source_id'], semantic={
+                'subject_ref': ('character:' + character_id if spec['respondent'] == 'character' else 'user:' + user_id),
+                'caller_ref': ('user:' + user_id if spec['speaker'] == 'user' else 'character:' + character_id),
+                'predicate': 'pending_answer' if pending else 'explicit_answer',
+                'object': spec['object'], 'value': value,
+                'time_scope': 'this_exchange'})
+        content = render_role_view('', observer_id=character_id,
+                                   source_character_id=character_id, semantic=semantic)
         judgment = dict(value=value, content=content, status='pending' if pending else 'committed',
                         event_id=event_id, operation_id=op, actor=spec['respondent'],
-                        evidence_event_ids=list(dict.fromkeys(d['source_id'] for d in deps)))
+                        evidence_event_ids=list(dict.fromkeys(d['source_id'] for d in deps)),
+                        semantic_payload=semantic, projection_version=PROJECTION_VERSION)
         history = list(meta.get('lifecycle_history') or [])
         if meta.get('current_judgment') or meta.get('pending_answer'):
             history.append({'current_judgment': meta.get('current_judgment'),
@@ -722,7 +732,8 @@ def _apply_exchange_operation(cur, *, cycle_id, user_id, character_id, event_id,
                         object=spec['object'], dependencies=deps)
         decision.update(project_canonical_memory(cur, user_id=user_id, character_id=character_id,
             event_id=event_id, source_id=source['source_id'], content=content, operation_id=op,
-            dependencies=deps, occurred_at=datetime.fromisoformat(source['timestamp'])))
+            dependencies=deps, occurred_at=datetime.fromisoformat(source['timestamp']),
+            semantic=semantic))
     meta['updated_by'] = 'explicit_answer_v1'
     cur.execute('''INSERT INTO cognitive_questions(user_id,character_id,question_key,question_text,
         status,metadata,source_event_refs,created_by_cycle_id,updated_by_cycle_id,updated_at)
@@ -789,6 +800,8 @@ def _apply_literal_operation(cur, *, cycle_id, user_id, character_id, event_id,
                              decision):
     from raw_events import get_active_events_by_ids
     from cognitive_predictions import create_prediction, settle_pending_predictions
+    from memory_authority import canonical_semantic_payload
+    from role_view import PROJECTION_VERSION, render_role_view
     claim = parsed.get('claim')
     qkey = evidence_question_key(parsed, source_id if operation_id == 'main' else source_id + ':' + operation_id)
     cur.execute('''SELECT id, metadata FROM cognitive_questions
@@ -875,13 +888,17 @@ def _apply_literal_operation(cur, *, cycle_id, user_id, character_id, event_id,
         decision.update(status='pending', action='pending', reason=meta['pending']['reason'])
     else:
         question_status = 'resolved'
-        question_text = f'用户对{claim["object"]}的明确自述（{claim["time_scope"]}）是什么？'
-        statement = f'用户明确自述：{claim["text"]}（仅限这次自述，不推断隐含心理）'
+        question_text = f'她关于{claim["object"]}说过什么（{claim["time_scope"]}）？'
+        semantic = canonical_semantic_payload(user_id=user_id,
+            character_id=character_id, source_id=source_id, claim=claim)
+        statement = render_role_view('', observer_id=character_id,
+                                     source_character_id=character_id, semantic=semantic)
         bkey = old.get('belief_key') or qkey + f'.e{event_id}'
         meta.pop('pending', None)
         meta['current_judgment'] = {'value': claim['value'], 'content': statement,
             'status': 'committed', 'belief_key': bkey, 'evidence_event_ids': [source_id],
-            'source_chat_id': payload.get('source_chat_id') or character_id}
+            'source_chat_id': payload.get('source_chat_id') or character_id,
+            'semantic_payload': semantic, 'projection_version': PROJECTION_VERSION}
         meta['claim_scope'] = {k: claim[k] for k in ('subject', 'predicate', 'object', 'time_scope', 'source')}
         decision.update(status='applied', action='corrected' if parsed['operation'] == 'correction' else 'reported', belief_key=bkey)
     meta['updated_by'] = 'deterministic_evidence_policy_v1'
@@ -905,7 +922,8 @@ def _apply_literal_operation(cur, *, cycle_id, user_id, character_id, event_id,
     if decision['status'] == 'applied' and not old:
         provenance = {'claim_scope': meta['claim_scope'], 'scope': 'single_event',
             'question_key': qkey, 'review_status': 'stable',
-            'authority': 'literal_self_report_only', 'basis_belief_keys': []}
+            'authority': 'literal_self_report_only', 'basis_belief_keys': [],
+            'semantic_payload': semantic, 'projection_version': PROJECTION_VERSION}
         # Confidence is confidence in the witnessed report, never in
         # a hidden feeling. Repeated reports do not increase it.
         cur.execute(
@@ -944,7 +962,8 @@ def _apply_literal_operation(cur, *, cycle_id, user_id, character_id, event_id,
         from memory_authority import project_canonical_memory
         decision.update(project_canonical_memory(cur, user_id=user_id, character_id=character_id,
             event_id=event_id, source_id=source_id, content=statement, claim=claim,
-            belief_key=bkey, occurred_at=occurred_at, operation_id=operation_id))
+            belief_key=bkey, occurred_at=occurred_at, operation_id=operation_id,
+            semantic=semantic))
     if parsed['operation'] == 'report' or decision.get('reason') == 'conflicting_report_requires_confirmation':
         decision['settled'] = settle_pending_predictions(cur.connection, user_id=user_id,
             character_id=character_id, event_id=event_id, occurred_at=occurred_at)
@@ -996,11 +1015,18 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                 operations = {}
                 if role == 'assistant':
                     quote_op = 'utterance' if supported else 'main'
-                    content = '角色实际说过：' + json.dumps(raw[0]['content'], ensure_ascii=False) + '（仅为话语记录，不证明话中内容或关系）'
+                    from role_view import render_role_view
+                    quote_semantic = {'subject_ref': 'character:' + character_id,
+                                      'predicate': 'quoted_utterance',
+                                      'evidence_text': raw[0]['content']}
+                    content = render_role_view('', observer_id=character_id,
+                                               source_character_id=character_id,
+                                               semantic={**quote_semantic, 'source_scope': character_id})
                     operations[quote_op] = dict(status='applied', action='quoted',
                         **project_canonical_memory(cur, user_id=user_id, character_id=character_id,
                             event_id=event_id, source_id=source_id, content=content,
-                            occurred_at=occurred_at, operation_id=quote_op))
+                            occurred_at=occurred_at, operation_id=quote_op,
+                            semantic=quote_semantic))
                 for part in parts:
                     op = part['operation_id']
                     if part['kind'] in ('question', 'answer', 'deferred'):

@@ -29,6 +29,8 @@ import threading
 import requests
 from db import get_conn
 from memory_authority import authoritative_memory_sql
+from role_view import PROJECTION_VERSION, render_role_view
+from smart_recall import STATUS_EXPIRE_HOURS
 
 # ── 开关 ──
 USE_RAG = os.environ.get('USE_RAG', '0') == '1'
@@ -291,9 +293,12 @@ def search_long_memory(user_id, character_id, shared_id, query_text, top_k=8):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            f'''SELECT id, content, timestamp, category FROM long_memory
+            f'''SELECT id, content, timestamp, category, character_id, semantic_payload, projection_version FROM long_memory
                WHERE user_id = %s AND character_id IN (%s, %s)
-                 AND {authoritative_memory_sql('long_memory')}''',
+                 AND {authoritative_memory_sql('long_memory')}
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                 AND (category IS DISTINCT FROM '状态' OR timestamp IS NULL
+                      OR timestamp >= CURRENT_TIMESTAMP - INTERVAL '{STATUS_EXPIRE_HOURS} hours')''',
             (user_id, character_id, shared_id)
         )
         rows = cur.fetchall()
@@ -309,7 +314,10 @@ def search_long_memory(user_id, character_id, shared_id, query_text, top_k=8):
         out = []
         for rid, _sim in hits:
             r = by_id[rid]
-            out.append((r[1], r[2], r[3] or '其他'))
+            out.append((render_role_view(r[1], observer_id=character_id,
+                                         source_character_id=r[4],
+                                         semantic=r[5] if r[6] == PROJECTION_VERSION else None),
+                        r[2], r[3] or '其他'))
         return out
     except Exception as e:
         print(f'[rag] 检索 long_memory 失败，退回全量：{e}')
@@ -327,7 +335,7 @@ def search_bond_memory(user_id, character_id, kind, query_text, top_k=6):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            f'''SELECT id, content, timestamp FROM bond_memory
+            f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
                  AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
@@ -343,7 +351,11 @@ def search_bond_memory(user_id, character_id, kind, query_text, top_k=6):
         hits = _top_k_ids('bond_memory', qv, list(by_id.keys()), top_k)
         if not hits:
             return None
-        return [by_id[rid] for rid, _sim in hits]
+        return [(rid, render_role_view(by_id[rid][1], observer_id=character_id,
+                                       source_character_id=character_id,
+                                       semantic=(by_id[rid][3] if by_id[rid][4] == PROJECTION_VERSION
+                                                 else None)), by_id[rid][2])
+                for rid, _sim in hits]
     except Exception as e:
         print(f'[rag] 检索 bond_memory 失败，退回全量：{e}')
         return None

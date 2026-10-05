@@ -135,8 +135,6 @@ def init_db():
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS notification_id VARCHAR(255) DEFAULT NULL")
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repeat_type TEXT DEFAULT 'none'")
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_completed_date TEXT")
-    cur.execute("UPDATE long_memory SET content = REPLACE(content, '用户', '她') WHERE content LIKE '用户%'")
-
     conn.commit()
     cur.close()
     conn.close()
