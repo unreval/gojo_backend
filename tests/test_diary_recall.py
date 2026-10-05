@@ -12,10 +12,7 @@ BACKEND = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'gojo_backend
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-fake_db = types.ModuleType('db')
-fake_db.get_conn = Mock(side_effect=AssertionError('unexpected database access'))
-sys.modules.setdefault('db', fake_db)
-
+import db
 import cognitive_reader
 import memory_lifecycle
 import shared_relation_prompt
@@ -97,7 +94,7 @@ class RecallDatabase:
 class DiaryRecallTests(unittest.TestCase):
     def setUp(self):
         self.database = RecallDatabase()
-        for module in (memory_lifecycle, smart_recall, sys.modules['db']):
+        for module in (memory_lifecycle, smart_recall, db):
             patcher = patch.object(module, 'get_conn', return_value=self.database)
             patcher.start()
             self.addCleanup(patcher.stop)

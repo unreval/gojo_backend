@@ -26,12 +26,6 @@ def stub(name, **attributes):
     return module
 
 
-fake_db = types.ModuleType('db')
-fake_db.get_conn = lambda: (_ for _ in ()).throw(
-    AssertionError('database should be patched by tests that need it')
-)
-sys.modules.setdefault('db', fake_db)
-
 import db_schedule  # noqa: E402
 import reply_availability  # noqa: E402
 

@@ -15,6 +15,7 @@ if BACKEND not in sys.path:
 
 import cognitive_worker  # noqa: E402
 import cognitive_output  # noqa: E402
+import cognitive_reader  # noqa: E402
 import relationship_engine  # noqa: E402
 import relationship_panel  # noqa: E402
 import relationship_reader  # noqa: E402
@@ -118,6 +119,17 @@ class _Connection:
 
 
 class RelationshipPanelAuthorityTests(unittest.TestCase):
+    def test_relationship_source_gate_requires_existing_active_rows(self):
+        source_ids = ('evt-a', 'evt-b')
+        with patch('raw_events.sources_are_active', return_value=True), \
+             patch('raw_events.get_active_events_by_ids', return_value=[
+                 {'event_id': 'evt-a'}]) as active:
+            self.assertEqual(cognitive_reader._active_relationship_source_ids(
+                'u', 'gojo', raw_ids=source_ids, conn=object()), ())
+            active.return_value = [{'event_id': 'evt-a'}, {'event_id': 'evt-b'}]
+            self.assertEqual(cognitive_reader._active_relationship_source_ids(
+                'u', 'gojo', raw_ids=source_ids, conn=object()), source_ids)
+
     def _panel(self, *, state=None, stances=None, cognition=None):
         with patch.object(relationship_panel, 'read_state',
                           return_value=state or _ledger_state()), \

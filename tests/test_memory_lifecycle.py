@@ -1,7 +1,6 @@
 import inspect
 import os
 import sys
-import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,12 +11,6 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 BACKEND = os.path.join(ROOT, 'gojo_backend')
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
-
-fake_db = types.ModuleType('db')
-fake_db.get_conn = lambda: (_ for _ in ()).throw(
-    AssertionError('database should be patched by tests that need it')
-)
-sys.modules.setdefault('db', fake_db)
 
 import memory_lifecycle  # noqa: E402
 from memory_lifecycle import (  # noqa: E402

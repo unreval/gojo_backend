@@ -104,6 +104,10 @@ def _active_relationship_source_ids(user_id, character_id, *, refs=(), raw_ids=(
         import raw_events
         if not raw_events.sources_are_active(ids, user_id, character_id, conn=conn):
             return ()
+        active = raw_events.get_active_events_by_ids(
+            user_id, character_id, ids, conn=conn)
+        if len(active) != len(ids) or {row.get('event_id') for row in active} != set(ids):
+            return ()
     except Exception:
         return ()
     return tuple(ids)

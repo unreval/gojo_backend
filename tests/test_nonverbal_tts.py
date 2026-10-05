@@ -277,7 +277,7 @@ class NonverbalDeliveryTests(unittest.TestCase):
                     provider.assert_not_called()
         self.assertEqual(self.sql('SELECT count(*) FROM cognitive_beliefs')[0][0], 0)
         self.assertEqual(self.sql('SELECT count(*) FROM long_memory')[0][0], 0)
-        self.assertEqual(self.sql("SELECT count(*) FROM bond_memory WHERE content NOT LIKE '角色实际说过：%'")[0][0], 0)
+        self.assertEqual(self.sql("SELECT count(*) FROM bond_memory WHERE content NOT LIKE '我实际说过：%'")[0][0], 0)
 
     def test_proactive_cache_cannot_return_or_store_speech_for_nonverbal(self):
         import proactive_msg

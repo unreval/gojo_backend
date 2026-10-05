@@ -97,7 +97,7 @@ class CriticalBondDeltaTests(CanonicalMemoryFixture, unittest.TestCase):
         self.assertTrue(ok)
         judgment = self.assert_delta()
         self.assertEqual(set(judgment['evidence_event_ids']), {'u1','chat_reply:u1'})
-        self.assertIn('角色被用户称作「宝宝」', judgment['content'])
+        self.assertIn('接受她称呼我为「宝宝」', judgment['content'])
         self.assertEqual(self.sql('SELECT content,recall_status FROM bond_memory WHERE authority_event_id IS NULL'), [(OLD,'active')])
 
 

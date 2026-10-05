@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import sys
-import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,27 +14,6 @@ FRONTEND_CHAT = os.path.join(ROOT, 'app', 'chat', '[id].tsx')
 MEMORY_PAGE = os.path.join(ROOT, 'app', '(tabs)', 'memory.tsx')
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
-
-fake_db = types.ModuleType('db')
-fake_db.get_conn = lambda: (_ for _ in ()).throw(
-    AssertionError('database should be patched by tests that need it')
-)
-sys.modules.setdefault('db', fake_db)
-
-fake_fastapi = types.ModuleType('fastapi')
-fake_router = types.SimpleNamespace(
-    get=lambda *_args, **_kwargs: (lambda fn: fn),
-    post=lambda *_args, **_kwargs: (lambda fn: fn),
-    delete=lambda *_args, **_kwargs: (lambda fn: fn),
-)
-fake_fastapi.APIRouter = lambda: fake_router
-fake_responses = types.ModuleType('fastapi.responses')
-fake_responses.JSONResponse = lambda content, status_code=200: types.SimpleNamespace(
-    body=json.dumps(content, ensure_ascii=False).encode(),
-    status_code=status_code,
-)
-sys.modules.setdefault('fastapi', fake_fastapi)
-sys.modules.setdefault('fastapi.responses', fake_responses)
 
 import db_chatlog  # noqa: E402
 import route_chatlog  # noqa: E402

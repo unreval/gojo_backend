@@ -138,6 +138,26 @@ class MemoryProjectionAuditTests(unittest.TestCase):
         self.database.commit()
         self.assertEqual(len(self.sql(f"SELECT id FROM long_memory WHERE {authoritative_memory_sql('long_memory')}")), 1)
 
+    def test_recovery_rejects_a_question_changed_after_planning(self):
+        self._legacy_rewrite()
+        stale_audit = audit_memory_projections(
+            self.database, 'u', 'c', _plans=True)
+        self.assertEqual(len(stale_audit['_plans']), 1)
+        self.sql('''UPDATE cognitive_questions
+                    SET metadata=jsonb_set(metadata,
+                        '{current_judgment,content}', '"newer judgment"'::jsonb)''')
+        self.database.commit()
+        with patch('memory_projection_audit.audit_memory_projections',
+                   return_value=stale_audit):
+            with self.assertRaisesRegex(RuntimeError,
+                                        'question_changed_during_recovery'):
+                recover_memory_projections(self.database, 'u', 'c', dry_run=False)
+        self.assertEqual(self.sql('SELECT projection_version FROM long_memory')[0][0],
+                         'legacy_v1')
+        self.assertEqual(self.sql('''SELECT metadata->'current_judgment'->>'content'
+                                     FROM cognitive_questions''')[0][0],
+                         'newer judgment')
+
     def test_recovery_rejects_missing_provenance_or_inactive_raw(self):
         self._legacy_rewrite()
         self.sql("UPDATE chat_log SET status='deleted' WHERE event_id='raw'")

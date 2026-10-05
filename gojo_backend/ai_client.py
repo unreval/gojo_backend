@@ -17,7 +17,6 @@
 - 'claude-*' → Anthropic
 - 'deepseek-*' → DeepSeek(OpenAI 兼容 API)
 """
-import json
 import requests
 import anthropic
 from config import ANTHROPIC_KEY, DEEPSEEK_KEY, DEEPSEEK_BASE_URL
@@ -186,7 +185,7 @@ def _call_deepseek(model, messages, system, max_tokens, temperature):
             print(f'[ai_client] empty_response model={model} '
                   f'finish={finish} reasoning_chars={len(reasoning)}')
     except (KeyError, IndexError):
-        raise RuntimeError(f'DeepSeek 响应结构异常: {json.dumps(data)[:300]}')
+        raise RuntimeError('DeepSeek 响应结构异常')
     usage = data.get('usage', {})
     return text, {
         'input_tokens': usage.get('prompt_tokens', 0),

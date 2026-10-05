@@ -111,7 +111,7 @@ def _classify(memory, event, sources, belief):
     return 'projection_mismatch_needs_review'
 
 
-def _recovery_plan(cur, memory, event, sources, belief):
+def _recovery_plan(cur, memory, event, sources, belief, *, lock=False):
     """Only a parsed raw claim and complete linked provenance may be upgraded."""
     if _classify(memory, event, sources, belief) != 'legacy_startup_rewrite_candidate':
         return 'not_a_startup_rewrite', None
@@ -155,8 +155,9 @@ def _recovery_plan(cur, memory, event, sources, belief):
     question_key = claim.get('question_key')
     if not question_key:
         return 'question_key_missing', None
-    cur.execute('''SELECT status,metadata FROM cognitive_questions
-                   WHERE user_id=%s AND character_id=%s AND question_key=%s''',
+    cur.execute(f'''SELECT status,metadata FROM cognitive_questions
+                   WHERE user_id=%s AND character_id=%s AND question_key=%s
+                   {'FOR UPDATE' if lock else ''}''',
                 (event['user_id'], event['character_id'], question_key))
     question = cur.fetchone()
     if not question or question[0] != 'resolved':
@@ -175,7 +176,7 @@ def _recovery_plan(cur, memory, event, sources, belief):
     return 'recoverable', {'table': memory['table'], 'id': memory['id'],
         'event_id': event['id'], 'operation_id': memory['authority_operation_id'],
         'belief_key': memory['authority_belief_key'], 'question_key': question_key,
-        'semantic': semantic, 'content': content}
+        'question_metadata': qmeta, 'semantic': semantic, 'content': content}
 
 
 def audit_memory_projections(conn, user_id, character_id, *, limit=1000,
@@ -247,7 +248,8 @@ def audit_memory_projections(conn, user_id, character_id, *, limit=1000,
                 status = _classify(memory, event, sources, belief)
                 recovery_status = None
                 if status == 'legacy_startup_rewrite_candidate':
-                    recovery_status, plan = _recovery_plan(cur, memory, event, sources, belief)
+                    recovery_status, plan = _recovery_plan(
+                        cur, memory, event, sources, belief, lock=_lock)
                     if plan:
                         plans.append(plan)
                 records.append({'table': table, 'id': memory['id'],
@@ -307,10 +309,11 @@ def recover_memory_projections(conn, user_id, character_id, *, dry_run=True, lim
                 '{current_judgment}',
                 (metadata->'current_judgment') || %s::jsonb)
                 WHERE user_id=%s AND character_id=%s AND question_key=%s
-                  AND status='resolved' ''',
+                  AND status='resolved' AND metadata=%s::jsonb ''',
                 (json.dumps({'projection_version': PROJECTION_VERSION,
-                             'semantic_payload': plan['semantic']}, ensure_ascii=False),
-                 user_id, character_id, plan['question_key']))
+                              'semantic_payload': plan['semantic']}, ensure_ascii=False),
+                 user_id, character_id, plan['question_key'],
+                 json.dumps(plan['question_metadata'], ensure_ascii=False)))
             if cur.rowcount != 1:
                 raise RuntimeError('question_changed_during_recovery')
             table = plan['table']

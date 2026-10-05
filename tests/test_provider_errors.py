@@ -200,6 +200,18 @@ class ProviderErrorTests(unittest.TestCase):
         self.assertNotIn('PRIVATE-PROVIDER-RESPONSE', str(raised.exception))
         self.assertNotIn('PRIVATE-PROVIDER-RESPONSE', str(diagnostics(raised.exception)))
 
+    def test_deepseek_malformed_success_does_not_expose_response_body(self):
+        secret = 'PRIVATE-PROVIDER-RESPONSE'
+        response = Mock(status_code=200)
+        response.json.return_value = {'choices': [], 'private': secret}
+        with patch.object(ai_client, 'DEEPSEEK_KEY', 'dummy'), patch.object(
+                ai_client.requests, 'post', return_value=response), patch(
+                'builtins.print') as logged:
+            with self.assertRaisesRegex(RuntimeError, '^DeepSeek 响应结构异常$') as raised:
+                ai_client._call_deepseek('deepseek-test', [], None, 100, None)
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn(secret, str(logged.call_args_list))
+
     def test_anthropic_metadata_uses_request_host_and_redacts_message(self):
         error = PermissionDeniedError('Bearer sk-PRIVATE-CREDENTIAL')
         error.body = {'error': {
