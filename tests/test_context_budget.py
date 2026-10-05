@@ -481,7 +481,7 @@ class CurrentTurnAndCollapseTests(unittest.TestCase):
         self.assertIn('drop_recent_covered(pinned, recent_exclude)', src)
         self.assertIn('drop_recent_covered(pool, recent_exclude)', src)
         self.assertIn('drop_recent_covered(loose_bonds, recent_exclude)', src)
-        self.assertIn('drop_recent_covered(tolds, recent_exclude)', src)
+        self.assertIn('drop_recent_covered(projected_tolds + legacy_tolds, recent_exclude)', src)
 
     def test_provenance_collapse_keeps_diary_subjective(self):
         from recall_candidates import RecallCandidate, collapse_candidates

@@ -7,6 +7,7 @@ from cognitive_reader import (
     complete_sticky_note,
     list_diary_entries,
     list_sticky_notes,
+    list_user_facing_sticky_notes,
 )
 
 
@@ -18,12 +19,10 @@ async def get_sticky_notes(user_id: str = 'default',
                            character_id: str = DEFAULT_CHARACTER_ID,
                            include_inactive: bool = False,
                            limit: int = 50):
-    notes = list_sticky_notes(
-        user_id,
-        character_id,
-        include_inactive=include_inactive,
-        limit=limit,
-    )
+    notes = (list_sticky_notes(user_id, character_id,
+                              include_inactive=True, limit=limit)
+             if include_inactive else
+             list_user_facing_sticky_notes(user_id, character_id, limit=limit))
     return JSONResponse({'sticky_notes': notes})
 
 

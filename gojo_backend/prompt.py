@@ -502,14 +502,12 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
             bond_lines = [f'- [{ts.strftime("%Y-%m-%d") if ts else "?"}] {c}' for _bid, c, ts in bonds]
             bond_text = f'\n\n【有当前原始来源的话语和明确约定——按条目标明的说话人理解】\n{chr(10).join(bond_lines)}'
 
-        tolds = None
-        if memory_search.is_vector_ready():
-            tolds = memory_search.search_bond_memory(user_id, character_id, 'told', user_message, top_k=5)
-        if tolds is None:
-            tolds = get_bond_memories(user_id, character_id, kind='told', limit=15)
+        # Told is a scoped view of canonical facts. The old bond vector index
+        # cannot select that view or grant an old generated row authority.
+        tolds = get_bond_memories(user_id, character_id, kind='told', limit=15)
         if tolds:
             told_lines = [f'- [{ts.strftime("%Y-%m-%d") if ts else "?"}] {c}' for _tid, c, ts in tolds]
-            told_text = f'\n\n【她告诉过你的事——关于你自己或你的世界】\n{chr(10).join(told_lines)}'
+            told_text = f'\n\n【她告诉过你的有来源自述】\n{chr(10).join(told_lines)}'
 
     # ── ★ 3.6 相处史 + 关系规则 ──
     first_days = get_first_interaction_days(user_id, character_id)

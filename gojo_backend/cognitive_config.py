@@ -170,9 +170,9 @@ COGNITIVE_STICKY_NOTE_TTL_CONFIG = validate_sticky_note_ttl_config(
 def get_sticky_note_ttl_config():
     """Return the validated, process-effective sticky TTL contract."""
     return dict(COGNITIVE_STICKY_NOTE_TTL_CONFIG)
-# User-facing 便利贴 is a presentation of Slow Loop stickies only.
-# memory_lifecycle_fast_loop stickies are internal memory cues.
-USER_FACING_STICKY_SOURCE = 'cognitive_slow_loop'
+# New visible stickies are deterministic projections of canonical raw events.
+# Older cognitive_slow_loop rows remain available through inspection reads.
+USER_FACING_STICKY_SOURCE = 'memory_lifecycle_fast_loop'
 
 # Belief revision: LLM 只判断 relation/strength，最终 delta 由确定性规则给出。
 COGNITIVE_CONFIDENCE_DELTA = {

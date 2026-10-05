@@ -97,7 +97,7 @@ class BondRecallStore:
                 and self._active(row)
             ]
             return
-        if 'FROM memory_source_events' in compact:
+        if compact.startswith('SELECT memory_id, source_event_id FROM memory_source_events'):
             return
         if compact.startswith('UPDATE bond_memory') and 'recall_status' in compact:
             ids = params[0] if params else []

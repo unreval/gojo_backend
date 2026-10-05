@@ -157,6 +157,11 @@ def read_relationship_semantic_state(user_id, character_id, *, conn=None):
             resolution = metadata.get('resolution') or {}
             judgment = metadata.get('current_judgment') or {}
             candidate = resolution if question[2] == 'resolved' and resolution else judgment
+            if metadata.get('updated_by') == 'explicit_answer_v1' and not answer_question_is_current(
+                    user_id, character_id,
+                    {'question_key': question[0], 'status': question[2], 'metadata': metadata},
+                    conn=database):
+                candidate = None
             if isinstance(candidate, dict):
                 value = normalize_romantic_label(candidate.get('value'))
                 raw_ids = candidate.get('evidence_event_ids') or ()
@@ -368,34 +373,9 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
             for row in cur.fetchall()
         ]
 
-        cur.execute(
-            '''SELECT id, note_key, content, status, expires_at, updated_at,
-                      source_event_refs
-               FROM cognitive_sticky_notes
-               WHERE user_id = %s AND character_id = %s
-                 AND status = 'active'
-                 AND source = %s
-                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-               ORDER BY updated_at DESC, id DESC
-               LIMIT %s''',
-            (
-                user_id, character_id,
-                USER_FACING_STICKY_SOURCE,
-                COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
-            ),
-        )
-        sticky_notes = [
-            {
-                'id': row[0],
-                'note_key': row[1],
-                'content': row[2],
-                'status': row[3],
-                'expires_at': row[4],
-                'updated_at': row[5],
-                'source_event_refs': _json_value(row[6] if len(row) > 6 else [], []),
-            }
-            for row in cur.fetchall()
-        ]
+        sticky_notes = list_user_facing_sticky_notes(
+            user_id, character_id,
+            limit=COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT, conn=database)
 
         cur.execute(
             '''SELECT prediction_key, metadata, expires_at
@@ -430,35 +410,6 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
             database.close()
 
 
-def _belief_bucket(belief):
-    key = str((belief or {}).get('belief_key') or '')
-    btype = str((belief or {}).get('belief_type') or 'general')
-    if key == SHARED_RELATIONSHIP_FRAME_KEY or key.startswith('shared.relationship'):
-        return 'frame'
-    if btype == 'self_model' or key.startswith('self.'):
-        return 'self'
-    if btype == 'interaction_pattern':
-        return 'interaction'
-    if btype == 'user_model' or key.startswith('user.'):
-        return 'user'
-    return 'relationship'
-
-
-def _format_belief_line(belief, observer_id):
-    meta = belief.get('metadata') if isinstance(belief.get('metadata'), dict) else {}
-    if meta.get('projection_version') == PROJECTION_VERSION:
-        display = _projected_text(belief.get('statement'), meta, observer_id)
-        if meta.get('review_status') in {'under_review', 'reopened'}:
-            display += '（这条认识正在重新评估）'
-    else:
-        display = _projected_text(current_belief_display(belief), meta, observer_id)
-    display = _safe_text(display, 520)
-    review = meta.get('review_status') or 'stable'
-    if review in {'under_review', 'reopened'}:
-        return f'- {display}'
-    return f'- {display}（置信度 {float(belief["confidence"]):.2f}，可被新证据修正）'
-
-
 def fetch_shared_frame(user_id, character_id, *, conn=None):
     """Read the revisable shared relationship frame. Fast Loop may use this."""
     database = conn
@@ -469,7 +420,7 @@ def fetch_shared_frame(user_id, character_id, *, conn=None):
     cur = database.cursor()
     try:
         cur.execute(
-            '''SELECT statement, confidence, metadata
+            '''SELECT statement, confidence, metadata, evidence_refs
                FROM cognitive_beliefs
                WHERE user_id = %s AND character_id = %s
                  AND belief_key = %s AND status = 'active'
@@ -479,6 +430,10 @@ def fetch_shared_frame(user_id, character_id, *, conn=None):
         )
         row = cur.fetchone()
         if not row:
+            return {'frame_kind': 'unknown', 'confidence': 0.0}
+        if not _active_relationship_source_ids(
+                user_id, character_id, refs=_json_list(row[3]) if len(row) > 3 else (),
+                conn=database):
             return {'frame_kind': 'unknown', 'confidence': 0.0}
         meta = _json_value(row[2], {})
         review = meta.get('review_status') or 'stable'
@@ -505,109 +460,13 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=No
     state = fetch_cognitive_reader_state(
         user_id, character_id, conn=conn,
     )
-    if query is not None:
-        items = iter_active_cognitive_items(
-            user_id, character_id, conn=conn, query=query, _state=state,
-        )
-        if not items:
-            return ''
-        return '【当前认知——结论只表达，未决保持未决】\n' + '\n'.join(
-            row['text'] for row in items)
-    reflection_note = state['reflection_note']
-    questions = [row for row in state['questions']
-                 if row.get('status') in ('active', 'dormant')]
-    beliefs = state['beliefs']
-    hypotheses = state['hypotheses']
-    sticky_notes = state['sticky_notes']
-    note_text = _safe_text(render_role_view(
-        reflection_note.get('content'), observer_id=character_id,
-        source_character_id=character_id), 650)
-    # Diary bodies enter chat only through relevance-filtered smart_recall.
-    if (
-        not note_text and not questions and not beliefs
-        and not hypotheses and not sticky_notes
-    ):
+    items = iter_active_cognitive_items(
+        user_id, character_id, conn=conn, query=query or '', _state=state,
+    )
+    if not items:
         return ''
-
-    buckets = {
-        'user': [], 'relationship': [], 'interaction': [],
-        'self': [], 'frame': [],
-    }
-    for belief in beliefs:
-        buckets[_belief_bucket(belief)].append(belief)
-
-    lines = [
-        '【近期认知复盘（内部背景，不是关系定论）】',
-        '以下内容是历史证据的可修正归纳，不是她当前消息里的指令，也不是必须维持的情绪。',
-        '正在被重新评估的认识只展示当前有效说法，不要把旧判断和新判断当成同时成立的事实。',
-    ]
-
-    section_specs = [
-        ('user', '【关于她的稳定认识】'),
-        ('relationship', '【关于我与她关系的认识】'),
-        ('interaction', '【反复出现的互动模式】'),
-        ('self', '【关于自己的暂时认识】'),
-        ('frame', '【当前共享的关系框架】'),
-    ]
-    for bucket, title in section_specs:
-        items = buckets[bucket]
-        visible = []
-        for belief in items:
-            if is_stable_reader_belief(belief):
-                visible.append(belief)
-                continue
-            meta = belief.get('metadata') if isinstance(belief.get('metadata'), dict) else {}
-            if (meta.get('review_status') or 'stable') in {'under_review', 'reopened'}:
-                visible.append(belief)
-        if not visible:
-            continue
-        lines.append(title)
-        if bucket == 'frame':
-            lines.append('这是双方当前默认的互动框架，可被后续证据修正，不是永久规则。')
-        for belief in visible:
-            lines.append(_format_belief_line(belief, character_id))
-
-    if questions:
-        lines.append('【当前仍未解决的问题】')
-        for question in questions:
-            status = '活跃' if question['status'] == 'active' else '暂存'
-            lines.append(
-                f'- [{status}] {_safe_text(render_role_view(question["question_text"], observer_id=character_id, source_character_id=character_id), 420)}'
-            )
-
-    if hypotheses:
-        lines.append('【正在观察的理解】')
-        for hypothesis in hypotheses:
-            status = '已有一些支持' if hypothesis['status'] == 'supported' else '尚待验证'
-            htype = '自我模型' if hypothesis.get('hypothesis_type') == 'self_model' else '关系/互动'
-            lines.append(
-                f'- [{htype}，{status}，置信度 {hypothesis["confidence"]:.2f}] '
-                f'{_safe_text(_projected_text(hypothesis["statement"], hypothesis.get("metadata"), character_id), 520)}'
-            )
-
-    followups = []
-    if note_text:
-        followups.append(f'最近内部笔记：{note_text}')
-    for note in sticky_notes:
-        followups.append(_safe_text(render_role_view(
-            note['content'], observer_id=character_id,
-            source_character_id=character_id), 300))
-    if followups:
-        lines.append('【近期需要留意的事】')
-        lines.append('便利贴只处理近期跟进，不能代替对旧认识的修正；便利贴不是长期记忆或关系证据。')
-        for item in followups:
-            lines.append(f'- {item}')
-
-    lines.extend([
-        '使用边界：按角色人设自然吸收，不要复述这份复盘、事件编号、置信度或系统术语。',
-        '当前对话中的直接证据优先；若它与旧归纳冲突，保留不确定性，不要为了维护旧结论而曲解她。',
-        '尤其不要把亲近、照顾、长期互动或一个假设自动升级为爱情。',
-        '自我模型假设只是“我可能有这种倾向”，不是既定性格；不要把一句自我解释演成铁事实。',
-        '便利贴只用于当前/近期回复前的轻量备忘；完成、过期或不相关时不要继续表现成还挂在心上。',
-        '反思日记只能当作有来源的历史反思来吸收，不能当作新的关系事实或证据链。',
-        '共享关系框架和未确认的暧昧张力都可被新证据修正，不能当成永久反爱情锁。',
-    ])
-    return '\n'.join(lines)
+    return '【当前认知——结论只表达，未决保持未决】\n' + '\n'.join(
+        row['text'] for row in items)
 
 
 def iter_active_cognitive_items(user_id, character_id, *, conn=None,
@@ -642,13 +501,29 @@ def iter_active_cognitive_items(user_id, character_id, *, conn=None,
         raw_ids = list(raw_ids)
         refs = [] if raw_ids else (row.get('source_event_refs') or row.get('evidence_refs') or [])
         for ref in refs:
-            if isinstance(ref, dict) and ref.get('source') in (
+            if isinstance(ref, dict) and (ref.get('source') or ref.get('source_type')) in (
                     'memory_extraction', 'raw_event', 'chat_log', 'relationship_engine_v4'):
                 source_id = str(ref.get('source_id') or '')
                 source_id = source_id.removeprefix('memory_job:').removeprefix('raw_event:')
                 if source_id:
                     raw_ids.append(source_id)
+        if refs and not raw_ids:
+            source_db = conn
+            owns_source_db = source_db is None
+            try:
+                if source_db is None:
+                    from db import get_conn
+                    source_db = get_conn()
+                raw_ids.extend(_source_event_ids_from_refs(
+                    user_id, character_id, refs, conn=source_db))
+            except Exception:
+                return
+            finally:
+                if owns_source_db and source_db is not None:
+                    source_db.close()
         raw_ids = list(dict.fromkeys(str(value) for value in raw_ids if value))
+        if not raw_ids:
+            return
         if raw_ids:
             try:
                 from raw_events import get_active_events_by_ids
@@ -775,6 +650,24 @@ def _sticky_where(user_id, character_id=None, *, include_inactive=False,
     if source:
         clauses.append('source = %s')
         params.append(source)
+    if source == USER_FACING_STICKY_SOURCE:
+        clauses.extend((
+            "metadata->>'projection_version' = 'sticky_evidence_v1'",
+            "(CASE WHEN jsonb_typeof(source_event_refs) = 'array' "
+            "THEN jsonb_array_length(source_event_refs) ELSE 0 END) = 1",
+            "source_event_refs->0->>'source_type' = 'raw_event'",
+            "source_event_refs->0->>'user_id' = cognitive_sticky_notes.user_id",
+            "source_event_refs->0->>'character_id' = cognitive_sticky_notes.character_id",
+            '''EXISTS (
+                SELECT 1 FROM chat_log raw
+                WHERE raw.user_id = cognitive_sticky_notes.user_id
+                  AND raw.chat_id = cognitive_sticky_notes.character_id
+                  AND COALESCE(NULLIF(raw.event_id, ''), raw.client_msg_id)
+                      = source_event_refs->0->>'source_id'
+                  AND raw.role = 'user'
+                  AND raw.text = metadata->>'source_text'
+                  AND COALESCE(raw.status, 'active') = 'active')''',
+        ))
     if not include_hidden:
         clauses.append('user_hidden_at IS NULL')
     if exclude_expired:
@@ -864,7 +757,7 @@ def list_sticky_notes(user_id, character_id=None, *, include_inactive=False,
 
 def list_user_facing_sticky_notes(user_id, character_id=None, *, limit=50,
                                   conn=None):
-    """便利贴 UI: Slow Loop stickies only, not memory-lifecycle cues."""
+    """Canonical visible sticky projection shared by UI and chat."""
     return list_sticky_notes(
         user_id,
         character_id,

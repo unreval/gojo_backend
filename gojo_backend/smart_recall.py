@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from db import get_conn
 from memory_authority import authoritative_memory_sql
 from role_view import PROJECTION_VERSION, render_role_view
+from told_projection import canonical_told_view, told_display
 from config import CN_TZ, DEFAULT_CHARACTER_ID
 from cognitive_config import COGNITIVE_DIARY_RECALL_LIMIT
 
@@ -352,6 +353,17 @@ def two_level_recall(user_id, character_id, user_message,
                 query_embedding, mem_emb
             ) * float(entry.get('recall_weight') or 1.0)
 
+        # The told bucket is a role-scoped view of these same canonical facts.
+        # Their SQL authority and Raw Event checks have already run above.
+        projected_tolds = [
+            view for entry in pinned + pool
+            if (view := canonical_told_view(entry, user_id, character_id)) is not None
+        ]
+        projected_tolds.sort(
+            key=lambda row: (row.get('pinned', False), row.get('score', 0),
+                             row.get('timestamp') or datetime.min), reverse=True)
+        projected_tolds = projected_tolds[:TOLD_TOP_K]
+
         # 按分数排序，取 top_k
         pool.sort(key=lambda x: x['score'], reverse=True)
         selected_facts = pinned[:PINNED_MAX] + pool[:FACT_TOP_K]
@@ -483,16 +495,17 @@ def two_level_recall(user_id, character_id, user_message,
         )
         loose_bonds = [item for item in loose_bonds if item['score'] > 0][:LOOSE_BOND_K]
 
-        # ── 6. told 桶 ──
+        # ── 6. Old told rows are read-only compatibility, never new facts. ──
         cur.execute(
             f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = 'told'
+                  AND projection_version = 'legacy_v1'
                   AND {authoritative_memory_sql('bond_memory')}
                ORDER BY timestamp DESC LIMIT %s''',
             (user_id, character_id, TOLD_CANDIDATE_LIMIT)
         )
         told_candidates = cur.fetchall()
-        tolds = []
+        legacy_tolds = []
         for row in told_candidates:
             tid, tcontent, tts = row[:3]
             projection_version = row[4] if len(row) > 4 else 'legacy_v1'
@@ -508,25 +521,26 @@ def two_level_recall(user_id, character_id, user_message,
             )
             if score <= 0:
                 continue
-            tolds.append({
+            legacy_tolds.append({
                 'authority': 'canonical_evidence_v1', 'id': tid, 'content': tcontent, 'timestamp': tts,
                 'score': score, 'relevance_score': relevance,
                 'source_character_id': character_id, 'semantic_payload': semantic,
-                'projection_version': projection_version,
+                'projection_version': projection_version, 'source_table': 'bond_memory',
             })
-        tolds.sort(
+        legacy_tolds.sort(
             key=lambda x: (x['score'], x['timestamp'] or datetime.min),
             reverse=True,
         )
-        tolds = tolds[:TOLD_TOP_K]
+        legacy_tolds = legacy_tolds[:TOLD_TOP_K]
         try:
             told_map = load_memory_source_map(
-                cur, 'bond_memory', [t['id'] for t in tolds])
+                cur, 'bond_memory', [t['id'] for t in legacy_tolds])
         except Exception:
             told_map = {}
-        for told in tolds:
+        for told in legacy_tolds:
             attach_row_provenance(told, told_map)
-        tolds = drop_recent_covered(tolds, recent_exclude)
+        tolds = drop_recent_covered(projected_tolds + legacy_tolds, recent_exclude)
+        tolds = tolds[:TOLD_TOP_K]
 
         cur.close()
         conn.close()
@@ -871,10 +885,13 @@ def format_recall_for_prompt(recall_result, observer_id=None):
         told_lines = []
         for t in tolds:
             tdate = t['timestamp'].strftime('%Y-%m-%d') if t.get('timestamp') else '?'
-            told_lines.append(f'- [{tdate}] {visible(t)}')
+            content = visible(t)
+            if t.get('source_table') == 'long_memory':
+                content = told_display(content)
+            told_lines.append(f'- [{tdate}] {content}')
         told_text = f'''
 
-【她告诉过你的事——关于你自己或你的世界】
+【她告诉过你的有来源自述】
 （这些是她在过去的对话里亲口告诉你的。你清楚地记得"她说过这些话"。）
 {chr(10).join(told_lines)}
 

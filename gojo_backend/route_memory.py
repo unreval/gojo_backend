@@ -238,13 +238,19 @@ async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT
     """★ 查看某角色的羁绊记忆。kind 传 between / told，不传返回全部。"""
     if not include_history:
         rows = get_bond_memories(user_id, character_id, kind=kind or None, limit=100)
-        return JSONResponse({'memories': [{
+        if not kind:
+            rows += [row for row in get_bond_memories(
+                user_id, character_id, kind='told', limit=100) if row[0] < 0]
+        memories = [{
             'id': r[0], 'content': render_role_view(
                 r[1], observer_id=character_id,
                 source_character_id=character_id),
             'timestamp': str(r[2]) if r[2] else None,
             'recallable': True, 'content_locked': True,
-        } for r in rows]})
+            'source_table': 'long_memory' if r[0] < 0 else 'bond_memory',
+        } for r in rows]
+        memories.sort(key=lambda row: row['timestamp'] or '', reverse=True)
+        return JSONResponse({'memories': memories})
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -262,14 +268,25 @@ async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT
     finally:
         cur.close()
         conn.close()
-    return JSONResponse({'memories': [{
+    memories = [{
         'id': r[0], 'content': render_role_view(
             r[1], observer_id=character_id,
             source_character_id=character_id,
             semantic=r[5] if r[6] == PROJECTION_VERSION else None),
         'timestamp': str(r[2]) if r[2] else None,
         'recallable': bool(r[3]), 'content_locked': bool(r[4]),
-    } for r in rows]})
+        'source_table': 'bond_memory',
+    } for r in rows]
+    if kind in ('', 'told'):
+        memories.extend({
+            'id': r[0], 'content': r[1],
+            'timestamp': str(r[2]) if r[2] else None,
+            'recallable': True, 'content_locked': True,
+            'source_table': 'long_memory',
+        } for r in get_bond_memories(user_id, character_id, kind='told', limit=100)
+            if r[0] < 0)
+    memories.sort(key=lambda row: row['timestamp'] or '', reverse=True)
+    return JSONResponse({'memories': memories})
 
 
 @router.put('/bond_memory/{memory_id}')
@@ -280,9 +297,14 @@ async def edit_bond_memory(memory_id: int, data: dict):
         return JSONResponse({'error': '内容不能为空'}, status_code=400)
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT content, authority FROM bond_memory WHERE id = %s FOR UPDATE',
+    cur.execute('SELECT content, authority, kind FROM bond_memory WHERE id = %s FOR UPDATE',
                 (memory_id,))
     existing = cur.fetchone()
+    if existing and existing[2] == 'told':
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return JSONResponse({'error': '旧 told 仅保留只读兼容'}, status_code=409)
     if existing and existing[1] == AUTHORITY and existing[0] != content:
         conn.rollback()
         cur.close()
@@ -301,8 +323,9 @@ async def edit_bond_memory(memory_id: int, data: dict):
 
 @router.delete('/bond_memory/{memory_id}')
 async def remove_bond_memory(memory_id: int):
-    """★ 删除一条羁绊记忆（想让角色忘掉某个剧透/约定时用）。"""
-    delete_bond_memory(memory_id)
+    """Delete an editable between row; historical told rows are read-only."""
+    if not delete_bond_memory(memory_id):
+        return JSONResponse({'error': '旧 told 仅保留只读兼容，或记录不存在'}, status_code=409)
     return JSONResponse({'ok': True, 'id': memory_id})
 
 

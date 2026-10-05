@@ -1,3 +1,8 @@
+"""Legacy model-authored Slow Loop contract, kept for historical inspection.
+
+The live worker uses deterministic_cycle_output and rejects model-authored
+sticky_note_updates. This module is intentionally outside default test discovery.
+"""
 import inspect
 import json
 import os

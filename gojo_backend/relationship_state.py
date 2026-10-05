@@ -411,6 +411,26 @@ def _now_iso() -> str:
 # ══════════════════════════════════════════════════════════════
 # Declared Stance CRUD
 # ══════════════════════════════════════════════════════════════
+_CURRENT_STANCE_SOURCE_SQL = """EXISTS (
+    SELECT 1 FROM chat_log raw
+    WHERE raw.user_id=rel_declared_stance.user_id
+      AND raw.chat_id=rel_declared_stance.character_id
+      AND COALESCE(NULLIF(raw.event_id,''),raw.client_msg_id)=rel_declared_stance.source_event_ref
+      AND COALESCE(raw.status,'active')='active'
+      AND raw.role IN ('assistant','gojo','char','character')
+      AND raw.text=rel_declared_stance.content
+      AND EXISTS (
+          SELECT 1 FROM cognitive_events ce
+          WHERE ce.user_id=raw.user_id
+            AND ce.character_id=raw.chat_id
+            AND ce.source_event_type='canonical_assistant_turn'
+            AND ce.source_event_id=rel_declared_stance.source_event_ref
+            AND ce.payload->>'content'=raw.text
+            AND ce.adjudication->>'status'='applied'
+      )
+)"""
+
+
 def declare_stance(user_id, character_id, stance_type: str, content: str,
                    source_event_ref: str = None) -> int:
     """新增一条角色的明确表态。返回新记录 id。
@@ -462,9 +482,10 @@ def revoke_stance(user_id, character_id, stance_id: int, reason: str) -> bool:
 def list_active_stances(user_id, character_id) -> List[Dict]:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('''SELECT id, stance_type, content, declared_at
+    cur.execute(f'''SELECT id, stance_type, content, declared_at
                    FROM rel_declared_stance
                    WHERE user_id = %s AND character_id = %s AND status = 'active'
+                     AND {_CURRENT_STANCE_SOURCE_SQL}
                    ORDER BY declared_at ASC''',
                 (user_id, character_id))
     rows = cur.fetchall()
@@ -479,17 +500,19 @@ def list_declared_stances(user_id, character_id, *, include_inactive=True) -> Li
     conn = get_conn()
     cur = conn.cursor()
     if include_inactive:
-        cur.execute('''SELECT id, stance_type, content, source_event_ref, status,
+        cur.execute(f'''SELECT id, stance_type, content, source_event_ref, status,
                               declared_at, revoked_at, revoke_reason
                        FROM rel_declared_stance
                        WHERE user_id = %s AND character_id = %s
+                         AND {_CURRENT_STANCE_SOURCE_SQL}
                        ORDER BY declared_at ASC, id ASC''',
                     (user_id, character_id))
     else:
-        cur.execute('''SELECT id, stance_type, content, source_event_ref, status,
+        cur.execute(f'''SELECT id, stance_type, content, source_event_ref, status,
                               declared_at, revoked_at, revoke_reason
                        FROM rel_declared_stance
                        WHERE user_id = %s AND character_id = %s AND status = 'active'
+                         AND {_CURRENT_STANCE_SOURCE_SQL}
                        ORDER BY declared_at ASC, id ASC''',
                     (user_id, character_id))
     rows = cur.fetchall()

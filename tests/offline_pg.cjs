@@ -2,7 +2,7 @@
 const { PGlite } = require(process.env.COGNITIVE_TEST_PGLITE);
 const readline = require('node:readline');
 (async () => {
-  const db = new PGlite();
+  const db = new PGlite(process.env.COGNITIVE_TEST_PGDATA || undefined);
   await db.waitReady;
   for await (const line of readline.createInterface({ input: process.stdin })) {
     try {

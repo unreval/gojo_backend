@@ -25,6 +25,14 @@ def state(**extra):
                 predictions=[], reflection_note={}, **extra)
 
 
+def raw_ref(event_id):
+    return [{'source_type': 'raw_event', 'source_id': event_id}]
+
+
+def active_sources(_user_id, _character_id, source_ids, conn=None):
+    return [{'event_id': event_id} for event_id in source_ids]
+
+
 class CriticalContextTests(unittest.TestCase):
     def test_specific_question_authority_wins_critical_slot_over_general_belief(self):
         rows = [context_budget.ContextItem(
@@ -78,13 +86,16 @@ class CriticalContextTests(unittest.TestCase):
         current = state()
         current['beliefs'] = [
             {'belief_key': 'nickname', 'statement': '我接受她叫我宝宝',
-             'confidence': .9, 'status': 'active', 'metadata': {}},
+             'confidence': .9, 'status': 'active', 'metadata': {},
+             'source_event_refs': raw_ref('nickname-source')},
             {'belief_key': 'old', 'statement': '我不接受她叫我宝宝',
              'confidence': .9, 'status': 'retracted', 'metadata': {}},
             {'belief_key': 'food', 'statement': '她喜欢火锅',
-             'confidence': .9, 'status': 'active', 'metadata': {}},
+             'confidence': .9, 'status': 'active', 'metadata': {},
+             'source_event_refs': raw_ref('food-source')},
         ]
-        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current):
+        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current), \
+                patch('raw_events.get_active_events_by_ids', side_effect=active_sources):
             items = cognitive_reader.iter_active_cognitive_items(
                 'u', 'gojo', query='宝宝这个称呼你接受吗', now=NOW)
         body = '\n'.join(row['text'] for row in items)
@@ -114,13 +125,17 @@ class CriticalContextTests(unittest.TestCase):
         current = state()
         current['sticky_notes'] = [
             {'note_key': 'same-note', 'content': '宝宝称呼待跟进', 'status': 'active',
-              'expires_at': NOW + timedelta(days=1)},
+              'expires_at': NOW + timedelta(days=1),
+              'source_event_refs': raw_ref('sticky-source')},
             {'note_key': 'same-note', 'content': '宝宝称呼待跟进', 'status': 'active',
-              'expires_at': NOW + timedelta(days=1)},
+              'expires_at': NOW + timedelta(days=1),
+              'source_event_refs': raw_ref('sticky-source')},
             {'content': '宝宝旧称呼过期提醒', 'status': 'active',
-             'expires_at': NOW - timedelta(seconds=1)},
+             'expires_at': NOW - timedelta(seconds=1),
+             'source_event_refs': raw_ref('old-sticky-source')},
         ]
-        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current):
+        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current), \
+                patch('raw_events.get_active_events_by_ids', side_effect=active_sources):
             items = cognitive_reader.iter_active_cognitive_items(
                 'u', 'gojo', query='宝宝称呼', now=NOW)
         self.assertEqual(len(items), 1)
@@ -149,8 +164,10 @@ class CriticalContextTests(unittest.TestCase):
         current['questions'] = [{
             'question_key': 'nickname', 'question_text': '宝宝称呼是否接受',
             'status': 'active', 'metadata': {},
+            'source_event_refs': raw_ref('question-source'),
         }]
-        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current):
+        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current), \
+                patch('raw_events.get_active_events_by_ids', side_effect=active_sources):
             rows = cognitive_reader.iter_active_cognitive_items(
                 'u', 'gojo', query='宝宝称呼', now=NOW)
         self.assertEqual([row['kind'] for row in rows], ['cognitive_question'])
@@ -195,13 +212,15 @@ class CriticalContextTests(unittest.TestCase):
                 'status': 'pending', 'content': '明天回答宝宝称呼的问题',
                 'evidence_event_ids': ['promise'],
             }},
+            'source_event_refs': raw_ref('question-source'),
         }]
         current['predictions'] = [{
             'status': 'pending', 'expires_at': NOW + timedelta(days=1),
-            'metadata': {'description': '用户可能追问宝宝称呼的问题'},
+            'metadata': {'description': '用户可能追问宝宝称呼的问题',
+                         'evidence_refs': raw_ref('prediction-source')},
         }]
         with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current), \
-                patch('raw_events.get_active_events_by_ids', return_value=[{'event_id': 'promise'}]):
+                patch('raw_events.get_active_events_by_ids', side_effect=active_sources):
             items = cognitive_reader.iter_active_cognitive_items(
                 'u', 'gojo', query='宝宝称呼', now=NOW)
         self.assertEqual({row['kind'] for row in items}, {
@@ -222,10 +241,13 @@ class CriticalContextTests(unittest.TestCase):
             'status': 'active', 'metadata': {
                 'pending_answer': {'status': 'pending', 'content': '明天给你回答'},
                 'current_judgment': {'status': 'committed', 'value': 'yes',
-                                     'content': '我接受她叫我宝宝'},
+                                     'content': '我接受她叫我宝宝',
+                                     'evidence_event_ids': ['judgment-source']},
             },
+            'source_event_refs': raw_ref('question-source'),
         }]
-        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current):
+        with patch.object(cognitive_reader, 'fetch_cognitive_reader_state', return_value=current), \
+                patch('raw_events.get_active_events_by_ids', side_effect=active_sources):
             for query in ('答案呢', '昨天说今天回答'):
                 with self.subTest(query=query):
                     rows = cognitive_reader.iter_active_cognitive_items(

@@ -26,7 +26,7 @@ import relationship_engine
 import relationship_flirt
 import relationship_initiative
 import relationship_reader
-from tests.test_cognitive_slow_loop import committable_output, valid_output
+from tests.legacy_cognitive_slow_loop import committable_output, valid_output
 
 
 NOW = datetime(2026, 9, 13, 8, 0, tzinfo=timezone.utc)
@@ -470,7 +470,7 @@ class ReaderStructureTests(unittest.TestCase):
         self.assertIn('不用于表达', label['expression_guidance'])
         self.assertIn('relationship_panel', label['expression_guidance'])
 
-    def test_reader_partitions_cognition_types(self):
+    def test_reader_drops_unprovenanced_cognition(self):
         class Cursor:
             def __init__(self):
                 self.sql = ''
@@ -526,15 +526,7 @@ class ReaderStructureTests(unittest.TestCase):
         text = cognitive_reader.build_cognitive_prompt_context(
             'u', 'gojo', conn=Conn(),
         )
-        self.assertIn('【关于她的稳定认识】', text)
-        self.assertIn('【关于我与她关系的认识】', text)
-        self.assertIn('【反复出现的互动模式】', text)
-        self.assertIn('【关于自己的暂时认识】', text)
-        self.assertIn('【当前共享的关系框架】', text)
-        self.assertIn('【当前仍未解决的问题】', text)
-        self.assertIn('【正在观察的理解】', text)
-        self.assertIn('【近期需要留意的事】', text)
-        self.assertNotIn('较稳定的历史观察', text)
+        self.assertEqual(text, '')
 
     def test_under_review_belief_is_shown_as_reassessment_not_two_facts(self):
         belief = {
@@ -584,8 +576,7 @@ class ReaderStructureTests(unittest.TestCase):
         text = cognitive_reader.build_cognitive_prompt_context(
             'u', 'gojo', conn=Conn(),
         )
-        self.assertIn('正在被重新评估', text)
-        self.assertNotIn('（置信度 0.72，可被新证据修正）', text)
+        self.assertEqual(text, '')
 
 
 class HypothesisQuestionChainTests(unittest.TestCase):

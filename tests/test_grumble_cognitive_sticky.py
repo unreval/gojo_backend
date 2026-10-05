@@ -186,7 +186,7 @@ class LegacyGrumbleRetiredTests(unittest.TestCase):
 
 
 class UserFacingStickyQueryTests(unittest.TestCase):
-    def test_user_facing_list_filters_slow_loop_active_unhidden_unexpired(self):
+    def test_user_facing_list_filters_evidenced_active_unhidden_unexpired(self):
         conn = FakeConn()
         conn.select_rows = [make_row()]
         notes = cognitive_reader.list_user_facing_sticky_notes(
@@ -203,7 +203,8 @@ class UserFacingStickyQueryTests(unittest.TestCase):
         self.assertNotIn('character_id = %s', sql)
         self.assertEqual(params[0], 'u1')
         self.assertIn(USER_FACING_STICKY_SOURCE, params)
-        self.assertNotIn(MEMORY_LIFECYCLE_SOURCE, params)
+        self.assertIn("projection_version' = 'sticky_evidence_v1'", sql)
+        self.assertIn("COALESCE(raw.status, 'active') = 'active'", sql)
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0]['source'], USER_FACING_STICKY_SOURCE)
         self.assertEqual(notes[0]['created_by_cycle_id'], 90)
@@ -234,7 +235,7 @@ class UserFacingStickyQueryTests(unittest.TestCase):
         self.assertEqual(null_notes[0]['emotion'], '')
         self.assertEqual(null_notes[0]['trigger_snippet'], '')
 
-    def test_memory_lifecycle_sticky_is_not_selected_by_user_facing_source(self):
+    def test_legacy_slow_loop_sticky_is_not_selected_by_user_facing_source(self):
         conn = FakeConn()
         conn.select_rows = []
         notes = cognitive_reader.list_user_facing_sticky_notes(
@@ -343,14 +344,12 @@ class PersistStickyProvenanceTests(unittest.TestCase):
         ui_conn = FakeConn()
         cognitive_reader.list_user_facing_sticky_notes('u', 'gojo', conn=ui_conn)
         ui_sql, ui_params = ui_conn.executed[0]
-        lifecycle_conn = FakeConn()
-        with patch.object(memory_lifecycle, 'get_conn', return_value=lifecycle_conn):
+        with patch.object(cognitive_reader, 'list_user_facing_sticky_notes',
+                          return_value=[]) as shared_reader:
             memory_lifecycle.recall_sticky_notes('u', 'gojo')
-        lifecycle_sql, lifecycle_params = lifecycle_conn.executed[0]
         self.assertIn('user_visible = TRUE', ui_sql)
         self.assertIn(USER_FACING_STICKY_SOURCE, ui_params)
-        self.assertNotIn('user_visible = TRUE', lifecycle_sql)
-        self.assertIn(MEMORY_LIFECYCLE_SOURCE, lifecycle_params)
+        shared_reader.assert_called_once_with('u', 'gojo', limit=6)
 
 
 class StickyDisplayContractTests(unittest.TestCase):

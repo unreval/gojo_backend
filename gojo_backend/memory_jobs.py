@@ -176,14 +176,15 @@ def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
     return job_id
 
 
-def _set_status(job_id, status, last_error=None):
+def _set_status(job_id, status, last_error=None, retry_delay_seconds=None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         '''UPDATE memory_jobs
-           SET status = %s, last_error = %s, updated_at = CURRENT_TIMESTAMP
+           SET status = %s, last_error = %s,
+               updated_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 second')
            WHERE id = %s''',
-        (status, last_error, job_id)
+        (status, last_error, retry_delay_seconds or 0, job_id)
     )
     conn.commit()
     cur.close()
@@ -199,6 +200,7 @@ def _claim_one():
                       extra_json, attempts, source_event_id, assistant_event_id
                FROM memory_jobs
                WHERE status = 'pending' AND attempts < %s
+                 AND COALESCE(updated_at, CURRENT_TIMESTAMP) <= CURRENT_TIMESTAMP
                ORDER BY id ASC
                LIMIT 1''',
             (MAX_ATTEMPTS,)
@@ -250,6 +252,7 @@ def _run_job(row):
     source_event_id = row[8] if len(row) > 8 else None
     assistant_event_id = row[9] if len(row) > 9 else None
     auth_failed = False
+    retry_delay = None
     try:
         ok = False
         extra = json.loads(extra_json or '{}') if extra_json else {}
@@ -304,9 +307,10 @@ def _run_job(row):
             return
         err = 'extraction_returned_false'
     except Exception as e:
-        from provider_error import is_auth_error
+        from provider_error import is_auth_error, retry_delay_seconds
         from structured_output import StructuredOutputError
         auth_failed = is_auth_error(e)
+        retry_delay = retry_delay_seconds(e)
         err = ('provider_auth_failed' if auth_failed else
                e.code if isinstance(e, StructuredOutputError)
                and e.code in _SAFE_ERROR_CODES else 'job_exception')
@@ -315,7 +319,10 @@ def _run_job(row):
         _set_status(job_id, 'failed', err)
         print(f'[memory_jobs] failed #{job_id} kind={kind} after {attempts} attempts error={err}')
     else:
-        _set_status(job_id, 'pending', err)
+        if retry_delay is None:
+            _set_status(job_id, 'pending', err)
+        else:
+            _set_status(job_id, 'pending', err, retry_delay)
         print(f'[memory_jobs] retry #{job_id} kind={kind} attempt={attempts} error={err}')
 
 

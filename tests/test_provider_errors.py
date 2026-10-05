@@ -16,7 +16,7 @@ import memory_jobs  # noqa: E402
 import rolling_summary  # noqa: E402
 import route_chat  # noqa: E402
 import structured_output  # noqa: E402
-from provider_error import ProviderHTTPError, diagnostics  # noqa: E402
+from provider_error import ProviderHTTPError, diagnostics, retry_delay_seconds  # noqa: E402
 
 
 class PermissionDeniedError(Exception):
@@ -24,6 +24,18 @@ class PermissionDeniedError(Exception):
 
 
 class ProviderErrorTests(unittest.TestCase):
+    def test_only_transient_provider_failures_get_a_retry_delay(self):
+        self.assertIsNone(retry_delay_seconds(ProviderHTTPError(
+            403, provider='anthropic', model='claude-test')))
+        self.assertEqual(retry_delay_seconds(ProviderHTTPError(
+            429, provider='deepseek', model='deepseek-test')), 120)
+        self.assertEqual(retry_delay_seconds(ProviderHTTPError(
+            503, provider='deepseek', model='deepseek-test')), 60)
+        try:
+            raise RuntimeError('safe transport failure') from TimeoutError()
+        except RuntimeError as error:
+            self.assertEqual(retry_delay_seconds(error), 60)
+
     def test_error_message_never_echoes_unknown_credentials_or_user_text(self):
         secret = 'abcdefghijklmnopqrstuvwx'  # fake 24-character credential
         error = ProviderHTTPError(
@@ -109,7 +121,49 @@ class ProviderErrorTests(unittest.TestCase):
                     'rolling_summary.process_summary_job', side_effect=error), patch.object(
                     memory_jobs, '_set_status') as set_status:
                 memory_jobs._run_job(row)
-            set_status.assert_called_once_with(1718, 'pending', 'job_exception')
+            set_status.assert_called_once_with(
+                1718, 'pending', 'job_exception', retry_delay_seconds(error))
+
+    @unittest.skipUnless(os.environ.get('COGNITIVE_TEST_PGLITE'), 'isolated PGlite unavailable')
+    def test_summary_job_retry_deadline_survives_a_new_worker_claim(self):
+        from tests.offline_pg import Connection
+
+        database = Connection()
+        try:
+            database.query('''CREATE TABLE memory_jobs (
+                id SERIAL PRIMARY KEY, kind TEXT, user_id TEXT, character_id TEXT,
+                user_text TEXT, assistant_text TEXT, extra_json TEXT,
+                attempts INTEGER DEFAULT 0, source_event_id TEXT, assistant_event_id TEXT,
+                status TEXT DEFAULT 'pending', last_error TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            database.query('''INSERT INTO memory_jobs
+                (kind, user_id, character_id, extra_json)
+                VALUES ('rolling_summary', 'u', 'gojo', '{}')''')
+            with patch.object(memory_jobs, 'get_conn', return_value=database):
+                memory_jobs._set_status(1, 'pending', 'job_exception', 60)
+                self.assertIsNone(memory_jobs._claim_one())
+                database.query('''UPDATE memory_jobs
+                    SET updated_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+                    WHERE id = 1''')
+                claimed = memory_jobs._claim_one()
+            self.assertEqual(claimed[0], 1)
+            self.assertEqual(claimed[7], 1)
+        finally:
+            database.shutdown()
+
+    def test_generation_429_stops_after_one_candidate_and_reports_delay(self):
+        error_out = {}
+        error = ProviderHTTPError(429, provider='anthropic', model='claude-test')
+        with patch.object(route_chat, '_create_json', side_effect=error) as create, patch(
+                'builtins.print'):
+            result, state = route_chat._generate_or_none(
+                'claude-test', 100, [], [{'role': 'user', 'content': 'hello'}],
+                attempts=2, log_tag='chat:test', cache_tag='chat:test',
+                error_out=error_out)
+        self.assertIsNone(result)
+        self.assertIsNone(state)
+        create.assert_called_once()
+        self.assertEqual(error_out['provider_retry_delay_seconds'], 120)
 
     def test_deepseek_error_exposes_safe_metadata_and_never_raw_body(self):
         response = Mock(status_code=403)

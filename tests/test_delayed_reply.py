@@ -323,6 +323,40 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertEqual(calls, [oid, oid])
         self.assertEqual(row['check_state'], 'consumed')
 
+    def test_transient_provider_failure_defers_without_duplicate_generation(self):
+        for error, delay in (
+                (ProviderHTTPError(429, provider='anthropic', model='claude-test'), 120),
+                (ProviderHTTPError(503, provider='anthropic', model='claude-test'), 60),
+                (TimeoutError(), 60)):
+            with self.subTest(error=type(error).__name__):
+                store = PhoneCheckStore()
+                oid, row = _seed_soft_busy_bundle(store, ['在吗'])
+                calls = []
+
+                def generate(_bundle):
+                    calls.append(oid)
+                    if len(calls) == 1:
+                        raise error
+                    return {'ok': True}
+
+                with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+                     patch.object(db_schedule, 'postpone_past_hard_busy',
+                                  side_effect=lambda *a, **k: (a[2] if len(a) > 2 else NOW, False)), \
+                     patch('activity_phone.profile_for_activity', return_value=None), \
+                     patch.object(db_schedule.random, 'random', return_value=0.0):
+                    first = delayed_reply.process_due_phone_checks(NOW, generate_fn=generate)
+                    self.assertEqual(first[0]['reason'], 'provider_retryable')
+                    self.assertEqual(row['check_state'], 'deferred')
+                    self.assertEqual(row['next_phone_check_at'], NOW + timedelta(seconds=delay))
+                    self.assertEqual(delayed_reply.process_due_phone_checks(
+                        NOW + timedelta(seconds=delay - 1), generate_fn=generate), [])
+                    self.assertEqual(calls, [oid])
+                    second = delayed_reply.process_due_phone_checks(
+                        NOW + timedelta(seconds=delay), generate_fn=generate)
+                self.assertEqual(second[0]['action'], 'replied')
+                self.assertEqual(row['check_state'], 'consumed')
+                self.assertEqual(calls, [oid, oid])
+
     def test_delayed_generation_marks_only_provider_auth_failure_for_defer(self):
         class AuthHelpers(HelpersStub):
             def _generate_or_none(self, *args, **kwargs):

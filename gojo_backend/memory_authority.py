@@ -55,7 +55,9 @@ def current_answer_question_sql(alias='cognitive_questions'):
               AND op.key={alias}.metadata->'current_judgment'->>'operation_id'
               AND ((op.value->>'projection_version'='{PROJECTION_VERSION}'
                     AND op.value->'semantic_payload'={alias}.metadata->'current_judgment'->'semantic_payload')
-                   OR (op.value->>'projection_version' IS DISTINCT FROM '{PROJECTION_VERSION}'
+                   OR (COALESCE(op.value->>'projection_version','legacy_v1')='legacy_v1'
+                       AND COALESCE({alias}.metadata->'current_judgment'->>'projection_version',
+                                    'legacy_v1')='legacy_v1'
                        AND op.value->>'memory_content'={alias}.metadata->'current_judgment'->>'content'))
         )))"""
 
@@ -143,6 +145,10 @@ def authoritative_memory_sql(table):
                 AND (
                     ({table}.projection_version='{PROJECTION_VERSION}'
                      AND {table}.semantic_payload IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM memory_source_events mse
+                                 WHERE mse.memory_type='{table}'
+                                   AND mse.memory_id={table}.id
+                                   AND mse.source_event_id=ce.source_event_id)
                      AND decision->>'projection_version'='{PROJECTION_VERSION}'
                      AND decision->'semantic_payload'={table}.semantic_payload
                      AND {table}.semantic_payload->>'source_event_id'=ce.source_event_id
@@ -157,7 +163,8 @@ def authoritative_memory_sql(table):
                                     AND {table}.semantic_payload->>'evidence_text'=ce.payload->'claim'->>'text')
                                    OR (NOT (ce.payload ? 'claim')
                                        AND position({table}.semantic_payload->>'evidence_text' in ce.payload->>'content')>0)))))
-                    OR ({table}.projection_version IS DISTINCT FROM '{PROJECTION_VERSION}'
+                    OR ({table}.projection_version='legacy_v1'
+                        AND COALESCE(decision->>'projection_version','legacy_v1')='legacy_v1'
                         AND (decision->>'memory_content'={table}.content
                              OR (decision->>'memory_content' LIKE '用户%'
                                  AND replace(decision->>'memory_content','用户','她')={table}.content))))
@@ -179,7 +186,8 @@ def authoritative_memory_sql(table):
                           AND b.status='active' AND b.metadata->>'review_status'='stable'
                            AND (({table}.projection_version='{PROJECTION_VERSION}'
                                  AND decision->>'belief_key'=b.belief_key)
-                                OR ({table}.projection_version IS DISTINCT FROM '{PROJECTION_VERSION}'
+                                OR ({table}.projection_version='legacy_v1'
+                                    AND COALESCE(decision->>'projection_version','legacy_v1')='legacy_v1'
                                     AND b.statement=decision->>'memory_content')))))
                 ))"""
 
@@ -205,7 +213,8 @@ def current_literal_belief_sql(alias):
             AND ((op.value->>'projection_version'='{PROJECTION_VERSION}'
                   AND op.value->>'belief_key'={alias}.belief_key
                   AND op.value->'semantic_payload'={alias}.metadata->'semantic_payload')
-                 OR (op.value->>'projection_version' IS DISTINCT FROM '{PROJECTION_VERSION}'
+                 OR (COALESCE(op.value->>'projection_version','legacy_v1')='legacy_v1'
+                     AND COALESCE({alias}.metadata->>'projection_version','legacy_v1')='legacy_v1'
                      AND COALESCE(op.value->>'memory_content',
                          '用户明确自述：' || (ce.payload->'claim'->>'text') ||
                          '（仅限这次自述，不推断隐含心理）')={alias}.statement)))"""
@@ -294,13 +303,18 @@ def filter_recall_authority(result, user_id, character_id):
         return None
     result = dict(result)
     facts = result.get('facts') or []
-    bonds = list(result.get('loose_bonds') or []) + list(result.get('tolds') or [])
+    tolds = list(result.get('tolds') or [])
+    bonds = list(result.get('loose_bonds') or []) + [
+        row for row in tolds if row.get('source_table') != 'long_memory']
     bonds += [bond for fact in facts for bond in fact.get('bonds', [])]
     from db import get_conn
     allowed = {}
     database = None
     try:
-        for table, candidates in (('long_memory', facts), ('bond_memory', bonds)):
+        for table, candidates in (
+                ('long_memory', facts + [row for row in tolds
+                                         if row.get('source_table') == 'long_memory']),
+                ('bond_memory', bonds)):
             ids = list({row['id'] for row in candidates if isinstance(row.get('id'), int)})
             allowed[table] = {}
             if not ids:
@@ -309,7 +323,13 @@ def filter_recall_authority(result, user_id, character_id):
                 database = get_conn()
             cur = database.cursor()
             try:
-                cur.execute(f"""SELECT id, content, projection_version, semantic_payload, character_id FROM {table}
+                refs = 'source_event_refs' if table == 'long_memory' else "'[]'::jsonb"
+                cur.execute(f"""SELECT id, content, projection_version, semantic_payload,
+                           character_id, {refs},
+                           ARRAY(SELECT mse.source_event_id FROM memory_source_events mse
+                                 WHERE mse.memory_type='{table}' AND mse.memory_id={table}.id
+                                 ORDER BY mse.source_event_id)
+                           FROM {table}
                     WHERE user_id=%s AND character_id IN (%s,%s) AND id=ANY(%s)
                       AND {authoritative_memory_sql(table)}""",
                     (user_id, character_id, 'shared' if table == 'long_memory' else character_id, ids))
@@ -329,18 +349,28 @@ def filter_recall_authority(result, user_id, character_id):
             stored = allowed[table].get(row.get('id'))
             if stored is None:
                 continue
-            _, content, version, semantic, source_character_id = stored
-            kept.append(dict(row, authority=AUTHORITY,
+            _, content, version, semantic, source_character_id, source_refs, source_ids = stored
+            verified = dict(row, authority=AUTHORITY,
                 content=render_role_view(content, observer_id=character_id,
                                          source_character_id=source_character_id,
                                          semantic=semantic if version == PROJECTION_VERSION else None),
                 projection_version=version, semantic_payload=semantic,
-                source_character_id=source_character_id))
+                source_character_id=source_character_id,
+                source_event_refs=source_refs, source_event_ids=tuple(source_ids or ()))
+            if table == 'long_memory' and row.get('source_table') == 'long_memory':
+                from told_projection import canonical_told_view
+                verified = canonical_told_view(verified, user_id, character_id)
+                if verified is None:
+                    continue
+            kept.append(verified)
         return kept
 
     result['facts'] = keep(facts, 'long_memory')
     for fact in result['facts']:
         fact['bonds'] = keep(fact.get('bonds', []), 'bond_memory')
-    for key in ('loose_bonds', 'tolds'):
-        result[key] = keep(result.get(key) or [], 'bond_memory')
+    result['loose_bonds'] = keep(result.get('loose_bonds') or [], 'bond_memory')
+    result['tolds'] = (keep([row for row in tolds
+                              if row.get('source_table') == 'long_memory'], 'long_memory')
+                       + keep([row for row in tolds
+                               if row.get('source_table') != 'long_memory'], 'bond_memory'))
     return result

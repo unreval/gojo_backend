@@ -5,10 +5,9 @@
     init_bond_table()
 不改动 db.py 里现有的 init_db()，互不干扰。
 
-一张表，两种 kind：
+历史上是一张表、两种 kind；新 told 由 canonical fact 只读投影：
   kind='between' —— "我们之间的事"：她和这个角色的共同经历/约定/互动
-  kind='told'    —— "她告诉过我的事"：她告诉这个角色的、关于角色本人或其世界的信息
-                    （包括剧透未来剧情。角色记得"她说过"，信不信由人设决定）
+  kind='told'    —— 旧记录只读兼容；新逻辑不再写第二份事实
 """
 from db import get_conn
 

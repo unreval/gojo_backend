@@ -6,6 +6,7 @@ duplicate *conclusions* that share sources. Never invents source_event_ids.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -204,11 +205,15 @@ def _candidate_from_row(kind, row, extra=None) -> Optional[RecallCandidate]:
         return None
     ids = parse_source_ids(row.get('source_event_ids')) or parse_source_ids(row.get('source_event_refs'))
     oid = str(row.get('id') or row.get('diary_key') or row.get('note_key') or '')
+    if row.get('projection_version') == 'role_view_v2' and not oid:
+        return None
+    identity = oid or str(abs(hash(text)) % 10**8)
+    kind_key = f'{kind}:{row.get("source_table", "bond_memory")}' if kind == 'told' else kind
     meta = dict(row)
     if extra:
         meta.update(extra)
     return RecallCandidate(
-        candidate_id=f'{kind}:{oid or abs(hash(text)) % 10**8}',
+        candidate_id=f'{kind_key}:{identity}',
         candidate_type=kind,
         text=text,
         source_event_ids=ids,
@@ -300,6 +305,23 @@ def _prefer(a: RecallCandidate, b: RecallCandidate) -> RecallCandidate:
 
 
 def _same_conclusion(a: RecallCandidate, b: RecallCandidate) -> bool:
+    # A versioned fact is identified by its adjudicated semantic record. A
+    # wording-only edit must never change whether it competes with a peer.
+    av = a.metadata.get('projection_version') == 'role_view_v2'
+    bv = b.metadata.get('projection_version') == 'role_view_v2'
+    if av or bv:
+        if not (av and bv) or a.semantic_role != b.semantic_role:
+            return False
+        def semantic(candidate):
+            value = candidate.metadata.get('semantic_payload')
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    return None
+            return value if isinstance(value, dict) and value else None
+        identity = semantic(a)
+        return identity is not None and identity == semantic(b)
     if 'episode_index' in (a.candidate_type, b.candidate_type):
         # An episode is broader than a fact/bond.  Keep both unless their text
         # is nearly the same conclusion, rather than erasing an independent

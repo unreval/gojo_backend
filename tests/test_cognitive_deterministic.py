@@ -1,4 +1,5 @@
 """Hard acceptance: canonical ingress -> queue -> revision -> reader, LLM off."""
+import asyncio
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import json
@@ -375,6 +376,72 @@ class OfflineDatabaseTests(unittest.TestCase):
         self.assertEqual(settle_pending_predictions(self.database, user_id='u', character_id='c',
             event_id=event, occurred_at=self.now + timedelta(seconds=1)), [])
         self.assertEqual(self.sql('SELECT status FROM cognitive_predictions'), [('pending',)])
+
+    def test_pending_sticky_ui_chat_resolve_tear_expire_and_durable_memory(self):
+        import cognitive_reader
+        import memory_lifecycle
+        import route_cognitive
+        import route_grumble
+
+        self.report('durable', '我喜欢咖啡。')
+        durable_id = self.sql("SELECT id FROM long_memory WHERE user_id='u' AND character_id='c'")[0][0]
+
+        def visible():
+            ui = json.loads(asyncio.run(route_grumble.get_grumbles('u', 'c', 100)).body)['grumbles']
+            chat = memory_lifecycle.recall_sticky_notes('u', 'c')
+            self.assertEqual([item['id'] for item in ui], [item['id'] for item in chat])
+            return ui
+
+        def pending(source_id, text):
+            self.source(source_id, text)
+            self.ingest(source_id)
+            self.run_cycle()
+            rows = visible()
+            self.assertEqual(len(rows), 1)
+            self.assertIn(text, rows[0]['content'])
+            return rows[0]['id']
+
+        exam_id = pending('exam', '我明天考试。')
+        self.assertEqual(self.sql('SELECT source, metadata->>\'projection_version\' '
+                                  'FROM cognitive_sticky_notes WHERE id=%s', (exam_id,))[0],
+                         ('memory_lifecycle_fast_loop', 'sticky_evidence_v1'))
+        asyncio.run(route_cognitive.mark_sticky_note_complete(
+            exam_id, {'user_id': 'u', 'character_id': 'c'}))
+        self.assertEqual(visible(), [])
+
+        interview_id = pending('interview', '我明天面试。')
+        self.assertTrue(json.loads(asyncio.run(route_grumble.del_grumble(interview_id, 'u')).body)['ok'])
+        self.assertEqual(visible(), [])
+        self.assertEqual(self.sql('SELECT status FROM cognitive_sticky_notes WHERE id=%s',
+                                  (interview_id,))[0][0], 'active')
+
+        meeting_id = pending('meeting', '我明天开会。')
+        self.sql("UPDATE cognitive_sticky_notes SET expires_at=CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id=%s",
+                 (meeting_id,))
+        self.database.commit()
+        self.assertEqual(visible(), [])
+
+        self.sql("INSERT INTO cognitive_sticky_notes(user_id, character_id, note_key, content, source) "
+                 "VALUES ('u', 'c', 'legacy', '旧模型便签', 'cognitive_slow_loop')")
+        self.database.commit()
+        self.assertEqual(visible(), [])
+        self.assertEqual(len(cognitive_reader.list_sticky_notes(
+            'u', 'c', include_inactive=True, conn=self.database)), 4)
+        self.assertEqual(self.sql('SELECT id FROM long_memory WHERE id=%s', (durable_id,)),
+                         [(durable_id,)])
+
+    def test_sticky_source_withdrawal_hides_ui_and_chat(self):
+        import memory_lifecycle
+        from cognitive_reader import list_user_facing_sticky_notes
+
+        self.source('exam', '我明天考试。')
+        self.ingest('exam')
+        self.run_cycle()
+        self.assertEqual(len(list_user_facing_sticky_notes('u', 'c', conn=self.database)), 1)
+        self.sql("UPDATE chat_log SET status='deleted' WHERE event_id='exam'")
+        self.database.commit()
+        self.assertEqual(list_user_facing_sticky_notes('u', 'c', conn=self.database), [])
+        self.assertEqual(memory_lifecycle.recall_sticky_notes('u', 'c'), [])
 
 
 if __name__ == '__main__':

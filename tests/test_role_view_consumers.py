@@ -48,11 +48,12 @@ class RoleViewConsumerTests(unittest.TestCase):
         self.assertEqual(public['content'], '她说今天很累。')
         self.assertEqual(public['trigger_snippet'], '用户原话：我很累')
         note = {'note_key': 'note-1', 'content': raw, 'status': 'active',
-                'source_event_refs': []}
+                'source_event_refs': [{'source_type': 'raw_event', 'source_id': 'event-1'}]}
         state = {'beliefs': [], 'questions': [], 'hypotheses': [],
                  'sticky_notes': [note], 'predictions': []}
-        items = cognitive_reader.iter_active_cognitive_items(
-            'user-1', 'gojo', _state=state)
+        with patch('raw_events.get_active_events_by_ids', return_value=[{'event_id': 'event-1'}]):
+            items = cognitive_reader.iter_active_cognitive_items(
+                'user-1', 'gojo', _state=state)
         self.assertEqual(len(items), 1)
         self.assertIn(public['content'], items[0]['text'])
         self.assertEqual(note['content'], raw)
@@ -60,11 +61,14 @@ class RoleViewConsumerTests(unittest.TestCase):
     def test_cognitive_dedup_uses_identity_not_display_text(self):
         state = {'beliefs': [], 'questions': [], 'hypotheses': [],
                  'sticky_notes': [
-                     {'note_key': 'same', 'content': '用户表示累了。', 'status': 'active'},
-                     {'note_key': 'same', 'content': '她说累了。', 'status': 'active'},
+                     {'note_key': 'same', 'content': '用户表示累了。', 'status': 'active',
+                      'source_event_refs': [{'source_type': 'raw_event', 'source_id': 'event-1'}]},
+                     {'note_key': 'same', 'content': '她说累了。', 'status': 'active',
+                      'source_event_refs': [{'source_type': 'raw_event', 'source_id': 'event-1'}]},
                  ], 'predictions': []}
-        items = cognitive_reader.iter_active_cognitive_items(
-            'user-1', 'gojo', _state=state)
+        with patch('raw_events.get_active_events_by_ids', return_value=[{'event_id': 'event-1'}]):
+            items = cognitive_reader.iter_active_cognitive_items(
+                'user-1', 'gojo', _state=state)
         self.assertEqual(len(items), 1)
 
     def test_derived_history_is_projected_after_source_selection(self):
@@ -115,38 +119,16 @@ class RoleViewConsumerTests(unittest.TestCase):
         self.assertEqual(raw['content'], '用户表示今天很累，我记下了。')
 
     def test_fast_sticky_recall_projects_after_selection(self):
-        class Cursor:
-            def __init__(self):
-                self.statements = []
-
-            def execute(self, sql, params):
-                self.statements.append(sql)
-
-            def fetchall(self):
-                return [(3, 'note-3', '用户表示今天很累。',
-                         memory_lifecycle.MEMORY_LIFECYCLE_SOURCE, [],
-                         None, None)]
-
-            def close(self):
-                pass
-
-        class Connection:
-            def __init__(self):
-                self._cursor = Cursor()
-
-            def cursor(self):
-                return self._cursor
-
-            def close(self):
-                pass
-
-        database = Connection()
-        with patch.object(memory_lifecycle, 'get_conn', return_value=database):
+        public = {'id': 3, 'note_key': 'note-3', 'content': '她说今天很累。',
+                  'source': memory_lifecycle.MEMORY_LIFECYCLE_SOURCE,
+                  'source_event_refs': [{'source_id': 'event-3'}],
+                  'expires_at': None, 'updated_at': None}
+        with patch.object(cognitive_reader, 'list_user_facing_sticky_notes',
+                          return_value=[public]) as shared_reader:
             notes = memory_lifecycle.recall_sticky_notes('user-1', 'gojo')
         self.assertEqual(notes[0]['content'], '她说今天很累。')
-        self.assertEqual(notes[0]['source_event_refs'], [])
-        self.assertEqual(len(database._cursor.statements), 1)
-        self.assertTrue(database._cursor.statements[0].lstrip().startswith('SELECT'))
+        self.assertEqual(notes[0]['source_event_refs'], public['source_event_refs'])
+        shared_reader.assert_called_once_with('user-1', 'gojo', limit=6)
 
 
 if __name__ == '__main__':

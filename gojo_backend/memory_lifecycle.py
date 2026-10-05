@@ -4,9 +4,8 @@ This module is intentionally model-free. It decides whether a newly extracted
 user fact should stay as a short-lived state, become a sticky note, wait as an
 episodic/candidate memory, or consolidate into durable long_memory.
 
-Sticky notes written here are internal memory cues
-(source=memory_lifecycle_fast_loop). They are not the user-facing 便利贴.
-The 便利贴 UI only presents Slow Loop stickies (source=cognitive_slow_loop).
+Canonical raw-event reminders are projected here for both chat and the
+便利贴 UI. Historical Slow Loop notes are retained for inspection only.
 """
 import hashlib
 import json
@@ -18,11 +17,12 @@ from config import CN_TZ
 from cognitive_config import (
     COGNITIVE_DIARY_RECALL_ENTRY_CHARS,
     COGNITIVE_DIARY_RECALL_LIMIT,
+    USER_FACING_STICKY_SOURCE,
 )
 from db import get_conn
 
 
-MEMORY_LIFECYCLE_SOURCE = 'memory_lifecycle_fast_loop'
+MEMORY_LIFECYCLE_SOURCE = USER_FACING_STICKY_SOURCE
 
 EPHEMERAL_TTL_SECONDS = 2 * 3600
 CANDIDATE_TTL_SECONDS = 14 * 86400
@@ -362,6 +362,39 @@ def build_sticky_content(content, topic_key):
         'goal.exam': '临近考试/任务',
     }.get(topic_key, '临近事项')
     return f'{topic_hint}：{content}。到期后不要当作长期事实。'
+
+
+def project_pending_sticky(cur, *, user_id, character_id, event_id,
+                           source_id, source_text, now):
+    """Project a short deadline reminder from a verified canonical user turn."""
+    raw_text = str(source_text or '')
+    text = raw_text.strip()
+    if not text or len(text) > 240:
+        return None
+    classification = classify_memory_lifecycle(text, category='状态', now=now)
+    if not classification.get('should_write_sticky'):
+        return None
+    note_key = 'memory_lifecycle.raw.' + hashlib.sha1(
+        str(source_id).encode('utf-8')).hexdigest()[:20]
+    refs = [{'event_id': event_id, 'source_type': 'raw_event',
+             'source_id': str(source_id), 'user_id': user_id,
+             'character_id': character_id}]
+    metadata = {'projection_version': 'sticky_evidence_v1',
+                'source_text': raw_text}
+    cur.execute(
+        '''INSERT INTO cognitive_sticky_notes (
+               user_id, character_id, note_key, content, status, source,
+               source_event_refs, expires_at, metadata)
+           VALUES (%s, %s, %s, %s, 'active', %s, %s::jsonb, %s, %s::jsonb)
+           ON CONFLICT (user_id, character_id, note_key) DO NOTHING
+           RETURNING id''',
+        (user_id, character_id, note_key,
+         f'她提到临近事项：「{text}」。', MEMORY_LIFECYCLE_SOURCE,
+         _json(refs), now + timedelta(seconds=classification['ttl_seconds']),
+         _json(metadata)),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def build_consolidated_summary(topic_key, evidence_contents):
@@ -845,49 +878,20 @@ def recall_lifecycle_memories(user_id, character_id, user_message='', limit=6,
 
 
 def recall_sticky_notes(user_id, character_id, user_message='', limit=3):
-    conn = get_conn()
-    cur = conn.cursor()
     try:
-        cur.execute(
-            '''SELECT id, note_key, content, source, source_event_refs, expires_at, updated_at
-               FROM cognitive_sticky_notes
-               WHERE user_id = %s
-                 AND character_id = %s
-                 AND status = 'active'
-                 AND source = %s
-                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-               ORDER BY updated_at DESC
-               LIMIT %s''',
-            (user_id, character_id, MEMORY_LIFECYCLE_SOURCE, limit * 2),
-        )
+        from cognitive_reader import list_user_facing_sticky_notes
+        rows = list_user_facing_sticky_notes(
+            user_id, character_id, limit=limit * 2)
         items = []
-        for row in cur.fetchall():
-            item = {
-                'id': row[0],
-                'note_key': row[1],
-                'content': row[2],
-                'source': row[3],
-                'source_event_refs': _parse_refs(row[4]),
-                'expires_at': row[5],
-                'updated_at': row[6],
-                'source_type': 'sticky_note',
-            }
+        for row in rows:
+            item = dict(row, source_type='sticky_note')
             item['score'] = _score_recall_entry(item['content'], user_message, 0.85, item['updated_at'])
             items.append(item)
-        items.sort(key=lambda it: (it['score'], it['updated_at'] or datetime.min), reverse=True)
-        from role_view import render_role_view
-        selected = items[:limit]
-        for item in selected:
-            item['content'] = render_role_view(
-                item['content'], observer_id=character_id,
-                source_character_id=character_id)
-        return selected
+        items.sort(key=lambda it: (it['score'], it['updated_at'] or ''), reverse=True)
+        return items[:limit]
     except Exception as e:
         print(f'[memory_lifecycle] sticky recall failed: {e}')
         return []
-    finally:
-        cur.close()
-        conn.close()
 
 
 def _diary_query_terms(user_message):

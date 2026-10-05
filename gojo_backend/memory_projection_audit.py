@@ -1,13 +1,14 @@
-"""Read-only inventory of old memory projections; never grants authority.
+"""Inventory and guarded recovery of old canonical memory projections.
 
-Pass an explicitly chosen database connection. This module does not connect to a
-database, update rows, or treat a matching legacy phrase as evidence.
+Pass an explicitly chosen database connection. Audit and the default recovery
+mode use SELECT only; the explicit apply mode rechecks and commits one transaction.
 """
 from collections import Counter
 import json
 
-from memory_authority import AUTHORITY, authoritative_memory_sql
-from role_view import PROJECTION_VERSION
+from memory_authority import (AUTHORITY, authoritative_memory_sql,
+                              canonical_semantic_payload)
+from role_view import PROJECTION_VERSION, render_role_view
 
 
 def _object(value):
@@ -17,6 +18,21 @@ def _object(value):
         except json.JSONDecodeError:
             return {}
     return value if isinstance(value, dict) else {}
+
+
+def _array(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    return value if isinstance(value, list) else []
+
+
+def _decision(event, operation_id):
+    adjudication = _object(event['adjudication'])
+    operations = adjudication.get('operations')
+    return _object(operations.get(operation_id or 'main')) if isinstance(operations, dict) else adjudication
 
 
 def _classify(memory, event, sources, belief):
@@ -34,8 +50,7 @@ def _classify(memory, event, sources, belief):
     adjudication = _object(event['adjudication'])
     if adjudication.get('status') != 'applied':
         return 'event_not_applied'
-    operations = adjudication.get('operations')
-    decision = _object(operations.get(memory['authority_operation_id'] or 'main')) if isinstance(operations, dict) else adjudication
+    decision = _decision(event, memory['authority_operation_id'])
     if not decision:
         return 'operation_missing'
     if decision.get('status') != 'applied':
@@ -96,7 +111,75 @@ def _classify(memory, event, sources, belief):
     return 'projection_mismatch_needs_review'
 
 
-def audit_memory_projections(conn, user_id, character_id, *, limit=1000):
+def _recovery_plan(cur, memory, event, sources, belief):
+    """Only a parsed raw claim and complete linked provenance may be upgraded."""
+    if _classify(memory, event, sources, belief) != 'legacy_startup_rewrite_candidate':
+        return 'not_a_startup_rewrite', None
+    if (memory['projection_version'] != 'legacy_v1'
+            or memory['semantic_payload'] is not None
+            or event['source_event_type'] != 'canonical_user_turn'):
+        return 'unsupported_legacy_origin', None
+    decision = _decision(event, memory['authority_operation_id'])
+    if (decision.get('action') not in ('reported', 'corrected')
+            or decision.get('projection_version') not in (None, 'legacy_v1')
+            or not memory['authority_belief_key']
+            or decision.get('belief_key') != memory['authority_belief_key']):
+        return 'verdict_identity_incomplete', None
+    payload = _object(event['payload'])
+    claim = _object(payload.get('claim'))
+    if len(sources) != 1 or sources[0]['chat_id'] != event['character_id']:
+        return 'raw_source_not_unique_or_private', None
+    from cognitive_revision import parse_cognitive_evidence
+    parsed = parse_cognitive_evidence(sources[0]['text'], event['user_id'], event['character_id'])
+    if parsed.get('operation') not in ('report', 'correction') or parsed.get('claim') != claim:
+        return 'claim_not_verified_from_raw', None
+    if (not belief or belief['statement'] != decision['memory_content']
+            or _object(belief['metadata']).get('authority') != 'literal_self_report_only'):
+        return 'belief_provenance_incomplete', None
+    refs = _array(belief['evidence_refs'])
+    if not any(ref.get('event_id') == event['id']
+               and ref.get('source_id') == event['source_event_id']
+               and ref.get('operation_id') == memory['authority_operation_id']
+               for ref in refs if isinstance(ref, dict)):
+        return 'belief_evidence_unlinked', None
+    cur.execute('''SELECT source_event_id FROM memory_source_events
+                   WHERE memory_type=%s AND memory_id=%s''',
+                (memory['table'], memory['id']))
+    links = [row[0] for row in cur.fetchall()]
+    if set(links) != {event['source_event_id']}:
+        return 'memory_source_links_incomplete', None
+    if memory['table'] == 'long_memory':
+        refs = _array(memory['source_event_refs'])
+        if len(refs) != 1 or not isinstance(refs[0], dict) or refs[0].get('source_id') != event['source_event_id']:
+            return 'memory_source_refs_incomplete', None
+    question_key = claim.get('question_key')
+    if not question_key:
+        return 'question_key_missing', None
+    cur.execute('''SELECT status,metadata FROM cognitive_questions
+                   WHERE user_id=%s AND character_id=%s AND question_key=%s''',
+                (event['user_id'], event['character_id'], question_key))
+    question = cur.fetchone()
+    if not question or question[0] != 'resolved':
+        return 'question_not_current', None
+    qmeta = _object(question[1])
+    judgment = _object(qmeta.get('current_judgment'))
+    if (judgment.get('belief_key') != memory['authority_belief_key']
+            or event['source_event_id'] not in _array(judgment.get('evidence_event_ids'))
+            or qmeta.get('claim_scope') != {key: claim.get(key) for key in
+                                           ('subject', 'predicate', 'object', 'time_scope', 'source')}):
+        return 'question_verdict_not_current', None
+    semantic = canonical_semantic_payload(user_id=event['user_id'],
+        character_id=event['character_id'], source_id=event['source_event_id'], claim=claim)
+    content = render_role_view('', observer_id=event['character_id'],
+        source_character_id=event['character_id'], semantic=semantic)
+    return 'recoverable', {'table': memory['table'], 'id': memory['id'],
+        'event_id': event['id'], 'operation_id': memory['authority_operation_id'],
+        'belief_key': memory['authority_belief_key'], 'question_key': question_key,
+        'semantic': semantic, 'content': content}
+
+
+def audit_memory_projections(conn, user_id, character_id, *, limit=1000,
+                             _plans=False, _lock=False):
     """Classify up to ``limit`` rows per table using SELECT queries only.
 
     A rewrite candidate remains untrusted until an independently approved
@@ -107,6 +190,7 @@ def audit_memory_projections(conn, user_id, character_id, *, limit=1000):
         raise ValueError('limit must be positive')
     cur = conn.cursor()
     records = []
+    plans = []
     truncated = False
     try:
         for table in ('long_memory', 'bond_memory'):
@@ -114,51 +198,140 @@ def audit_memory_projections(conn, user_id, character_id, *, limit=1000):
             cur.execute(f'''SELECT id,user_id,character_id,content,authority,
                        authority_event_id,authority_operation_id,authority_belief_key,
                        projection_version,semantic_payload,
+                       {"source_event_refs" if table == "long_memory" else "'[]'::jsonb"},
                        COALESCE(recall_status,'active'),
                        (expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP)
                        FROM {table} WHERE user_id=%s AND {scope}
-                       ORDER BY id LIMIT %s''', (user_id, character_id, limit + 1))
+                       ORDER BY id LIMIT %s {"FOR UPDATE" if _lock else ""}''',
+                        (user_id, character_id, limit + 1))
             rows = cur.fetchall()
             truncated |= len(rows) > limit
             for values in rows[:limit]:
                 memory = dict(zip(('id', 'user_id', 'character_id', 'content', 'authority',
                                    'authority_event_id', 'authority_operation_id',
                                    'authority_belief_key', 'projection_version',
-                                   'semantic_payload', 'recall_status', 'expired'), values))
+                                   'semantic_payload', 'source_event_refs',
+                                   'recall_status', 'expired'), values))
                 memory['table'] = table
                 event = belief = None
                 sources = []
                 if memory['authority'] == AUTHORITY and memory['authority_event_id']:
-                    cur.execute('''SELECT user_id,character_id,source_event_type,
+                    cur.execute(f'''SELECT id,user_id,character_id,source_event_type,
                                source_event_id,payload,adjudication FROM cognitive_events
-                               WHERE id=%s''', (memory['authority_event_id'],))
+                               WHERE id=%s {"FOR UPDATE" if _lock else ""}''',
+                                (memory['authority_event_id'],))
                     event_row = cur.fetchone()
                     if event_row:
-                        event = dict(zip(('user_id', 'character_id', 'source_event_type',
+                        event = dict(zip(('id', 'user_id', 'character_id', 'source_event_type',
                                           'source_event_id', 'payload', 'adjudication'), event_row))
-                        cur.execute('''SELECT chat_id,role,text,status FROM chat_log
-                                   WHERE user_id=%s AND COALESCE(NULLIF(event_id,''),client_msg_id)=%s''',
+                        cur.execute(f'''SELECT chat_id,role,text,status FROM chat_log
+                                   WHERE user_id=%s AND COALESCE(NULLIF(event_id,''),client_msg_id)=%s
+                                   {"FOR UPDATE" if _lock else ""}''',
                                     (event['user_id'], event['source_event_id']))
                         sources = [dict(zip(('chat_id', 'role', 'text', 'status'), row))
                                    for row in cur.fetchall()]
                         if memory['authority_belief_key']:
-                            cur.execute('''SELECT status,statement,metadata FROM cognitive_beliefs
-                                       WHERE user_id=%s AND character_id=%s AND belief_key=%s''',
+                            cur.execute(f'''SELECT status,statement,metadata,evidence_refs FROM cognitive_beliefs
+                                       WHERE user_id=%s AND character_id=%s AND belief_key=%s
+                                       {"FOR UPDATE" if _lock else ""}''',
                                         (event['user_id'], event['character_id'], memory['authority_belief_key']))
                             belief_row = cur.fetchone()
                             if belief_row:
-                                belief = dict(zip(('status', 'statement', 'metadata'), belief_row))
+                                belief = dict(zip(('status', 'statement', 'metadata', 'evidence_refs'), belief_row))
                 recall_eligible = False
                 if memory['authority'] == AUTHORITY:
                     cur.execute(f'''SELECT 1 FROM {table} WHERE id=%s AND user_id=%s
                                AND {authoritative_memory_sql(table)}''',
                                 (memory['id'], memory['user_id']))
                     recall_eligible = cur.fetchone() is not None
+                status = _classify(memory, event, sources, belief)
+                recovery_status = None
+                if status == 'legacy_startup_rewrite_candidate':
+                    recovery_status, plan = _recovery_plan(cur, memory, event, sources, belief)
+                    if plan:
+                        plans.append(plan)
                 records.append({'table': table, 'id': memory['id'],
                                 'authority_event_id': memory['authority_event_id'],
-                                'status': _classify(memory, event, sources, belief),
+                                'status': status, 'recovery_status': recovery_status,
                                 'recall_eligible': recall_eligible})
     finally:
         cur.close()
-    return {'records': records, 'counts': dict(Counter(r['status'] for r in records)),
-            'truncated': truncated}
+    result = {'records': records, 'counts': dict(Counter(r['status'] for r in records)),
+              'recovery_counts': dict(Counter(r['recovery_status'] for r in records
+                                              if r['recovery_status'])),
+              'truncated': truncated}
+    if _plans:
+        result['_plans'] = plans
+    return result
+
+
+def recover_memory_projections(conn, user_id, character_id, *, dry_run=True, limit=1000):
+    """Default to SELECT-only. Explicit apply atomically upgrades verified rows.
+
+    The caller chooses the connection; this module never discovers credentials.
+    Only IDs and status counts are returned, never source or memory text.
+    """
+    audit = audit_memory_projections(conn, user_id, character_id, limit=limit,
+                                     _plans=True, _lock=not dry_run)
+    plans = audit.pop('_plans')
+    result = {'dry_run': dry_run, 'eligible_ids': [
+        {'table': p['table'], 'id': p['id']} for p in plans],
+        'counts': audit['counts'], 'recovery_counts': audit['recovery_counts'],
+        'truncated': audit['truncated'], 'applied': 0}
+    if dry_run or not plans:
+        return result
+    cur = conn.cursor()
+    try:
+        for plan in plans:
+            payload = json.dumps(plan['semantic'], ensure_ascii=False)
+            cur.execute('''UPDATE cognitive_events SET adjudication=jsonb_set(
+                adjudication, ARRAY['operations',%s],
+                (adjudication->'operations'->%s) || %s::jsonb)
+                WHERE id=%s AND adjudication->>'status'='applied'
+                  AND adjudication->'operations'->%s->>'status'='applied' ''',
+                (plan['operation_id'], plan['operation_id'],
+                 json.dumps({'projection_version': PROJECTION_VERSION,
+                             'semantic_payload': plan['semantic']}, ensure_ascii=False),
+                 plan['event_id'], plan['operation_id']))
+            if cur.rowcount != 1:
+                raise RuntimeError('adjudication_changed_during_recovery')
+            cur.execute('''UPDATE cognitive_beliefs SET metadata=metadata || %s::jsonb
+                           WHERE user_id=%s AND character_id=%s AND belief_key=%s
+                             AND status='active' AND metadata->>'review_status'='stable' ''',
+                        (json.dumps({'projection_version': PROJECTION_VERSION,
+                                     'semantic_payload': plan['semantic']}, ensure_ascii=False),
+                         user_id, character_id, plan['belief_key']))
+            if cur.rowcount != 1:
+                raise RuntimeError('belief_changed_during_recovery')
+            cur.execute('''UPDATE cognitive_questions SET metadata=jsonb_set(metadata,
+                '{current_judgment}',
+                (metadata->'current_judgment') || %s::jsonb)
+                WHERE user_id=%s AND character_id=%s AND question_key=%s
+                  AND status='resolved' ''',
+                (json.dumps({'projection_version': PROJECTION_VERSION,
+                             'semantic_payload': plan['semantic']}, ensure_ascii=False),
+                 user_id, character_id, plan['question_key']))
+            if cur.rowcount != 1:
+                raise RuntimeError('question_changed_during_recovery')
+            table = plan['table']
+            cur.execute(f'''UPDATE {table} SET content=%s,projection_version=%s,
+                           semantic_payload=%s::jsonb
+                           WHERE id=%s AND user_id=%s AND character_id=%s
+                             AND authority=%s AND projection_version='legacy_v1' ''',
+                        (plan['content'], PROJECTION_VERSION, payload, plan['id'],
+                         user_id, character_id, AUTHORITY))
+            if cur.rowcount != 1:
+                raise RuntimeError('projection_changed_during_recovery')
+            cur.execute(f'''SELECT 1 FROM {table} WHERE id=%s AND user_id=%s
+                           AND {authoritative_memory_sql(table)}''',
+                        (plan['id'], user_id))
+            if cur.fetchone() is None:
+                raise RuntimeError('recovered_projection_failed_authority_gate')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+    result['applied'] = len(plans)
+    return result

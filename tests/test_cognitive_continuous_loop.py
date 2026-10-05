@@ -119,27 +119,11 @@ class DueCursor:
 
 
 class CognitiveReaderTests(unittest.TestCase):
-    def test_reader_exposes_conclusions_with_uncertainty_not_hidden_reasoning(self):
+    def test_reader_drops_old_cognition_without_raw_provenance(self):
         context = cognitive_reader.build_cognitive_prompt_context(
             'u', 'gojo', conn=Connection(ReaderCursor()),
         )
-        self.assertIn('近期认知复盘', context)
-        self.assertIn('不是关系定论', context)
-        self.assertIn('最近内部笔记', context)
-        self.assertIn('仍未解决的问题', context)
-        self.assertIn('【关于我与用户关系的认识】', context)
-        self.assertIn('【当前仍未解决的问题】', context)
-        self.assertIn('【正在观察的理解】', context)
-        self.assertIn('【近期需要留意的事】', context)
-        self.assertNotIn('较稳定的历史观察', context)
-        self.assertIn('保持关心但承认仍不确定', context)
-        self.assertIn('角色的关心是否仍停留在保持边界的照看', context)
-        self.assertIn('不是长期记忆或关系证据', context)
-        self.assertNotIn('角色保持实际关心，同时没有确认爱情。', context)
-        self.assertNotIn('近期反思日记', context)
-        self.assertNotIn('我把这件事先记下来，但不能当成结论。', context)
-        self.assertNotIn('reasoning_context', context)
-        self.assertNotIn('new_predictions', context)
+        self.assertEqual(context, '')
 
     def test_shared_relation_prompt_reads_cognitive_context(self):
         source = inspect.getsource(shared_relation_prompt.build_relation_rules)

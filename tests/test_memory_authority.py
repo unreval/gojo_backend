@@ -141,11 +141,116 @@ class MemoryAuthorityTests(unittest.TestCase):
             source_event_refs=[{'source_id': 'raw'}]))
         with patch('smart_recall.link_bond_to_fact', return_value=None):
             self.assertTrue(user_memory.save_bond_memory('u', 'c', 'between', '我们结婚了'))
-            self.assertTrue(user_memory.save_bond_memory('u', 'c', 'told', '她告诉我她住在火星'))
+            self.assertFalse(user_memory.save_bond_memory('u', 'c', 'told', '她告诉我她住在火星'))
         self.assertEqual(self.sql('SELECT DISTINCT authority FROM long_memory'), [('generated_recollection',)])
         self.assertEqual(user_memory.get_long_memory('u','c'), [])
         self.assertEqual(user_memory.get_bond_memories('u','c'), [])
         self.assertNotIn('火星', self.prompt_memory(self.current_result()))
+
+    def test_told_is_canonical_fact_view_scoped_to_private_or_shared_audience(self):
+        from smart_recall import two_level_recall
+        self.report('coffee-c', '我喜欢咖啡。')
+        self.assertIn('她告诉过我：', user_memory.get_bond_memories('u', 'c', 'told')[0][1])
+        self.assertEqual(user_memory.get_bond_memories('u', 'd', 'told'), [])
+
+        self.source('doctor-d', '我的职业是「医生」。', character='d')
+        self.assertTrue(user_memory.extract_and_save_memory(
+            'u', 'untrusted copy', 'model prose', 'd', source_event_id='doctor-d'))
+        self.run_cycle()
+        self.group_source(1, '我喜欢茶。')
+        self.process_group(1)
+
+        c_tolds = [text for _, text, _ in user_memory.get_bond_memories('u', 'c', 'told')]
+        d_tolds = [text for _, text, _ in user_memory.get_bond_memories('u', 'd', 'told')]
+        self.assertTrue(any('咖啡' in text for text in c_tolds))
+        self.assertFalse(any('医生' in text for text in c_tolds))
+        self.assertTrue(any('医生' in text for text in d_tolds))
+        self.assertFalse(any('咖啡' in text for text in d_tolds))
+        self.assertTrue(any('茶' in text for text in c_tolds))
+        self.assertTrue(any('茶' in text for text in d_tolds))
+
+        with patch('memory_lifecycle.recall_lifecycle_memories', return_value=[]), \
+             patch('memory_lifecycle.recall_sticky_notes', return_value=[]), \
+             patch('memory_lifecycle.recall_diary_memories', return_value=[]):
+            recalled = two_level_recall('u', 'c', '咖啡')
+        self.assertTrue(any(row.get('source_table') == 'long_memory'
+                            for row in recalled['tolds']))
+        checked = filter_recall_authority(recalled, 'u', 'c')
+        self.assertTrue(any(row.get('source_table') == 'long_memory'
+                            for row in checked['tolds']))
+        self.assertFalse(any('医生' in row['content'] for row in checked['tolds']))
+        d_fact_id = self.sql("SELECT id FROM long_memory WHERE character_id='d'")[0][0]
+        forged_cache = {'facts': [], 'loose_bonds': [], 'tolds': [
+            {'id': d_fact_id, 'source_table': 'long_memory',
+             'content': '她告诉过我：她是医生', 'authority': AUTHORITY}]}
+        self.assertEqual(filter_recall_authority(forged_cache, 'u', 'c')['tolds'], [])
+
+    def test_generated_legacy_told_never_gains_canonical_authority(self):
+        self.report('coffee-c', '我喜欢咖啡。')
+        old_id = self.sql("""INSERT INTO bond_memory(user_id,character_id,kind,content)
+                    VALUES ('u','c','told','她告诉我她住在火星') RETURNING id""")[0][0]
+        self.database.commit()
+        tolds = user_memory.get_bond_memories('u', 'c', 'told')
+        self.assertTrue(any('咖啡' in text for _, text, _ in tolds))
+        self.assertFalse(any('火星' in text for _, text, _ in tolds))
+        import route_memory
+        with patch('route_memory.get_conn', return_value=self.database):
+            edited = asyncio.run(route_memory.edit_bond_memory(
+                old_id, {'content': '她说过别的'}))
+            deleted = asyncio.run(route_memory.remove_bond_memory(old_id))
+        self.assertEqual((edited.status_code, deleted.status_code), (409, 409))
+        self.assertEqual(self.sql('SELECT content FROM bond_memory WHERE id=%s', (old_id,)),
+                         [('她告诉我她住在火星',)])
+
+    def test_legacy_stance_requires_current_exact_assistant_source(self):
+        import relationship_state
+        self.sql("""CREATE TABLE rel_declared_stance (
+            id SERIAL PRIMARY KEY,user_id TEXT,character_id TEXT,stance_type TEXT,
+            content TEXT,source_event_ref TEXT,status TEXT DEFAULT 'active',
+            declared_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            revoked_at TIMESTAMPTZ,revoke_reason TEXT)""")
+        self.source('spoken-c', '我会认真答复。', role='assistant')
+        self.sql("""INSERT INTO rel_declared_stance
+            (user_id,character_id,stance_type,content,source_event_ref) VALUES
+            ('u','c','care_admission','我会认真答复。','spoken-c'),
+            ('u','c','care_admission','我爱她。','missing-source'),
+            ('u','c','boundary_stated','我的底线。','boundary/topic')""")
+        with patch('relationship_state.get_conn', return_value=self.database):
+            self.assertEqual(relationship_state.list_active_stances('u', 'c'), [])
+            self.sql("""INSERT INTO cognitive_events
+                (user_id,character_id,source_event_type,source_event_id,source,
+                 occurred_at,payload,adjudication)
+                VALUES ('u','c','canonical_assistant_turn','spoken-c','chat',
+                        CURRENT_TIMESTAMP,%s::jsonb,'{"status":"applied"}'::jsonb)""",
+                (json.dumps({'content': '我会认真答复。'}),))
+            active = relationship_state.list_active_stances('u', 'c')
+            self.assertEqual([row['content'] for row in active], ['我会认真答复。'])
+            self.sql("UPDATE chat_log SET status='deleted' WHERE event_id='spoken-c'")
+            self.assertEqual(relationship_state.list_declared_stances('u', 'c'), [])
+
+    def test_shared_frame_requires_live_raw_provenance(self):
+        from cognitive_reader import fetch_shared_frame
+        from cognitive_config import SHARED_RELATIONSHIP_FRAME_KEY
+        self.sql("""INSERT INTO cognitive_beliefs
+            (user_id,character_id,belief_key,statement,confidence,status,metadata)
+            VALUES ('u','c',%s,'当前是朋友',0.8,'active',%s::jsonb)""",
+            (SHARED_RELATIONSHIP_FRAME_KEY, json.dumps({'frame_kind': 'friends'})))
+        self.assertEqual(fetch_shared_frame('u', 'c', conn=self.database)['frame_kind'], 'unknown')
+        self.source('frame-c', '我把这段关系视为朋友。', role='assistant')
+        self.sql("""UPDATE cognitive_beliefs SET evidence_refs=%s::jsonb
+                    WHERE belief_key=%s""",
+                 (json.dumps([{'source_id': 'frame-c'}]), SHARED_RELATIONSHIP_FRAME_KEY))
+        self.assertEqual(fetch_shared_frame('u', 'c', conn=self.database)['frame_kind'], 'friends')
+        self.sql("UPDATE chat_log SET status='deleted' WHERE event_id='frame-c'")
+        self.assertEqual(fetch_shared_frame('u', 'c', conn=self.database)['frame_kind'], 'unknown')
+
+    def test_cognitive_prompt_drops_belief_without_raw_provenance(self):
+        from cognitive_reader import build_cognitive_prompt_context
+        self.sql("""INSERT INTO cognitive_beliefs
+            (user_id,character_id,belief_key,statement,confidence,status,metadata)
+            VALUES ('u','c','invented','她住在火星',0.9,'active','{}'::jsonb)""")
+        text = build_cognitive_prompt_context('u', 'c', conn=self.database, query='火星')
+        self.assertNotIn('火星', text)
 
     def test_legacy_merge_resolution_and_invalidation_cannot_modify_canonical_bonds(self):
         self.report('raw', '不要「讨论体重」')
@@ -246,6 +351,16 @@ class MemoryAuthorityTests(unittest.TestCase):
         self.assertNotIn('火星', context)
         self.assertTrue(any('她喜欢咖啡' in item['text'] for item in items))
         self.assertNotIn('火星', str(items))
+
+    def test_cognitive_sticky_without_raw_source_is_not_readable(self):
+        from cognitive_reader import iter_active_cognitive_items
+
+        state = {'sticky_notes': [{
+            'id': 1, 'note_key': 'old', 'content': '无来源的旧便利贴',
+            'status': 'active', 'source_event_refs': [],
+        }]}
+        self.assertEqual(iter_active_cognitive_items(
+            'u', 'c', conn=self.database, _state=state), [])
 
     def test_legacy_canonical_and_startup_changed_projection_still_read(self):
         self.report('raw', '我喜欢咖啡')

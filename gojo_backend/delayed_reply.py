@@ -224,8 +224,13 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
             return {'ok': False, 'reason': reason}
     emotion, msgs = helpers._finalize_committed(result)
     if msgs is None:
-        return {'ok': False, 'reason': ('provider_auth_failed'
-                if generation_error.get('provider_auth_failed') else 'generation_failed')}
+        if generation_error.get('provider_auth_failed'):
+            return {'ok': False, 'reason': 'provider_auth_failed'}
+        retry_delay = generation_error.get('provider_retry_delay_seconds')
+        if retry_delay:
+            return {'ok': False, 'reason': 'provider_retryable',
+                    'retry_delay_seconds': retry_delay}
+        return {'ok': False, 'reason': 'generation_failed'}
 
     from schedule_transition import commit_generated_schedule_intent
     transition = commit_generated_schedule_intent(
@@ -330,10 +335,14 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
         try:
             generated = generate_fn(claimed)
         except Exception as exc:
-            from provider_error import is_auth_error
+            from provider_error import is_auth_error, retry_delay_seconds
             print(f'[delayed_reply] generate #{oid} failed: {type(exc).__name__}')
-            generated = {'ok': False, 'reason': ('provider_auth_failed'
-                         if is_auth_error(exc) else 'generation_failed')}
+            retry_delay = retry_delay_seconds(exc)
+            generated = {'ok': False, 'reason': (
+                'provider_auth_failed' if is_auth_error(exc) else
+                'provider_retryable' if retry_delay else 'generation_failed')}
+            if retry_delay:
+                generated['retry_delay_seconds'] = retry_delay
         if generated and generated.get('ok'):
             resolved = False
             for _attempt in range(3):
@@ -361,7 +370,9 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
             db_schedule.log_phone_check_action('generation_failed', claimed)
             try:
                 auth_failed = (generated or {}).get('reason') == 'provider_auth_failed'
-                retry_at = now + timedelta(minutes=15) if auth_failed else None
+                retry_delay = (generated or {}).get('retry_delay_seconds')
+                retry_at = (now + timedelta(minutes=15) if auth_failed else
+                            now + timedelta(seconds=retry_delay) if retry_delay else None)
                 released = db_schedule.abort_delayed_reply(
                     oid, claimed['claim_token'], retry_at=retry_at)
                 if released:

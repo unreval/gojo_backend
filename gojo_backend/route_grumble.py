@@ -6,9 +6,9 @@
   DELETE /grumbles/{id}             撕掉一张(用户隐藏,不改 cognitive status)
 
 便利贴是 Persistent Cognitive System 的表达层,不是每轮聊天后的第二次角色扮演。
-数据源: cognitive_sticky_notes,且仅 source=cognitive_slow_loop。
-memory_lifecycle_fast_loop 的 sticky 是内部记忆提示,不进入本 API。
-已读/撕掉与 Slow Loop 的 completed/expired 生命周期相互独立。
+数据源: cognitive_sticky_notes 中经原始证据核验的确定性投影。
+旧 cognitive_slow_loop 行保留只读检查，不进入本 API。
+已读/撕掉与 completed/expired 生命周期相互独立。
 """
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -54,7 +54,7 @@ def _public_grumble(note):
 async def get_grumbles(user_id: str = DEFAULT_USER,
                        character_id: str = None,
                        limit: int = 100):
-    """列出 user-facing Slow Loop 便利贴。character_id 传空就是全部角色混着来。"""
+    """列出有原始证据的便利贴。character_id 传空则列出全部角色。"""
     items = list_user_facing_sticky_notes(
         user_id, character_id or None, limit=limit,
     )

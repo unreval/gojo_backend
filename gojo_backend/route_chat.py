@@ -43,7 +43,7 @@ from generation_contract import (
 )
 from ai_client import extract_text
 from provider_error import diagnostics as provider_diagnostics
-from provider_error import is_auth_error
+from provider_error import is_auth_error, retry_delay_seconds
 from context_budget import estimate_tokens
 from tts import tts_to_b64, transcribe_audio_b64
 from prompt import build_system_blocks, log_cache_usage
@@ -629,6 +629,7 @@ def _generate_or_none(
         except Exception as exc:
             if error_out is not None:
                 error_out['provider_auth_failed'] = is_auth_error(exc)
+                error_out['provider_retry_delay_seconds'] = retry_delay_seconds(exc)
             _emit_generation_trace(
                 model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
                 messages=messages, attempt=attempt + 1, attempts=semantic_attempts,

@@ -61,9 +61,9 @@ class RecallDatabase:
                 elif 'FROM char_diary' in compact:
                     self.rows = database.diaries
                 elif compact.startswith(
-                        'SELECT id, content, projection_version, semantic_payload, character_id FROM long_memory'):
+                        'SELECT id, content, projection_version, semantic_payload, character_id,') and 'FROM long_memory' in compact:
                     assert 'long_memory.authority' in compact
-                    self.rows = [(row[0], row[1], 'legacy_v1', None, 'gojo')
+                    self.rows = [(row[0], row[1], 'legacy_v1', None, 'gojo', [], [])
                                  for row in database.facts]
                 elif compact.startswith('SELECT id, content FROM long_memory'):
                     # This fixture contains only current authoritative facts;
@@ -236,7 +236,7 @@ class DiaryRecallTests(unittest.TestCase):
 
     def test_diary_entry_is_not_valid_evidence_for_hypothesis_update(self):
         import cognitive_output
-        from tests.test_cognitive_slow_loop import valid_output
+        from tests.legacy_cognitive_slow_loop import valid_output
 
         output = valid_output()
         output['evidence_refs'][0]['event_id'] = 7

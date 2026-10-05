@@ -80,6 +80,24 @@ def is_auth_error(error):
         'AuthenticationError', 'PermissionDeniedError')
 
 
+def retry_delay_seconds(error):
+    """Bound retries for temporary provider failures, including wrapped transport errors."""
+    for _ in range(3):
+        if error is None:
+            break
+        status = getattr(error, 'status_code', None)
+        if status == 429:
+            return 120
+        if isinstance(status, int) and not isinstance(status, bool) and 500 <= status <= 599:
+            return 60
+        if isinstance(error, TimeoutError) or type(error).__name__ in (
+                'Timeout', 'ConnectTimeout', 'ReadTimeout', 'APITimeoutError',
+                'ConnectionError', 'APIConnectionError'):
+            return 60
+        error = getattr(error, '__cause__', None)
+    return None
+
+
 def diagnostics(error, *, model=None, provider=None, base_url=None):
     """Return bounded transport fields and a fixed, content-free reason."""
     try:

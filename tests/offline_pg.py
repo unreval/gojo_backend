@@ -1,5 +1,6 @@
 """Small DB-API adapter for the optional, in-memory PGlite acceptance tests."""
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 import re
@@ -7,11 +8,16 @@ import subprocess
 
 
 class Connection:
-    def __init__(self):
+    def __init__(self, data_dir=None):
+        environment = os.environ.copy()
+        if data_dir is not None:
+            environment['COGNITIVE_TEST_PGDATA'] = str(data_dir)
+        else:
+            environment.pop('COGNITIVE_TEST_PGDATA', None)
         self.process = subprocess.Popen(
             ['node', str(Path(__file__).with_suffix('.cjs'))],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            text=True, encoding='utf-8')
+            text=True, encoding='utf-8', env=environment)
         self.in_transaction = False
 
     def query(self, sql, params=()):

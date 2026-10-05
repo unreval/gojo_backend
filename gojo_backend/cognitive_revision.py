@@ -1047,6 +1047,12 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                 decision.update(main)
                 decision.update(operations=operations,
                     status='applied' if any(op['status'] == 'applied' for op in operations.values()) else 'pending')
+                if (role == 'user' and decision['status'] == 'pending'
+                        and decision.get('reason') == 'unsupported_or_implicit_semantics'):
+                    from memory_lifecycle import project_pending_sticky
+                    project_pending_sticky(cur, user_id=user_id,
+                        character_id=character_id, event_id=event_id,
+                        source_id=source_id, source_text=raw[0]['content'], now=now)
         cur.execute('''UPDATE cognitive_events SET adjudication=%s::jsonb WHERE id=%s''',
                     (json.dumps(decision, ensure_ascii=False, default=str), event_id))
         # Prediction outcomes already handled in this transaction must not

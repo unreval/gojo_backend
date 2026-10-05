@@ -22,7 +22,7 @@
 记忆四层结构：
   1. 她的事实      long_memory (character_id='shared')  —— 关于用户本人，全角色共享
   2. 我们之间的事  bond_memory (kind='between')          —— 她和某角色的共同经历，按角色独立
-  3. 她告诉我的事  bond_memory (kind='told')             —— 她告诉某角色的、关于角色本人/其世界的信息
+  3. 她告诉我的事  canonical fact + source scope 的查询视图；旧 bond told 只读兼容
   4. 角色背景      character_memory                      —— 原作设定，只手动管理，聊天不写入
 
 short_memory 只是近窗 compatibility cache / LLM recent view，不是 canonical evidence。
@@ -903,7 +903,10 @@ def _bigrams(s: str) -> set:
 
 def save_bond_memory(user_id, character_id, kind, content, source_event_ids=None,
                      *, atomic_sources=False):
-    """kind='between'（我们之间）或 'told'（她告诉我的）。带去重。"""
+    """Write a legacy between row; told is now a read-time canonical fact view."""
+    if kind == 'told':
+        # New tolds are read-time views of canonical long_memory facts.
+        return False
     if source_event_ids:
         import raw_events
         if not raw_events.sources_are_active(source_event_ids, user_id, character_id):
@@ -991,6 +994,8 @@ def merge_bond_memories(user_id, character_id, kind, replaces, new_content,
 
     返回 (是否成功, 实际删除条数)
     """
+    if kind == 'told':
+        return False, 0
     if not new_content or not isinstance(replaces, list) or not replaces:
         return False, 0
     replaces = [r for r in replaces if isinstance(r, str) and r.strip()][:3]
@@ -1118,6 +1123,8 @@ def resolve_bond_memories(user_id, character_id, kind, replaces,
     bond_merge is additive (old event still true, more detail).
     This is terminal: the old pending condition is no longer active recall.
     """
+    if kind == 'told':
+        return False, []
     if not isinstance(replaces, list) or not replaces:
         return False, []
     replaces = [item for item in replaces if isinstance(item, str) and item.strip()][:5]
@@ -1190,6 +1197,8 @@ def resolve_bond_memories(user_id, character_id, kind, replaces,
 def invalidate_bond_memories(user_id, character_id, kind, memory_ids,
                              *, reason='invalid'):
     """Retire unsupported derived bonds without deleting their history or sources."""
+    if kind == 'told':
+        return False, []
     ids = []
     for memory_id in memory_ids or []:
         try:
@@ -1241,13 +1250,41 @@ def invalidate_bond_memories(user_id, character_id, kind, memory_ids,
 
 
 def get_bond_memories(user_id, character_id, kind=None, limit=30):
-    """返回 [(id, content, timestamp)]，新→旧。kind=None 时返回全部种类。"""
+    """Return bond rows; kind='told' also reads scoped canonical fact views."""
     conn = get_conn()
     cur = conn.cursor()
+    told_views = []
+    if kind == 'told':
+        from told_projection import canonical_told_view, told_display
+        cur.execute(
+            f'''SELECT id, content, timestamp, character_id, semantic_payload,
+                      projection_version FROM long_memory
+               WHERE user_id = %s AND character_id IN (%s, 'shared')
+                 AND projection_version = '{PROJECTION_VERSION}'
+                 AND semantic_payload->>'subject_ref' = %s
+                 AND semantic_payload->>'source_scope' = long_memory.character_id
+                 AND NULLIF(semantic_payload->>'source_event_id', '') IS NOT NULL
+                 AND {authoritative_memory_sql('long_memory')}
+                 AND (category IS DISTINCT FROM '状态' OR timestamp IS NULL
+                      OR timestamp >= CURRENT_TIMESTAMP - INTERVAL '{STATUS_EXPIRE_HOURS} hours')
+               ORDER BY timestamp DESC LIMIT %s''',
+            (user_id, character_id, f'user:{user_id}', limit),
+        )
+        for row in cur.fetchall():
+            view = canonical_told_view({
+                'id': row[0], 'content': row[1], 'timestamp': row[2],
+                'source_character_id': row[3], 'semantic_payload': row[4],
+                'projection_version': row[5],
+            }, user_id, character_id)
+            if view:
+                # Negative IDs distinguish a read-only fact view from bond IDs.
+                told_views.append((-row[0], told_display(view['content']), row[2]))
     if kind:
+        legacy_told_only = "AND projection_version = 'legacy_v1'" if kind == 'told' else ''
         cur.execute(
             f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
+                 {legacy_told_only}
                  AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC LIMIT %s''',
@@ -1265,20 +1302,25 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [(r[0], render_role_view(r[1], observer_id=character_id,
+    legacy_rows = [(r[0], render_role_view(r[1], observer_id=character_id,
                                     source_character_id=character_id,
                                     semantic=r[3] if len(r) > 4 and r[4] == PROJECTION_VERSION else None),
              r[2]) for r in rows]
+    return sorted(told_views + legacy_rows,
+                  key=lambda row: row[2] or datetime.min, reverse=True)[:limit]
 
 
 def delete_bond_memory(memory_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('DELETE FROM bond_memory WHERE id = %s', (memory_id,))
+    cur.execute("DELETE FROM bond_memory WHERE id = %s AND kind <> 'told'", (memory_id,))
+    deleted = cur.rowcount > 0
     conn.commit()
     cur.close()
     conn.close()
-    notify_memory_changed('bond_memory', deleted=True)
+    if deleted:
+        notify_memory_changed('bond_memory', deleted=True)
+    return deleted
 
 
 # ────────── 认识时长（按角色最早共同痕迹算，不是全局app天数）──────────
