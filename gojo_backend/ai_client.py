@@ -21,6 +21,7 @@ import json
 import requests
 import anthropic
 from config import ANTHROPIC_KEY, DEEPSEEK_KEY, DEEPSEEK_BASE_URL
+from provider_error import ProviderHTTPError
 
 _anthropic_client = None
 
@@ -150,10 +151,23 @@ def _call_deepseek(model, messages, system, max_tokens, temperature):
             timeout=90,
         )
     except requests.RequestException as e:
-        raise RuntimeError(f'DeepSeek 网络异常: {e}')
+        raise RuntimeError('DeepSeek 网络异常') from e
 
     if resp.status_code != 200:
-        raise RuntimeError(f'DeepSeek API {resp.status_code}: {resp.text[:300]}')
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        error = body.get('error') if isinstance(body, dict) else None
+        error = error if isinstance(error, dict) else {}
+        raise ProviderHTTPError(
+            resp.status_code, provider='deepseek', model=model,
+            base_url=DEEPSEEK_BASE_URL,
+            code=error.get('code') or error.get('type'),
+            message=error.get('message'),
+            request_id=(resp.headers.get('request-id')
+                        or resp.headers.get('x-request-id')),
+        )
     data = resp.json()
     try:
         choice = data['choices'][0]

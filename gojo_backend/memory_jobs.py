@@ -113,7 +113,9 @@ def _enqueue(kind, user_id, character_id, user_text, assistant_text, extra_json,
                    WHERE kind=%s AND user_id=%s
                      AND COALESCE(character_id, '') = COALESCE(%s, '')
                      AND source_event_id=%s
-                     AND status IN ('pending', 'running', 'done')
+                     AND (status IN ('pending', 'running', 'done')
+                          OR (kind = 'rolling_summary' AND status = 'failed'
+                              AND last_error = 'provider_auth_failed'))
                    ORDER BY id DESC LIMIT 1''',
                 (kind, user_id, character_id, source_event_id))
             existing = cur.fetchone()
@@ -247,6 +249,7 @@ def _run_job(row):
     attempts = row[7]
     source_event_id = row[8] if len(row) > 8 else None
     assistant_event_id = row[9] if len(row) > 9 else None
+    auth_failed = False
     try:
         ok = False
         extra = json.loads(extra_json or '{}') if extra_json else {}
@@ -301,11 +304,14 @@ def _run_job(row):
             return
         err = 'extraction_returned_false'
     except Exception as e:
+        from provider_error import is_auth_error
         from structured_output import StructuredOutputError
-        err = (e.code if isinstance(e, StructuredOutputError)
+        auth_failed = is_auth_error(e)
+        err = ('provider_auth_failed' if auth_failed else
+               e.code if isinstance(e, StructuredOutputError)
                and e.code in _SAFE_ERROR_CODES else 'job_exception')
 
-    if attempts >= MAX_ATTEMPTS:
+    if auth_failed or attempts >= MAX_ATTEMPTS:
         _set_status(job_id, 'failed', err)
         print(f'[memory_jobs] failed #{job_id} kind={kind} after {attempts} attempts error={err}')
     else:

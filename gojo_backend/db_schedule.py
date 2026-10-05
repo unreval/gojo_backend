@@ -819,8 +819,25 @@ def finish_claimed_defer(cur, oid, token, now, new_next):
     return cur.rowcount
 
 
-def release_claimed_phone_check(cur, oid, token):
-    """Generation failed: keep pending inbox, allow a later claim."""
+def release_claimed_phone_check(cur, oid, token, *, retry_at=None):
+    """Generation failed: preserve the inbox; defer an auth failure."""
+    if retry_at is not None:
+        cur.execute(
+            '''UPDATE char_phone_check SET -- phone_check:defer_auth
+                   check_state = 'deferred',
+                   can_reply = FALSE,
+                   next_phone_check_at = %s,
+                   claimed_at = NULL,
+                   claim_token = NULL,
+                   claim_owner = NULL,
+                   claim_expires_at = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = %s
+                 AND claim_token = %s
+                 AND check_state = 'processing'
+                 AND resolved_at IS NULL''',
+            (retry_at, oid, token))
+        return cur.rowcount
     cur.execute(
         '''UPDATE char_phone_check SET -- phone_check:release
                check_state = 'pending',
@@ -995,11 +1012,11 @@ def complete_delayed_reply(oid, token, now):
         conn.close()
 
 
-def abort_delayed_reply(oid, token):
+def abort_delayed_reply(oid, token, *, retry_at=None):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        n = release_claimed_phone_check(cur, oid, token)
+        n = release_claimed_phone_check(cur, oid, token, retry_at=retry_at)
         conn.commit()
         return n
     finally:

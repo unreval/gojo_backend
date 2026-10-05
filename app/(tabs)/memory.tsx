@@ -28,8 +28,8 @@ import { C, SERVER_URL } from '../../constants/theme';
 const FIXED_USER_ID = 'user_mofpiyd7442ia7';
 
 interface Character { id: string; name: string; avatar_url?: string | null; }
-interface FactMem   { id: number; content: string; category: string; timestamp?: string | null; }
-interface BondMem   { id: number; content: string; timestamp?: string | null; }
+interface FactMem   { id: number; content: string; category: string; timestamp?: string | null; recallable?: boolean; content_locked?: boolean; }
+interface BondMem   { id: number; content: string; timestamp?: string | null; recallable?: boolean; content_locked?: boolean; }
 interface BgMem     { id: number; content: string; category: string; keywords?: string; importance?: number; timestamp?: string | null; }
 
 type ModuleKey = 'facts' | 'between' | 'told' | 'background';
@@ -103,8 +103,8 @@ export default function MemoryScreen() {
     try {
       const [fRes, bRes, tRes, gRes] = await Promise.all([
         axios.get(`${SERVER_URL}/long_memory?user_id=${FIXED_USER_ID}&character_id=${cid}`),
-        axios.get(`${SERVER_URL}/bond_memory?user_id=${FIXED_USER_ID}&character_id=${cid}&kind=between`),
-        axios.get(`${SERVER_URL}/bond_memory?user_id=${FIXED_USER_ID}&character_id=${cid}&kind=told`),
+        axios.get(`${SERVER_URL}/bond_memory?user_id=${FIXED_USER_ID}&character_id=${cid}&kind=between&include_history=true`),
+        axios.get(`${SERVER_URL}/bond_memory?user_id=${FIXED_USER_ID}&character_id=${cid}&kind=told&include_history=true`),
         axios.get(`${SERVER_URL}/character_memory?character_id=${cid}`),
       ]);
       setFacts(fRes.data?.memories || []);
@@ -133,9 +133,15 @@ export default function MemoryScreen() {
 
   const curChar = chars.find(c => c.id === charId);
   const charName = curChar?.name || charId;
+  const currentFacts = facts.filter(f => f.recallable === true);
+  const historicalFacts = facts.filter(f => f.recallable !== true);
+  const currentBetween = between.filter(m => m.recallable === true);
+  const historicalBetween = between.filter(m => m.recallable !== true);
+  const currentTold = told.filter(m => m.recallable === true);
+  const historicalTold = told.filter(m => m.recallable !== true);
   const neurons = facts.length + between.length + told.length + background.length;
   const brainZones = new Set([...facts.map(f => f.category || '其他'), '羁绊', '认知', '背景']).size;
-  const todayNew = [...facts, ...between, ...told].filter(m => isToday(m.timestamp)).length;
+  const todayNew = [...currentFacts, ...currentBetween, ...currentTold].filter(m => isToday(m.timestamp)).length;
 
   // ── 遗忘（删除）──
   const forget = (module: ModuleKey, id: number, content: string) => {
@@ -180,15 +186,15 @@ export default function MemoryScreen() {
       setEditing(null);
       await loadMemories(charId);
     } catch (e: any) {
-      Alert.alert('保存失败', e?.message ?? '请重试');
+      Alert.alert('保存失败', e?.response?.data?.error ?? e?.message ?? '请重试');
     } finally { setSaving(false); }
   };
 
   const toggle = (k: ModuleKey) => setCollapsed(p => ({ ...p, [k]: !p[k] }));
 
   // ── 单张记忆卡 ──
-  const MemCard = ({ module, id, content, meta, ts }: {
-    module: ModuleKey; id: number; content: string; meta?: string; ts?: string | null;
+  const MemCard = ({ module, id, content, meta, ts, historical = false }: {
+    module: ModuleKey; id: number; content: string; meta?: string; ts?: string | null; historical?: boolean;
   }) => (
     <TouchableOpacity
       activeOpacity={0.8}
@@ -204,7 +210,7 @@ export default function MemoryScreen() {
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
           <Text style={s.cardText}>{content}</Text>
-          {isNewborn(ts) && <View style={s.newborn}><Text style={s.newbornText}>新生</Text></View>}
+          {!historical && isNewborn(ts) && <View style={s.newborn}><Text style={s.newbornText}>新生</Text></View>}
         </View>
         <Text style={s.cardMeta}>
           {relTime(ts)}{meta ? `  ${meta}` : ''}  突触 #{id}
@@ -232,7 +238,7 @@ export default function MemoryScreen() {
 
   // 她的事实按脑区分组
   const factsByCat: [string, FactMem[]][] = CATEGORY_ORDER
-    .map(cat => [cat, facts.filter(f => (f.category || '其他') === cat)] as [string, FactMem[]])
+    .map(cat => [cat, currentFacts.filter(f => (f.category || '其他') === cat)] as [string, FactMem[]])
     .filter(([, arr]) => arr.length > 0);
 
   return (
@@ -248,7 +254,7 @@ export default function MemoryScreen() {
               <Image source={{ uri: curChar.avatar_url }} style={s.headerAvatar} />
             ) : null}
           </View>
-          <Text style={s.headerSub}>每一颗神经元都是一段记忆 · 长按遗忘 · 点击修改</Text>
+          <Text style={s.headerSub}>可召回记忆与历史记录分开展示 · 长按遗忘 · 点击修改</Text>
         </View>
         <TouchableOpacity style={s.refreshBtn} onPress={onRefresh}>
           <Text style={s.refreshText}>刷新</Text>
@@ -301,7 +307,7 @@ export default function MemoryScreen() {
             <View style={s.brainStats}>
               <View style={s.statCol}>
                 <Text style={s.statNum}>{neurons}</Text>
-                <Text style={s.statLabel}>神经元</Text>
+                <Text style={s.statLabel}>记录总数</Text>
               </View>
               <View style={s.statDivider} />
               <View style={s.statCol}>
@@ -309,6 +315,7 @@ export default function MemoryScreen() {
                 <Text style={s.statLabel}>脑区</Text>
               </View>
             </View>
+            <Text style={s.recallSummary}>可召回 {currentFacts.length + currentBetween.length + currentTold.length} · 历史记录 {historicalFacts.length + historicalBetween.length + historicalTold.length}</Text>
           </View>
 
           {todayNew > 0 && (
@@ -319,28 +326,54 @@ export default function MemoryScreen() {
           )}
 
           {/* 模块一：她的事实 */}
-          <SectionHead k="facts" emoji="📌" title="她的事实" sub="全角色共享" count={facts.length} />
+          <SectionHead k="facts" emoji="📌" title="她的事实" sub="当前可召回" count={currentFacts.length} />
           {!collapsed.facts && factsByCat.map(([cat, arr]) => (
             <View key={cat}>
               <Text style={s.catHead}>{CAT_EMOJI[cat] || '🗂'} {cat} · 海马回</Text>
               {arr.map(m => <MemCard key={m.id} module="facts" id={m.id} content={m.content} ts={m.timestamp} />)}
             </View>
           ))}
-          {!collapsed.facts && facts.length === 0 && <Text style={s.emptyText}>还没有关于她的记忆</Text>}
+          {!collapsed.facts && currentFacts.length === 0 && <Text style={s.emptyText}>当前没有可召回的事实</Text>}
+          {!collapsed.facts && historicalFacts.length > 0 && (
+            <View>
+              <Text style={s.historyHead}>历史记录 · {historicalFacts.length}</Text>
+              <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。只有原始对话可核对且仍有效的事实才会参与。</Text>
+              {historicalFacts.map(m => (
+                <MemCard key={m.id} module="facts" id={m.id} content={m.content}
+                  ts={m.timestamp} meta="当前不参与聊天召回" historical />
+              ))}
+            </View>
+          )}
 
           {/* 模块二：我们之间 */}
-          <SectionHead k="between" emoji="🤝" title="我们之间" sub={`她和${charName}的共同记忆`} count={between.length} />
-          {!collapsed.between && between.map(m => (
+          <SectionHead k="between" emoji="🤝" title="我们之间" sub="当前可召回" count={currentBetween.length} />
+          {!collapsed.between && currentBetween.map(m => (
             <MemCard key={m.id} module="between" id={m.id} content={m.content} ts={m.timestamp} />
           ))}
-          {!collapsed.between && between.length === 0 && <Text style={s.emptyText}>还没有共同的记忆，去创造一些吧</Text>}
+          {!collapsed.between && currentBetween.length === 0 && <Text style={s.emptyText}>当前没有可召回的共同记忆</Text>}
+          {!collapsed.between && historicalBetween.length > 0 && (
+            <View>
+              <Text style={s.historyHead}>历史记录 · {historicalBetween.length}</Text>
+              <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。</Text>
+              {historicalBetween.map(m => <MemCard key={m.id} module="between" id={m.id} content={m.content}
+                ts={m.timestamp} meta="当前不参与聊天召回" historical />)}
+            </View>
+          )}
 
           {/* 模块三：她告诉过TA的 */}
-          <SectionHead k="told" emoji="📖" title={`她告诉过${charName}的`} sub="剧透与设定" count={told.length} />
-          {!collapsed.told && told.map(m => (
+          <SectionHead k="told" emoji="📖" title={`她告诉过${charName}的`} sub="当前可召回" count={currentTold.length} />
+          {!collapsed.told && currentTold.map(m => (
             <MemCard key={m.id} module="told" id={m.id} content={m.content} ts={m.timestamp} />
           ))}
-          {!collapsed.told && told.length === 0 && <Text style={s.emptyText}>她还没有告诉{charName}什么特别的事</Text>}
+          {!collapsed.told && currentTold.length === 0 && <Text style={s.emptyText}>当前没有可召回的已告知记忆</Text>}
+          {!collapsed.told && historicalTold.length > 0 && (
+            <View>
+              <Text style={s.historyHead}>历史记录 · {historicalTold.length}</Text>
+              <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。</Text>
+              {historicalTold.map(m => <MemCard key={m.id} module="told" id={m.id} content={m.content}
+                ts={m.timestamp} meta="当前不参与聊天召回" historical />)}
+            </View>
+          )}
 
           {/* 模块四：TA的背景 */}
           <SectionHead
@@ -382,6 +415,16 @@ export default function MemoryScreen() {
                 placeholder="记忆内容…"
                 placeholderTextColor={C.textMute}
               />
+              {editing.id != null && (
+                (editing.module === 'between' && between.some(m => m.id === editing.id && m.content_locked)) ||
+                (editing.module === 'told' && told.some(m => m.id === editing.id && m.content_locked)) ||
+                (editing.module === 'facts' && facts.some(f => f.id === editing.id && f.content_locked))) && (
+                <Text style={s.editSourceHint}>
+                  {editing.module === 'facts'
+                    ? '要更正已确认内容，请在聊天中明确说明；这里仍可调整分类。'
+                    : '要更正已确认内容，请在聊天中明确说明。'}
+                </Text>
+              )}
               {editing.module === 'facts' && (
                 <View style={s.catPickRow}>
                   {CATEGORY_ORDER.map(cat => (
@@ -454,6 +497,7 @@ const s = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   brainStats:  { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
+  recallSummary: { color: C.textMute, fontSize: 12, marginTop: 10 },
   statCol:     { alignItems: 'center', paddingHorizontal: 28 },
   statNum:     { color: C.text, fontSize: 34, fontWeight: '800' },
   statLabel:   { color: C.textMute, fontSize: 13, marginTop: 2 },
@@ -485,6 +529,8 @@ const s = StyleSheet.create({
   addBtnText: { color: C.accent2, fontSize: 14, fontWeight: '700', lineHeight: 16 },
 
   catHead: { color: C.textDim, fontSize: 12, marginTop: 8, marginBottom: 6, marginLeft: 4 },
+  historyHead: { color: C.textDim, fontSize: 13, marginTop: 18, marginBottom: 6, marginLeft: 4, fontWeight: '600' },
+  historyNote: { color: C.textMute, fontSize: 12, lineHeight: 18, marginBottom: 10, marginLeft: 4 },
 
   card: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
@@ -518,6 +564,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 14, paddingVertical: 10, color: C.text, fontSize: 14,
     minHeight: 90, textAlignVertical: 'top',
   },
+  editSourceHint: { color: C.textMute, fontSize: 12, lineHeight: 18, marginTop: 8 },
   catPickRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
   catPick: {
     paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12,

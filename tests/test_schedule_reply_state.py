@@ -281,6 +281,22 @@ class FakeCursor:
             self.rowcount = n
             return
 
+        if 'phone_check:defer_auth' in compact:
+            retry_at, oid, token = params
+            row = self._find_by_id(oid)
+            if (row and row.get('claim_token') == token
+                    and row.get('check_state') == 'processing'
+                    and not row.get('resolved_at')):
+                row['check_state'] = 'deferred'
+                row['can_reply'] = False
+                row['next_phone_check_at'] = retry_at
+                row['claimed_at'] = None
+                row['claim_token'] = None
+                row['claim_owner'] = None
+                row['claim_expires_at'] = None
+                self.rowcount = 1
+            return
+
         if 'phone_check:release' in compact:
             oid, token = params
             row = self._find_by_id(oid)

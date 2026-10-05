@@ -143,7 +143,7 @@ export default function GrumblesScreen() {
         <View style={s.center}>
           <Text style={s.emptyIcon}>📝</Text>
           <Text style={s.emptyText}>还没有便利贴</Text>
-          <Text style={s.emptySub}>认知复盘之后,TA 心里还挂着的事会贴在这里</Text>
+          <Text style={s.emptySub}>这里只显示仍有效且可见的便利贴</Text>
         </View>
       ) : (
         <ScrollView

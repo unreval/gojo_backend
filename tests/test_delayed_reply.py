@@ -21,6 +21,7 @@ import db_schedule  # noqa: E402
 import delayed_reply  # noqa: E402
 import proactive_scheduler  # noqa: E402
 import reply_availability  # noqa: E402
+from provider_error import ProviderHTTPError  # noqa: E402
 import test_schedule_reply_state as sched_tests  # noqa: E402
 
 FakeConn = sched_tests.FakeConn
@@ -290,6 +291,71 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertIsNone(row.get('resolved_at'))
         self.assertEqual(row['pending_count'], 2)
         self.assertIn('一', row['pending_text'])
+
+    def test_auth_failure_defers_phone_check_without_losing_inbox(self):
+        store = PhoneCheckStore()
+        oid, row = _seed_soft_busy_bundle(store, ['一', '二'])
+        calls = []
+
+        def generate(bundle):
+            calls.append(bundle['id'])
+            return {'ok': len(calls) == 2,
+                    'reason': 'provider_auth_failed' if len(calls) == 1 else None}
+
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (a[2] if len(a) > 2 else NOW, False)), \
+             patch.object(db_schedule.random, 'random', return_value=0.0):
+            first = delayed_reply.process_due_phone_checks(NOW, generate_fn=generate)
+            self.assertEqual(first[0]['action'], 'failed')
+            self.assertEqual(row['check_state'], 'deferred')
+            self.assertEqual(row['next_phone_check_at'], NOW + timedelta(minutes=15))
+            self.assertIsNone(row['resolved_at'])
+            self.assertEqual(row['pending_count'], 2)
+            self.assertIn('一', row['pending_text'])
+            self.assertEqual(db_schedule.abort_delayed_reply(oid, 'wrong-token'), 0)
+            self.assertEqual(delayed_reply.process_due_phone_checks(
+                NOW + timedelta(seconds=30), generate_fn=generate), [])
+            self.assertEqual(calls, [oid])
+            second = delayed_reply.process_due_phone_checks(
+                NOW + timedelta(minutes=15), generate_fn=generate)
+        self.assertEqual(second[0]['action'], 'replied')
+        self.assertEqual(calls, [oid, oid])
+        self.assertEqual(row['check_state'], 'consumed')
+
+    def test_delayed_generation_marks_only_provider_auth_failure_for_defer(self):
+        class AuthHelpers(HelpersStub):
+            def _generate_or_none(self, *args, **kwargs):
+                kwargs['error_out']['provider_auth_failed'] = True
+                return None, None
+
+        bundle = {'id': 9, 'user_id': 'u', 'character_id': 'gojo',
+                  'pending_text': '在吗', 'pending_count': 1, 'event_meta': ''}
+        with patch('characters.get_character', return_value={'name': '五条'}), \
+             patch.object(delayed_reply, 'assistant_already_committed', return_value=False), \
+             patch('temporal_awareness.get_temporal_snapshot', return_value={}), \
+             patch('prompt.build_system_blocks', return_value=[]):
+            result = delayed_reply.generate_delayed_chat_reply(
+                bundle, helpers=AuthHelpers())
+        self.assertEqual(result, {'ok': False, 'reason': 'provider_auth_failed'})
+
+    def test_thrown_provider_auth_error_is_deferred_without_logging_body(self):
+        store = PhoneCheckStore()
+        _oid, row = _seed_soft_busy_bundle(store, ['在吗'])
+
+        def denied(_bundle):
+            raise ProviderHTTPError(403, provider='anthropic', model='claude-test',
+                                    message='sk-FAKE-SECRET')
+
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule, 'postpone_past_hard_busy',
+                          side_effect=lambda *a, **k: (a[2] if len(a) > 2 else NOW, False)), \
+             patch.object(db_schedule.random, 'random', return_value=0.0), \
+             patch('builtins.print') as logged:
+            result = delayed_reply.process_due_phone_checks(NOW, generate_fn=denied)
+        self.assertEqual(result[0]['reason'], 'provider_auth_failed')
+        self.assertEqual(row['check_state'], 'deferred')
+        self.assertNotIn('FAKE-SECRET', str(logged.call_args_list))
 
     def test_success_resolves_exactly_once(self):
         store = PhoneCheckStore()

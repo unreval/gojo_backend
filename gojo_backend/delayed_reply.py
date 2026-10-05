@@ -6,7 +6,7 @@ the same /chat/text pipeline (build context, OUTPUT_SPEC, commit gate).
 """
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from reply_availability import format_pending_bundle_context, parse_pending_event_meta
 from db_read_receipt import source_event_ids_from_claim
@@ -205,12 +205,14 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
         temporal_snapshot=temporal_snapshot, context_pack=pack)
 
     from config import MODEL_MAIN
+    generation_error = {}
     result, committed_state = helpers._generate_or_none(
         MODEL_MAIN, 1500, system_blocks, messages,
         attempts=2,
         log_tag=f'delayed:{user_id}][{character_id}',
         cache_tag=f'chat:{character_id}',
         salvage=True,
+        error_out=generation_error,
     )
     # Delayed replies use the same truth guard/commit path as immediate text.
     # A phone-check may have completed an old phase while the model was running.
@@ -222,7 +224,8 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
             return {'ok': False, 'reason': reason}
     emotion, msgs = helpers._finalize_committed(result)
     if msgs is None:
-        return {'ok': False, 'reason': 'generation_failed'}
+        return {'ok': False, 'reason': ('provider_auth_failed'
+                if generation_error.get('provider_auth_failed') else 'generation_failed')}
 
     from schedule_transition import commit_generated_schedule_intent
     transition = commit_generated_schedule_intent(
@@ -327,8 +330,10 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
         try:
             generated = generate_fn(claimed)
         except Exception as exc:
-            print(f'[delayed_reply] generate #{oid} failed: {exc}')
-            generated = {'ok': False, 'reason': str(exc)}
+            from provider_error import is_auth_error
+            print(f'[delayed_reply] generate #{oid} failed: {type(exc).__name__}')
+            generated = {'ok': False, 'reason': ('provider_auth_failed'
+                         if is_auth_error(exc) else 'generation_failed')}
         if generated and generated.get('ok'):
             resolved = False
             for _attempt in range(3):
@@ -355,7 +360,10 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
         else:
             db_schedule.log_phone_check_action('generation_failed', claimed)
             try:
-                released = db_schedule.abort_delayed_reply(oid, claimed['claim_token'])
+                auth_failed = (generated or {}).get('reason') == 'provider_auth_failed'
+                retry_at = now + timedelta(minutes=15) if auth_failed else None
+                released = db_schedule.abort_delayed_reply(
+                    oid, claimed['claim_token'], retry_at=retry_at)
                 if released:
                     db_schedule.log_phone_check_action('released', claimed)
             except Exception as exc:

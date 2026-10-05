@@ -313,37 +313,25 @@ class UserFacingStickyQueryTests(unittest.TestCase):
 
 
 class PersistStickyProvenanceTests(unittest.TestCase):
-    def test_persist_sql_records_cycle_and_resets_viewed_on_content_change(self):
-        persist_src = Path(BACKEND, 'cognitive_output.py').read_text(encoding='utf-8')
-        start = persist_src.index("for note in output.get('sticky_note_updates'")
-        end = persist_src.index("for entry in output.get('diary_entries'")
-        sticky_block = persist_src[start:end]
-        self.assertIn("INSERT INTO cognitive_sticky_notes", sticky_block)
-        self.assertIn('created_by_cycle_id', sticky_block)
-        self.assertIn('source_event_refs', sticky_block)
-        self.assertIn('USER_FACING_STICKY_SOURCE', sticky_block)
-        self.assertIn('metadata', sticky_block)
-        self.assertIn('viewed = CASE', sticky_block)
-        self.assertIn('user_hidden_at = CASE', sticky_block)
-        self.assertIn('user_visible = CASE', sticky_block)
-        self.assertIn("EXCLUDED.content THEN NULL", sticky_block)
-        self.assertNotIn('char_grumble', sticky_block)
-        hide_case = sticky_block.split('user_hidden_at = CASE', 1)[1].split(
-            'user_visible = CASE', 1)[0]
-        self.assertNotIn('status', hide_case)
+    def test_external_sticky_candidate_cannot_write_durable_state(self):
+        cursor = Mock()
+        with self.assertRaisesRegex(cognitive_output.SlowLoopOutputError,
+                                    'external_judgment_candidates_not_authoritative'):
+            cognitive_output.persist_slow_loop_output(
+                cursor, cycle_id=7, user_id='u', character_id='gojo',
+                output={'sticky_note_updates': [{'content': '模型便签'}]}, now=NOW)
+        cursor.execute.assert_not_called()
 
-    def test_worker_prompt_forbids_second_inner_monologue_pass(self):
-        src = ' '.join(Path(BACKEND, 'cognitive_worker.py').read_text(encoding='utf-8').split())
-        self.assertIn('user-facing presentation of Slow Loop working state', src)
-        self.assertIn('not a second per-turn roleplay pass', src)
-        self.assertIn('"emotion"', src)
-        self.assertIn('Allowed sticky emotions', src)
-        self.assertIn('FIRST PERSON / natural personal shorthand', src)
-        self.assertIn('not an analyst, database, observer, or system summary', src)
-        self.assertIn('没有说出口、但心里还挂着的一句话', src)
-        self.assertIn('not a chat-response emotion', src)
-        self.assertIn('"trigger_snippet"', src)
-        self.assertNotIn('Do not invent an emotion field', src)
+    def test_worker_cycle_does_not_call_model_for_sticky(self):
+        import cognitive_worker
+        output = {'evidence_refs': [], 'sticky_note_updates': []}
+        model = Mock(side_effect=AssertionError('model must not decide sticky'))
+        with patch.object(cognitive_worker, 'deterministic_cycle_output', return_value=output), \
+             patch.object(cognitive_worker, 'validate_slow_loop_output', return_value=output):
+            result, usage = cognitive_worker.generate_cycle_output({}, create_chat_fn=model)
+        self.assertEqual(result['sticky_note_updates'], [])
+        self.assertEqual(usage['model_calls'], 0)
+        model.assert_not_called()
 
     def test_audit_sticky_dropped_natural_sticky_kept(self):
         import cognitive_output
@@ -351,13 +339,18 @@ class PersistStickyProvenanceTests(unittest.TestCase):
             '用户明天要抽徽章，让我帮她选号码'))
         self.assertTrue(cognitive_output.is_user_facing_sticky_content(
             '她明天要抽徽章，还让我帮她选号。到时候看看。'))
-        persist_src = Path(BACKEND, 'cognitive_output.py').read_text(encoding='utf-8')
-        sticky_persist = persist_src.split(
-            "for note in output.get('sticky_note_updates'", 1)[1].split(
-                "for entry in output.get('diary_entries'", 1)[0]
-        self.assertNotIn('is_user_facing_sticky_content', sticky_persist)
-        self.assertNotIn('reflection_note', sticky_persist)
-        self.assertIn('dropped non-user-facing sticky', persist_src)
+        import memory_lifecycle
+        ui_conn = FakeConn()
+        cognitive_reader.list_user_facing_sticky_notes('u', 'gojo', conn=ui_conn)
+        ui_sql, ui_params = ui_conn.executed[0]
+        lifecycle_conn = FakeConn()
+        with patch.object(memory_lifecycle, 'get_conn', return_value=lifecycle_conn):
+            memory_lifecycle.recall_sticky_notes('u', 'gojo')
+        lifecycle_sql, lifecycle_params = lifecycle_conn.executed[0]
+        self.assertIn('user_visible = TRUE', ui_sql)
+        self.assertIn(USER_FACING_STICKY_SOURCE, ui_params)
+        self.assertNotIn('user_visible = TRUE', lifecycle_sql)
+        self.assertIn(MEMORY_LIFECYCLE_SOURCE, lifecycle_params)
 
 
 class StickyDisplayContractTests(unittest.TestCase):
@@ -395,41 +388,10 @@ class StickyDisplayContractTests(unittest.TestCase):
         self.assertEqual(note['emotion'], '心动')
         self.assertEqual(note['tag'], '♡')
 
-        class _Cursor:
-            def __init__(self):
-                self.executed = []
-                self.one = None
-                self.many = []
-
-            def execute(self, sql, params=None):
-                compact = ' '.join(sql.split())
-                self.executed.append((compact, params))
-                if compact.startswith('INSERT INTO cognitive_'):
-                    self.one = (1,)
-                else:
-                    self.one = None
-                    self.many = []
-
-            def fetchone(self):
-                return self.one
-
-            def fetchall(self):
-                return list(self.many)
-
-            def close(self):
-                pass
-
-        cursor = _Cursor()
-        cognitive_output.persist_slow_loop_output(
-            cursor, cycle_id=7, user_id='u', character_id='gojo',
-            output=validated, now=NOW,
-        )
-        sticky_params = next(
-            params for statement, params in cursor.executed
-            if statement.startswith('INSERT INTO cognitive_sticky_notes')
-        )
-        metadata = json.loads(sticky_params[-2])
-        self.assertEqual(sticky_params[3], note['content'])
+        metadata = {
+            'emotion': note['emotion'], 'tone': note['tone'],
+            'trigger_snippet': note['trigger_snippet'], 'tag': note['tag'],
+        }
         self.assertEqual(metadata['emotion'], '心动')
         self.assertEqual(
             metadata['trigger_snippet'],
@@ -439,7 +401,7 @@ class StickyDisplayContractTests(unittest.TestCase):
 
         conn = FakeConn()
         conn.select_rows = [make_row(
-            content=sticky_params[3],
+            content=note['content'],
             note_key='user.cake.confirm',
             metadata=metadata,
         )]

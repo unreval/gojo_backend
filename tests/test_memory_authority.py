@@ -1,4 +1,5 @@
 """Real SQL: canonical group evidence, factual readers and unsupported language."""
+import asyncio
 from datetime import timedelta
 import json
 import os
@@ -272,6 +273,69 @@ class MemoryAuthorityTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(len(result['facts']),1)
         self.assertNotIn('火星',self.prompt_memory(result))
+
+    def test_memory_page_keeps_legacy_history_separate_from_recallable_fact(self):
+        self.report('raw', '我喜欢咖啡')
+        user_memory.save_long_memory('u', '旧记忆仍保留', '其他', 'c')
+        user_memory.save_long_memory('u', '另一角色的旧记忆', '其他', 'd')
+        user_memory.save_long_memory('other', '另一用户的旧记忆', '其他', 'c')
+        import route_memory
+        with patch('route_memory.get_conn', return_value=self.database):
+            response = asyncio.run(route_memory.list_long_memory('u', 'c'))
+        rows = json.loads(response.body)['memories']
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sum(row['recallable'] for row in rows), 1)
+        self.assertTrue(any('喜欢咖啡' in row['content'] and row['recallable'] for row in rows))
+        self.assertTrue(any(row['content'] == '旧记忆仍保留' and not row['recallable'] for row in rows))
+        self.assertTrue(any('喜欢咖啡' in row['content'] and row['content_locked'] for row in rows))
+        self.assertTrue(any(row['content'] == '旧记忆仍保留' and not row['content_locked'] for row in rows))
+
+    def test_memory_page_marks_stale_state_ineligible_like_chat_recall(self):
+        self.report('state', '我的状态是「很累」')
+        self.sql("UPDATE long_memory SET timestamp=CURRENT_TIMESTAMP - INTERVAL '49 hours' "
+                 "WHERE category='状态'")
+        self.database.commit()
+        import route_memory
+        with patch('route_memory.get_conn', return_value=self.database):
+            response = asyncio.run(route_memory.list_long_memory('u', 'c'))
+        rows = json.loads(response.body)['memories']
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]['recallable'])
+        self.assertTrue(rows[0]['content_locked'])
+
+    def test_bond_page_keeps_legacy_history_without_exposing_it_to_chat(self):
+        self.report('boundary', '不要「讨论体重」')
+        with patch('smart_recall.link_bond_to_fact', return_value=None):
+            user_memory.save_bond_memory('u', 'c', 'between', '旧共同记忆')
+        import route_memory
+        with patch('route_memory.get_conn', return_value=self.database):
+            response = asyncio.run(route_memory.list_bond_memory(
+                'u', 'c', kind='between', include_history=True))
+        rows = json.loads(response.body)['memories']
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sum(row['recallable'] for row in rows), 1)
+        self.assertTrue(any(row['content'] == '旧共同记忆' and not row['recallable']
+                            for row in rows))
+        self.assertEqual(len(user_memory.get_bond_memories('u', 'c', 'between')), 1)
+
+    def test_memory_page_cannot_rewrite_canonical_fact_or_bond_content(self):
+        self.report('fact', '我喜欢咖啡')
+        self.report('boundary', '不要「讨论体重」')
+        fact_id, fact_text = self.sql('SELECT id,content FROM long_memory')[0]
+        bond_id, bond_text = self.sql('SELECT id,content FROM bond_memory')[0]
+        import route_memory
+        with patch('route_memory.get_conn', return_value=self.database), \
+             patch('route_memory.notify_memory_changed') as changed:
+            fact_response = asyncio.run(route_memory.update_long_memory(
+                fact_id, {'content': '模型改写的事实', 'category': '喜好'}))
+            bond_response = asyncio.run(route_memory.edit_bond_memory(
+                bond_id, {'content': '模型改写的共同记忆'}))
+        self.assertEqual((fact_response.status_code, bond_response.status_code), (409, 409))
+        self.assertEqual(self.sql('SELECT content FROM long_memory WHERE id=%s',
+                                  (fact_id,))[0][0], fact_text)
+        self.assertEqual(self.sql('SELECT content FROM bond_memory WHERE id=%s',
+                                  (bond_id,))[0][0], bond_text)
+        changed.assert_not_called()
 
     def test_explicit_fact_state_refusal_boundary_and_date_range_are_applied(self):
         statements=('我的职业是「教师」','我的状态是「很累」',

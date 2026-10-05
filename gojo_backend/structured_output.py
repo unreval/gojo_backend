@@ -341,8 +341,17 @@ def invoke_structured_llm(
     try:
         raw_text, raw_usage = create_chat_fn(**kwargs)
     except Exception as exc:
+        from provider_error import diagnostics
+
+        detail = diagnostics(exc, model=model)
         print(f'[structured_output] status=error domain={domain} attempt={attempt} '
-              f'ok=False error=llm_call_failed exception={type(exc).__name__}')
+              f'ok=False error=llm_call_failed exception={type(exc).__name__} '
+              f'status_code={detail["status"] or "-"} '
+              f'provider_error_code={detail["code"] or "-"} '
+              f'provider_error_message={detail["message"] or "-"} '
+              f'model={detail["model"] or "-"} '
+              f'base_url_host={detail["base_url_host"] or "-"} '
+              f'request_id={detail["request_id"] or "-"}')
         raise
     raw_text = raw_text if isinstance(raw_text, str) else ''
     usage = _safe_usage(raw_usage)

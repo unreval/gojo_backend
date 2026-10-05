@@ -131,7 +131,12 @@ def enqueue_summary_job(
     if use_mem:
         with _LOCK:
             for job in _MEMORY_JOBS:
-                if job.get('source_event_id') == key and job.get('status') in ('pending', 'running'):
+                if (job.get('source_event_id') == key
+                        and job.get('user_id') == user_id
+                        and job.get('character_id') == character_id
+                        and (job.get('status') in ('pending', 'running')
+                             or (job.get('status') == 'failed'
+                                 and job.get('last_error') == 'provider_auth_failed'))):
                     return job.get('id')
             job_id = len(_MEMORY_JOBS) + 1
             _MEMORY_JOBS.append({

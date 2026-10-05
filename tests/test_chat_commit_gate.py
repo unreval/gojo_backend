@@ -20,6 +20,7 @@ if os.path.dirname(__file__) not in sys.path:
     sys.path.insert(0, os.path.dirname(__file__))
 
 from receipt_passthrough import passthrough_generation_receipt  # noqa: E402
+from provider_error import ProviderHTTPError  # noqa: E402
 
 
 def stub(name, **attributes):
@@ -233,6 +234,19 @@ class ChatCommitGateTests(unittest.TestCase):
             self.assertEqual(self.save_user_once.call_count, 1)
         self.assertIn('generation_failed; max_semantic_attempts=2; commit skipped',
                       ' '.join(str(c) for c in self.log.call_args_list))
+
+    def test_provider_403_fails_once_without_assistant_commit(self):
+        self.route._create_json = Mock(side_effect=ProviderHTTPError(
+            403, provider='anthropic', model='claude-test',
+            code='permission_error', message='credential abcdefghijklmnopqrstuvwx denied'))
+        response = asyncio.run(self.route.chat_text({
+            'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
+            'source_event_id': 'evt-provider-403',
+        }))
+        body = json.loads(response.body)
+        self.assert_generation_failed(response, body)
+        self.assertNotIn('abcdefghijklmnopqrstuvwx',
+                         ' '.join(str(call) for call in self.log.call_args_list))
 
     def test_prompt_messages_do_not_fallback_on_source_validity_error(self):
         import raw_events

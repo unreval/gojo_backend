@@ -1,4 +1,6 @@
 """用户记忆相关路由（★ 记忆列表 / 重分类均包含 shared 共享桶）"""
+from datetime import datetime, timedelta
+
 import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -6,6 +8,8 @@ from fastapi.responses import JSONResponse
 from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID
 from ai_client import extract_text
 from db import get_conn
+from memory_authority import AUTHORITY, authoritative_memory_sql
+from smart_recall import STATUS_EXPIRE_HOURS
 from user_memory import (
     get_short_memory, get_long_memory, get_chat_days,
     extract_and_save_memory, SHARED_CHARACTER_ID,
@@ -42,12 +46,18 @@ async def get_stats(user_id: str = 'default'):
 async def list_long_memory(user_id: str = 'default', character_id: str = DEFAULT_CHARACTER_ID):
     conn = get_conn()
     cur = conn.cursor()
+    status_cutoff = datetime.utcnow() - timedelta(hours=STATUS_EXPIRE_HOURS)
     # ★ 把 shared 共享桶一起查出来，不然记忆页看不到新提取的共享记忆
     cur.execute(
-        '''SELECT id, content, category, timestamp FROM long_memory
+        f'''SELECT id, content, category, timestamp,
+                  (({authoritative_memory_sql('long_memory')})
+                   AND (category IS DISTINCT FROM '状态'
+                        OR timestamp IS NULL OR timestamp >= %s)) AS recallable,
+                  authority = '{AUTHORITY}' AS content_locked
+           FROM long_memory
            WHERE user_id = %s AND character_id IN (%s, %s)
            ORDER BY timestamp DESC''',
-        (user_id, character_id, SHARED_CHARACTER_ID)
+        (status_cutoff, user_id, character_id, SHARED_CHARACTER_ID)
     )
     rows = cur.fetchall()
     cur.close()
@@ -56,6 +66,8 @@ async def list_long_memory(user_id: str = 'default', character_id: str = DEFAULT
         'id': r[0], 'content': r[1],
         'category': r[2] or '其他',
         'timestamp': str(r[3]) if r[3] else None,
+        'recallable': bool(r[4]),
+        'content_locked': bool(r[5]),
     } for r in rows]
     return JSONResponse({'memories': memories})
 
@@ -68,6 +80,14 @@ async def update_long_memory(memory_id: int, data: dict):
         return JSONResponse({'error': '内容不能为空'}, status_code=400)
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute('SELECT content, authority FROM long_memory WHERE id = %s FOR UPDATE',
+                (memory_id,))
+    existing = cur.fetchone()
+    if existing and existing[1] == AUTHORITY and existing[0] != content:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return JSONResponse({'error': '这条事实已有原始对话证据，请在聊天中明确更正，不能直接改写内容'}, status_code=409)
     if category:
         cur.execute('UPDATE long_memory SET content = %s, category = %s WHERE id = %s',
                     (content, category, memory_id))
@@ -198,12 +218,35 @@ async def reclassify_memories(data: dict):
 
 @router.get('/bond_memory')
 async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT_CHARACTER_ID,
-                           kind: str = ''):
+                           kind: str = '', include_history: bool = False):
     """★ 查看某角色的羁绊记忆。kind 传 between / told，不传返回全部。"""
-    rows = get_bond_memories(user_id, character_id, kind=kind or None, limit=100)
+    if not include_history:
+        rows = get_bond_memories(user_id, character_id, kind=kind or None, limit=100)
+        return JSONResponse({'memories': [{
+            'id': r[0], 'content': r[1],
+            'timestamp': str(r[2]) if r[2] else None,
+            'recallable': True, 'content_locked': True,
+        } for r in rows]})
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        kind_filter = 'AND kind = %s' if kind else ''
+        cur.execute(
+            f'''SELECT id, content, timestamp,
+                      ({authoritative_memory_sql('bond_memory')}) AS recallable,
+                      authority = '{AUTHORITY}' AS content_locked
+               FROM bond_memory
+               WHERE user_id = %s AND character_id = %s {kind_filter}
+               ORDER BY timestamp DESC''',
+            (user_id, character_id, kind) if kind else (user_id, character_id))
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
     return JSONResponse({'memories': [{
         'id': r[0], 'content': r[1],
         'timestamp': str(r[2]) if r[2] else None,
+        'recallable': bool(r[3]), 'content_locked': bool(r[4]),
     } for r in rows]})
 
 
@@ -215,6 +258,14 @@ async def edit_bond_memory(memory_id: int, data: dict):
         return JSONResponse({'error': '内容不能为空'}, status_code=400)
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute('SELECT content, authority FROM bond_memory WHERE id = %s FOR UPDATE',
+                (memory_id,))
+    existing = cur.fetchone()
+    if existing and existing[1] == AUTHORITY and existing[0] != content:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return JSONResponse({'error': '这条记忆已有原始对话证据，请在聊天中明确更正，不能直接改写内容'}, status_code=409)
     cur.execute('UPDATE bond_memory SET content = %s WHERE id = %s', (content, memory_id))
     updated = cur.rowcount
     conn.commit()

@@ -42,6 +42,8 @@ from generation_contract import (
     GENERATION_ENVELOPE_SCHEMA, degraded_reply, rejection_reason,
 )
 from ai_client import extract_text
+from provider_error import diagnostics as provider_diagnostics
+from provider_error import is_auth_error
 from context_budget import estimate_tokens
 from tts import tts_to_b64, transcribe_audio_b64
 from prompt import build_system_blocks, log_cache_usage
@@ -181,6 +183,13 @@ def _trace_error_type(error):
     except Exception:
         return 'unknown'
     return name if _TRACE_TOKEN_RE.fullmatch(name) else 'unknown'
+
+
+def _provider_base_url():
+    try:
+        return claude_client.base_url
+    except Exception:
+        return None
 
 
 def _trace_chars(value):
@@ -390,6 +399,12 @@ def _build_generation_trace_payload(
             _trace_error_type(error)
             if normalized_outcome == 'provider_error' else None
         ),
+        'provider_error': (
+            provider_diagnostics(
+                error, model=model, provider='anthropic',
+                base_url=_provider_base_url())
+            if normalized_outcome == 'provider_error' else None
+        ),
         'max_tokens': max_tokens,
         'system_block_count': len(system_blocks or []),
         'system_blocks': _trace_system_blocks(system_blocks),
@@ -585,7 +600,7 @@ def _protocol_rejection_reason(parsed, raw='', min_messages=1, acceptance_mode=N
 def _generate_or_none(
     model, max_tokens, system_blocks, messages, *,
     attempts, log_tag, cache_tag, min_messages=1, salvage=False, reject_fn=None,
-    generation_trace=None,
+    generation_trace=None, error_out=None,
 ):
     """One provider request per semantic candidate, with at most one repair."""
     semantic_attempts = min(attempts, 2)
@@ -612,13 +627,24 @@ def _generate_or_none(
             raw, response = _create_json(
                 model, max_tokens, request_system_blocks, messages)
         except Exception as exc:
+            if error_out is not None:
+                error_out['provider_auth_failed'] = is_auth_error(exc)
             _emit_generation_trace(
                 model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
                 messages=messages, attempt=attempt + 1, attempts=semantic_attempts,
                 trace_context=generation_trace, error=exc,
                 outcome='provider_error', will_retry=False,
             )
-            print(f'[generation] provider error: {type(exc).__name__}')
+            detail = provider_diagnostics(
+                exc, model=model, provider='anthropic',
+                base_url=_provider_base_url())
+            print(f'[generation] provider error: {type(exc).__name__} '
+                  f'status_code={detail["status"] or "-"} '
+                  f'provider_error_code={detail["code"] or "-"} '
+                  f'provider_error_message={detail["message"] or "-"} '
+                  f'model={detail["model"] or "-"} '
+                  f'base_url_host={detail["base_url_host"] or "-"} '
+                  f'request_id={detail["request_id"] or "-"}')
             break
         finally:
             _provider_call_counter.reset(counter_token)
