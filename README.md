@@ -17,7 +17,7 @@ Gojo Backend 不只是一个聊天接口，而是一个围绕 **长期角色状�
 ```text
 Repository : unreval/gojo_backend
 Branch     : main
-Main SHA   : a21e14e61ff629629ca6f26a2c131be96e0e98b2
+Code Baseline : a21e14e61ff629629ca6f26a2c131be96e0e98b2
 Backend    : Python 3.11 + FastAPI
 Database   : PostgreSQL
 Deploy     : Zeabur
