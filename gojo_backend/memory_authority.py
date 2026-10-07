@@ -166,7 +166,7 @@ def authoritative_memory_sql(table):
                     OR ({table}.projection_version='legacy_v1'
                         AND COALESCE(decision->>'projection_version','legacy_v1')='legacy_v1'
                         AND (decision->>'memory_content'={table}.content
-                             OR (decision->>'memory_content' LIKE '用户%'
+                             OR (left(decision->>'memory_content', 2) = '用户'
                                  AND replace(decision->>'memory_content','用户','她')={table}.content))))
                 AND decision->>'memory_table'='{table}'
                 AND (NOT (decision ? 'dependencies') OR
