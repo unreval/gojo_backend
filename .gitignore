@@ -50,3 +50,5 @@ __pycache__/
 temp_*.wav
 test_output.wav
 
+# Gojo generated review report
+review/latest.md
