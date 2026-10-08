@@ -163,9 +163,15 @@ class FakeCursor:
             return
 
         if (compact.startswith('UPDATE char_phone_check SET next_phone_check_at = COALESCE(')
-                and len(params) == 3):
-            now, _now2, oid = params
+                and len(params) in (3, 6)):
+            now, _now2, oid = params[:3]
             row = self._find_by_id(oid)
+            if len(params) == 6 and row:
+                today, _today2, hhmm = params[3:]
+                if (row.get('resolved_at') or row.get('check_state') != 'pending'
+                        or not (row['sched_date'] < today or (
+                            row['sched_date'] == today and row['end_time'] <= hhmm))):
+                    return
             if row and row.get('check_state') in ('pending', 'deferred'):
                 existing = row.get('next_phone_check_at')
                 row['next_phone_check_at'] = min(existing, now) if existing else now
@@ -275,30 +281,30 @@ class FakeCursor:
             self.rowcount = n
             return
 
-        if 'phone_check:defer_auth' in compact:
-            retry_at, oid, token = params
-            row = self._find_by_id(oid)
-            if (row and row.get('claim_token') == token
-                    and row.get('check_state') == 'processing'
-                    and not row.get('resolved_at')):
-                row['check_state'] = 'deferred'
-                row['can_reply'] = False
-                row['next_phone_check_at'] = retry_at
-                row['claimed_at'] = None
-                row['claim_token'] = None
-                row['claim_owner'] = None
-                row['claim_expires_at'] = None
-                self.rowcount = 1
-            return
-
-        if 'phone_check:release' in compact:
+        if compact.startswith('SELECT fail_count FROM char_phone_check'):
             oid, token = params
             row = self._find_by_id(oid)
             if (row and row.get('claim_token') == token
                     and row.get('check_state') == 'processing'
                     and not row.get('resolved_at')):
-                row['check_state'] = 'pending'
+                self._one = (row.get('fail_count', 0),)
+            return
+
+        if 'phone_check:release_failed' in compact:
+            (state, fail_count, retry_not_before, reason, failed_at,
+             next_at, resolved_at, oid, token) = params
+            row = self._find_by_id(oid)
+            if (row and row.get('claim_token') == token
+                    and row.get('check_state') == 'processing'
+                    and not row.get('resolved_at')):
+                row['check_state'] = state
                 row['can_reply'] = False
+                row['fail_count'] = fail_count
+                row['retry_not_before'] = retry_not_before
+                row['last_fail_reason'] = reason
+                row['last_fail_at'] = failed_at
+                row['next_phone_check_at'] = next_at
+                row['resolved_at'] = resolved_at
                 row['claimed_at'] = None
                 row['claim_token'] = None
                 row['claim_owner'] = None
@@ -309,13 +315,15 @@ class FakeCursor:
         if 'phone_check:claim' in compact:
             with self.store.lock:
                 (claimed_at, token, owner, expires, seen_at,
-                 oid, now_due, now_stale) = params
+                 oid, now_due, now_retry, now_stale) = params
                 row = self._find_by_id(oid)
                 self.rowcount = 0
                 if not row or row.get('resolved_at'):
                     return
                 next_at = row.get('next_phone_check_at')
                 if next_at is None or next_at > now_due:
+                    return
+                if row.get('retry_not_before') and row['retry_not_before'] > now_retry:
                     return
                 state = row.get('check_state') or 'pending'
                 stale = (
@@ -346,6 +354,7 @@ class FakeCursor:
                     row.get('schedule_event_id'), row.get('phase_id'),
                     row.get('event_revision'), row.get('occurrence_id'),
                     row.get('seen_at'),
+                    row.get('fail_count', 0),
                 )
                 return
 
@@ -382,12 +391,12 @@ class FakeCursor:
             return
 
         if compact.startswith('SELECT id FROM char_phone_check'):
-            now_due = params[1] if len(params) > 1 else None
-            today = params[2] if len(params) > 2 else None
-            hhmm = params[4] if len(params) > 4 else None
+            now_retry, now_stale, now_due, today, _today2, hhmm, limit = params
             ids = []
             for row in self.store.rows.values():
                 if row.get('resolved_at'):
+                    continue
+                if row.get('retry_not_before') and row['retry_not_before'] > now_retry:
                     continue
                 if (row.get('pending_count') or 0) <= 0:
                     continue
@@ -395,8 +404,7 @@ class FakeCursor:
                 stale = (
                     state == 'processing'
                     and row.get('claim_expires_at')
-                    and now_due
-                    and row['claim_expires_at'] <= now_due
+                    and row['claim_expires_at'] <= now_stale
                 )
                 if state not in ('pending', 'deferred') and not stale:
                     continue
@@ -411,7 +419,7 @@ class FakeCursor:
                         due = True
                 if due:
                     ids.append((row['id'],))
-            self._many = ids[: int(params[-1] if params else 20)]
+            self._many = ids[: int(limit)]
             return
 
         if compact.startswith('SELECT id, seen, can_reply'):

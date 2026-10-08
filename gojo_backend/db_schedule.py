@@ -90,8 +90,10 @@ PHONE_CHECK_CLAIMABLE = (PHONE_CHECK_PENDING, PHONE_CHECK_DEFERRED)
 CLAIM_TTL_SECONDS = 180
 
 
-def log_phone_check_action(action, claimed, *, next_at=None):
+def log_phone_check_action(action, claimed, *, next_at=None, reason=None):
     claimed = claimed or {}
+    failure = (f' reason={reason} fail_count={claimed.get("fail_count", 0)}'
+               if reason is not None else '')
     print('[phone_check] '
           f'id={claimed.get("id")} action={action} '
           f'pending_count={claimed.get("pending_count")} '
@@ -101,7 +103,8 @@ def log_phone_check_action(action, claimed, *, next_at=None):
           f'current_event_id={claimed.get("current_event_id")} '
           f'current_phase_id={claimed.get("current_phase_id")} '
           f'current_reply_state={claimed.get("current_reply_state")} '
-          f'next_phone_check_at={next_at if next_at is not None else claimed.get("next_phone_check_at")}')
+          f'next_phone_check_at={next_at if next_at is not None else claimed.get("next_phone_check_at")}'
+          f'{failure}')
 
 
 def init_schedule_table():
@@ -177,6 +180,10 @@ def init_schedule_table():
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS claim_token TEXT')
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS claim_owner TEXT')
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ')
+        cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS fail_count INTEGER NOT NULL DEFAULT 0')
+        cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS retry_not_before TIMESTAMPTZ')
+        cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS last_fail_reason TEXT')
+        cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS last_fail_at TIMESTAMPTZ')
         # A phone-check row is an occurrence/snapshot. It is never recycled
         # after a reply, and inbound work during a claim creates a successor.
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS occurrence_id TEXT')
@@ -732,6 +739,7 @@ def claim_due_phone_check(cur, oid, now, *, token=None, owner=None):
              AND resolved_at IS NULL
              AND next_phone_check_at IS NOT NULL
              AND next_phone_check_at <= %s
+             AND (retry_not_before IS NULL OR retry_not_before <= %s)
              AND (
                    check_state IN ('pending', 'deferred')
                    OR (check_state = 'processing' AND claim_expires_at IS NOT NULL
@@ -742,8 +750,8 @@ def claim_due_phone_check(cur, oid, now, *, token=None, owner=None):
                       user_id, character_id, first_source_event_id,
                       last_source_event_id, activity_title, start_time, end_time,
                       sched_date, schedule_event_id, phase_id, event_revision,
-                      occurrence_id, seen_at''',
-        (now, token, owner, expires, now, oid, now, now))
+                      occurrence_id, seen_at, fail_count''',
+        (now, token, owner, expires, now, oid, now, now, now))
     row = cur.fetchone()
     if not row:
         return None
@@ -771,6 +779,7 @@ def claim_due_phone_check(cur, oid, now, *, token=None, owner=None):
         'claim_token': token,
         'claim_owner': owner,
         'seen_at': row[20] if len(row) > 20 else now,
+        'fail_count': row[21] if len(row) > 21 else 0,
     }
     mark_source_events_seen_tx(
         cur, claimed['user_id'], claimed['character_id'],
@@ -819,29 +828,41 @@ def finish_claimed_defer(cur, oid, token, now, new_next):
     return cur.rowcount
 
 
-def release_claimed_phone_check(cur, oid, token, *, retry_at=None):
-    """Generation failed: preserve the inbox; defer an auth failure."""
-    if retry_at is not None:
-        cur.execute(
-            '''UPDATE char_phone_check SET -- phone_check:defer_auth
-                   check_state = 'deferred',
-                   can_reply = FALSE,
-                   next_phone_check_at = %s,
-                   claimed_at = NULL,
-                   claim_token = NULL,
-                   claim_owner = NULL,
-                   claim_expires_at = NULL,
-                   updated_at = CURRENT_TIMESTAMP
-               WHERE id = %s
-                 AND claim_token = %s
-                 AND check_state = 'processing'
-                 AND resolved_at IS NULL''',
-            (retry_at, oid, token))
-        return cur.rowcount
+def release_claimed_phone_check(cur, oid, token, *, retry_at=None,
+                               reason='generation_failed', now=None):
+    """Count a failed claim once, back off, and preserve the pending inbox."""
+    now = now or datetime.now(timezone.utc)
     cur.execute(
-        '''UPDATE char_phone_check SET -- phone_check:release
-               check_state = 'pending',
+        '''SELECT fail_count FROM char_phone_check
+           WHERE id = %s AND claim_token = %s
+             AND check_state = 'processing' AND resolved_at IS NULL
+           FOR UPDATE''',
+        (oid, token))
+    row = cur.fetchone()
+    if not row:
+        return 0
+    fail_count = int(row[0] or 0) + 1
+    expired = fail_count >= 5
+    retry_not_before = None
+    if not expired:
+        minutes = (2, 10, 30, 120)[fail_count - 1]
+        if reason == 'provider_auth_failed':
+            minutes = max(minutes, 15)
+        retry_not_before = now + timedelta(minutes=minutes)
+        if retry_at is not None:
+            retry_not_before = max(retry_not_before, retry_at)
+    state = ('expired' if expired else
+             'deferred' if retry_at is not None else 'pending')
+    cur.execute(
+        '''UPDATE char_phone_check SET -- phone_check:release_failed
+               check_state = %s,
                can_reply = FALSE,
+               fail_count = %s,
+               retry_not_before = %s,
+               last_fail_reason = %s,
+               last_fail_at = %s,
+               next_phone_check_at = %s,
+               resolved_at = %s,
                claimed_at = NULL,
                claim_token = NULL,
                claim_owner = NULL,
@@ -851,7 +872,11 @@ def release_claimed_phone_check(cur, oid, token, *, retry_at=None):
              AND claim_token = %s
              AND check_state = 'processing'
              AND resolved_at IS NULL''',
-        (oid, token))
+        (state, fail_count, retry_not_before, reason, now,
+         retry_not_before, now if expired else None, oid, token))
+    if expired and cur.rowcount:
+        log_phone_check_action('expired', {'id': oid, 'fail_count': fail_count},
+                               reason=reason)
     return cur.rowcount
 
 
@@ -863,6 +888,7 @@ def list_due_phone_check_ids(cur, now, *, limit=20):
         '''SELECT id FROM char_phone_check
            WHERE resolved_at IS NULL
              AND COALESCE(pending_count, 0) > 0
+             AND (retry_not_before IS NULL OR retry_not_before <= %s)
              AND (
                    check_state IN ('pending', 'deferred')
                    OR (check_state = 'processing' AND claim_expires_at IS NOT NULL
@@ -875,7 +901,7 @@ def list_due_phone_check_ids(cur, now, *, limit=20):
                  )
            ORDER BY next_phone_check_at NULLS LAST, id
            LIMIT %s''',
-        (now, now, today, today, hhmm, limit))
+        (now, now, now, today, today, hhmm, limit))
     return [row[0] for row in cur.fetchall()]
 
 
@@ -1012,11 +1038,13 @@ def complete_delayed_reply(oid, token, now):
         conn.close()
 
 
-def abort_delayed_reply(oid, token, *, retry_at=None):
+def abort_delayed_reply(oid, token, *, retry_at=None,
+                       reason='generation_failed', now=None):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        n = release_claimed_phone_check(cur, oid, token, retry_at=retry_at)
+        n = release_claimed_phone_check(
+            cur, oid, token, retry_at=retry_at, reason=reason, now=now)
         conn.commit()
         return n
     finally:

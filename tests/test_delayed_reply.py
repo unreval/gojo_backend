@@ -5,6 +5,7 @@ import os
 import sys
 import types
 import unittest
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -138,7 +139,14 @@ class HelpersStub:
 
 class DelayedReplyTests(unittest.TestCase):
     def setUp(self):
+        self.clock = Mock(return_value=0.0)
         self._io_patches = [
+            patch.object(delayed_reply.time, 'monotonic', self.clock),
+            patch.object(delayed_reply, '_pause_until', 0.0),
+            patch.object(delayed_reply, '_generation_calls', deque()),
+            patch.object(delayed_reply, 'DELAYED_REPLY_ENABLED', True),
+            patch.object(delayed_reply, 'DELAYED_REPLY_MAX_PER_TICK', 1),
+            patch.object(delayed_reply, 'DELAYED_REPLY_MAX_PER_HOUR', 20),
             patch('behavior_evidence.record_reply_cycle', Mock()),
             patch('push_notify.push_to_user', Mock()),
             patch.object(delayed_reply, 'assistant_already_committed',
@@ -151,6 +159,123 @@ class DelayedReplyTests(unittest.TestCase):
         for item in self._io_patches:
             item.start()
             self.addCleanup(item.stop)
+
+    def test_disabled_worker_never_lists_claims_or_generates(self):
+        generate = Mock()
+        with patch.object(delayed_reply, 'DELAYED_REPLY_ENABLED', False), \
+             patch.object(db_schedule, 'iter_due_phone_checks') as due:
+            self.assertEqual(delayed_reply.process_due_phone_checks(NOW, generate_fn=generate), [])
+        due.assert_not_called()
+        generate.assert_not_called()
+
+        def sleep(seconds):
+            if seconds == delayed_reply.TICK_SECONDS:
+                delayed_reply._stop = True
+
+        with patch.object(delayed_reply, 'DELAYED_REPLY_ENABLED', False), \
+             patch.object(delayed_reply, '_stop', False), \
+             patch.object(delayed_reply.time, 'sleep', side_effect=sleep), \
+             patch.object(delayed_reply, 'cancel_orphan_busy_promises'), \
+             patch.object(delayed_reply, 'process_due_phone_checks') as process:
+            delayed_reply._loop()
+        process.assert_not_called()
+
+    def test_tick_limit_bounds_listing_and_generation(self):
+        evaluate = Mock(side_effect=lambda oid, now: {
+            'action': 'reply', 'claimed': {'id': oid, 'claim_token': 'token'}})
+        generate = Mock(return_value={'ok': True})
+        with patch.object(db_schedule, 'iter_due_phone_checks', return_value=[1, 2, 3]) as due, \
+             patch.object(db_schedule, 'complete_delayed_reply', return_value=1):
+            result = delayed_reply.process_due_phone_checks(
+                NOW, evaluate_fn=evaluate, generate_fn=generate)
+        due.assert_called_once_with(NOW, limit=1)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(generate.call_count, 1)
+        self.assertEqual(evaluate.call_count, 1)
+
+    def test_hourly_limit_counts_failures_and_expires_at_one_hour(self):
+        generate = Mock(return_value={'ok': False, 'reason': 'generation_failed'})
+        evaluate = Mock(return_value={
+            'action': 'reply', 'claimed': {'id': 1, 'claim_token': 'token'}})
+        with patch.object(db_schedule, 'iter_due_phone_checks', return_value=[1]) as due, \
+             patch.object(db_schedule, 'abort_delayed_reply', return_value=1):
+            for _ in range(20):
+                delayed_reply.process_due_phone_checks(NOW, evaluate_fn=evaluate, generate_fn=generate)
+            self.clock.return_value = 3599.0
+            self.assertEqual(delayed_reply.process_due_phone_checks(
+                NOW, evaluate_fn=evaluate, generate_fn=generate), [])
+            self.assertEqual(due.call_count, 20)
+            self.assertEqual(generate.call_count, 20)
+            self.clock.return_value = 3600.0
+            delayed_reply.process_due_phone_checks(NOW, evaluate_fn=evaluate, generate_fn=generate)
+        self.assertEqual(generate.call_count, 21)
+        self.assertEqual(len(delayed_reply._generation_calls), 1)
+
+    def test_provider_circuit_stops_current_tick_and_all_rows_for_ten_minutes(self):
+        for reason in ('provider_retryable', 'provider_auth_failed'):
+            with self.subTest(reason=reason), \
+                 patch.object(delayed_reply, '_pause_until', 0.0), \
+                 patch.object(delayed_reply, 'DELAYED_REPLY_MAX_PER_TICK', 3), \
+                 patch.object(db_schedule, 'iter_due_phone_checks', return_value=[1, 2]) as due, \
+                 patch.object(db_schedule, 'abort_delayed_reply', return_value=1) as abort:
+                self.clock.return_value = 0.0
+                generate = Mock(return_value={'ok': False, 'reason': reason})
+                evaluate = Mock(side_effect=lambda oid, now: {
+                    'action': 'reply', 'claimed': {'id': oid, 'claim_token': 'token'}})
+                delayed_reply.process_due_phone_checks(NOW, evaluate_fn=evaluate, generate_fn=generate)
+                self.assertEqual(generate.call_count, 1)
+                self.assertEqual(evaluate.call_count, 1)
+                self.assertEqual(abort.call_args.kwargs['reason'], reason)
+                self.assertEqual(delayed_reply._pause_until, 600.0)
+                self.clock.return_value = 599.0
+                self.assertEqual(delayed_reply.process_due_phone_checks(
+                    NOW, evaluate_fn=evaluate, generate_fn=generate), [])
+                self.assertEqual(due.call_count, 1)
+                self.clock.return_value = 600.0
+                delayed_reply.process_due_phone_checks(NOW, evaluate_fn=evaluate, generate_fn=generate)
+                self.assertEqual(generate.call_count, 2)
+
+    def test_failed_abort_still_opens_circuit_and_does_not_invent_failure_count(self):
+        claimed = {'id': 1, 'claim_token': 'token', 'fail_count': 2}
+        for abort_result in (0, RuntimeError('db unavailable')):
+            with self.subTest(abort=abort_result), \
+                 patch.object(delayed_reply, '_pause_until', 0.0), \
+                 patch.object(db_schedule, 'iter_due_phone_checks', return_value=[1]), \
+                 patch.object(db_schedule, 'log_phone_check_action') as logged, \
+                 patch.object(db_schedule, 'abort_delayed_reply',
+                              side_effect=abort_result if isinstance(abort_result, Exception) else None,
+                              return_value=abort_result):
+                delayed_reply.process_due_phone_checks(
+                    NOW, evaluate_fn=lambda *a: {'action': 'reply', 'claimed': claimed},
+                    generate_fn=lambda bundle: {'ok': False, 'reason': 'provider_retryable'})
+                self.assertEqual(delayed_reply._pause_until, 600.0)
+                logged.assert_called_once_with('generation_failed', claimed, reason='provider_retryable')
+
+    def test_repeated_generation_failure_expires_after_five_calls(self):
+        store = PhoneCheckStore()
+        oid, row = _seed_soft_busy_bundle(store, ['在吗'])
+        row['end_time'] = '09:00'
+        generate = Mock(return_value={'ok': False, 'reason': 'generation_failed'})
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule, 'get_current_world_state', return_value={
+                 'event': None, 'phase': None, 'activity': None,
+                 'availability': {'reply_state': 'free'}}):
+            now = NOW
+            for count in range(1, 6):
+                result = delayed_reply.process_due_phone_checks(now, generate_fn=generate)
+                self.assertEqual(result[0]['reason'], 'generation_failed')
+                self.assertEqual(row['fail_count'], count)
+                if count < 5:
+                    self.assertEqual(db_schedule.iter_due_phone_checks(
+                        now + timedelta(seconds=30)), [])
+                    now = row['retry_not_before']
+                    self.clock.return_value = (now - NOW).total_seconds()
+            self.assertEqual(delayed_reply.process_due_phone_checks(
+                now + timedelta(days=1), generate_fn=generate), [])
+        self.assertEqual(generate.call_count, 5)
+        self.assertEqual(row['check_state'], 'expired')
+        self.assertEqual(row['pending_text'], '在吗')
+        self.assertEqual(row['pending_count'], 1)
 
     def test_soft_busy_three_messages_share_one_pending_bundle(self):
         store = PhoneCheckStore()
@@ -286,11 +411,15 @@ class DelayedReplyTests(unittest.TestCase):
              patch.object(db_schedule.random, 'random', return_value=0.0):
             results = delayed_reply.process_due_phone_checks(
                 NOW, generate_fn=lambda bundle: {'ok': False, 'reason': 'generation_failed'})
+            self.assertEqual(delayed_reply.process_due_phone_checks(
+                NOW + timedelta(seconds=30), generate_fn=Mock()), [])
         self.assertEqual(results[0]['action'], 'failed')
         self.assertEqual(row['check_state'], 'pending')
         self.assertIsNone(row.get('resolved_at'))
         self.assertEqual(row['pending_count'], 2)
         self.assertIn('一', row['pending_text'])
+        self.assertEqual(row['fail_count'], 1)
+        self.assertEqual(row['retry_not_before'], NOW + timedelta(minutes=2))
 
     def test_auth_failure_defers_phone_check_without_losing_inbox(self):
         store = PhoneCheckStore()
@@ -317,6 +446,7 @@ class DelayedReplyTests(unittest.TestCase):
             self.assertEqual(delayed_reply.process_due_phone_checks(
                 NOW + timedelta(seconds=30), generate_fn=generate), [])
             self.assertEqual(calls, [oid])
+            self.clock.return_value = 900.0
             second = delayed_reply.process_due_phone_checks(
                 NOW + timedelta(minutes=15), generate_fn=generate)
         self.assertEqual(second[0]['action'], 'replied')
@@ -329,6 +459,7 @@ class DelayedReplyTests(unittest.TestCase):
                 (ProviderHTTPError(503, provider='anthropic', model='claude-test'), 60),
                 (TimeoutError(), 60)):
             with self.subTest(error=type(error).__name__):
+                self.clock.return_value = 0.0
                 store = PhoneCheckStore()
                 oid, row = _seed_soft_busy_bundle(store, ['在吗'])
                 calls = []
@@ -340,6 +471,7 @@ class DelayedReplyTests(unittest.TestCase):
                     return {'ok': True}
 
                 with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+                     patch.object(delayed_reply, '_pause_until', 0.0), \
                      patch.object(db_schedule, 'postpone_past_hard_busy',
                                   side_effect=lambda *a, **k: (a[2] if len(a) > 2 else NOW, False)), \
                      patch('activity_phone.profile_for_activity', return_value=None), \
@@ -347,12 +479,13 @@ class DelayedReplyTests(unittest.TestCase):
                     first = delayed_reply.process_due_phone_checks(NOW, generate_fn=generate)
                     self.assertEqual(first[0]['reason'], 'provider_retryable')
                     self.assertEqual(row['check_state'], 'deferred')
-                    self.assertEqual(row['next_phone_check_at'], NOW + timedelta(seconds=delay))
+                    self.assertEqual(row['next_phone_check_at'], NOW + timedelta(seconds=max(delay, 120)))
                     self.assertEqual(delayed_reply.process_due_phone_checks(
                         NOW + timedelta(seconds=delay - 1), generate_fn=generate), [])
                     self.assertEqual(calls, [oid])
+                    self.clock.return_value = 600.0
                     second = delayed_reply.process_due_phone_checks(
-                        NOW + timedelta(seconds=delay), generate_fn=generate)
+                        NOW + timedelta(minutes=10), generate_fn=generate)
                 self.assertEqual(second[0]['action'], 'replied')
                 self.assertEqual(row['check_state'], 'consumed')
                 self.assertEqual(calls, [oid, oid])
@@ -360,18 +493,21 @@ class DelayedReplyTests(unittest.TestCase):
     def test_delayed_generation_marks_only_provider_auth_failure_for_defer(self):
         class AuthHelpers(HelpersStub):
             def _generate_or_none(self, *args, **kwargs):
+                self.generation_attempts = kwargs['attempts']
                 kwargs['error_out']['provider_auth_failed'] = True
                 return None, None
 
         bundle = {'id': 9, 'user_id': 'u', 'character_id': 'gojo',
                   'pending_text': '在吗', 'pending_count': 1, 'event_meta': ''}
+        helpers = AuthHelpers()
         with patch('characters.get_character', return_value={'name': '五条'}), \
              patch.object(delayed_reply, 'assistant_already_committed', return_value=False), \
              patch('temporal_awareness.get_temporal_snapshot', return_value={}), \
              patch('prompt.build_system_blocks', return_value=[]):
             result = delayed_reply.generate_delayed_chat_reply(
-                bundle, helpers=AuthHelpers())
+                bundle, helpers=helpers)
         self.assertEqual(result, {'ok': False, 'reason': 'provider_auth_failed'})
+        self.assertEqual(helpers.generation_attempts, 1)
 
     def test_thrown_provider_auth_error_is_deferred_without_logging_body(self):
         store = PhoneCheckStore()
