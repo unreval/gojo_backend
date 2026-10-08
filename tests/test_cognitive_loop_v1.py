@@ -552,6 +552,11 @@ class ReactivationTests(unittest.TestCase):
 
 
 class QueueLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        enabled = patch.object(cognitive_queue, 'COGNITIVE_WORKER_ENABLED', True)
+        enabled.start()
+        self.addCleanup(enabled.stop)
+
     def test_stable_advisory_key(self):
         key = cognitive_queue.stable_advisory_lock_key('u', 'gojo')
         self.assertEqual(key, cognitive_queue.stable_advisory_lock_key('u', 'gojo'))

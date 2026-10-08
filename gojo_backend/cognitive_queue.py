@@ -15,6 +15,9 @@ from cognitive_config import (
     COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT,
     COGNITIVE_MAX_RETRY,
     COGNITIVE_MAX_TRIGGERS_PER_CYCLE,
+    COGNITIVE_MAX_CYCLES_PER_RUN,
+    COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES,
+    COGNITIVE_WORKER_ENABLED,
     USER_FACING_STICKY_SOURCE,
 )
 
@@ -205,7 +208,8 @@ def _has_unprocessed_canonical_trigger(cur, user_id, character_id):
     return cur.fetchone() is not None
 
 
-def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
+def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None,
+                               for_worker=False):
     """Claim pending occurrences into one queued cycle under a short xact lock."""
     database, owns_connection = _get_connection(conn)
     current_time = _utc_now(now)
@@ -218,6 +222,15 @@ def aggregate_pending_triggers(user_id, character_id, *, conn=None, now=None):
         recovery = _recover_expired_claims(
             cur, user_id, character_id, current_time,
         )
+
+        # Reclaim old leases even while dispatch is disabled; never claim anew.
+        if not COGNITIVE_WORKER_ENABLED:
+            database.commit()
+            return {'status': 'disabled', 'recovery': recovery}
+        if (not for_worker and (COGNITIVE_MAX_CYCLES_PER_RUN > 0
+                or COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES > 0)):
+            database.commit()
+            return {'status': 'worker_maintenance_required', 'recovery': recovery}
 
         cur.execute(
             '''SELECT id FROM cognitive_cycles

@@ -124,6 +124,11 @@ class PromiseRaceCursor(queue_tests.CycleCursor):
 
 
 class PromiseDailyLimitTests(unittest.TestCase):
+    def setUp(self):
+        enabled = patch.object(cognitive_queue, 'COGNITIVE_WORKER_ENABLED', True)
+        enabled.start()
+        self.addCleanup(enabled.stop)
+
     def test_arrival_during_last_cycle_survives_cleanup_and_is_claimed_next_day_once(self):
         cursor = PromiseRaceCursor()
         conn = queue_tests.TransactionConnection(cursor)
