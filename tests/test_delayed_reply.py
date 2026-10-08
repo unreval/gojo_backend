@@ -21,6 +21,7 @@ if TESTS not in sys.path:
 import db_schedule  # noqa: E402
 import delayed_reply  # noqa: E402
 import proactive_scheduler  # noqa: E402
+import raw_events  # noqa: E402
 import reply_availability  # noqa: E402
 from provider_error import ProviderHTTPError  # noqa: E402
 import test_schedule_reply_state as sched_tests  # noqa: E402
@@ -46,6 +47,24 @@ def _conn(store):
     return FakeConn(store)
 
 
+def _active_source_rows(_user_id, _character_id, event_ids, **_kwargs):
+    texts = {'e1': '一', 'e2': '二', 'e3': '三'}
+    return [
+        {'event_id': str(event_id), 'role': 'user',
+         'content': texts.get(str(event_id), str(event_id)), 'kind': 'text'}
+        for event_id in event_ids
+    ]
+
+
+def _synthetic_claim(oid):
+    return {
+        'id': oid, 'claim_token': 'token',
+        'user_id': 'u', 'character_id': 'gojo',
+        'pending_count': 1, 'pending_text': '一',
+        'first_source_event_id': 'e1', 'last_source_event_id': 'e1',
+    }
+
+
 def _seed_soft_busy_bundle(store, texts, *, due=None, event_metas=None):
     due = due or (NOW - timedelta(minutes=1))
     start = due - timedelta(minutes=20)
@@ -53,15 +72,17 @@ def _seed_soft_busy_bundle(store, texts, *, due=None, event_metas=None):
          patch.object(db_schedule, 'sample_next_phone_check_at', return_value=due), \
          patch.object(db_schedule, 'postpone_past_hard_busy',
                       side_effect=lambda *a, **k: (a[2] if len(a) > 2 else due, False)):
-        first_meta = (event_metas or [None] * len(texts))[0]
+        first_meta = dict((event_metas or [None] * len(texts))[0] or {})
+        first_meta.setdefault('source_event_id', 'e1')
         first = db_schedule.decide_phone_check(
             'gojo', 'u', start, ACTIVITY,
             source_event_id='e1', pending_text=texts[0], event_meta=first_meta)
         oid = first['opportunity_id']
         for index, text in enumerate(texts[1:], start=2):
-            meta = None
+            meta = {}
             if event_metas and index - 1 < len(event_metas):
-                meta = event_metas[index - 1]
+                meta = dict(event_metas[index - 1] or {})
+            meta.setdefault('source_event_id', f'e{index}')
             db_schedule.decide_phone_check(
                 'gojo', 'u', start + timedelta(minutes=index), ACTIVITY,
                 source_event_id=f'e{index}', pending_text=text, event_meta=meta)
@@ -151,6 +172,10 @@ class DelayedReplyTests(unittest.TestCase):
             patch('push_notify.push_to_user', Mock()),
             patch.object(delayed_reply, 'assistant_already_committed',
                           return_value=False),
+            patch.object(db_schedule, 'get_conn',
+                         side_effect=AssertionError('unexpected database access')),
+            patch.object(raw_events, 'get_active_events_by_ids',
+                         side_effect=_active_source_rows),
             patch.object(
                 db_schedule, 'get_current_world_state',
                 side_effect=lambda character_id, user_id, now=None:
@@ -182,10 +207,12 @@ class DelayedReplyTests(unittest.TestCase):
 
     def test_tick_limit_bounds_listing_and_generation(self):
         evaluate = Mock(side_effect=lambda oid, now: {
-            'action': 'reply', 'claimed': {'id': oid, 'claim_token': 'token'}})
+            'action': 'reply', 'claimed': _synthetic_claim(oid)})
         generate = Mock(return_value={'ok': True})
         with patch.object(db_schedule, 'iter_due_phone_checks', return_value=[1, 2, 3]) as due, \
-             patch.object(db_schedule, 'complete_delayed_reply', return_value=1):
+             patch.object(db_schedule, 'complete_delayed_reply', return_value=1), \
+             patch.object(db_schedule, 'abort_delayed_reply',
+                          side_effect=AssertionError('unexpected abort')):
             result = delayed_reply.process_due_phone_checks(
                 NOW, evaluate_fn=evaluate, generate_fn=generate)
         due.assert_called_once_with(NOW, limit=1)
@@ -196,7 +223,7 @@ class DelayedReplyTests(unittest.TestCase):
     def test_hourly_limit_counts_failures_and_expires_at_one_hour(self):
         generate = Mock(return_value={'ok': False, 'reason': 'generation_failed'})
         evaluate = Mock(return_value={
-            'action': 'reply', 'claimed': {'id': 1, 'claim_token': 'token'}})
+            'action': 'reply', 'claimed': _synthetic_claim(1)})
         with patch.object(db_schedule, 'iter_due_phone_checks', return_value=[1]) as due, \
              patch.object(db_schedule, 'abort_delayed_reply', return_value=1):
             for _ in range(20):
@@ -221,7 +248,7 @@ class DelayedReplyTests(unittest.TestCase):
                 self.clock.return_value = 0.0
                 generate = Mock(return_value={'ok': False, 'reason': reason})
                 evaluate = Mock(side_effect=lambda oid, now: {
-                    'action': 'reply', 'claimed': {'id': oid, 'claim_token': 'token'}})
+                    'action': 'reply', 'claimed': _synthetic_claim(oid)})
                 delayed_reply.process_due_phone_checks(NOW, evaluate_fn=evaluate, generate_fn=generate)
                 self.assertEqual(generate.call_count, 1)
                 self.assertEqual(evaluate.call_count, 1)
@@ -236,7 +263,7 @@ class DelayedReplyTests(unittest.TestCase):
                 self.assertEqual(generate.call_count, 2)
 
     def test_failed_abort_still_opens_circuit_and_does_not_invent_failure_count(self):
-        claimed = {'id': 1, 'claim_token': 'token', 'fail_count': 2}
+        claimed = dict(_synthetic_claim(1), fail_count=2)
         for abort_result in (0, RuntimeError('db unavailable')):
             with self.subTest(abort=abort_result), \
                  patch.object(delayed_reply, '_pause_until', 0.0), \
@@ -276,6 +303,95 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertEqual(row['check_state'], 'expired')
         self.assertEqual(row['pending_text'], '在吗')
         self.assertEqual(row['pending_count'], 1)
+
+    def test_no_active_pending_sources_expires_without_generation(self):
+        store = PhoneCheckStore()
+        _oid, row = _seed_soft_busy_bundle(store, ['一', '二'])
+        generate = Mock(return_value={'ok': True})
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule.random, 'random', return_value=0.0), \
+             patch.object(raw_events, 'get_active_events_by_ids', return_value=[]) as active:
+            first = delayed_reply.process_due_phone_checks(NOW, generate_fn=generate)
+            second = delayed_reply.process_due_phone_checks(
+                NOW + timedelta(days=1), generate_fn=generate)
+        self.assertEqual(first[0]['reason'], 'source_invalid')
+        self.assertEqual(second, [])
+        active.assert_called_once_with('u', 'gojo', ['e1', 'e2'])
+        generate.assert_not_called()
+        self.assertEqual(row['check_state'], 'expired')
+        self.assertEqual(row['last_fail_reason'], 'source_invalid')
+        self.assertEqual(row['fail_count'], 1)
+        self.assertIsNotNone(row['resolved_at'])
+
+    def test_partial_active_sources_use_canonical_text_in_one_generation(self):
+        store = PhoneCheckStore()
+        _oid, row = _seed_soft_busy_bundle(
+            store, ['截断说明', '已删除', '第三条旧副本'],
+            event_metas=[
+                {'kind': 'image', 'source_event_id': 'e1',
+                 'caption': '媒体副本说明',
+                 'visual_summary': '蓝色杯子'},
+                {'kind': 'text', 'source_event_id': 'e2'},
+                {'kind': 'text', 'source_event_id': 'e3'},
+            ])
+        canonical = [
+            {'event_id': 'e1', 'role': 'user', 'content': '图片完整原文',
+             'kind': 'image'},
+            {'event_id': 'e3', 'role': 'user', 'content': '第三条完整原文',
+             'kind': 'text'},
+        ]
+        generate = Mock(return_value={'ok': True})
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule.random, 'random', return_value=0.0), \
+             patch.object(raw_events, 'get_active_events_by_ids',
+                          return_value=canonical):
+            result = delayed_reply.process_due_phone_checks(
+                NOW, generate_fn=generate)
+        self.assertEqual(result[0]['action'], 'replied')
+        generate.assert_called_once()
+        checked = generate.call_args.args[0]
+        self.assertEqual(checked['pending_count'], 2)
+        self.assertEqual(checked['pending_text'], '图片完整原文\n第三条完整原文')
+        self.assertEqual(checked['first_source_event_id'], 'e1')
+        self.assertEqual(checked['last_source_event_id'], 'e3')
+        metas = reply_availability.parse_pending_event_meta(checked['event_meta'])
+        self.assertEqual([meta['source_event_id'] for meta in metas], ['e1', 'e3'])
+        self.assertEqual([meta['text'] for meta in metas],
+                         ['图片完整原文', '第三条完整原文'])
+        self.assertEqual(metas[0]['visual_summary'], '蓝色杯子')
+        self.assertEqual(row['check_state'], 'consumed')
+
+    def test_source_validity_error_expires_after_one_paid_attempt(self):
+        store = PhoneCheckStore()
+        _oid, row = _seed_soft_busy_bundle(store, ['在吗'])
+        message = 'canonical source invalid ' + 'x' * 340
+
+        def generate(_bundle):
+            raise raw_events.SourceValidityError(message)
+
+        generate_fn = Mock(side_effect=generate)
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+             patch.object(db_schedule.random, 'random', return_value=0.0), \
+             patch('builtins.print') as logged:
+            first = delayed_reply.process_due_phone_checks(
+                NOW, generate_fn=generate_fn)
+            second = delayed_reply.process_due_phone_checks(
+                NOW + timedelta(days=1), generate_fn=generate_fn)
+        self.assertEqual(first[0]['reason'], 'source_invalid')
+        self.assertEqual(second, [])
+        self.assertEqual(generate_fn.call_count, 1)
+        self.assertEqual(row['check_state'], 'expired')
+        self.assertEqual(row['last_fail_reason'], 'source_invalid')
+        self.assertEqual(row['fail_count'], 1)
+        self.assertIsNone(row['retry_not_before'])
+        failure_logs = [
+            str(call.args[0]) for call in logged.call_args_list
+            if call.args and '[delayed_reply] generate #' in str(call.args[0])
+        ]
+        self.assertEqual(len(failure_logs), 1)
+        self.assertIn(message[:300], failure_logs[0])
+        self.assertNotIn(message[:301], failure_logs[0])
+        self.assertRegex(failure_logs[0], r'test_delayed_reply\.py:\d+')
 
     def test_soft_busy_three_messages_share_one_pending_bundle(self):
         store = PhoneCheckStore()
@@ -502,12 +618,33 @@ class DelayedReplyTests(unittest.TestCase):
         helpers = AuthHelpers()
         with patch('characters.get_character', return_value={'name': '五条'}), \
              patch.object(delayed_reply, 'assistant_already_committed', return_value=False), \
+             patch('user_memory.save_user_short_memory_once', return_value=True), \
              patch('temporal_awareness.get_temporal_snapshot', return_value={}), \
              patch('prompt.build_system_blocks', return_value=[]):
             result = delayed_reply.generate_delayed_chat_reply(
                 bundle, helpers=helpers)
         self.assertEqual(result, {'ok': False, 'reason': 'provider_auth_failed'})
         self.assertEqual(helpers.generation_attempts, 1)
+
+    def test_source_replay_failure_precedes_llm_and_schedule_commit(self):
+        helpers = HelpersStub()
+        bundle = {
+            'id': 9, 'user_id': 'u', 'character_id': 'gojo',
+            'pending_text': '来源原文', 'pending_count': 1,
+            'event_meta': [{'source_event_id': 'e1', 'text': '来源原文'}],
+            'first_source_event_id': 'e1', 'last_source_event_id': 'e1',
+        }
+        with patch('characters.get_character', return_value={'name': '五条'}), \
+             patch('temporal_awareness.get_temporal_snapshot', return_value={}), \
+             patch('prompt.build_system_blocks', return_value=[]), \
+             patch('user_memory.save_user_short_memory_once',
+                   side_effect=raw_events.SourceValidityError('source withdrawn')), \
+             patch('schedule_transition.commit_generated_schedule_intent') as commit:
+            with self.assertRaises(raw_events.SourceValidityError):
+                delayed_reply.generate_delayed_chat_reply(
+                    bundle, helpers=helpers)
+        self.assertEqual(helpers.generate_calls, 0)
+        commit.assert_not_called()
 
     def test_thrown_provider_auth_error_is_deferred_without_logging_body(self):
         store = PhoneCheckStore()

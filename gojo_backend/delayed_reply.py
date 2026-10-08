@@ -61,6 +61,49 @@ def _pending_source_event_ids(bundle):
     return source_event_ids_from_claim(bundle)
 
 
+def _precheck_pending_bundle_sources(bundle):
+    """Keep only active canonical user events before paying for generation."""
+    from raw_events import get_active_events_by_ids
+
+    source_ids = _pending_source_event_ids(bundle)
+    if not source_ids:
+        return None
+    active = {
+        event['event_id']: event
+        for event in get_active_events_by_ids(
+            bundle['user_id'], bundle['character_id'], source_ids)
+        if event.get('role') == 'user'
+    }
+    kept_ids = [source_id for source_id in source_ids if source_id in active]
+    if not kept_ids:
+        return None
+
+    metas = {}
+    for meta in parse_pending_event_meta(bundle.get('event_meta')):
+        source_id = str(meta.get('source_event_id') or meta.get('event_id') or '').strip()
+        if source_id in active:
+            metas.setdefault(source_id, {}).update(meta)
+    filtered_metas = []
+    for source_id in kept_ids:
+        meta = dict(metas.get(source_id) or {})
+        meta['source_event_id'] = source_id
+        # The phone-check text is a truncated copy. Replaying that copy under
+        # an existing ID can fail the canonical role/content check.
+        meta['text'] = active[source_id]['content']
+        filtered_metas.append(meta)
+    if len(kept_ids) != len(source_ids):
+        print(f'[delayed_reply] phone_check_id={bundle.get("id")} '
+              f'dropped_invalid_sources={len(source_ids) - len(kept_ids)}')
+    return dict(
+        bundle,
+        pending_count=len(kept_ids),
+        pending_text='\n'.join(active[source_id]['content'] for source_id in kept_ids)[:4000],
+        event_meta=filtered_metas,
+        first_source_event_id=kept_ids[0],
+        last_source_event_id=kept_ids[-1],
+    )
+
+
 def assistant_already_committed(user_id, character_id, phone_check_id):
     """True if a previous crash already wrote the first delayed bubble."""
     if phone_check_id is None or not user_id or not character_id:
@@ -131,17 +174,14 @@ def _persist_pending_user_messages(bundle):
         if line.strip()
     ]
     for index, meta in enumerate(metas):
-        text = (
-            meta.get('caption')
-            or meta.get('display_text')
-            or meta.get('text')
-            or (pending_lines[index] if index < len(pending_lines) else '')
-        )
+        text = (meta['text'] if 'text' in meta else
+                meta.get('caption') or meta.get('display_text') or
+                (pending_lines[index] if index < len(pending_lines) else ''))
         event_id = meta.get('source_event_id') or meta.get('event_id')
         if not text and not event_id:
             continue
         save_user_short_memory_once(
-            user_id, text or '(pending)', character_id,
+            user_id, text if event_id else text or '(pending)', character_id,
             source_event_id=event_id,
             event_meta=meta,
         )
@@ -211,6 +251,7 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
 
     pending_text = (bundle.get('pending_text') or '').strip()
     pending_ids = _pending_source_event_ids(bundle)
+    _persist_pending_user_messages(bundle)
     extra_suffix = '\n\n' + format_pending_bundle_context(bundle)
     trigger = (
         '【系统内部】你现在有空看手机了。请根据 INTERNAL CONTEXT 里忙碌期间'
@@ -274,7 +315,6 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
             print(f'[delayed_reply] TTS skipped: {exc}')
             msg['audio_b64'] = ''
 
-    _persist_pending_user_messages(bundle)
     short_memories = get_short_memory(user_id, SHORT_MEMORY_MAX, character_id)
 
     turn_id = delivery_event_id(phone_check_id, 0)
@@ -365,15 +405,30 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
             results.append({'id': oid, 'action': action or 'skip'})
             continue
         generated = None
-        _generation_calls.append(time.monotonic())
-        generated_count += 1
         try:
-            generated = generate_fn(claimed)
+            checked = _precheck_pending_bundle_sources(claimed)
+            if checked is None:
+                print(f'[delayed_reply] phone_check_id={oid} '
+                      'source_invalid no_active_canonical_user_sources')
+                generated = {'ok': False, 'reason': 'source_invalid'}
+            else:
+                _generation_calls.append(time.monotonic())
+                generated_count += 1
+                generated = generate_fn(checked)
         except Exception as exc:
             from provider_error import is_auth_error, retry_delay_seconds
-            print(f'[delayed_reply] generate #{oid} failed: {type(exc).__name__}')
-            retry_delay = retry_delay_seconds(exc)
+            from raw_events import SourceValidityError
+            frame = exc.__traceback__
+            while frame and frame.tb_next:
+                frame = frame.tb_next
+            location = (f'{os.path.basename(frame.tb_frame.f_code.co_filename)}:'
+                        f'{frame.tb_lineno}' if frame else 'unknown')
+            print(f'[delayed_reply] generate #{oid} failed: {type(exc).__name__} '
+                  f'message={str(exc)[:300]} location={location}')
+            source_invalid = isinstance(exc, SourceValidityError)
+            retry_delay = None if source_invalid else retry_delay_seconds(exc)
             generated = {'ok': False, 'reason': (
+                'source_invalid' if source_invalid else
                 'provider_auth_failed' if is_auth_error(exc) else
                 'provider_retryable' if retry_delay else 'generation_failed')}
             if retry_delay:
@@ -407,6 +462,7 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
             if provider_failed:
                 _pause_until = time.monotonic() + 600
                 print(f'[delayed_reply] provider circuit opened reason={reason} pause_seconds=600')
+            expired = False
             try:
                 failure_now = _now() if live_clock else now
                 auth_failed = reason == 'provider_auth_failed'
@@ -417,13 +473,16 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
                     oid, claimed['claim_token'], retry_at=retry_at,
                     reason=reason, now=failure_now)
                 if released:
+                    expired = reason == 'source_invalid'
                     claimed = dict(claimed, fail_count=claimed.get('fail_count', 0) + 1)
-                    db_schedule.log_phone_check_action('released', claimed)
+                    if reason != 'source_invalid':
+                        db_schedule.log_phone_check_action('released', claimed)
             except Exception as exc:
                 print(f'[delayed_reply] abort #{oid} failed: {exc}')
-            db_schedule.log_phone_check_action('generation_failed', claimed, reason=reason)
+            if reason != 'source_invalid':
+                db_schedule.log_phone_check_action('generation_failed', claimed, reason=reason)
             results.append({
-                'id': oid, 'action': 'failed',
+                'id': oid, 'action': 'expired' if expired else 'failed',
                 'ok': False,
                 'reason': reason,
             })
