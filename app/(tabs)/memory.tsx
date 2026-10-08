@@ -33,6 +33,9 @@ interface BondMem   { id: number; content: string; timestamp?: string | null; re
 interface BgMem     { id: number; content: string; category: string; keywords?: string; importance?: number; timestamp?: string | null; }
 
 type ModuleKey = 'facts' | 'between' | 'told' | 'background';
+type HistoryKey = Exclude<ModuleKey, 'background'>;
+
+const HISTORY_PAGE_SIZE = 50;
 
 const CATEGORY_ORDER = ['状态', '身份', '喜好', '厌恶', '经历', '关系', '其他'];
 const CAT_EMOJI: Record<string, string> = {
@@ -85,6 +88,9 @@ export default function MemoryScreen() {
   const [collapsed, setCollapsed] = useState<Record<ModuleKey, boolean>>({
     facts: false, between: false, told: false, background: true,
   });
+  const [historyVisibleCount, setHistoryVisibleCount] = useState<Record<HistoryKey, number>>({
+    facts: 0, between: 0, told: 0,
+  });
   // 编辑/新增弹窗
   const [editing, setEditing] = useState<{ module: ModuleKey; id?: number; content: string; category?: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -117,6 +123,7 @@ export default function MemoryScreen() {
   };
 
   useFocusEffect(useCallback(() => {
+    setHistoryVisibleCount({ facts: 0, between: 0, told: 0 });
     (async () => {
       setLoading(true);
       await loadChars();
@@ -202,6 +209,8 @@ export default function MemoryScreen() {
   };
 
   const toggle = (k: ModuleKey) => setCollapsed(p => ({ ...p, [k]: !p[k] }));
+  const toggleHistory = (k: HistoryKey) => setHistoryVisibleCount(p => ({ ...p, [k]: p[k] > 0 ? 0 : HISTORY_PAGE_SIZE }));
+  const showMoreHistory = (k: HistoryKey) => setHistoryVisibleCount(p => ({ ...p, [k]: p[k] + HISTORY_PAGE_SIZE }));
 
   // ── 单张记忆卡 ──
   const MemCard = ({ module, id, content, meta, ts, historical = false }: {
@@ -347,12 +356,24 @@ export default function MemoryScreen() {
           {!collapsed.facts && currentFacts.length === 0 && <Text style={s.emptyText}>当前没有可召回的事实</Text>}
           {!collapsed.facts && historicalFacts.length > 0 && (
             <View>
-              <Text style={s.historyHead}>历史记录 · {historicalFacts.length}</Text>
-              <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。只有原始对话可核对且仍有效的事实才会参与。</Text>
-              {historicalFacts.map(m => (
-                <MemCard key={m.id} module="facts" id={m.id} content={m.content}
-                  ts={m.timestamp} meta="当前不参与聊天召回" historical />
-              ))}
+              <TouchableOpacity onPress={() => toggleHistory('facts')} accessibilityRole="button"
+                accessibilityState={{ expanded: historyVisibleCount.facts > 0 }}>
+                <Text style={s.historyHead}>历史记录 {historicalFacts.length} {historyVisibleCount.facts > 0 ? '▾' : '▸'}</Text>
+              </TouchableOpacity>
+              {historyVisibleCount.facts > 0 && (
+                <View>
+                  <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。只有原始对话可核对且仍有效的事实才会参与。</Text>
+                  {historicalFacts.slice(0, historyVisibleCount.facts).map(m => (
+                    <MemCard key={m.id} module="facts" id={m.id} content={m.content}
+                      ts={m.timestamp} meta="当前不参与聊天召回" historical />
+                  ))}
+                  {historyVisibleCount.facts < historicalFacts.length && (
+                    <TouchableOpacity style={[s.refreshBtn, s.historyMore]} onPress={() => showMoreHistory('facts')} accessibilityRole="button">
+                      <Text style={s.refreshText}>再显示 50 条</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
             </View>
           )}
 
@@ -364,10 +385,22 @@ export default function MemoryScreen() {
           {!collapsed.between && currentBetween.length === 0 && <Text style={s.emptyText}>当前没有可召回的共同记忆</Text>}
           {!collapsed.between && historicalBetween.length > 0 && (
             <View>
-              <Text style={s.historyHead}>历史记录 · {historicalBetween.length}</Text>
-              <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。</Text>
-              {historicalBetween.map(m => <MemCard key={m.id} module="between" id={m.id} content={m.content}
-                ts={m.timestamp} meta="当前不参与聊天召回" historical />)}
+              <TouchableOpacity onPress={() => toggleHistory('between')} accessibilityRole="button"
+                accessibilityState={{ expanded: historyVisibleCount.between > 0 }}>
+                <Text style={s.historyHead}>历史记录 {historicalBetween.length} {historyVisibleCount.between > 0 ? '▾' : '▸'}</Text>
+              </TouchableOpacity>
+              {historyVisibleCount.between > 0 && (
+                <View>
+                  <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。</Text>
+                  {historicalBetween.slice(0, historyVisibleCount.between).map(m => <MemCard key={m.id} module="between" id={m.id} content={m.content}
+                    ts={m.timestamp} meta="当前不参与聊天召回" historical />)}
+                  {historyVisibleCount.between < historicalBetween.length && (
+                    <TouchableOpacity style={[s.refreshBtn, s.historyMore]} onPress={() => showMoreHistory('between')} accessibilityRole="button">
+                      <Text style={s.refreshText}>再显示 50 条</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
             </View>
           )}
 
@@ -379,10 +412,22 @@ export default function MemoryScreen() {
           {!collapsed.told && currentTold.length === 0 && <Text style={s.emptyText}>当前没有可召回的已告知记忆</Text>}
           {!collapsed.told && historicalTold.length > 0 && (
             <View>
-              <Text style={s.historyHead}>历史记录 · {historicalTold.length}</Text>
-              <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。</Text>
-              {historicalTold.map(m => <MemCard key={m.id} module="told" id={m.id} content={m.content}
-                ts={m.timestamp} meta="当前不参与聊天召回" historical />)}
+              <TouchableOpacity onPress={() => toggleHistory('told')} accessibilityRole="button"
+                accessibilityState={{ expanded: historyVisibleCount.told > 0 }}>
+                <Text style={s.historyHead}>历史记录 {historicalTold.length} {historyVisibleCount.told > 0 ? '▾' : '▸'}</Text>
+              </TouchableOpacity>
+              {historyVisibleCount.told > 0 && (
+                <View>
+                  <Text style={s.historyNote}>这些记录仍保留，但目前不参与聊天召回。</Text>
+                  {historicalTold.slice(0, historyVisibleCount.told).map(m => <MemCard key={m.id} module="told" id={m.id} content={m.content}
+                    ts={m.timestamp} meta="当前不参与聊天召回" historical />)}
+                  {historyVisibleCount.told < historicalTold.length && (
+                    <TouchableOpacity style={[s.refreshBtn, s.historyMore]} onPress={() => showMoreHistory('told')} accessibilityRole="button">
+                      <Text style={s.refreshText}>再显示 50 条</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
             </View>
           )}
 
@@ -545,6 +590,7 @@ const s = StyleSheet.create({
   catHead: { color: C.textDim, fontSize: 12, marginTop: 8, marginBottom: 6, marginLeft: 4 },
   historyHead: { color: C.textDim, fontSize: 13, marginTop: 18, marginBottom: 6, marginLeft: 4, fontWeight: '600' },
   historyNote: { color: C.textMute, fontSize: 12, lineHeight: 18, marginBottom: 10, marginLeft: 4 },
+  historyMore: { alignSelf: 'center', marginBottom: 8 },
 
   card: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
