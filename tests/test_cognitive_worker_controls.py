@@ -2,6 +2,8 @@
 from contextlib import ExitStack
 from datetime import timedelta
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -212,6 +214,90 @@ class WorkerControlsSQLTests(unittest.TestCase):
         self.assertEqual(self.sql('''SELECT status,attempt_count,claimed_by_cycle_id,claim_expires_at
                                     FROM cognitive_event_triggers WHERE id=%s''', (trigger_id,)),
                          [('pending', 1, None, None)])
+
+
+@unittest.skipUnless(os.getenv('COGNITIVE_TEST_PGLITE'), 'requires disposable PGlite')
+class WorkerControlsPersistenceTests(unittest.TestCase):
+    sql = acceptance.OfflineDatabaseTests.sql
+    source = acceptance.OfflineDatabaseTests.source
+    ingest_turn = WorkerControlsSQLTests.ingest_turn
+
+    def setUp(self):
+        from tests.offline_pg import Connection
+
+        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1])
+        self.addCleanup(self.temp.cleanup)
+        self.data_dir = Path(self.temp.name) / 'database'
+        self.database = Connection(self.data_dir)
+        WorkerControlsSQLTests.setUp(self)
+
+    def tearDown(self):
+        try:
+            acceptance.OfflineDatabaseTests.tearDown(self)
+        finally:
+            if self.database.process.poll() is None:
+                self.database.rollback()
+                self.database.shutdown()
+
+    def assert_recovery_persisted(self, *, duplicate):
+        from tests.offline_pg import Connection
+
+        seeded = []
+        for user, character, attempts in (('434', 'gojo', 2), ('358', 'geto', 3)):
+            source_id = 'old-' + character
+            result = self.ingest_turn(source_id, user=user, character=character)
+            self.sql('UPDATE cognitive_event_triggers SET attempt_count=%s WHERE id=%s',
+                     (attempts, result['trigger_id']))
+            if not duplicate:
+                source_id = 'new-' + character
+                self.source(source_id, '我喜欢咖啡。', user=user, character=character)
+            seeded.append((user, character, attempts, source_id,
+                           result['cycle']['cycle_id'], result['trigger_id']))
+        self.database.commit()
+        self.database.shutdown()
+        self.now += timedelta(seconds=301)
+
+        # A production-owned close rolls back outstanding work. Reopen the same
+        # disposable database in a fresh process for each connection.
+        def close_connection(connection):
+            connection.rollback()
+            connection.shutdown()
+
+        with patch('db.get_conn', side_effect=lambda: Connection(self.data_dir)) as get_conn, \
+             patch.object(Connection, 'close', autospec=True, side_effect=close_connection) as close, \
+             patch.object(cognitive_events, 'COGNITIVE_WORKER_ENABLED', False), \
+             patch.object(queue, 'COGNITIVE_WORKER_ENABLED', False), \
+             patch.object(queue, '_utc_now', side_effect=lambda now=None: now or self.now):
+            for user, character, _, source_id, _, _ in seeded:
+                result = cognitive_events.ingest_canonical_turn(
+                    user_id=user, character_id=character, source_event_id=source_id)
+                self.assertEqual(result['status'], 'duplicate' if duplicate else 'inserted')
+                if not duplicate:
+                    self.assertIsNone(result['cycle'])
+            self.assertEqual(get_conn.call_count, 2)
+            self.assertEqual(close.call_count, 2)
+
+        self.database = Connection(self.data_dir)
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_cycles'), [(2,)])
+        for _, _, attempts, _, cycle_id, trigger_id in seeded:
+            self.assertEqual(self.sql('''SELECT status,failure_code FROM cognitive_cycles
+                                        WHERE id=%s''', (cycle_id,)),
+                             [('failed', 'claim_lease_expired')])
+            expected = 'dead_letter' if attempts == 3 else 'pending'
+            self.assertEqual(self.sql('''SELECT status,attempt_count,claimed_by_cycle_id,
+                                               claimed_at,claim_expires_at,last_error_code
+                                        FROM cognitive_event_triggers WHERE id=%s''', (trigger_id,)),
+                             [(expected, attempts, None, None, None, 'claim_lease_expired')])
+        if not duplicate:
+            self.assertEqual(self.sql('''SELECT status,attempt_count FROM cognitive_event_triggers
+                                        WHERE last_error_code IS NULL ORDER BY id'''),
+                             [('pending', 0)] * 2)
+
+    def test_disabled_owned_ingress_persists_recovery_across_connections(self):
+        self.assert_recovery_persisted(duplicate=False)
+
+    def test_disabled_owned_duplicate_persists_recovery_across_connections(self):
+        self.assert_recovery_persisted(duplicate=True)
 
 
 class WorkerControlUnitTests(unittest.TestCase):
