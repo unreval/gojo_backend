@@ -19,6 +19,7 @@ import test_schedule_reply_state as sched_tests  # noqa: E402
 import db_read_receipt  # noqa: E402
 import db_schedule  # noqa: E402
 import delayed_reply  # noqa: E402
+import raw_events  # noqa: E402
 import route_read_receipt  # noqa: E402
 import proactive_msg  # noqa: E402
 
@@ -62,6 +63,14 @@ def _world(activity, now, state):
 class ReadReceiptTests(unittest.TestCase):
     def setUp(self):
         self.store = sched_tests.PhoneCheckStore()
+        p = patch.object(raw_events, 'get_active_events_by_ids',
+                         side_effect=lambda _u, _c, ids, **_kwargs: [
+                             {'event_id': str(event_id), 'role': 'user',
+                              'content': str(event_id), 'kind': 'text'}
+                             for event_id in ids
+                         ])
+        p.start()
+        self.addCleanup(p.stop)
         for module in (db_schedule, db_read_receipt):
             p = patch.object(module, 'get_conn', side_effect=lambda: _conn(self.store))
             p.start()

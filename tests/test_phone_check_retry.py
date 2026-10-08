@@ -75,6 +75,18 @@ class PhoneCheckRetryTests(unittest.TestCase):
         self.assertEqual(db_schedule.list_due_phone_check_ids(self.cur, now + timedelta(days=1)), [])
         self.assertIsNone(db_schedule.claim_due_phone_check(self.cur, 1, now + timedelta(days=1)))
 
+    def test_source_invalid_expires_on_first_failure_without_retry(self):
+        self.fail_generation(NOW, reason='source_invalid')
+        self.assertEqual(self.row['check_state'], 'expired')
+        self.assertEqual(self.row['fail_count'], 1)
+        self.assertEqual(self.row['last_fail_reason'], 'source_invalid')
+        self.assertEqual(self.row['resolved_at'], NOW)
+        self.assertIsNone(self.row['retry_not_before'])
+        self.assertEqual(self.row['pending_count'], 1)
+        self.assertEqual(self.row['pending_text'], '在吗')
+        self.assertEqual(db_schedule.list_due_phone_check_ids(
+            self.cur, NOW + timedelta(days=1)), [])
+
     def test_auth_minimum_and_later_explicit_retry_are_preserved(self):
         self.fail_generation(NOW, reason='provider_auth_failed')
         self.assertEqual(self.row['retry_not_before'], NOW + timedelta(minutes=15))

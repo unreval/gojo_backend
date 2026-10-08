@@ -842,7 +842,7 @@ def release_claimed_phone_check(cur, oid, token, *, retry_at=None,
     if not row:
         return 0
     fail_count = int(row[0] or 0) + 1
-    expired = fail_count >= 5
+    expired = reason == 'source_invalid' or fail_count >= 5
     retry_not_before = None
     if not expired:
         minutes = (2, 10, 30, 120)[fail_count - 1]
