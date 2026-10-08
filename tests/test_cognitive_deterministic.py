@@ -64,6 +64,15 @@ class OfflineDatabaseTests(unittest.TestCase):
         self.stack.enter_context(patch('context_layer._USE_MEMORY_STORE', False))
         self.stack.enter_context(patch('cognitive_queue.COGNITIVE_COOLDOWN_SECONDS', 0))
         self.stack.enter_context(patch('cognitive_queue.COGNITIVE_DAILY_CYCLE_LIMIT', 100))
+        for module in ('cognitive_events', 'cognitive_queue', 'cognitive_worker'):
+            self.stack.enter_context(patch(module + '.COGNITIVE_WORKER_ENABLED', True, create=True))
+        for module in ('cognitive_queue', 'cognitive_worker'):
+            for setting in ('COGNITIVE_MAX_CYCLES_PER_RUN',
+                            'COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES'):
+                self.stack.enter_context(patch(module + '.' + setting, 0, create=True))
+        for name, value in (('_PROCESSED_CYCLES', 0), ('_NEXT_CYCLE_AT', 0.0),
+                            ('_RUN_LIMIT_LOGGED', False)):
+            self.stack.enter_context(patch('cognitive_worker.' + name, value, create=True))
         self.model_guards = [self.stack.enter_context(patch(target,
             side_effect=AssertionError('LLM_CALLED_IN_COGNITIVE_PATH'), create=True)) for target in (
                 'ai_client.create_chat', 'structured_output.invoke_structured_llm',

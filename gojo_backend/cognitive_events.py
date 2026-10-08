@@ -5,6 +5,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 
+from cognitive_config import COGNITIVE_WORKER_ENABLED
 from cognitive_triggers import (
     create_trigger_occurrence,
 )
@@ -271,7 +272,9 @@ def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, 
     """Use the existing Evidence Store / trigger queue, without any model call."""
     from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
     from cognitive_revision import parse_cognitive_evidence, evidence_question_key
-    from cognitive_queue import aggregate_pending_triggers, stable_advisory_lock_key
+    from cognitive_queue import (
+        aggregate_pending_triggers, recover_expired_claims, stable_advisory_lock_key,
+    )
 
     group_candidate = (str(source_chat_id or '').startswith('group:')
                        and str(source_event_id or '').startswith(str(source_chat_id) + ':message:'))
@@ -328,13 +331,20 @@ def ingest_canonical_turn(*, user_id, character_id, source_event_id, conn=None, 
                     reason = 'canonical_judgment_already_committed'
             if owns_connection:
                 database.commit()
+            if aggregate and not COGNITIVE_WORKER_ENABLED:
+                recover_expired_claims(user_id, character_id, conn=database)
             return {'status': 'duplicate', 'event_id': None, 'reason': reason}
         trigger = create_trigger_occurrence(database, event_id=event_id, user_id=user_id,
             character_id=character_id, trigger_class='question_reactivation',
             occurrence_key=qkey, payload={'question_key': qkey, 'reason': 'new_canonical_evidence'})
         if owns_connection:
             database.commit()
-        cycle = aggregate_pending_triggers(user_id, character_id, conn=database) if aggregate else None
+        cycle = None
+        if aggregate:
+            if COGNITIVE_WORKER_ENABLED:
+                cycle = aggregate_pending_triggers(user_id, character_id, conn=database)
+            else:
+                recover_expired_claims(user_id, character_id, conn=database)
         return {'status': 'inserted', 'event_id': event_id, 'trigger_id': trigger,
                 'question_key': qkey, 'cycle': cycle}
     except Exception:

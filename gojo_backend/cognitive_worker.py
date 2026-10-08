@@ -2,10 +2,13 @@
 import re
 import threading
 from datetime import datetime, timezone
+from time import monotonic
 
 from cognitive_config import (
     COGNITIVE_REFLECTION_SCAN_SECONDS, COGNITIVE_WORKER_ENABLED,
     COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS, COGNITIVE_WORKER_POLL_SECONDS,
+    COGNITIVE_MAX_CYCLES_PER_RUN,
+    COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES,
     PREDICTION_RESOLVER_WHITELIST,
 )
 from cognitive_queue import (
@@ -19,6 +22,9 @@ from cognitive_revision import deterministic_cycle_output
 _THREAD = None
 _STOP = threading.Event()
 _LAST_REFLECTION_SCAN_AT = None
+_PROCESSED_CYCLES = 0
+_NEXT_CYCLE_AT = 0.0
+_RUN_LIMIT_LOGGED = False
 
 
 def _utc_now():
@@ -53,19 +59,26 @@ def _load_pairs_requiring_maintenance(now=None):
         conn.close()
 
 
-def maintain_pending_cycles(now=None):
+def maintain_pending_cycles(now=None, *, max_new_cycles=None):
     """Recover expired leases and aggregate ready trigger pairs."""
     results = []
+    new_cycles = 0
+    if max_new_cycles is not None and max_new_cycles <= 0:
+        return results
     for user_id, character_id in _load_pairs_requiring_maintenance(now=now):
         try:
             result = aggregate_pending_triggers(
-                user_id, character_id, now=now,
+                user_id, character_id, now=now, for_worker=True,
             )
             results.append({
                 'user_id': user_id,
                 'character_id': character_id,
                 'result': result,
             })
+            if result.get('status') == 'queued':
+                new_cycles += 1
+                if max_new_cycles is not None and new_cycles >= max_new_cycles:
+                    break
         except Exception as exc:
             print(
                 f'[cognitive_worker] maintenance failed for '
@@ -98,15 +111,48 @@ def generate_cycle_output(context, *, create_chat_fn=None):
         current_event_ids=ids), {'model_calls': 0, 'input_tokens': 0, 'output_tokens': 0}
 
 
+def _record_processed_cycle(result):
+    global _PROCESSED_CYCLES, _NEXT_CYCLE_AT
+    if result.get('status') in {'succeeded', 'failed', 'invalid'}:
+        _PROCESSED_CYCLES += 1
+        _NEXT_CYCLE_AT = monotonic() + COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES
+    return result
+
+
 def run_worker_once(*, create_chat_fn=None, now=None):
     """Maintain the queue and process at most one cycle."""
-    maintain_scheduled_reflections(now=now)
-    maintain_pending_cycles(now=now)
-    claimed = claim_next_cycle(now=now)
+    global _RUN_LIMIT_LOGGED
+    if not COGNITIVE_WORKER_ENABLED:
+        return {'status': 'disabled'}
+    if (COGNITIVE_MAX_CYCLES_PER_RUN > 0
+            and _PROCESSED_CYCLES >= COGNITIVE_MAX_CYCLES_PER_RUN):
+        if not _RUN_LIMIT_LOGGED:
+            print('[cognitive_worker] process cycle limit reached: '
+                  f'{_PROCESSED_CYCLES}/{COGNITIVE_MAX_CYCLES_PER_RUN}', flush=True)
+            _RUN_LIMIT_LOGGED = True
+        return {'status': 'run_limit_reached', 'processed_cycles': _PROCESSED_CYCLES,
+                'limit': COGNITIVE_MAX_CYCLES_PER_RUN,
+                'retry_after': COGNITIVE_WORKER_POLL_SECONDS}
+    if COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES > 0:
+        retry_after = _NEXT_CYCLE_AT - monotonic()
+        if retry_after > 0:
+            return {'status': 'cycle_interval_wait', 'retry_after': retry_after}
+    controlled = (COGNITIVE_MAX_CYCLES_PER_RUN > 0
+                  or COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES > 0)
+    if controlled:
+        claimed = claim_next_cycle(now=now)
+        if not claimed:
+            maintain_scheduled_reflections(now=now)
+            maintain_pending_cycles(now=now, max_new_cycles=1)
+            claimed = claim_next_cycle(now=now)
+    else:
+        maintain_scheduled_reflections(now=now)
+        maintain_pending_cycles(now=now)
+        claimed = claim_next_cycle(now=now)
     if not claimed:
         return {'status': 'idle'}
     if claimed.get('status') != 'running':
-        return claimed
+        return _record_processed_cycle(claimed)
 
     cycle_id = claimed['cycle_id']
     try:
@@ -129,6 +175,7 @@ def run_worker_once(*, create_chat_fn=None, now=None):
             worker_usage=usage,
             now=now,
         )
+        _record_processed_cycle(result)
         summary = (result.get('output') or output)['cycle_summary']['summary'][:120]
         print(
             f'[cognitive_worker] cycle #{cycle_id} succeeded: {summary}',
@@ -142,6 +189,7 @@ def run_worker_once(*, create_chat_fn=None, now=None):
                 cycle_id, error_code, now=now,
                 preserve_raw_evidence=True,
             )
+            _record_processed_cycle(result)
         except Exception as fail_exc:
             print(
                 f'[cognitive_worker] cycle #{cycle_id} failed and could not '
@@ -164,7 +212,10 @@ def _loop():
             if result.get('status') == 'succeeded':
                 continue
             if result.get('status') == 'failed':
-                wait_seconds = COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS
+                wait_seconds = max(COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS,
+                    _NEXT_CYCLE_AT - monotonic())
+            elif result.get('retry_after') is not None:
+                wait_seconds = result['retry_after']
         except Exception as exc:
             wait_seconds = COGNITIVE_WORKER_ERROR_BACKOFF_SECONDS
             print(f'[cognitive_worker] loop error: {exc}', flush=True)
