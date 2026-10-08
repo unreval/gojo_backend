@@ -4,8 +4,10 @@ Not a second LLM brain. Not proactive_scheduler. Delivery uses the existing
 proactive_msg inbox so the frontend can show 1~3 bubbles, but generation is
 the same /chat/text pipeline (build context, OUTPUT_SPEC, commit gate).
 """
+import os
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from reply_availability import format_pending_bundle_context, parse_pending_event_meta
@@ -15,6 +17,12 @@ from db_read_receipt import source_event_ids_from_claim
 _thread = None
 _stop = False
 TICK_SECONDS = 30
+DELAYED_REPLY_ENABLED = os.getenv('DELAYED_REPLY_ENABLED', 'true').strip().lower() not in (
+    'false', '0', 'no', 'off')
+DELAYED_REPLY_MAX_PER_TICK = max(0, int(os.getenv('DELAYED_REPLY_MAX_PER_TICK', '1')))
+DELAYED_REPLY_MAX_PER_HOUR = max(0, int(os.getenv('DELAYED_REPLY_MAX_PER_HOUR', '20')))
+_generation_calls = deque()
+_pause_until = 0.0
 _BUSY_FALLBACK_MARKER = 'phone_check_id='
 
 
@@ -24,6 +32,20 @@ def _now():
         return datetime.now(CN_TZ)
     except Exception:
         return datetime.now(timezone.utc)
+
+
+def _generation_allowed():
+    now = time.monotonic()
+    while _generation_calls and _generation_calls[0] <= now - 3600:
+        _generation_calls.popleft()
+    if now < _pause_until:
+        print(f'[delayed_reply] worker paused remaining_seconds={_pause_until - now:.0f}')
+        return False
+    if len(_generation_calls) >= DELAYED_REPLY_MAX_PER_HOUR:
+        print(f'[delayed_reply] hourly limit reached calls={len(_generation_calls)} '
+              f'limit={DELAYED_REPLY_MAX_PER_HOUR}; tick skipped')
+        return False
+    return True
 
 
 def is_busy_fallback_promise(promise):
@@ -206,9 +228,12 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
 
     from config import MODEL_MAIN
     generation_error = {}
+    print(f'[delayed_reply] LLM call phone_check_id={phone_check_id} '
+          f'fail_count={bundle.get("fail_count", 0)} '
+          f'hourly_calls={len(_generation_calls)}')
     result, committed_state = helpers._generate_or_none(
         MODEL_MAIN, 1500, system_blocks, messages,
-        attempts=2,
+        attempts=1,
         log_tag=f'delayed:{user_id}][{character_id}',
         cache_tag=f'chat:{character_id}',
         salvage=True,
@@ -311,16 +336,24 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
     """Claim due bundles, generate at most once, resolve only after commit."""
     import db_schedule
 
+    global _pause_until
+    if (not DELAYED_REPLY_ENABLED or DELAYED_REPLY_MAX_PER_TICK <= 0
+            or not _generation_allowed()):
+        return []
+    live_clock = now is None
     now = now or _now()
     generate_fn = generate_fn or generate_delayed_chat_reply
     evaluate_fn = evaluate_fn or db_schedule.evaluate_due_phone_check
     results = []
     try:
-        ids = db_schedule.iter_due_phone_checks(now)
+        ids = db_schedule.iter_due_phone_checks(now, limit=DELAYED_REPLY_MAX_PER_TICK)
     except Exception as exc:
         print(f'[delayed_reply] list due failed: {exc}')
         return results
+    generated_count = 0
     for oid in ids:
+        if generated_count >= DELAYED_REPLY_MAX_PER_TICK or not _generation_allowed():
+            break
         try:
             decision = evaluate_fn(oid, now)
         except Exception as exc:
@@ -332,6 +365,8 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
             results.append({'id': oid, 'action': action or 'skip'})
             continue
         generated = None
+        _generation_calls.append(time.monotonic())
+        generated_count += 1
         try:
             generated = generate_fn(claimed)
         except Exception as exc:
@@ -367,23 +402,33 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
                 'resolved': resolved,
             })
         else:
-            db_schedule.log_phone_check_action('generation_failed', claimed)
+            reason = (generated or {}).get('reason') or 'generation_failed'
+            provider_failed = reason in ('provider_auth_failed', 'provider_retryable')
+            if provider_failed:
+                _pause_until = time.monotonic() + 600
+                print(f'[delayed_reply] provider circuit opened reason={reason} pause_seconds=600')
             try:
-                auth_failed = (generated or {}).get('reason') == 'provider_auth_failed'
+                failure_now = _now() if live_clock else now
+                auth_failed = reason == 'provider_auth_failed'
                 retry_delay = (generated or {}).get('retry_delay_seconds')
-                retry_at = (now + timedelta(minutes=15) if auth_failed else
-                            now + timedelta(seconds=retry_delay) if retry_delay else None)
+                retry_at = (failure_now + timedelta(minutes=15) if auth_failed else
+                            failure_now + timedelta(seconds=retry_delay) if retry_delay else None)
                 released = db_schedule.abort_delayed_reply(
-                    oid, claimed['claim_token'], retry_at=retry_at)
+                    oid, claimed['claim_token'], retry_at=retry_at,
+                    reason=reason, now=failure_now)
                 if released:
+                    claimed = dict(claimed, fail_count=claimed.get('fail_count', 0) + 1)
                     db_schedule.log_phone_check_action('released', claimed)
             except Exception as exc:
                 print(f'[delayed_reply] abort #{oid} failed: {exc}')
+            db_schedule.log_phone_check_action('generation_failed', claimed, reason=reason)
             results.append({
                 'id': oid, 'action': 'failed',
                 'ok': False,
-                'reason': (generated or {}).get('reason'),
+                'reason': reason,
             })
+            if provider_failed:
+                break
     return results
 
 
@@ -393,7 +438,8 @@ def _loop():
     while not _stop:
         try:
             cancel_orphan_busy_promises()
-            process_due_phone_checks()
+            if DELAYED_REPLY_ENABLED:
+                process_due_phone_checks()
         except Exception as exc:
             print(f'[delayed_reply] tick failed: {exc}')
         time.sleep(TICK_SECONDS)

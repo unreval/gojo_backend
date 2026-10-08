@@ -214,8 +214,10 @@ class ReadReceiptTests(unittest.TestCase):
         with patch.object(db_schedule, 'get_current_world_state',
                           side_effect=lambda _c, _u, now: _world(CURRENT, now, 'free')):
             first = db_schedule.evaluate_due_phone_check(row['id'], NOW)
-            db_schedule.abort_delayed_reply(row['id'], first['claimed']['claim_token'])
-            second = db_schedule.evaluate_due_phone_check(row['id'], LATER)
+            db_schedule.abort_delayed_reply(
+                row['id'], first['claimed']['claim_token'], now=NOW)
+            second = db_schedule.evaluate_due_phone_check(
+                row['id'], NOW + timedelta(minutes=2))
         self.assertEqual(set(source_id for _u, _c, source_id in self.store.receipts),
                          {'A', 'B'})
         self.assertIsNone(self._receipt('C'))
@@ -313,7 +315,9 @@ class ReadReceiptPostgresTests(unittest.TestCase):
             check_state TEXT DEFAULT 'pending', resolved_at TIMESTAMPTZ,
             claimed_at TIMESTAMPTZ, claim_token TEXT, claim_owner TEXT,
             claim_expires_at TIMESTAMPTZ, seen BOOLEAN DEFAULT FALSE,
-            seen_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
+            seen_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
+            fail_count INTEGER NOT NULL DEFAULT 0, retry_not_before TIMESTAMPTZ,
+            last_fail_reason TEXT, last_fail_at TIMESTAMPTZ
         )''')
         with patch.object(db_read_receipt, 'get_conn', return_value=conn):
             db_read_receipt.init_read_receipt_table()
