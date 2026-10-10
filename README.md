@@ -1066,6 +1066,15 @@ Vector Retrieval = Disabled
 - legacy memory projection audit；
 - Provider sensitive-response redaction。
 
+### 当前工作区：已实现并通过专项离线测试
+
+- 当前话题优先规则位于 `prompt.py` 动态尾，包含四级话题优先级与首句回应约束；
+- 延迟回复使用原始 `pending_text` 作为召回查询，保留积压原文与标记只出现一次的保护；
+- 延迟路径显式设置 `auto_pin_enabled=False`，现有调用默认启用 auto-pin；
+- 积压消息显示 canonical raw events 中的发送时间，缺时间时保留原文；显示时间不写入 metadata 或存储。
+
+**真实模型验证：尚未验证实际回复的遵循程度。**
+
 ---
 
 # 18. 当前未完成 / 尚未闭环
@@ -1126,8 +1135,12 @@ Vector Retrieval = Disabled
 | 🟠 P1 | Self Loop 未完成 | 未完成 |
 | 🟠 P1 | Canon Lock / Relationship softening 需重新验收 | 待验证 |
 | 🟠 P1 | 在线状态与新 schedule 架构需统一 | 待整合 |
+| 🟠 P1 | 零分事实可入选，told 通道绕过 `selected_facts` 过滤 | 未修复 |
+| 🟠 P1 | 最新摘要无条件保留，≤4 字消息触发 `recent_safety` | 未修复 |
+| 🟠 P1 | Auto-pin 按执行顺序处理冲突，重放旧指令可覆盖新指令 | 待独立立项 |
 | 🟡 P2 | Vector retrieval 默认关闭 | 有意暂缓 |
 | 🟡 P2 | 引用 / 时间相关修复分支需要重新核对与当前 main 的整合状态 | 待处理 |
+| 🟡 P2 | Episode 向量 `embedding_unavailable` 时只剩关键词召回 | 未修复 |
 
 ---
 

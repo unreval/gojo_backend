@@ -84,6 +84,9 @@ def _precheck_pending_bundle_sources(bundle):
         if source_id in active:
             metas.setdefault(source_id, {}).update(meta)
     filtered_metas = []
+    # Prompt-only display data from the same canonical lookup; never event_meta.
+    pending_prompt_events = []
+    display_remaining = 4000
     for source_id in kept_ids:
         meta = dict(metas.get(source_id) or {})
         meta['source_event_id'] = source_id
@@ -91,6 +94,14 @@ def _precheck_pending_bundle_sources(bundle):
         # an existing ID can fail the canonical role/content check.
         meta['text'] = active[source_id]['content']
         filtered_metas.append(meta)
+        if display_remaining > 0:
+            display_text = active[source_id]['content'][:display_remaining]
+            pending_prompt_events.append({
+                'source_event_id': source_id,
+                'text': display_text,
+                'timestamp': active[source_id].get('timestamp'),
+            })
+            display_remaining -= len(display_text) + 1
     if len(kept_ids) != len(source_ids):
         print(f'[delayed_reply] phone_check_id={bundle.get("id")} '
               f'dropped_invalid_sources={len(source_ids) - len(kept_ids)}')
@@ -98,6 +109,7 @@ def _precheck_pending_bundle_sources(bundle):
         bundle,
         pending_count=len(kept_ids),
         pending_text='\n'.join(active[source_id]['content'] for source_id in kept_ids)[:4000],
+        pending_prompt_events=pending_prompt_events,
         event_meta=filtered_metas,
         first_source_event_id=kept_ids[0],
         last_source_event_id=kept_ids[-1],
@@ -249,7 +261,7 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
             'turn_id': delivery_event_id(phone_check_id, 0),
         }
 
-    pending_text = (bundle.get('pending_text') or '').strip()
+    pending_text = bundle.get('pending_text') or ''
     pending_ids = _pending_source_event_ids(bundle)
     _persist_pending_user_messages(bundle)
     extra_suffix = '\n\n' + format_pending_bundle_context(bundle)
@@ -259,8 +271,8 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
     )
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     pack, messages = helpers._turn_context(
-        user_id, character_id, '', profile='text',
-        current_event_id=pending_ids or None)
+        user_id, character_id, pending_text, profile='text',
+        current_event_id=pending_ids or None, auto_pin_enabled=False)
     messages = helpers._history_plus_current(messages, trigger)
     recall_query = pending_text or trigger
     system_blocks = build_system_blocks(

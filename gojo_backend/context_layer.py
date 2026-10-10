@@ -1492,6 +1492,7 @@ def assemble_from_events(
     deleted_ids=None,
     current_event_id=None,
     temporal_snapshot=None,
+    auto_pin_enabled=True,
 ) -> ChatContextPack:
     cfg = config or BudgetConfig()
     manager = ContextBudgetManager(cfg)
@@ -1500,15 +1501,16 @@ def assemble_from_events(
     with _latency_span('hot'):
         hot, spill = select_hot_window(events, config=cfg, now=now)
     maybe_store_spill_summary(user_id, character_id, spill, config=cfg, now=now)
-    try:
-        from auto_pin import maybe_auto_pin
-        maybe_auto_pin(
-            user_id, character_id, user_message,
-            source_event_ids=tuple(_event_id_set(current_event_id)),
-            now=now,
-        )
-    except Exception as exc:
-        print(f'[context_layer] auto pin skipped:{exc}')
+    if auto_pin_enabled:
+        try:
+            from auto_pin import maybe_auto_pin
+            maybe_auto_pin(
+                user_id, character_id, user_message,
+                source_event_ids=tuple(_event_id_set(current_event_id)),
+                now=now,
+            )
+        except Exception as exc:
+            print(f'[context_layer] auto pin skipped:{exc}')
 
     deleted = set(deleted_ids or ())
     if deleted:
@@ -1711,6 +1713,7 @@ def build_chat_context(
     now=None,
     current_event_id=None,
     temporal_snapshot=None,
+    auto_pin_enabled=True,
 ) -> ChatContextPack:
     """Fast path: bounded ledger fetch + deterministic window. No LLM."""
     cfg = BudgetConfig.for_profile(profile)
@@ -1745,6 +1748,7 @@ def build_chat_context(
             deleted_ids=deleted,
             current_event_id=current_event_id,
             temporal_snapshot=temporal_snapshot,
+            auto_pin_enabled=auto_pin_enabled,
         )
     except Exception as exc:
         try:

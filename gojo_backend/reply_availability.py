@@ -12,6 +12,7 @@ Busy fallback is a delayed normal chat reply. It must not create
 proactive_promise rows or use the proactive generator.
 """
 import json
+from datetime import datetime
 
 
 def _activity_state(activity):
@@ -53,6 +54,16 @@ def format_pending_bundle_context(bundle):
     title = bundle.get('activity_title') or bundle.get('title') or ''
     state = bundle.get('reply_state') or 'soft_busy'
     pending_text = (bundle.get('pending_text') or '').strip()
+    prompt_events = bundle.get('pending_prompt_events')
+    if prompt_events:
+        lines = []
+        for event in prompt_events:
+            text = event['text']
+            sent_at = event.get('timestamp')
+            if isinstance(sent_at, datetime):
+                text = f'[发送时间 {sent_at.isoformat(sep=" ", timespec="seconds")}] {text}'
+            lines.append(text)
+        pending_text = '\n'.join(lines).strip()
     count = bundle.get('pending_count') or 0
     metas = parse_pending_event_meta(bundle.get('event_meta'))
     visual_lines = []

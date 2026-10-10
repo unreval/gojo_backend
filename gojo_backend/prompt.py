@@ -630,7 +630,12 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     dynamic_tail = f"""{query_recall}
 {pinned_block}{summary_block}{episode_block}{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
 
-{time_ctx}{extra_suffix}"""
+{time_ctx}{extra_suffix}
+
+【当前消息优先】
+话题优先级：1) 她这次实际说了什么；2) 最近几轮的话题；3) 与当前话题明确相关的历史记忆；4) 其他背景，无明显关联不主动提起。
+第一句必须回应她这次说的话。
+延迟回复以积压原文为待回应内容；系统触发语只负责执行。"""
 
     return static_head, _REPLY_SCOPE_RULES, dynamic_tail
 

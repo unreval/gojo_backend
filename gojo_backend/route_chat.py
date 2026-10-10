@@ -852,7 +852,8 @@ def _prompt_messages(user_id, character_id, short_memories, limit=24):
 
 
 def _turn_context(user_id, character_id, user_message='', profile='default',
-                  limit=24, current_event_id=None, temporal_snapshot=None):
+                  limit=24, current_event_id=None, temporal_snapshot=None,
+                  auto_pin_enabled=True):
     """Hot-context first; fail-closed on source validity; bounded fallback."""
     if temporal_snapshot is None:
         temporal_snapshot = get_temporal_snapshot(user_id, character_id)
@@ -867,6 +868,7 @@ def _turn_context(user_id, character_id, user_message='', profile='default',
             current_event_id=current_event_id,
             temporal_snapshot=temporal_snapshot,
             now=temporal_snapshot.get('now_utc'),
+            auto_pin_enabled=auto_pin_enabled,
         )
         if getattr(pack, 'failed_closed', False):
             return pack, []

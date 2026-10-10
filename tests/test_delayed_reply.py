@@ -6,6 +6,8 @@ import sys
 import types
 import unittest
 from collections import deque
+from contextlib import ExitStack
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -107,6 +109,7 @@ class HelpersStub:
         self.offline_calls = 0
         self.user_message = None
         self.current_event_id = None
+        self.auto_pin_enabled = None
         self.bubbles = bubbles or [
             {'jp': '今見た', 'zh': '刚才看到了'},
             {'jp': 'ちょっと待ってた', 'zh': '让你等了一下'},
@@ -115,10 +118,11 @@ class HelpersStub:
         self.extra_messages = None
 
     def _turn_context(self, user_id, character_id, user_message='', profile='default',
-                      current_event_id=None):
+                      current_event_id=None, auto_pin_enabled=True):
         self.context_calls += 1
         self.user_message = user_message
         self.current_event_id = current_event_id
+        self.auto_pin_enabled = auto_pin_enabled
         skip = current_event_id or []
         if isinstance(skip, (str, int)):
             skip = [skip]
@@ -139,6 +143,8 @@ class HelpersStub:
 
     def _generate_or_none(self, *args, **kwargs):
         self.generate_calls += 1
+        self.system_blocks = args[2]
+        self.messages = args[3]
         if self.fail:
             return None, None
         return {'messages': self.bubbles, 'emotion': '平静'}, {'mood': 'ok'}
@@ -761,15 +767,16 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertEqual(n, 1)
 
     def test_pending_bundle_appears_once_in_prompt(self):
+        pending_lines = ['积压蓝色问题A', '积压蓝色问题B', '积压蓝色问题C']
         helpers = HelpersStub(history=[
-            {'role': 'user', 'content': '一', 'event_id': 'e1'},
-            {'role': 'user', 'content': '二', 'event_id': 'e2'},
-            {'role': 'user', 'content': '三', 'event_id': 'e3'},
+            {'role': 'user', 'content': pending_lines[0], 'event_id': 'e1'},
+            {'role': 'user', 'content': pending_lines[1], 'event_id': 'e2'},
+            {'role': 'user', 'content': pending_lines[2], 'event_id': 'e3'},
             {'role': 'user', 'content': '更早的话', 'event_id': 'old'},
         ])
         bundle = {
             'id': 8, 'user_id': 'u', 'character_id': 'gojo',
-            'pending_text': '一\n二\n三', 'pending_count': 3,
+            'pending_text': '\n'.join(pending_lines), 'pending_count': 3,
             'event_meta': '\n'.join([
                 json.dumps({'kind': 'text', 'source_event_id': 'e1'},
                            ensure_ascii=False),
@@ -793,20 +800,28 @@ class DelayedReplyTests(unittest.TestCase):
              patch('temporal_awareness.get_temporal_snapshot', return_value={}), \
              patch('temporal_awareness.record_turn'), \
              patch('prompt.build_system_blocks',
-                   side_effect=lambda *a, extra_suffix='', **k: captured.update(
-                       extra_suffix=extra_suffix) or []), \
+                    side_effect=lambda *a, extra_suffix='', **k: captured.update(
+                        extra_suffix=extra_suffix) or [{'type': 'text', 'text': extra_suffix}]), \
              patch('tts.tts_to_b64', return_value=''), \
              patch('proactive_msg.add_proactive_msg', return_value=(1, NOW)):
             delayed_reply.generate_delayed_chat_reply(bundle, helpers=helpers)
-        self.assertEqual(helpers.user_message, '')
+        self.assertEqual(helpers.user_message, bundle['pending_text'])
+        self.assertIs(helpers.auto_pin_enabled, False)
         self.assertEqual(set(helpers.current_event_id), {'e1', 'e2', 'e3'})
         history_text = ' '.join(
             item.get('content', '') for item in (helpers.extra_messages or [])
             if item.get('role') != 'user' or '系统内部' not in (item.get('content') or '')
         )
-        self.assertNotIn('一', history_text)
-        self.assertIn('【积压原文】\n一\n二\n三', captured['extra_suffix'])
+        for line in pending_lines:
+            self.assertNotIn(line, history_text)
+        self.assertIn('【积压原文】\n' + bundle['pending_text'], captured['extra_suffix'])
         self.assertEqual(captured['extra_suffix'].count('【积压原文】'), 1)
+        final_prompt = '\n'.join(block['text'] for block in helpers.system_blocks)
+        final_prompt += '\n' + '\n'.join(item['content'] for item in helpers.messages)
+        self.assertEqual(final_prompt.count(bundle['pending_text']), 1)
+        self.assertEqual(final_prompt.count('【积压原文】'), 1)
+        for line in pending_lines:
+            self.assertEqual(final_prompt.count(line), 1)
 
     def test_crash_after_commit_does_not_resend(self):
         helpers = HelpersStub()
@@ -846,6 +861,25 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertEqual(commits, [
             'delayed_reply:15:0', 'delayed_reply:15:1',
         ])
+
+    def test_schedule_guard_rejects_delayed_completion_before_delivery(self):
+        helpers = HelpersStub(bubbles=[{'jp': '会議はもう終わった。', 'zh': '会议已经结束了。'}])
+        bundle = dict(_synthetic_claim(8), reply_state='soft_busy')
+        with patch('characters.get_character', return_value={'name': '五条'}), \
+             patch('user_memory.save_user_short_memory_once', return_value=True), \
+             patch('temporal_awareness.get_temporal_snapshot', return_value={}), \
+             patch('prompt.build_system_blocks', return_value=[]), \
+             patch.object(db_schedule, 'get_current_world_state', return_value={
+                 'event': {'id': 7, 'status': 'active', 'revision': 3}}), \
+             patch('schedule_transition.commit_generated_schedule_intent') as transition, \
+             patch('user_memory.commit_visible_assistant_message') as commit, \
+             patch('proactive_msg.add_proactive_msg') as deliver:
+            result = delayed_reply.generate_delayed_chat_reply(bundle, helpers=helpers)
+        self.assertEqual(result, {'ok': False, 'reason': 'active_event_completion_claim_without_intent'})
+        self.assertIs(helpers.auto_pin_enabled, False)
+        transition.assert_not_called()
+        commit.assert_not_called()
+        deliver.assert_not_called()
 
     def test_hard_busy_and_soft_busy_inbound_do_not_create_promise(self):
         backend = Path(BACKEND)
@@ -1026,6 +1060,197 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertEqual(results[0]['action'], 'replied')
         self.assertEqual(len(generate_calls), 1)
         self.assertEqual(row['check_state'], 'consumed')
+
+
+class DelayedGroundingTests(unittest.TestCase):
+    def setUp(self):
+        import context_layer
+        import route_chat
+
+        self.context = context_layer
+        self.route = route_chat
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        context_layer.use_memory_store(True)
+        self.addCleanup(context_layer.use_memory_store, False)
+        self.sources = {}
+        self.hot = []
+        self.stack.enter_context(patch.object(
+            raw_events, 'get_active_events_by_ids', side_effect=lambda u, c, ids, **k:
+            [self.sources[sid] for sid in ids if sid in self.sources]))
+        self.stack.enter_context(patch.object(raw_events, 'deleted_event_ids', return_value=set()))
+        self.stack.enter_context(patch.object(
+            raw_events, 'get_hot_candidate_events', side_effect=lambda *a, **k: deepcopy(self.hot)))
+        self.stack.enter_context(patch.object(context_layer, '_support_items', return_value=([], '')))
+        self.stack.enter_context(patch.object(context_layer, '_build_recall_query_embedding', return_value=None))
+        self.recall = self.stack.enter_context(patch('smart_recall.two_level_recall', return_value={
+            'facts': [], 'loose_bonds': [], 'tolds': []}))
+        self.stack.enter_context(patch('episodic_index.recall_episodes', return_value=[]))
+        self.stack.enter_context(patch('cognitive_reader.build_cognitive_prompt_context', return_value=''))
+        self.stack.enter_context(patch('characters.get_character', return_value={
+            'name': '五条', 'core_prompt': 'CORE-PERSONA'}))
+        self.stack.enter_context(patch('prompt.get_character', return_value={
+            'name': '五条', 'core_prompt': 'CORE-PERSONA'}))
+        self.stack.enter_context(patch('prompt.load_canon_lock', return_value='CANON-LOCK'))
+        self.stack.enter_context(patch('prompt.get_first_interaction_days', return_value=20))
+        self.stack.enter_context(patch('prompt._accounts_block', return_value=''))
+        self.stack.enter_context(patch('db_schedule.format_world_prompt', return_value=('', {})))
+        self.stack.enter_context(patch('temporal_awareness.get_temporal_snapshot', return_value={
+            'now_utc': NOW, 'now_local': NOW, 'has_history': True}))
+        self.stack.enter_context(patch.object(route_chat, 'get_temporal_snapshot', return_value={
+            'now_utc': NOW, 'now_local': NOW, 'has_history': True}))
+        self.stack.enter_context(patch.object(delayed_reply, 'assistant_already_committed', return_value=False))
+        cursor = Mock()
+        cursor.fetchall.return_value = []
+        self.stack.enter_context(patch('db.get_conn', return_value=Mock(cursor=Mock(return_value=cursor))))
+
+    def event(self, source_id, text, timestamp=None, role='user'):
+        event = {'event_id': source_id, 'role': role, 'content': text,
+                 'timestamp': timestamp, 'metadata': {}}
+        self.sources[source_id] = event
+        return event
+
+    def bundle(self, source_ids, **extra):
+        return dict(
+            id=8, user_id='u', character_id='gojo', pending_text='旧副本',
+            pending_count=len(source_ids), first_source_event_id=source_ids[0],
+            last_source_event_id=source_ids[-1],
+            event_meta=[{'source_event_id': sid} for sid in source_ids], **extra)
+
+    def generate_failed(self, checked):
+        stub = HelpersStub(fail=True)
+        helpers = types.SimpleNamespace(
+            _turn_context=self.route._turn_context,
+            _history_plus_current=self.route._history_plus_current,
+            _generate_or_none=stub._generate_or_none,
+            _finalize_committed=stub._finalize_committed)
+        with patch('user_memory.save_user_short_memory_once', return_value=True), \
+             patch.object(self.route, '_turn_context', wraps=self.route._turn_context) as turn:
+            helpers._turn_context = turn
+            result = delayed_reply.generate_delayed_chat_reply(checked, helpers=helpers)
+        self.assertEqual(result, {'ok': False, 'reason': 'generation_failed'})
+        self.assertEqual(turn.call_args.args[2], checked['pending_text'])
+        self.assertIs(turn.call_args.kwargs['auto_pin_enabled'], False)
+        self.assertEqual(turn.call_args.kwargs['current_event_id'],
+                         delayed_reply._pending_source_event_ids(checked))
+        self.assertEqual(self.recall.call_args.args[2], checked['pending_text'])
+        return stub
+
+    def test_canonical_send_times_align_with_sources_without_metadata_writes(self):
+        first_time = NOW - timedelta(hours=2)
+        last_time = (NOW - timedelta(minutes=10)).astimezone(timezone(timedelta(hours=8)))
+        self.event('e1', '第一条蓝色原文\n含换行', first_time)
+        self.event('e3', '第三条原文', last_time)
+        self.event('assistant-copy', 'assistant不能成为积压', NOW, role='assistant')
+        bundle = self.bundle(['e1', 'deleted', 'assistant-copy', 'e3'])
+        original = deepcopy(bundle)
+        raw_before = deepcopy(self.sources)
+        checked = delayed_reply._precheck_pending_bundle_sources(bundle)
+        self.assertEqual(bundle, original)
+        self.assertEqual(checked['pending_text'], '第一条蓝色原文\n含换行\n第三条原文')
+        self.assertEqual(checked['pending_prompt_events'], [
+            {'source_event_id': 'e1', 'text': '第一条蓝色原文\n含换行', 'timestamp': first_time},
+            {'source_event_id': 'e3', 'text': '第三条原文', 'timestamp': last_time},
+        ])
+        rendered = reply_availability.format_pending_bundle_context(checked)
+        first_display = '[发送时间 2026-09-18 08:00:00+00:00] 第一条蓝色原文\n含换行'
+        last_display = '[发送时间 2026-09-18 17:50:00+08:00] 第三条原文'
+        self.assertIn(first_display, rendered)
+        self.assertIn(last_display, rendered)
+        self.assertLess(rendered.index(first_display), rendered.index(last_display))
+        self.assertEqual(rendered.count('【积压原文】'), 1)
+        self.assertNotIn('assistant不能成为积压', rendered)
+        self.assertNotIn('deleted', rendered)
+        with patch('user_memory.save_user_short_memory_once', return_value=True) as save:
+            delayed_reply._persist_pending_user_messages(checked)
+        self.assertEqual([call.kwargs['source_event_id'] for call in save.call_args_list], ['e1', 'e3'])
+        self.assertEqual([call.args[1] for call in save.call_args_list],
+                         ['第一条蓝色原文\n含换行', '第三条原文'])
+        for call in save.call_args_list:
+            self.assertNotIn('timestamp', call.kwargs['event_meta'])
+            self.assertNotIn('pending_prompt_events', call.kwargs['event_meta'])
+            self.assertNotIn('[发送时间', call.args[1])
+        self.assertEqual(self.sources, raw_before)
+
+    def test_missing_canonical_time_keeps_original_and_ignores_copied_times(self):
+        pending = ' \n缺时间仍保留这条原文\n '
+        self.event('e1', pending)
+        bundle = self.bundle(['e1'], seen_at=NOW, claimed_at=NOW)
+        bundle['event_meta'][0]['timestamp'] = '2099-01-01T00:00:00+00:00'
+        bundle['pending_prompt_events'] = [{'text': '伪造显示', 'timestamp': NOW}]
+        checked = delayed_reply._precheck_pending_bundle_sources(bundle)
+        self.assertEqual(checked['pending_prompt_events'], [
+            {'source_event_id': 'e1', 'text': pending, 'timestamp': None}])
+        self.assertEqual(checked['pending_text'], pending)
+        rendered = reply_availability.format_pending_bundle_context(checked)
+        self.assertIn('【积压原文】\n缺时间仍保留这条原文\n', rendered)
+        self.assertNotIn('[发送时间', rendered)
+        self.assertNotIn('2099', rendered)
+        self.assertNotIn('伪造显示', rendered)
+        self.hot = [self.event('hot-topic', '当前海报话题', NOW - timedelta(minutes=1))]
+        self.generate_failed(checked)
+
+    def test_real_delayed_context_queries_pending_once_and_creates_no_pin(self):
+        import auto_pin
+
+        pending = '现在 push，顺便解释刚刚为什么选蓝色？'
+        current = self.event('e1', pending, NOW - timedelta(minutes=2))
+        self.hot = [self.event('old-topic', '海报蓝色还是绿色？', NOW - timedelta(minutes=3)), current]
+        checked = delayed_reply._precheck_pending_bundle_sources(self.bundle(['e1']))
+        with patch.object(auto_pin, 'maybe_auto_pin', wraps=auto_pin.maybe_auto_pin) as pin:
+            stub = self.generate_failed(checked)
+        pin.assert_not_called()
+        self.assertEqual(self.context._PINS, {})
+        final_prompt = '\n'.join(block['text'] for block in stub.system_blocks)
+        final_prompt += '\n' + '\n'.join(item['content'] for item in stub.messages)
+        self.assertEqual(final_prompt.count(pending), 1)
+        self.assertEqual(final_prompt.count('【积压原文】'), 1)
+        self.assertIn('海报蓝色还是绿色？', final_prompt)
+        self.assertIn('【当前消息优先】', final_prompt)
+        self.assertIn('系统内部', stub.messages[-1]['content'])
+        self.assertNotIn(pending, '\n'.join(item['content'] for item in stub.messages))
+
+    def test_failed_delayed_replay_keeps_newer_conflicting_pin_unchanged(self):
+        import auto_pin
+
+        for old_text, new_text in [('现在 push', '不要 push'), ('不要 push', '现在 push')]:
+            with self.subTest(old_text=old_text):
+                self.context.reset_memory_store()
+                old = self.event('old-pending', old_text, NOW - timedelta(minutes=4))
+                self.event('newer-user', new_text, NOW - timedelta(minutes=2))
+                self.hot = [self.event('hot-topic', '刚刚说到海报颜色', NOW - timedelta(minutes=1)), old]
+                auto_pin.maybe_auto_pin('u', 'gojo', old_text, source_event_ids=['old-pending'],
+                                       now=old['timestamp'])
+                auto_pin.maybe_auto_pin('u', 'gojo', new_text, source_event_ids=['newer-user'],
+                                       now=self.sources['newer-user']['timestamp'])
+                before = deepcopy(self.context._PINS)
+                checked = delayed_reply._precheck_pending_bundle_sources(self.bundle(['old-pending']))
+                with patch.object(auto_pin, 'maybe_auto_pin', wraps=auto_pin.maybe_auto_pin) as pin:
+                    for _attempt in range(2):
+                        self.generate_failed(checked)
+                        self.assertEqual(self.context._PINS, before)
+                pin.assert_not_called()
+
+    def test_pending_query_and_display_keep_existing_4000_character_budget(self):
+        first = self.event('e1', '旧段落' + 'x' * 3870, NOW - timedelta(minutes=3))
+        second = self.event('e2', '最新问题：刚刚为什么选蓝色？\n这条消息还有一行', NOW - timedelta(minutes=2))
+        third = self.event('e3', '末段' + 'y' * 300, NOW - timedelta(minutes=1))
+        expected = '\n'.join(event['content'] for event in (first, second, third))[:4000]
+        checked = delayed_reply._precheck_pending_bundle_sources(self.bundle(['e1', 'e2', 'e3']))
+        self.assertEqual(len(checked['pending_text']), 4000)
+        self.assertEqual(checked['pending_text'], expected)
+        self.assertIn(second['content'], checked['pending_text'])
+        self.assertEqual('\n'.join(event['text'] for event in checked['pending_prompt_events']), expected)
+        self.hot = [self.event('hot-topic', '当前海报话题', NOW - timedelta(minutes=1))]
+        stub = self.generate_failed(checked)
+        final_prompt = '\n'.join(block['text'] for block in stub.system_blocks)
+        self.assertEqual(final_prompt.count(second['content']), 1)
+        self.assertEqual(final_prompt.count('【积压原文】'), 1)
+        self.assertNotIn(third['content'], final_prompt)
+        with patch('user_memory.save_user_short_memory_once', return_value=True) as save:
+            delayed_reply._persist_pending_user_messages(checked)
+        self.assertEqual([call.args[1] for call in save.call_args_list],
+                         [first['content'], second['content'], third['content']])
 
 
 if __name__ == '__main__':
