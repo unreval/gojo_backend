@@ -2,6 +2,9 @@
 import os
 import sys
 import unittest
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 BACKEND = os.path.join(ROOT, 'gojo_backend')
@@ -10,6 +13,7 @@ if BACKEND not in sys.path:
 
 import auto_pin  # noqa: E402
 import context_layer  # noqa: E402
+import raw_events  # noqa: E402
 
 
 class AutoPinTests(unittest.TestCase):
@@ -72,6 +76,62 @@ class AutoPinTests(unittest.TestCase):
         context_layer.list_pins('u', 'gojo')
         second = context_layer.list_pins('u', 'gojo')[0]
         self.assertEqual(second['priority'], p1)
+
+    def test_default_context_pins_current_canonical_ids_and_ignores_assistant_history(self):
+        now = datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc)
+        current_text = '就按这个方案'
+        events = [
+            {'event_id': 'assistant-old', 'role': 'assistant',
+             'content': '不要 push', 'timestamp': now - timedelta(minutes=1)},
+            {'event_id': 'canonical-1', 'role': 'user',
+             'content': current_text, 'timestamp': now},
+            {'event_id': 'canonical-2', 'role': 'user',
+             'content': '继续', 'timestamp': now},
+        ]
+        with patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
+             patch.object(raw_events, 'get_hot_candidate_events', return_value=events), \
+             patch.object(context_layer, '_support_items', return_value=([], '')):
+            pack = context_layer.build_chat_context(
+                'u', 'gojo', user_message=current_text, include_recall=False,
+                current_event_id=('canonical-1', 'canonical-2'), now=now)
+        self.assertFalse(pack.failed_closed)
+        self.assertEqual(pack.recent_event_ids, ['assistant-old'])
+        pins = list(context_layer._PINS.values())
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(pins[0]['pin_type'], 'explicit_decision')
+        self.assertEqual(pins[0]['text'], current_text)
+        self.assertEqual(set(pins[0]['source_event_ids']),
+                         {'canonical-1', 'canonical-2'})
+
+    def test_disabled_context_auto_pin_does_not_call_writer_or_change_pins(self):
+        now = datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc)
+        for old_text, new_text in [('现在 push', '不要 push'),
+                                   ('不要 push', '现在 push')]:
+            with self.subTest(old_text=old_text, new_text=new_text):
+                context_layer.reset_memory_store()
+                auto_pin.maybe_auto_pin(
+                    'u', 'gojo', old_text, source_event_ids=['old-pending'], now=now)
+                auto_pin.maybe_auto_pin(
+                    'u', 'gojo', new_text, source_event_ids=['later-user'], now=now)
+                before = deepcopy(context_layer._PINS)
+                events = [
+                    {'event_id': 'older-hot', 'role': 'user', 'content': '你好',
+                     'timestamp': now - timedelta(minutes=1)},
+                    {'event_id': 'old-pending', 'role': 'user', 'content': old_text,
+                     'timestamp': now},
+                ]
+                with patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
+                     patch.object(raw_events, 'get_hot_candidate_events', return_value=events), \
+                     patch.object(context_layer, '_support_items', return_value=([], '')), \
+                     patch.object(auto_pin, 'maybe_auto_pin', wraps=auto_pin.maybe_auto_pin) as writer:
+                    for _attempt in range(2):
+                        pack = context_layer.build_chat_context(
+                            'u', 'gojo', user_message=old_text, include_recall=False,
+                            current_event_id=('old-pending',), now=now,
+                            auto_pin_enabled=False)
+                        self.assertEqual(pack.recent_event_ids, ['older-hot'])
+                        self.assertEqual(context_layer._PINS, before)
+                writer.assert_not_called()
 
 
 if __name__ == '__main__':
