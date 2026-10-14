@@ -13,6 +13,13 @@ _ERROR_CODES = frozenset({
 })
 
 
+def model_for_provider_detection(model):
+    """Remove one nonempty relay label for provider checks only."""
+    if model.startswith('['):
+        return re.sub(r'^\[[^\[\]\r\n]+\]', '', model, count=1)
+    return model
+
+
 def _token(value):
     if not isinstance(value, str) or not _TOKEN.fullmatch(value):
         return None
@@ -123,8 +130,9 @@ def _diagnostics(error, *, model, provider, base_url):
     resolved_model = model or getattr(error, 'model', None)
     resolved_provider = provider or getattr(error, 'provider', None)
     if not resolved_provider and isinstance(resolved_model, str):
-        resolved_provider = ('anthropic' if resolved_model.startswith(('claude-', 'anthropic-'))
-                             else 'deepseek' if resolved_model.startswith('deepseek-') else None)
+        routing_model = model_for_provider_detection(resolved_model)
+        resolved_provider = ('anthropic' if routing_model.startswith(('claude-', 'anthropic-'))
+                             else 'deepseek' if routing_model.startswith('deepseek-') else None)
     request = getattr(error, 'request', None)
     request_url = getattr(request, 'url', None)
     return {
