@@ -366,7 +366,17 @@ class TemporalApplicabilityTests(unittest.TestCase):
                     now=snap['now_utc'], temporal_snapshot=snap,
                     config=context_budget.BudgetConfig.for_profile(profile),
                     current_event_id='current', include_recall=False)
-                self.assertIn('晚安，快睡。', [m['content'] for m in pack.messages])
+                sleep_stamp = self.at(5, 18).isoformat(timespec='seconds')
+                return_stamp = self.at(11, 4).isoformat(timespec='seconds')
+                self.assertEqual(pack.messages, [
+                    {'role': 'assistant', 'content': (
+                        f'【历史消息；发送={sleep_stamp}；日期关系=今天；'
+                        '距本轮=8小时12分】\n晚安，快睡。')},
+                    {'role': 'user', 'content': (
+                        '【对话间隔；距上一条=5小时46分；跨日=否】\n'
+                        f'【历史消息；发送={return_stamp}；日期关系=今天；'
+                        '距本轮=2小时26分】\n(蹭蹭)')},
+                ])
                 self.assertEqual(events[0]['content'], '晚安，快睡。')
                 self.assertIs(pack.temporal_snapshot, snap)
                 self.assertIn('11:04', temporal._as_local(snap['historical_context_through']).isoformat())
@@ -394,6 +404,7 @@ class TemporalApplicabilityTests(unittest.TestCase):
                 self.assertIn('conversational_state: historical', text)
                 self.assertNotIn('STALE-', text)
                 texts.append(text)
+        self.assertEqual(len(texts), 2)
         self.assertEqual(texts[0], texts[1])
 
 

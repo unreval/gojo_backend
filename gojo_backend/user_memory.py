@@ -552,7 +552,8 @@ def get_short_memory(user_id, n=6, character_id=DEFAULT_CHARACTER_ID):
 
 
 def get_short_memory_for_prompt(user_id, n=6, character_id=DEFAULT_CHARACTER_ID,
-                                exclude_event_ids=None, exclude_messages=None):
+                                exclude_event_ids=None, exclude_messages=None,
+                                *, now=None, return_events=False, user_message=''):
     """角色经历层 → Anthropic messages。
 
     short_memory.content / chat_log.text 是用户原文/媒体占位；
@@ -576,7 +577,9 @@ def get_short_memory_for_prompt(user_id, n=6, character_id=DEFAULT_CHARACTER_ID,
     for role, content in excluded_pairs:
         for index in range(len(rows) - 1, -1, -1):
             item = rows[index]
-            if item['role'] == role and item['content'] == content:
+            if (item['role'] == role and item['content'] == content
+                    and (not excluded or not item.get('event_id')
+                         or item.get('event_id') in excluded)):
                 drop_indexes.add(index)
                 break
     rows = [
@@ -584,15 +587,34 @@ def get_short_memory_for_prompt(user_id, n=6, character_id=DEFAULT_CHARACTER_ID,
         if index not in drop_indexes and item.get('event_id') not in excluded
     ]
     rows = rows[-limit:]
-    now = datetime.now(CN_TZ)
-    today = now.date()
-    out = []
+    now = now if now is not None else datetime.now(CN_TZ)
+    if not return_events:
+        # Other route callers retain their existing compatibility projection.
+        out = []
+        for item in rows:
+            marker = _time_marker(item['timestamp'], now, now.date())
+            body = marker + item['content'] if marker else item['content']
+            text = assemble_prompt_content(body, item.get('event_meta'))
+            if text:
+                out.append({'role': item['role'], 'content': text})
+        return out
+    from context_layer import exclude_current_turn_events, format_history_messages
+    events = []
     for item in rows:
-        marker = _time_marker(item['timestamp'], now, today)
-        body = marker + item['content'] if marker else item['content']
-        text = assemble_prompt_content(body, item.get('event_meta'))
-        if text:
-            out.append({'role': item['role'], 'content': text})
+        body = assemble_prompt_content(item['content'], item.get('event_meta'))
+        if body:
+            event = dict(item)
+            event['prompt_text'] = body
+            events.append(event)
+    events = exclude_current_turn_events(events, exclude_event_ids, user_message)
+    out = []
+    for item, projected in zip(events, format_history_messages(events, now=now)):
+        message = {'role': item['role'], 'content': projected['prompt_text']}
+        message.update(timestamp=item.get('timestamp'),
+                       event_id=item.get('event_id'),
+                       raw_content=item['content'],
+                       prompt_text=item['prompt_text'])
+        out.append(message)
     return out
 
 

@@ -126,11 +126,18 @@ class AdaptiveHotContextTests(unittest.TestCase):
             events, user_id='u', character_id='gojo',
             now=NOW, config=cfg, include_recall=False)
         self.assertTrue(pack.messages)
-        self.assertEqual(pack.messages[-1]['content'], blob)
-        for msg in pack.messages:
-            self.assertEqual(msg['content'], blob)
+        expected_stamp = events[-1]['timestamp'].astimezone(
+            context_layer.CN_TZ).isoformat(timespec='seconds')
+        expected_text = (
+            f'【历史消息；发送={expected_stamp}；日期关系=今天；距本轮=11分】\n'
+            + blob)
+        self.assertEqual(pack.messages, [
+            {'role': events[-1]['role'], 'content': expected_text}])
+        self.assertTrue(all(event['content'] == blob for event in events))
         used = sum(context_budget.estimate_tokens(m['content']) for m in pack.messages)
-        self.assertLessEqual(used, cfg.total_token_budget + context_budget.estimate_tokens(blob))
+        self.assertLessEqual(used, max(
+            cfg.total_token_budget,
+            context_budget.estimate_tokens(expected_text)))
 
     def test_same_task_does_not_cut_early(self):
         events = [
