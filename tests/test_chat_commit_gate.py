@@ -383,8 +383,11 @@ class ChatCommitGateTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         sent_messages = self.route._create_json.call_args.args[3]
-        self.assertIn('【引用回复】', sent_messages[-1]['content'])
-        self.assertIn('刚才那杯水别碰。', sent_messages[-1]['content'])
+        current_blocks = sent_messages[-1]['content']
+        self.assertEqual(len(current_blocks), 2)
+        self.assertIn('【后端当前时间事实】', current_blocks[0]['text'])
+        self.assertIn('【引用回复】', current_blocks[1]['text'])
+        self.assertIn('刚才那杯水别碰。', current_blocks[1]['text'])
         self.assertEqual(self.short_rows[0]['content'], '我接着说')
         self.rel.assert_not_called()
         self.assertEqual(self.save_user_once.call_args.args[1], '我接着说')
