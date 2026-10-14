@@ -133,6 +133,7 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
         "rel_declared",
     ),
     "memory": (
+        "gojo_backend/context_layer.py",
         "memory_",
         "user_memory",
         "smart_recall",
@@ -148,6 +149,7 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
         "fast_loop",
     ),
     "generation": (
+        "gojo_backend/prompt.py",
         "generation_",
         "route_chat",
         "assistant_turn",
