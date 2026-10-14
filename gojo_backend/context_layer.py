@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from db import get_conn
+from config import CN_TZ
 from context_budget import (
     BudgetConfig,
     ContextBudgetManager,
@@ -35,6 +36,10 @@ _PINS: Dict[str, dict] = {}
 # Summary selection remains bounded, but no longer only sees the newest two
 # summaries when the current turn clearly refers to an older topic.
 SUMMARY_RECALL_CANDIDATE_LIMIT = 24
+
+# These callers render generation history directly. Background readers consume
+# raw transcripts; image effects also consume messages as cognitive context.
+_TIME_MARKER_PROFILES = {'default', 'chat', 'text', 'story', 'voice', 'proactive', 'group_chat'}
 
 CONTEXT_LAYER_DDL = (
     '''CREATE TABLE IF NOT EXISTS rolling_summaries (
@@ -110,6 +115,72 @@ def _now_utc(now=None):
     if getattr(now, 'tzinfo', None) is None:
         return now.replace(tzinfo=timezone.utc)
     return now
+
+
+def format_prompt_elapsed(seconds) -> str:
+    minutes = max(0, int(seconds // 60))
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'{hours}小时{minutes:02d}分'
+    return f'{minutes}分'
+
+
+def format_history_messages(events: Sequence[dict], *, now) -> List[dict]:
+    """Time labels are a prompt projection; original event content stays intact."""
+    frozen = _now_utc(now)
+    today = frozen.astimezone(CN_TZ).date()
+    rows = []
+    previous = None
+    for event in events or ():
+        row = dict(event)
+        body = row.get('prompt_text') or row.get('content') or ''
+        stamp = row.get('timestamp')
+        lines = []
+        if stamp is None:
+            lines.append('【历史消息；发送时间未知】')
+            previous = None
+        else:
+            stamp = _now_utc(stamp).astimezone(CN_TZ)
+            if previous is not None:
+                gap = (stamp - previous).total_seconds()
+                cross_day = stamp.date() != previous.date()
+                if gap >= 25 * 60 or cross_day:
+                    lines.append(
+                        f'【对话间隔；距上一条={format_prompt_elapsed(gap)}；'
+                        f'跨日={"是" if cross_day else "否"}】')
+            date = stamp.date()
+            relation = ('今天' if date == today else '昨天'
+                        if (today - date).days == 1 else date.isoformat())
+            age = format_prompt_elapsed((frozen - stamp).total_seconds())
+            lines.append(
+                f'【历史消息；发送={stamp.isoformat(timespec="seconds")}；'
+                f'日期关系={relation}；距本轮={age}】')
+            previous = stamp
+        row['prompt_text'] = '\n'.join(lines + [body])
+        rows.append(row)
+    return rows
+
+
+def history_time_facts(events: Sequence[dict], *, now) -> dict:
+    """Previous times from pre-turn events only; never feed these into ingress."""
+    frozen = _now_utc(now)
+    facts = dict(previous_user=None, previous_assistant=None, last_history_at=None)
+    for event in events or ():
+        role = event.get('role')
+        key = ('previous_user' if role == 'user' else 'previous_assistant'
+               if role == 'assistant' else None)
+        if key is None:
+            continue
+        stamp = event.get('timestamp')
+        if stamp is not None:
+            stamp = _now_utc(stamp)
+            if stamp > frozen:
+                continue
+        # Rows already follow conversation order. An unknown newest row cannot
+        # borrow the timestamp of an older occurrence of the same role.
+        facts['last_history_at'] = stamp
+        facts[key] = stamp
+    return facts
 
 
 def _json_ids(value) -> Tuple[str, ...]:
@@ -200,6 +271,7 @@ def select_hot_window(
     config: Optional[BudgetConfig] = None,
     now=None,
     token_budget: Optional[int] = None,
+    include_time_markers=True,
 ) -> Tuple[List[dict], List[dict]]:
     """Walk newest→oldest. Token + continuity, not LIMIT 40.
 
@@ -212,15 +284,18 @@ def select_hot_window(
         return [], []
     budget = int(token_budget if token_budget is not None else cfg.hot_token_budget)
     now = _now_utc(now)
-    newest_first = list(reversed(rows))
+    projected = format_history_messages(rows, now=now) if include_time_markers else rows
+    newest_first = list(reversed(list(zip(rows, projected))))
     selected = []
     selected_ids = set()
     used = 0
-    for event in newest_first:
+    for event, projection in newest_first:
         n = len(selected) + 1
         if n > cfg.hot_max_events:
             break
-        text = event.get('content') or ''
+        text = (projection.get('prompt_text') or projection.get('content') or '')
+        if not include_time_markers:
+            text = event.get('content') or ''
         cost = estimate_tokens(text)
         age = _event_minutes(now, event.get('timestamp'))
         neighbor = selected[-1] if selected else None
@@ -687,7 +762,8 @@ def reconcile_summaries_for_deleted(user_id, character_id, deleted_ids):
 
 def compact_transcript(pack, limit=8):
     lines = []
-    messages = list(getattr(pack, 'messages', None) or [])[-max(1, int(limit or 8)):]
+    messages = list(getattr(pack, 'raw_messages', None)
+                    or getattr(pack, 'messages', None) or [])[-max(1, int(limit or 8)):]
     for item in messages:
         role = item.get('role') if isinstance(item, dict) else None
         content = item.get('content') if isinstance(item, dict) else ''
@@ -700,10 +776,14 @@ def compact_transcript(pack, limit=8):
 
 def assemble_fallback_from_messages(
     messages, *, user_id='', character_id='', profile='default',
+    temporal_snapshot=None,
 ):
     """Compatibility view of short_memory, still budgeted. Not a fact source."""
     cfg = BudgetConfig.for_profile(profile)
+    include_time_markers = profile in _TIME_MARKER_PROFILES
+    now = _now_utc((temporal_snapshot or {}).get('now_utc'))
     items = []
+    events = []
     rows = list(messages or [])
     for index, item in enumerate(rows):
         if isinstance(item, (tuple, list)) and len(item) >= 2:
@@ -715,17 +795,38 @@ def assemble_fallback_from_messages(
         text = content or ''
         if not str(text).strip():
             continue
+        event = None
+        if isinstance(item, dict) and 'raw_content' in item:
+            event = {
+                'role': role or 'user',
+                'content': item.get('raw_content') or '',
+                'prompt_text': item.get('prompt_text') or item.get('raw_content') or '',
+                'timestamp': item.get('timestamp'),
+                'event_id': item.get('event_id'),
+            }
+            events.append(event)
+            if not include_time_markers:
+                text = event['prompt_text']
         items.append(ContextItem(
             item_id=f'fb:{index}',
             item_type='hot_raw',
             text=text,
             priority=100,
             role=role or 'user',
+            created_at=event.get('timestamp') if event else None,
+            source_event_ids=(str(event['event_id']),)
+            if event and event.get('event_id') else (),
+            metadata={'event': event} if event else {},
         ))
     allocated = ContextBudgetManager(cfg).split(items)
-    hot = allocated.get('hot') or []
+    hot = _rerender_hot_history(allocated, cfg, now=now,
+                                include_time_markers=include_time_markers)
     return ChatContextPack(
+        temporal_snapshot=temporal_snapshot,
         messages=[{'role': item.role or 'user', 'content': item.text} for item in hot],
+        raw_messages=_raw_hot_messages(hot),
+        history_time_facts=history_time_facts(events, now=now),
+        recent_event_ids=[item.source_event_ids[0] for item in hot if item.source_event_ids],
         items=list(hot),
         support_ready=False,
         allocation={
@@ -937,11 +1038,17 @@ def _event_id_set(current_event_id) -> set:
     return {str(item).strip() for item in values if str(item).strip()}
 
 
-def exclude_current_turn_events(events: Sequence[dict], current_event_id=None) -> List[dict]:
+def exclude_current_turn_events(
+    events: Sequence[dict], current_event_id=None, user_message='',
+) -> List[dict]:
     """Hot context stops before this request's user Raw Event(s)."""
     rows = [dict(event) for event in (events or []) if event]
     skip = _event_id_set(current_event_id)
     if not skip:
+        if (user_message and rows and rows[-1].get('role') == 'user'
+                and (rows[-1].get('content') == user_message
+                     or rows[-1].get('prompt_text') == user_message)):
+            return rows[:-1]
         return rows
     return [
         event for event in rows
@@ -1089,10 +1196,13 @@ def _recall_result_from_items(items: Sequence[ContextItem], original):
     return out
 
 
-def _hot_items(events: Sequence[dict]) -> List[ContextItem]:
+def _hot_items(events: Sequence[dict], *, now, include_time_markers=True) -> List[ContextItem]:
     items = []
-    for index, event in enumerate(events):
-        text = event.get('prompt_text') or event.get('content') or ''
+    projected = format_history_messages(events, now=now) if include_time_markers else events
+    for index, (event, projection) in enumerate(zip(events, projected)):
+        if not str(event.get('prompt_text') or event.get('content') or '').strip():
+            continue
+        text = projection.get('prompt_text') or projection.get('content') or ''
         if not str(text).strip():
             continue
         eid = str(event.get('event_id') or '') or f'hot:{index}'
@@ -1107,6 +1217,41 @@ def _hot_items(events: Sequence[dict]) -> List[ContextItem]:
             role=event.get('role') or 'user',
         ))
     return items
+
+
+def _raw_hot_messages(items: Sequence[ContextItem]) -> List[dict]:
+    out = []
+    for item in items:
+        event = (item.metadata or {}).get('event')
+        body = ((event.get('prompt_text') or event.get('content') or '')
+                if event is not None else item.text)
+        out.append({'role': item.role or 'user', 'content': body})
+    return out
+
+
+def _rerender_hot_history(allocated, config, *, now, include_time_markers=True) -> List[ContextItem]:
+    """Gaps refer to retained neighbors and their full text remains budgeted."""
+    hot = list(allocated.get('hot') or [])
+    if not include_time_markers:
+        return hot
+    other_cost = sum(item.token_cost for name, items in allocated.items()
+                     if name != 'hot' for item in items)
+    while hot:
+        projected = format_history_messages([
+            item.metadata['event'] for item in hot if item.metadata.get('event') is not None
+        ], now=now)
+        projections = iter(projected)
+        for item in hot:
+            if item.metadata.get('event') is not None:
+                item.text = next(projections)['prompt_text']
+                item.token_cost = estimate_tokens(item.text)
+        used = other_cost + sum(item.token_cost for item in hot)
+        # Keep the existing newest-whole-message exception to the total cap.
+        if used <= max(config.total_token_budget, hot[-1].token_cost) or len(hot) == 1:
+            break
+        hot.pop(0)
+    allocated['hot'] = hot
+    return hot
 
 
 def _summary_items(rows: Sequence[dict]) -> List[ContextItem]:
@@ -1150,6 +1295,8 @@ def _pin_items(rows: Sequence[dict]) -> List[ContextItem]:
 @dataclass
 class ChatContextPack:
     messages: List[dict] = field(default_factory=list)
+    raw_messages: List[dict] = field(default_factory=list)
+    history_time_facts: dict = field(default_factory=dict)
     recent_event_ids: List[str] = field(default_factory=list)
     spill_event_ids: List[str] = field(default_factory=list)
     items: List[ContextItem] = field(default_factory=list)
@@ -1493,13 +1640,15 @@ def assemble_from_events(
     current_event_id=None,
     temporal_snapshot=None,
     auto_pin_enabled=True,
+    include_time_markers=True,
 ) -> ChatContextPack:
     cfg = config or BudgetConfig()
     manager = ContextBudgetManager(cfg)
     now = _now_utc((temporal_snapshot or {}).get('now_utc') or now)
-    events = exclude_current_turn_events(events, current_event_id)
+    events = exclude_current_turn_events(events, current_event_id, user_message)
     with _latency_span('hot'):
-        hot, spill = select_hot_window(events, config=cfg, now=now)
+        hot, spill = select_hot_window(events, config=cfg, now=now,
+                                      include_time_markers=include_time_markers)
     maybe_store_spill_summary(user_id, character_id, spill, config=cfg, now=now)
     if auto_pin_enabled:
         try:
@@ -1545,7 +1694,7 @@ def assemble_from_events(
     # almost the same complete Raw Event segment.  Pins and hot context retain
     # their existing higher-priority paths unchanged.
     summaries_for_prompt = list(summaries)
-    items = _hot_items(hot) + _pin_items(pins)
+    items = _hot_items(hot, now=now, include_time_markers=include_time_markers) + _pin_items(pins)
     recent_ids = [str(ev.get('event_id') or '') for ev in hot if ev.get('event_id')]
     recall_result = None
     if include_recall:
@@ -1611,8 +1760,9 @@ def assemble_from_events(
 
     with _latency_span('budget'):
         allocated = manager.split(items)
+    hot_kept = _rerender_hot_history(allocated, cfg, now=now,
+                                    include_time_markers=include_time_markers)
     _trace_budget_dropped(items, allocated)
-    hot_kept = allocated.get('hot') or []
     if temporal_snapshot is not None:
         from temporal_awareness import conversational_applicability
         historical_times = [
@@ -1648,6 +1798,8 @@ def assemble_from_events(
     pack = ChatContextPack(
         temporal_snapshot=temporal_snapshot,
         messages=messages,
+        raw_messages=_raw_hot_messages(hot_kept),
+        history_time_facts=history_time_facts(events, now=now),
         recent_event_ids=[
             item.source_event_ids[0]
             for item in hot_kept
@@ -1749,6 +1901,7 @@ def build_chat_context(
             current_event_id=current_event_id,
             temporal_snapshot=temporal_snapshot,
             auto_pin_enabled=auto_pin_enabled,
+            include_time_markers=profile in _TIME_MARKER_PROFILES,
         )
     except Exception as exc:
         try:

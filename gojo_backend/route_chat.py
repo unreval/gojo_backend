@@ -22,11 +22,12 @@
   - 参数通过 threading args= 传入，避免闭包读被 handler return 后的变量。
   - 修复原实现里 `except Exception:` 后 `print({e})` 但 e 未定义的 bug。
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from contextvars import ContextVar
 import hashlib
 import json
 import re
+import unicodedata
 import uuid
 import anthropic
 from fastapi import APIRouter
@@ -600,7 +601,7 @@ def _protocol_rejection_reason(parsed, raw='', min_messages=1, acceptance_mode=N
 def _generate_or_none(
     model, max_tokens, system_blocks, messages, *,
     attempts, log_tag, cache_tag, min_messages=1, salvage=False, reject_fn=None,
-    generation_trace=None, error_out=None,
+    generation_trace=None, error_out=None, observe_fn=None,
 ):
     """One provider request per semantic candidate, with at most one repair."""
     semantic_attempts = min(attempts, 2)
@@ -698,6 +699,14 @@ def _generate_or_none(
                 break
             repair_reason = reason
             continue
+        if observe_fn:
+            try:
+                observe_fn(parsed)
+            except Exception as exc:
+                try:
+                    print(f'[temporal_check] observer_error={type(exc).__name__}')
+                except Exception:
+                    pass
         try:
             reason = reject_fn(parsed) if reject_fn else None
         except Exception as exc:
@@ -890,10 +899,24 @@ def _turn_context(user_id, character_id, user_message='', profile='default',
         from raw_events import SourceValidityError
         from context_layer import assemble_fallback_from_messages
         short_rows = list(get_short_memory_for_prompt(
-            user_id, n=limit, character_id=character_id) or [])
+            user_id, n=limit, character_id=character_id,
+            exclude_event_ids=_context_event_ids(current_event_id),
+            exclude_messages=[('user', user_message)] if current_event_id else None,
+            now=temporal_snapshot.get('now_utc'), return_events=True,
+            user_message=user_message or '') or [])
         fallback_pack = assemble_fallback_from_messages(
-            short_rows, user_id=user_id, character_id=character_id, profile=profile)
-        return (pack or fallback_pack), list(fallback_pack.messages)
+            short_rows, user_id=user_id, character_id=character_id, profile=profile,
+            temporal_snapshot=temporal_snapshot)
+        if pack is not None:
+            for name in ('messages', 'raw_messages', 'history_time_facts',
+                         'recent_event_ids', 'temporal_snapshot'):
+                setattr(pack, name, getattr(fallback_pack, name))
+            pack.items = [item for item in getattr(pack, 'items', [])
+                          if item.item_type != 'hot_raw'] + list(fallback_pack.items)
+            pack.allocation = dict(getattr(pack, 'allocation', {}) or {})
+            pack.allocation['hot'] = fallback_pack.allocation.get('hot', 0)
+            return pack, list(pack.messages)
+        return fallback_pack, list(fallback_pack.messages)
     except Exception as e:
         try:
             from raw_events import SourceValidityError
@@ -908,9 +931,227 @@ def _turn_context(user_id, character_id, user_message='', profile='default',
         return pack, []
 
 
-def _history_plus_current(messages, content):
+def _context_event_ids(current_event_id):
+    if current_event_id is None:
+        return []
+    values = [current_event_id] if isinstance(current_event_id, (str, int)) else current_event_id
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _raw_context_messages(pack):
+    """Prompt time labels must not become recall keywords or cognitive input."""
+    if pack is None:
+        return []
+    return list(getattr(pack, 'raw_messages', getattr(pack, 'messages', [])) or [])
+
+
+def _prompt_local_time(value, snapshot):
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    import config
+    local_now = snapshot.get('now_local')
+    zone = getattr(local_now, 'tzinfo', None) or getattr(config, 'CN_TZ', None) or timezone.utc
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).astimezone(zone)
+
+
+def _current_time_facts(snapshot, pack):
+    import context_layer
+    import temporal_awareness
+    now = _prompt_local_time(snapshot.get('now_utc') or snapshot.get('now_local'), snapshot)
+    history = getattr(pack, 'history_time_facts', {}) or {}
+    previous = {role: _prompt_local_time(history.get(f'previous_{role}'), snapshot)
+                for role in ('user', 'assistant')}
+    last = _prompt_local_time(history.get('last_history_at'), snapshot)
+    elapsed = {role: (int((now - value).total_seconds()) if now and value and value <= now else None)
+               for role, value in previous.items()}
+    phase_fn = getattr(temporal_awareness, 'clock_phase', None)
+    state_fn = getattr(temporal_awareness, 'conversational_applicability', None)
+    state = (state_fn(previous['assistant'], snapshot)['applicability'] if state_fn
+             else (snapshot.get('conversational_state') or {}).get('applicability', 'unknown'))
+    formatter = getattr(context_layer, 'format_prompt_elapsed', lambda seconds: f'{seconds}秒')
+    lines = ['【后端当前时间事实】',
+             f'now={now.isoformat() if now else "未知"}',
+             f'timezone={now.tzinfo if now else "未知"}（现有配置）',
+             f'clock_phase={phase_fn(now) if phase_fn and now else "unknown"}']
+    for role, value in previous.items():
+        seconds = elapsed[role]
+        lines.extend((f'previous_{role}={value.isoformat() if value else "发送时间未知"}',
+                      f'elapsed_since_previous_{role}='
+                      + (f'{seconds}秒（{formatter(seconds)}）' if seconds is not None else '未知')))
+    relation = ('same_calendar_day' if last.date() == now.date() else 'cross_calendar_day') if last and now else 'unknown'
+    if last and now and last <= now:
+        gap = int((now - last).total_seconds())
+        cross_day = last.date() != now.date()
+        if gap >= 25 * 60 or cross_day:
+            lines.append(f'【对话间隔；距上一条={formatter(gap)}；跨日={"是" if cross_day else "否"}】')
+    lines.extend((f'calendar_relation={relation}', f'retained_history_state={state}',
+                  '这里只证明时间经过，不证明用户睡过、没睡或今晚刚到家。'))
+    return '\n'.join(lines)
+
+
+def _history_plus_current(messages, content, *, temporal_snapshot=None, context_pack=None):
     from context_layer import append_current_user_turn
-    return append_current_user_turn(messages, content)
+    if temporal_snapshot is not None and messages and messages[-1].get('role') == 'user':
+        blocks = messages[-1].get('content')
+        if (isinstance(blocks, list) and len(blocks) == 2
+                and blocks[0].get('text', '').startswith('【后端当前时间事实】')
+                and blocks[1].get('text') == content):
+            return [dict(message) for message in messages]
+    out = append_current_user_turn(messages, content)
+    if temporal_snapshot is not None and out and content:
+        out[-1] = {'role': 'user', 'content': [
+            {'type': 'text', 'text': _current_time_facts(temporal_snapshot, context_pack)},
+            {'type': 'text', 'text': content},
+        ]}
+    return out
+
+
+def _find_reply_clock_phase_conflict(text, snapshot):
+    """Observe explicit present-time assertions; suggestions carry no time claim."""
+    import temporal_awareness
+    phase_fn = getattr(temporal_awareness, 'clock_phase', None)
+    now = _prompt_local_time(snapshot.get('now_utc') or snapshot.get('now_local'), snapshot)
+    if not now or not phase_fn:
+        return None
+    phase = phase_fn(now).split('(', 1)[0]
+    labels = {
+        '凌晨': {'early_morning'}, '深夜': {'early_morning', 'late_night'},
+        '夜中': {'early_morning', 'late_night'}, '早上': {'morning'},
+        '朝': {'morning'}, '上午': {'late_morning'}, '中午': {'noon'},
+        '昼': {'noon', 'afternoon'}, '下午': {'afternoon'},
+        '午後': {'noon', 'afternoon'}, '晚上': {'evening', 'late_night'},
+    }
+    for sentence in re.split(r'[。！？!?\n]', text or ''):
+        if re.search(r'[「」『』“”"]|昨天|昨日|昨夜|刚才|剛才|之前|当时|那时|もし|なら|假如|如果|不是|ではな|じゃな|明天|明日|到时候', sentence):
+            continue
+        if (re.search(r'这么晚了|こんな遅い時間', sentence)
+                and phase not in ('early_morning', 'evening', 'late_night')):
+            return 'current_clock_phase_conflict'
+        match = re.search(r'(?:现在|此刻|已经|今は|もう)(?:已经|是|、|，|\s)*('
+                          + '|'.join(labels) + r')(?:了|だ|です|にな|$|[，,])', sentence)
+        if match and phase not in labels[match.group(1)]:
+            return 'current_clock_phase_conflict'
+    return None
+
+
+def _parse_anchor_number(text):
+    if text.isdecimal():
+        return int(text)
+    digits = {'零': 0, '〇': 0, **dict(zip('一二三四五六七八九', range(1, 10)))}
+    if all(char in digits for char in text):
+        return int(''.join(str(digits[char]) for char in text))
+    total = digit = 0
+    for char in text:
+        if char in digits:
+            digit = digits[char]
+        elif char in '十百千':
+            total += (digit or 1) * {'十': 10, '百': 100, '千': 1000}[char]
+            digit = 0
+        else:
+            return None
+    return total + digit
+
+
+def _numeric_anchors(text):
+    """Finite explicit anchors; an unqualified twelve-hour clock stays ambiguous."""
+    text = unicodedata.normalize('NFKC', text or '')
+    number = r'[0-9零〇一二三四五六七八九十百千]+'
+    anchors = []
+    date = re.compile(r'(?<!\d)([0-9]{4})[-/]([0-9]{1,2})[-/]([0-9]{1,2})(?!\d)'
+                      r'|(' + number + r')年(' + number + r')月(' + number + r')日')
+    date_spans = []
+    for match in date.finditer(text):
+        parts = match.groups()[:3] if match.group(1) else match.groups()[3:]
+        value = tuple(_parse_anchor_number(part) for part in parts)
+        try:
+            datetime(*value)
+        except (TypeError, ValueError):
+            return None
+        anchors.append(('date', *value))
+        date_spans.append(match.span())
+    for start, end in reversed(date_spans):
+        text = text[:start] + ' ' * (end - start) + text[end:]
+    clock = re.compile(r'(?<![0-9])(?P<period>午前|午後|上午|下午|早上|晚上)?'
+                       r'(?P<hour>' + number + r')(?:時(?!間)|时(?!间)|点|:)(?P<minute>'
+                       + number + r')?(?P<half>半)?(?:分)?')
+    spans = []
+    for match in clock.finditer(text):
+        hour = _parse_anchor_number(match.group('hour'))
+        minute = 30 if match.group('half') else _parse_anchor_number(match.group('minute') or '0')
+        if hour is None or minute is None or hour > 23 or minute > 59:
+            return None
+        period = match.group('period')
+        explicit = bool(period or ':' in match.group(0) or hour > 12)
+        if period:
+            if not 1 <= hour <= 12:
+                return None
+            hour %= 12
+            if period in ('午後', '下午', '晚上'):
+                hour += 12
+        anchors.append(('clock' if explicit else 'ambiguous_clock', hour, minute))
+        spans.append(match.span())
+    remaining = list(text)
+    for start, end in spans:
+        remaining[start:end] = ' ' * (end - start)
+    for match in re.finditer(r'(' + number + r')(分钟|分鐘|分間|分|時間|小时|小時|天|日|年|月|円|元|个|個)', ''.join(remaining)):
+        unit = {'分钟': 'minutes', '分鐘': 'minutes', '分間': 'minutes', '分': 'minutes',
+                '時間': 'hours', '小时': 'hours', '小時': 'hours',
+                '天': 'days', '日': 'days', '円': 'currency', '元': 'currency',
+                '个': 'count', '個': 'count'}.get(match.group(2), match.group(2))
+        anchors.append((unit, _parse_anchor_number(match.group(1))))
+    return sorted(anchors)
+
+
+def _find_bilingual_numeric_conflict(parsed):
+    for message in (parsed or {}).get('messages') or []:
+        jp, zh = message.get('jp'), message.get('zh')
+        if not jp or not zh:
+            continue
+        left, right = _numeric_anchors(jp), _numeric_anchors(zh)
+        if left is None or right is None or not left or not right:
+            continue
+        if any(anchor[0] == 'ambiguous_clock' for anchor in left + right):
+            # Compare only twelve-hour values when either side omits AM/PM.
+            def without_period(anchors):
+                return sorted(('clock', anchor[1] % 12, anchor[2])
+                              if anchor[0] in ('clock', 'ambiguous_clock') else anchor
+                              for anchor in anchors)
+            left, right = without_period(left), without_period(right)
+        if left != right:
+            return 'bilingual_numeric_anchor_mismatch'
+    return None
+
+
+def _observe_temporal_candidate(parsed, snapshot, context_pack, event_id):
+    text = ' '.join(f'{message.get("jp", "")} {message.get("zh", "")}'
+                    for message in (parsed or {}).get('messages') or [])
+    prefix = re.sub(r'\s+', ' ', text).strip()
+    checks = [('clock_phase', _find_reply_clock_phase_conflict(text, snapshot), prefix),
+              ('bilingual_numeric', _find_bilingual_numeric_conflict(parsed), prefix)]
+    for message in (parsed or {}).get('messages') or []:
+        for language in ('jp', 'zh'):
+            candidate = (message.get(language) or '').lstrip()
+            if candidate.startswith(('【历史消息', '【对话间隔', '【后端当前时间事实')):
+                checks.append(('prompt_marker_echo', 'temporal_prompt_marker_echo', candidate))
+    history = getattr(context_pack, 'history_time_facts', {}) or {}
+    now = _prompt_local_time(snapshot.get('now_utc') or snapshot.get('now_local'), snapshot)
+    intervals = {}
+    for role in ('user', 'assistant'):
+        previous = _prompt_local_time(history.get(f'previous_{role}'), snapshot)
+        intervals[f'elapsed_since_previous_{role}'] = (
+            int((now - previous).total_seconds()) if now and previous and previous <= now else None)
+    for check_type, code, candidate in checks:
+        if code:
+            print('[temporal_check] ' + json.dumps({
+                'check_type': check_type, 'error_code': code, 'event_id': event_id,
+                'now': now.isoformat() if now else None, 'intervals': intervals,
+                'candidate_prefix': candidate[:40],
+            }, ensure_ascii=False, separators=(',', ':')))
 
 
 # ★ 记账透传辅助：只做基本形状校验,不写库(由前端确认后 POST /accounting/records)
@@ -999,10 +1240,11 @@ def _start_relationship_update(user_id, character_id, user_text, full_jp,
     """快捷方法：从 handler 里一行调用起 v4 更新线程。
     上下文优先来自 canonical pack，short_memory 只是兼容缓存。"""
     core_snippet = (char.get('core_prompt') or '')[:300]
-    if pack is not None and getattr(pack, 'messages', None):
+    raw_messages = _raw_context_messages(pack)
+    if raw_messages:
         recent_ctx = [
             {'role': m.get('role'), 'content': m.get('content')}
-            for m in list(pack.messages)[-6:]
+            for m in raw_messages[-6:]
         ]
     else:
         recent_ctx = [{'role': r, 'content': c} for r, c in (short_memories or [])[-6:]]
@@ -1211,15 +1453,17 @@ async def chat_text(data: dict):
         current_event_id=source_event_id,
         temporal_snapshot=temporal_snapshot)
     messages = _history_plus_current(
-        messages, _user_prompt_with_reply(user_text, reply_to))
+        messages, _user_prompt_with_reply(user_text, reply_to),
+        temporal_snapshot=temporal_snapshot, context_pack=pack)
     if 'hot' not in _trace.marks:
         _trace.mark('hot', (_time.perf_counter() - _tmark) * 1000.0)
     _tmark = _time.perf_counter()
 
     recall_query = user_text
-    if pack and pack.messages:
+    raw_messages = _raw_context_messages(pack)
+    if raw_messages:
         tails = [
-            m.get('content', '') for m in pack.messages[-2:]
+            m.get('content', '') for m in raw_messages[-2:]
             if isinstance(m.get('content'), str)
         ]
         if tails:
@@ -1280,6 +1524,8 @@ async def chat_text(data: dict):
             cache_tag=f'chat:{character_id}',
             salvage=True,
             reject_fn=reject_reply,
+            observe_fn=lambda parsed: _observe_temporal_candidate(
+                parsed, temporal_snapshot, pack, source_event_id),
             generation_trace=generation_trace,
         )
     llm_ms = (_time.perf_counter() - _tmark) * 1000.0
@@ -1438,12 +1684,14 @@ async def chat_story(data: dict):
         user_id, character_id, user_text, profile='story',
         current_event_id=str(data.get('source_event_id') or '').strip() or None,
         temporal_snapshot=temporal_snapshot)
-    messages = _history_plus_current(messages, user_text)
+    messages = _history_plus_current(
+        messages, user_text, temporal_snapshot=temporal_snapshot, context_pack=pack)
 
     recall_query = user_text
-    if pack and pack.messages:
+    raw_messages = _raw_context_messages(pack)
+    if raw_messages:
         tails = [
-            m.get('content', '') for m in pack.messages[-2:]
+            m.get('content', '') for m in raw_messages[-2:]
             if isinstance(m.get('content'), str)
         ]
         if tails:
@@ -1614,7 +1862,8 @@ async def chat_voice_text(data: dict):
         user_id, character_id, user_text, profile='voice',
         current_event_id=source_event_id,
         temporal_snapshot=temporal_snapshot)
-    messages = _history_plus_current(messages, user_text)
+    messages = _history_plus_current(
+        messages, user_text, temporal_snapshot=temporal_snapshot, context_pack=pack)
 
     system_blocks = build_system_blocks(
         user_id, character_id, user_text, extra_suffix=VOICE_CALL_SCENE,
@@ -1712,7 +1961,8 @@ async def chat_voice_story(data: dict):
         user_id, character_id, user_text, profile='voice',
         current_event_id=source_event_id,
         temporal_snapshot=temporal_snapshot)
-    messages = _history_plus_current(messages, user_text)
+    messages = _history_plus_current(
+        messages, user_text, temporal_snapshot=temporal_snapshot, context_pack=pack)
 
     system_blocks = build_system_blocks(
         user_id, character_id, user_text, extra_suffix=VOICE_STORY_SCENE,
