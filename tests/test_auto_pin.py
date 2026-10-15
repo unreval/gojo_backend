@@ -134,5 +134,176 @@ class AutoPinTests(unittest.TestCase):
                 writer.assert_not_called()
 
 
+class CommunicationAgreementTests(unittest.TestCase):
+    def setUp(self):
+        context_layer.use_memory_store(True)
+
+    def tearDown(self):
+        context_layer.use_memory_store(False)
+
+    def _write_agreement(self, text, event_id='agreement-1', role='user', **kwargs):
+        event = {'event_id': event_id, 'role': role, 'content': text}
+        with patch.object(raw_events, 'get_active_events_by_ids', return_value=[event]):
+            return auto_pin.maybe_auto_pin(
+                'u', 'gojo', text, source_event_ids=[event_id], **kwargs)
+
+    def test_explicit_communication_agreement_has_source_and_original_words(self):
+        text = '以后我发🦖就是想你了'
+        rows = self._write_agreement(text)
+        self.assertEqual(len(rows), 1)
+        self.assertIn('communication_agreement', auto_pin.AUTO_PIN_TYPES)
+        self.assertEqual(rows[0]['pin_type'], 'communication_agreement')
+        self.assertEqual(rows[0]['text'], f'用户约定（原话）：「{text}」')
+        self.assertEqual(rows[0]['source_event_ids'], ('agreement-1',))
+        self.assertEqual(rows[0]['priority'], auto_pin.PIN_PRIORITY['communication_agreement'])
+        self.assertIsNone(rows[0]['expires_at'])
+
+    def test_explicit_phrases_include_bedtime_agreements(self):
+        texts = ('以后我发晚安就是想你了', '我们约好睡觉前发🦖表示想你',
+                 '约定🦖代表想你', '暗号是🦖', '我们的暗号：🦖代表想你',
+                 '记住🦖就是想你了')
+        for index, text in enumerate(texts):
+            with self.subTest(text=text):
+                rows = self._write_agreement(text, event_id=f'phrase-{index}')
+                self.assertEqual([row['pin_type'] for row in rows], ['communication_agreement'])
+                self.assertEqual(rows[0]['text'], f'用户约定（原话）：「{text}」')
+
+    def test_original_words_are_not_clipped_or_whitespace_normalized(self):
+        text = ' \n以后我发🦖就是想你了。\n' + '  晚安  睡觉\n' * 40 + ' '
+        row = self._write_agreement(text)[0]
+        self.assertGreater(len(text), 180)
+        self.assertEqual(row['text'], f'用户约定（原话）：「{text}」')
+
+    def test_character_messages_cannot_trigger_agreements(self):
+        for role in ('assistant', 'gojo', 'system'):
+            with self.subTest(role=role):
+                self.assertEqual(self._write_agreement('以后我发🦖就是想你了', role=role), [])
+        self.assertEqual(context_layer.list_pins('u', 'gojo'), [])
+
+    def test_casual_chatter_and_questions_do_not_trigger_agreements(self):
+        for text in ('晚安', '今天吃饭了', '我要睡觉了', '暗号是什么？', '以后我发🦖就是想你了？',
+                     '约定俗成的说法罢了', '约定已经取消了', '约定已被撤销', '我们约好了吗', '我们约好了么'):
+            with self.subTest(text=text):
+                self.assertEqual(auto_pin.detect_auto_pins(text), [])
+
+    def test_agreements_require_complete_matching_user_sources(self):
+        text = '以后我发🦖就是想你了'
+        event = {'event_id': 'e1', 'role': 'user', 'content': text}
+        cases = (([], []), (['e1'], []), (['e1', 'missing'], [event]),
+                 (['e1'], [dict(event, event_id='wrong')]),
+                 (['e1'], [dict(event, content='其它原话')]),
+                 (['e1', 'assistant'], [event, dict(event, event_id='assistant', role='assistant')]))
+        for ids, sources in cases:
+            with self.subTest(ids=ids, sources=sources), \
+                    patch.object(raw_events, 'get_active_events_by_ids', return_value=sources):
+                self.assertEqual(auto_pin.maybe_auto_pin('u', 'gojo', text, source_event_ids=ids), [])
+        with patch.object(raw_events, 'get_active_events_by_ids',
+                          side_effect=raw_events.SourceValidityError('db down')):
+            self.assertEqual(auto_pin.maybe_auto_pin('u', 'gojo', text, source_event_ids=['e1']), [])
+        self.assertEqual(context_layer.list_pins('u', 'gojo'), [])
+
+    def test_matching_user_source_can_share_current_turn_with_another_user_event(self):
+        text = '以后我发🦖就是想你了'
+        sources = [{'event_id': 'e1', 'role': 'user', 'content': text},
+                   {'event_id': 'e2', 'role': 'user', 'content': '继续'}]
+        with patch.object(raw_events, 'get_active_events_by_ids', return_value=sources):
+            rows = auto_pin.maybe_auto_pin('u', 'gojo', text, source_event_ids=['e1', 'e2'])
+            replay = auto_pin.maybe_auto_pin('u', 'gojo', text, source_event_ids=['e2', 'e1'])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(set(rows[0]['source_event_ids']), {'e1', 'e2'})
+        self.assertEqual(rows[0]['pin_id'], replay[0]['pin_id'])
+        self.assertEqual(len(context_layer.list_pins('u', 'gojo')), 1)
+
+    def test_distinct_agreements_in_the_same_source_batch_do_not_overwrite_each_other(self):
+        first_text, second_text = '以后我发🦖就是想你了', '以后我发🦖就是想抱抱了'
+        sources = [{'event_id': 'e1', 'role': 'user', 'content': first_text},
+                   {'event_id': 'e2', 'role': 'user', 'content': second_text}]
+        with patch.object(raw_events, 'get_active_events_by_ids', return_value=sources):
+            first = auto_pin.maybe_auto_pin('u', 'gojo', first_text, source_event_ids=['e1', 'e2'])[0]
+            second = auto_pin.maybe_auto_pin('u', 'gojo', second_text, source_event_ids=['e1', 'e2'])[0]
+            replay = auto_pin.maybe_auto_pin('u', 'gojo', first_text, source_event_ids=['e2', 'e1'])[0]
+        self.assertEqual(first['pin_id'], replay['pin_id'])
+        self.assertNotEqual(first['pin_id'], second['pin_id'])
+        self.assertEqual({p['text'] for p in context_layer.list_pins('u', 'gojo')},
+                         {f'用户约定（原话）：「{first_text}」', f'用户约定（原话）：「{second_text}」'})
+
+    def test_redefined_agreement_and_old_replay_keep_independent_sources(self):
+        now = datetime(2026, 10, 15, 5, 0, tzinfo=timezone.utc)
+        old = '以后我发🦖就是想你了'
+        new = '以后我发🦖就是想抱抱了'
+        first = self._write_agreement(old, 'old', now=now - timedelta(days=1))[0]
+        latest = self._write_agreement(new, 'new', now=now)[0]
+        replay = self._write_agreement(old, 'old', now=now + timedelta(minutes=1))[0]
+        self.assertEqual(first['pin_id'], replay['pin_id'])
+        self.assertNotEqual(first['pin_id'], latest['pin_id'])
+        pins = context_layer.list_pins('u', 'gojo')
+        self.assertEqual({p['text'] for p in pins},
+                         {f'用户约定（原话）：「{old}」', f'用户约定（原话）：「{new}」'})
+        self.assertEqual(next(p for p in pins if p['pin_id'] == latest['pin_id'])['source_event_ids'], ('new',))
+
+    def test_agreement_ids_keep_source_and_identity_distinctions_for_long_ids(self):
+        pin_type = 'communication_agreement'
+        long_user, long_character = 'u' * 120, 'c' * 120
+        identities = ((long_user, long_character, 'e1'), (long_user, long_character, 'e2'),
+                      (long_user + '2', long_character, 'e1'), (long_user, long_character + '2', 'e1'))
+        ids = [auto_pin._pin_id(user, character, pin_type, source)
+               for user, character, source in identities]
+        self.assertEqual(len(set(ids)), 4)
+        self.assertTrue(all(len(pid) <= 120 for pid in ids))
+
+    def test_original_seven_types_keep_their_text_and_expiration_rules(self):
+        now = datetime(2026, 10, 15, 5, 0, tzinfo=timezone.utc)
+        cases = (('current_task', '先把 Recall v2 做完'), ('explicit_decision', '就按这个方案'),
+                 ('pending_request', '不要 push'), ('deadline', '今晚之前做好'),
+                 ('explicit_promise', '我回来之后继续'), ('unresolved_question', '还没解决'),
+                 ('unresolved_conflict', '互相冲突'))
+        with patch.object(raw_events, 'get_active_events_by_ids') as lookup:
+            for kind, text in cases:
+                with self.subTest(kind=kind):
+                    row = auto_pin.maybe_auto_pin('u', 'gojo', text, source_event_ids=[kind], now=now)[0]
+                    self.assertEqual(row['pin_type'], kind)
+                    self.assertEqual(row['text'], text)
+                    expected = now + timedelta(days=14) if kind in ('current_task', 'deadline') else None
+                    self.assertEqual(row['expires_at'], expected)
+            lookup.assert_not_called()
+        for kind, text in (('current_task', '晚安先把 Recall v2 做完'),
+                           ('explicit_decision', '睡觉前就按这个方案')):
+            self.assertEqual([p['pin_type'] for p in auto_pin.detect_auto_pins(text)], [kind])
+
+    def test_agreement_survives_hot_window_and_source_deletion_removes_it_from_prompt(self):
+        text = '以后我发🦖就是想你了'
+        now = datetime(2026, 10, 15, 5, 0, tzinfo=timezone.utc)
+        self._write_agreement(text, now=now)
+        events = [{'event_id': f'later-{i}', 'role': 'user', 'content': '普通聊天',
+                   'timestamp': now + timedelta(minutes=i)} for i in range(100)]
+        for deleted in (set(), {'agreement-1'}):
+            with self.subTest(deleted=deleted):
+                pack = context_layer.assemble_from_events(
+                    events, user_id='u', character_id='gojo', include_recall=False,
+                    deleted_ids=deleted, now=now + timedelta(days=30))
+                if deleted:
+                    self.assertNotIn(text, pack.pinned_prompt_text)
+                else:
+                    self.assertIn('[communication_agreement]', pack.pinned_prompt_text)
+                    self.assertIn(f'约定（原话）：「{text}」', pack.pinned_prompt_text)
+                    self.assertNotIn('agreement-1', pack.recent_event_ids)
+
+    def test_context_ignores_character_agreements_and_disabled_replay(self):
+        now = datetime(2026, 10, 15, 5, 0, tzinfo=timezone.utc)
+        text = '以后我发🦖就是想你了'
+        events = [{'event_id': 'assistant-old', 'role': 'assistant', 'content': text, 'timestamp': now}]
+        with patch.object(raw_events, 'deleted_event_ids', return_value=set()), \
+                patch.object(raw_events, 'get_hot_candidate_events', return_value=events), \
+                patch.object(context_layer, '_support_items', return_value=([], '')):
+            context_layer.build_chat_context('u', 'gojo', user_message='你好', include_recall=False, now=now)
+            self.assertEqual(context_layer.list_pins('u', 'gojo'), [])
+            with patch.object(auto_pin, 'maybe_auto_pin', wraps=auto_pin.maybe_auto_pin) as writer:
+                context_layer.build_chat_context(
+                    'u', 'gojo', user_message=text, include_recall=False,
+                    current_event_id='pending-user', now=now, auto_pin_enabled=False)
+                writer.assert_not_called()
+            self.assertEqual(context_layer.list_pins('u', 'gojo'), [])
+
+
 if __name__ == '__main__':
     unittest.main()
