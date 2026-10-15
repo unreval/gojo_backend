@@ -149,6 +149,8 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
         "fast_loop",
     ),
     "generation": (
+        "gojo_backend/ai_client.py",
+        "gojo_backend/provider_error.py",
         "gojo_backend/prompt.py",
         "generation_",
         "route_chat",

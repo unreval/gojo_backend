@@ -20,7 +20,7 @@
 import requests
 import anthropic
 from config import ANTHROPIC_KEY, DEEPSEEK_KEY, DEEPSEEK_BASE_URL
-from provider_error import ProviderHTTPError
+from provider_error import ProviderHTTPError, model_for_provider_detection
 
 _anthropic_client = None
 
@@ -75,12 +75,13 @@ def create_chat(model, messages, system=None, max_tokens=1000, temperature=None,
     Raises:
         RuntimeError: provider 报错时抛出
     """
-    if model.startswith('claude-') or model.startswith('anthropic-'):
+    routing_model = model_for_provider_detection(model)
+    if routing_model.startswith('claude-') or routing_model.startswith('anthropic-'):
         if max_retries is None:
             return _call_anthropic(model, messages, system, max_tokens, temperature)
         return _call_anthropic(
             model, messages, system, max_tokens, temperature, max_retries=max_retries)
-    elif model.startswith('deepseek-'):
+    elif routing_model.startswith('deepseek-'):
         return _call_deepseek(model, messages, system, max_tokens, temperature)
     else:
         raise ValueError(f'未知的 model 前缀: {model}')
