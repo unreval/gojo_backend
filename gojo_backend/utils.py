@@ -302,6 +302,113 @@ def normalize_plaintext_reply(raw):
     return {'jp': text, 'zh': text}
 
 
+def _check_time_word_consistency(jp: str, zh: str) -> str | None:
+    """Reject explicit incompatible periods; omitted time words are acceptable."""
+    jp_time_map = {
+        '朝': 'morning', '午前': 'morning', '早朝': 'morning', '今朝': 'morning',
+        '昼': 'noon', '正午': 'noon',
+        '午後': 'afternoon',
+        '夕方': 'evening', '夕暮れ': 'evening',
+        '夜': 'night', '今晩': 'night', '今夜': 'night',
+        '深夜': 'late_night', '夜中': 'late_night',
+    }
+    zh_time_map = {
+        '早上': 'morning', '上午': 'morning', '清晨': 'morning', '今早': 'morning',
+        '早饭': 'morning', '早餐': 'morning',
+        '中午': 'noon', '正午': 'noon', '午饭': 'noon', '午餐': 'noon',
+        '下午': 'afternoon',
+        '傍晚': 'evening', '黄昏': 'evening',
+        '晚上': 'night', '今晚': 'night', '晚饭': 'night', '晚餐': 'night',
+        '深夜': 'late_night', '半夜': 'late_night',
+    }
+    compatible = {
+        'morning': {'morning'}, 'noon': {'noon'}, 'afternoon': {'afternoon'},
+        'evening': {'evening', 'night'},
+        'night': {'night', 'evening', 'late_night'},
+        'late_night': {'late_night', 'night'},
+    }
+    # AM/PM twelve denotes midnight/noon rather than morning/afternoon.
+    for period, replacement in (('午前', '深夜'), ('午後', '正午')):
+        jp = re.sub(period + r'(?=(?:12|１２|十二)時)', replacement, jp)
+    for period, replacement in (('上午', '深夜'), ('下午', '正午')):
+        zh = re.sub(period + r'(?=(?:12|１２|十二)点)', replacement, zh)
+    # Longest matches keep 深夜 from also contributing the broader 夜 period.
+    jp_periods = {jp_time_map[m.group()] for m in re.finditer(
+        '|'.join(sorted(jp_time_map, key=len, reverse=True)), jp)}
+    zh_periods = {zh_time_map[m.group()] for m in re.finditer(
+        '|'.join(sorted(zh_time_map, key=len, reverse=True)), zh)}
+    if jp_periods and zh_periods and not any(
+            zh_period in compatible[jp_period]
+            for jp_period in jp_periods for zh_period in zh_periods):
+        return 'time_word_contradiction'
+    return None
+
+
+def _check_negation_consistency(jp: str, zh: str) -> str | None:
+    """Compare strong negation markers, leaving short or ambiguous wording alone."""
+    if len(jp.strip()) < 6 or len(zh.strip()) < 6:
+        return None
+    # These finite double-negative and rhetorical forms do not imply denial.
+    if (re.search(r'ない(?:わけではない|ことはない)|なく[はも]ない|なくても(?:いい|良い)|'
+                  r'(?:じゃない|ではない)(?:か|[？?])', jp)
+            or re.search(r'不是不|并非不|不能不|不得不|没有不', zh)):
+        return None
+    jp_neg_patterns = (
+        r'ない(?:[。！？!?、，,\s]|$|よ|ね|な|ぞ|ん|だろ|でしょ|です)',
+        r'ません(?:[。！？!?、，,\s]|$|よ|ね|でした)',
+        r'ずに', r'じゃない', r'ではない', r'ねーよ', r'ねぇよ',
+        r'わけない', r'はずない',
+    )
+    zh_neg_patterns = (
+        r'不(?:是|会|能|想|要|行|可以|可能|应该|对|知道|必|用|需要|愿意)',
+        r'没(?:有|什么|啥|吃|睡|去|来|见|说|想|做|听|看|回|能)',
+        r'别(?:想|说|闹|来|急|忘)',
+        r'才不', r'才没', r'并不', r'绝不', r'从不',
+    )
+    if (any(re.search(pattern, jp) for pattern in jp_neg_patterns)
+            != any(re.search(pattern, zh) for pattern in zh_neg_patterns)):
+        return 'negation_polarity_mismatch'
+    return None
+
+
+def _check_number_consistency(jp: str, zh: str) -> str | None:
+    """Reject disjoint explicit number values, leaving clock anchors to R1."""
+    def extract_numbers(text):
+        text = unicodedata.normalize('NFKC', text)
+        # Code subscripts are identifiers, not translated quantities.
+        text = re.sub(r'\b[A-Za-z_]\w*\[[0-9]+\]', '', text)
+        number = r'[0-9零〇一二三四五六七八九十百千万萬亿億兆]+'
+        # Clock notation can change the written numbers (午後3時 / 15点).
+        text = re.sub(r'(?:午前|午後|上午|下午|早上|晚上)?' + number
+                      + r'(?:時(?!間)|时(?!间)|点|:)(?:' + number
+                      + r')?(?:半)?(?:分)?', '', text)
+        digits = {'零': 0, '〇': 0, **dict(zip('一二三四五六七八九', range(1, 10)))}
+        numbers = set()
+        for token in re.findall(number, text):
+            if len(token) > 6:
+                continue
+            if token.isdecimal():
+                numbers.add(int(token))
+            elif all(char in digits for char in token):
+                numbers.add(int(''.join(str(digits[char]) for char in token)))
+            # Unsupported large units stay a whole token and are left ambiguous.
+            elif all(char in digits or char in '十百千' for char in token):
+                total = digit = 0
+                for char in token:
+                    if char in digits:
+                        digit = digits[char]
+                    else:
+                        total += (digit or 1) * {'十': 10, '百': 100, '千': 1000}[char]
+                        digit = 0
+                numbers.add(total + digit)
+        return numbers
+
+    jp_numbers, zh_numbers = extract_numbers(jp), extract_numbers(zh)
+    if jp_numbers and zh_numbers and jp_numbers.isdisjoint(zh_numbers):
+        return 'number_value_mismatch'
+    return None
+
+
 def reply_message_rejection_reason(m: dict):
     """Return a stable protocol reason, or None for a safe bilingual message."""
     if not isinstance(m, dict):
@@ -324,7 +431,9 @@ def reply_message_rejection_reason(m: dict):
     han = sum('\u3400' <= ch <= '\u9fff' for ch in gate_text)
     if kana > han:
         return 'zh_contains_kana'
-    return None
+    return (_check_time_word_consistency(jp, zh)
+            or _check_negation_consistency(jp, zh)
+            or _check_number_consistency(jp, zh))
 
 
 def valid_reply_msg(m: dict) -> bool:

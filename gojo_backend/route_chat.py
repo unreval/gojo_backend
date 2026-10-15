@@ -127,6 +127,12 @@ _TRACE_RETRY_REASONS = {
     'tomorrow_noon_rewritten_as_today',
     'past_noon_used_as_future_deadline',
     'active_event_completion_claim_without_intent',
+    'current_clock_phase_conflict',
+    'bilingual_numeric_anchor_mismatch',
+    'temporal_prompt_marker_echo',
+    'time_word_contradiction',
+    'negation_polarity_mismatch',
+    'number_value_mismatch',
 }
 _TRACE_PROVIDERS = {'anthropic'}
 _TRACE_MESSAGE_ROLES = {'user', 'assistant'}
@@ -686,7 +692,9 @@ def _generate_or_none(
                            and isinstance(parsed.get('messages'), list)
                            and 0 < len(parsed['messages']) < min_messages)
             will_retry = ((reason in (
-                'jp_equals_zh_verbal', 'zh_contains_kana', 'invalid_message_field')
+                'jp_equals_zh_verbal', 'zh_contains_kana', 'invalid_message_field',
+                'time_word_contradiction', 'negation_polarity_mismatch',
+                'number_value_mismatch')
                 or short_story) and attempt + 1 < semantic_attempts)
             _emit_generation_trace(
                 model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
@@ -1021,8 +1029,9 @@ def _find_reply_clock_phase_conflict(text, snapshot):
     phase = phase_fn(now).split('(', 1)[0]
     labels = {
         '凌晨': {'early_morning'}, '深夜': {'early_morning', 'late_night'},
-        '夜中': {'early_morning', 'late_night'}, '早上': {'morning'},
-        '朝': {'morning'}, '上午': {'late_morning'}, '中午': {'noon'},
+        '夜中': {'early_morning', 'late_night'}, '早上': {'morning', 'late_morning'},
+        '朝': {'morning', 'late_morning'}, '上午': {'morning', 'late_morning'},
+        '中午': {'noon'},
         '昼': {'noon', 'afternoon'}, '下午': {'afternoon'},
         '午後': {'noon', 'afternoon'}, '晚上': {'evening', 'late_night'},
     }
@@ -1152,6 +1161,24 @@ def _observe_temporal_candidate(parsed, snapshot, context_pack, event_id):
                 'now': now.isoformat() if now else None, 'intervals': intervals,
                 'candidate_prefix': candidate[:40],
             }, ensure_ascii=False, separators=(',', ':')))
+
+
+def _reject_temporal_candidate(parsed, snapshot):
+    """Reject the temporal conflicts recorded by the independent observer."""
+    text = ' '.join(f'{message.get("jp", "")} {message.get("zh", "")}'
+                    for message in (parsed or {}).get('messages') or [])
+    clock_conflict = _find_reply_clock_phase_conflict(text, snapshot)
+    if clock_conflict:
+        return clock_conflict
+    numeric_conflict = _find_bilingual_numeric_conflict(parsed)
+    if numeric_conflict:
+        return numeric_conflict
+    for message in (parsed or {}).get('messages') or []:
+        for language in ('jp', 'zh'):
+            candidate = (message.get(language) or '').lstrip()
+            if candidate.startswith(('【历史消息', '【对话间隔', '【后端当前时间事实')):
+                return 'temporal_prompt_marker_echo'
+    return None
 
 
 # ★ 记账透传辅助：只做基本形状校验,不写库(由前端确认后 POST /accounting/records)
@@ -1505,7 +1532,9 @@ async def chat_text(data: dict):
             now=temporal_snapshot.get('now_local'))
 
     def reject_reply(parsed):
-        return reject_calendar(parsed) or reject_schedule(parsed)
+        return (reject_calendar(parsed)
+                or reject_schedule(parsed)
+                or _reject_temporal_candidate(parsed, temporal_snapshot))
 
     generation_trace = {
         'source_event_id': source_event_id,
