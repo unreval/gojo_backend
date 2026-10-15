@@ -6,6 +6,7 @@ raises its priority.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -19,6 +20,7 @@ AUTO_PIN_TYPES = (
     'explicit_promise',
     'unresolved_question',
     'unresolved_conflict',
+    'communication_agreement',
 )
 
 PIN_PRIORITY = {
@@ -29,6 +31,7 @@ PIN_PRIORITY = {
     'explicit_promise': 84,
     'unresolved_conflict': 83,
     'unresolved_question': 80,
+    'communication_agreement': 85,
 }
 
 # Casual chatter that must never become a working-set pin.
@@ -62,6 +65,15 @@ _PATTERNS = {
     ],
 }
 
+# Keep agreement matching separate from the original seven types' casual filter.
+_COMMUNICATION_AGREEMENT_PATTERNS = tuple(re.compile(pattern) for pattern in (
+    r'(?:^|[。！？!?；;\n，,])\s*以后[^。！？!?；;\n]+就[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
+    r'(?:^|[。！？!?；;\n，,])\s*我们约好[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
+    r'(?:^|[。！？!?；;\n，,])\s*约定(?!(?:俗成|(?:已经|已)?被?(?:取消|作废|撤销|失效)))[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
+    r'(?:^|[。！？!?；;\n，,])\s*(?:我们的)?暗号(?:是|为|[:：])[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
+    r'(?:^|[。！？!?；;\n，,])\s*记住[^。！？!?；;\n]+就是[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
+))
+
 _PUSH_BLOCK = re.compile(r'(不要\s*push|先不要\s*push|先别\s*push|别\s*push|不要提交|不要推)')
 _PUSH_ALLOW = re.compile(r'(现在\s*push|可以\s*push|推上去|现在提交|现在推)')
 
@@ -92,9 +104,14 @@ def is_casual_chatter(text: str) -> bool:
 def detect_auto_pins(text: str) -> List[dict]:
     """Return zero or more pin drafts. Deterministic, no LLM."""
     body = (text or '').strip()
-    if not body or is_casual_chatter(body):
-        return []
     found = []
+    if any(pattern.search(body) for pattern in _COMMUNICATION_AGREEMENT_PATTERNS):
+        found.append({
+            'pin_type': 'communication_agreement',
+            'text': f'用户约定（原话）：「{text}」',
+        })
+    if not body or is_casual_chatter(body):
+        return found
     if _PUSH_ALLOW.search(body):
         found.append({
             'pin_type': 'pending_request',
@@ -126,6 +143,9 @@ def detect_auto_pins(text: str) -> List[dict]:
 
 
 def _pin_id(user_id, character_id, pin_type, topic):
+    if pin_type == 'communication_agreement':
+        key = '\0'.join((str(character_id), str(user_id), pin_type, topic))
+        return f'auto:{pin_type}:' + hashlib.sha256(key.encode('utf-8')).hexdigest()
     return f'auto:{character_id}:{user_id}:{pin_type}:{topic}'[:120]
 
 
@@ -151,6 +171,22 @@ def maybe_auto_pin(
     for draft in drafts:
         pin_type = draft['pin_type']
         topic = draft.get('topic') or pin_type
+        if pin_type == 'communication_agreement':
+            if not ids:
+                continue
+            from raw_events import SourceValidityError, get_active_events_by_ids
+            try:
+                sources = get_active_events_by_ids(user_id, character_id, ids)
+            except SourceValidityError as exc:
+                print(f'[auto_pin] agreement source unavailable:{exc}')
+                continue
+            if ({source['event_id'] for source in sources} != set(ids)
+                    or any(source.get('role') != 'user' for source in sources)
+                    or not any(source.get('content') == text for source in sources)):
+                continue
+            # Each source set owns its pin; replay cannot overwrite another agreement.
+            topic = '\0'.join(sorted({source['event_id'] for source in sources
+                                      if source.get('content') == text}))
         if draft.get('action') == 'allow-push':
             for item in list_pins(user_id, character_id, status='active', limit=20, now=now):
                 meta_type = item.get('pin_type')
