@@ -89,6 +89,7 @@ def init_context_layer_tables():
         cur.execute("ALTER TABLE rolling_summaries ADD COLUMN IF NOT EXISTS superseded_by TEXT")
         cur.execute("ALTER TABLE rolling_summaries ADD COLUMN IF NOT EXISTS rebuild_required BOOLEAN DEFAULT FALSE")
         cur.execute("ALTER TABLE rolling_summaries ADD COLUMN IF NOT EXISTS is_placeholder BOOLEAN DEFAULT TRUE")
+        cur.execute("ALTER TABLE pinned_context ADD COLUMN IF NOT EXISTS persistent BOOLEAN NOT NULL DEFAULT FALSE")
         conn.commit()
     finally:
         cur.close()
@@ -521,7 +522,7 @@ def invalidate_summary(summary_id, *, status='invalidated', superseded_by=None):
 def upsert_pin(
     user_id, character_id, text, *,
     pin_type='decision', source_event_ids=(), priority=80,
-    pin_id=None, status='active', expires_at=None,
+    pin_id=None, status='active', expires_at=None, persistent=False,
 ):
     pid = (pin_id or f'pin:{uuid.uuid4()}')[:120]
     payload = {
@@ -534,6 +535,7 @@ def upsert_pin(
         'priority': int(priority or 50),
         'status': status if status in PIN_STATUSES else 'active',
         'expires_at': expires_at,
+        'persistent': bool(persistent),
         'created_at': datetime.now(timezone.utc),
         'updated_at': datetime.now(timezone.utc),
     }
@@ -547,14 +549,15 @@ def upsert_pin(
     conn = get_conn()
     cur = conn.cursor()
     try:
-        from cognitive_revision import sources_current_for_derivation
-        if not sources_current_for_derivation(cur, user_id, character_id, payload['source_event_ids']):
-            payload['status'] = 'superseded'
+        if not payload['persistent']:
+            from cognitive_revision import sources_current_for_derivation
+            if not sources_current_for_derivation(cur, user_id, character_id, payload['source_event_ids']):
+                payload['status'] = 'superseded'
         cur.execute(
             '''INSERT INTO pinned_context
                (pin_id, user_id, character_id, text, pin_type, source_event_ids,
-                priority, status, expires_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                priority, status, expires_at, persistent)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (pin_id) DO UPDATE SET
                  text = EXCLUDED.text,
                  pin_type = EXCLUDED.pin_type,
@@ -562,10 +565,11 @@ def upsert_pin(
                  priority = EXCLUDED.priority,
                  status = EXCLUDED.status,
                  expires_at = EXCLUDED.expires_at,
+                 persistent = EXCLUDED.persistent,
                  updated_at = CURRENT_TIMESTAMP''',
             (pid, user_id, character_id, payload['text'], payload['pin_type'],
              _dump_ids(payload['source_event_ids']), payload['priority'],
-             payload['status'], expires_at))
+             payload['status'], expires_at, payload['persistent']))
         conn.commit()
         return payload
     finally:
@@ -614,6 +618,7 @@ def _row_pin(row) -> dict:
         'expires_at': row[8],
         'created_at': row[9],
         'updated_at': row[10],
+        'persistent': bool(row[11]) if len(row) > 11 and row[11] is not None else False,
     }
 
 
@@ -644,7 +649,7 @@ def list_pins(user_id, character_id, *, status='active', limit=20, now=None):
     try:
         cur.execute(
             '''SELECT pin_id, user_id, character_id, text, pin_type, source_event_ids,
-                      priority, status, expires_at, created_at, updated_at
+                      priority, status, expires_at, created_at, updated_at, persistent
                FROM pinned_context
                WHERE user_id=%s AND character_id=%s
                  AND (%s IS NULL OR status=%s)
@@ -669,11 +674,14 @@ def _alive_source_ids(source_event_ids, deleted: set) -> Tuple[str, ...]:
 
 
 def _verified_derived(rows, deleted: set, *, require_source=True, user_id=None, character_id=None):
+    # Persistent agreements retain their original provenance after source deletion.
+    persistent_rows = [row for row in rows if row.get('persistent')]
+    transient_rows = [row for row in rows if not row.get('persistent')]
     if user_id and character_id and not _USE_MEMORY_STORE:
         from memory_authority import filter_derived_answer_sources
-        rows = filter_derived_answer_sources(rows, user_id, character_id)
+        transient_rows = filter_derived_answer_sources(transient_rows, user_id, character_id)
     out = []
-    for row in rows:
+    for row in transient_rows:
         ids = _json_ids(row.get('source_event_ids'))
         if require_source and not ids:
             continue
@@ -682,6 +690,10 @@ def _verified_derived(rows, deleted: set, *, require_source=True, user_id=None, 
             continue
         item = dict(row)
         item['source_event_ids'] = alive
+        out.append(item)
+    for row in persistent_rows:
+        item = dict(row)
+        item['source_event_ids'] = _json_ids(row.get('source_event_ids'))
         out.append(item)
     return out
 
@@ -1336,11 +1348,17 @@ def revalidate_pack_blocks(pack, user_id, character_id, query):
     """Rebuild cached expression blocks from current sources at prompt assembly."""
     from memory_authority import filter_derived_answer_sources
     from cognitive_reader import build_cognitive_prompt_context
-    candidates = [{'source_event_ids': item.source_event_ids, 'item': item}
-                  for item in getattr(pack, 'items', ())
-                  if item.item_type in ('pinned', 'rolling_summary', 'episodic_memory')]
+    candidates = []
+    items = []
+    for item in getattr(pack, 'items', ()):
+        if item.item_type not in ('pinned', 'rolling_summary', 'episodic_memory'):
+            continue
+        if item.item_type == 'pinned' and (item.metadata or {}).get('pin', {}).get('persistent'):
+            items.append(item)
+        else:
+            candidates.append({'source_event_ids': item.source_event_ids, 'item': item})
     current = filter_derived_answer_sources(candidates, user_id, character_id) if candidates else []
-    items = [row['item'] for row in current]
+    items.extend(row['item'] for row in current)
     try:
         cognitive = build_cognitive_prompt_context(user_id, character_id, query=query)
     except Exception:
@@ -1362,11 +1380,23 @@ def _view_text(text, observer_id):
 def _format_pinned_block(items: Sequence[ContextItem], observer_id=None) -> str:
     if not items:
         return ''
-    lines = ['【当前重要事项——工作集，不是永久记忆】']
-    for item in items:
-        kind = (item.metadata or {}).get('pin_type') or 'item'
-        lines.append(f'- [{kind}] {_view_text(item.text, observer_id)}')
-    lines.append('这些是当前仍需记住的事项；完成后不要继续当作未决。')
+    persistent_items = [item for item in items
+                        if (item.metadata or {}).get('pin', {}).get('persistent')]
+    transient_items = [item for item in items
+                       if not (item.metadata or {}).get('pin', {}).get('persistent')]
+    lines = []
+    if persistent_items:
+        lines.append('【你和用户之间的约定——长期有效】')
+        for item in persistent_items:
+            kind = (item.metadata or {}).get('pin_type') or 'item'
+            lines.append(f'- [{kind}] {_view_text(item.text, observer_id)}')
+        lines.append('这些是你和用户之间达成的长期约定，必须一直遵守，不要忘记。')
+    if transient_items:
+        lines.append('【当前重要事项——工作集，不是永久记忆】')
+        for item in transient_items:
+            kind = (item.metadata or {}).get('pin_type') or 'item'
+            lines.append(f'- [{kind}] {_view_text(item.text, observer_id)}')
+        lines.append('这些是当前仍需记住的事项；完成后不要继续当作未决。')
     return '\n' + '\n'.join(lines) + '\n'
 
 
