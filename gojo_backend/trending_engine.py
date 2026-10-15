@@ -10,7 +10,7 @@
 import time
 import threading
 from datetime import datetime
-from config import ANTHROPIC_KEY, CN_TZ
+from config import ANTHROPIC_KEY, CN_TZ, MODEL_JP_AUX
 from ai_client import extract_text
 
 _cache: dict = {}
@@ -50,7 +50,7 @@ def _search_trending(city='tokyo'):
 
     try:
         resp = client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model=MODEL_JP_AUX,
             max_tokens=2000,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{'role': 'user', 'content': prompt}],
@@ -99,7 +99,7 @@ def _search_without_tool(city, city_cn, year, month):
 
     try:
         resp = client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model=MODEL_JP_AUX,
             max_tokens=2000,
             messages=[{'role': 'user', 'content': prompt}],
         )

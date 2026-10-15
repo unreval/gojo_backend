@@ -21,7 +21,7 @@ import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID
+from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX, MODEL_MID
 from db import get_conn
 from utils import extract_json, sanitize_jp
 from ai_client import extract_text
@@ -262,7 +262,7 @@ def _schedule_speakers(members, history, user_text, mentioned_id=None):
 
     try:
         resp = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model=MODEL_JP_AUX,
             max_tokens=120,
             messages=[{'role': 'user', 'content': sched_prompt}]
         )
@@ -338,7 +338,7 @@ def _schedule_interaction(candidates, history, all_members):
 
     try:
         resp = claude_client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model=MODEL_JP_AUX,
             max_tokens=80,
             messages=[{'role': 'user', 'content': sched_prompt}]
         )
@@ -529,7 +529,7 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
     for attempt in range(3):
         try:
             resp = claude_client.messages.create(
-                model='claude-sonnet-4-6',
+                model=MODEL_MID,
                 max_tokens=800,
                 system=system_blocks,
                 messages=messages

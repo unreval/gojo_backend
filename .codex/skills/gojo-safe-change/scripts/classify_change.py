@@ -134,6 +134,7 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
     ),
     "memory": (
         "gojo_backend/context_layer.py",
+        "gojo_backend/route_memory.py",
         "memory_",
         "user_memory",
         "smart_recall",
@@ -151,6 +152,10 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
     "generation": (
         "gojo_backend/ai_client.py",
         "gojo_backend/provider_error.py",
+        "gojo_backend/config.py",
+        "gojo_backend/route_group.py",
+        "gojo_backend/route_story.py",
+        "gojo_backend/trending_engine.py",
         "gojo_backend/prompt.py",
         "generation_",
         "route_chat",
