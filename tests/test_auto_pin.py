@@ -4,7 +4,7 @@ import sys
 import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 BACKEND = os.path.join(ROOT, 'gojo_backend')
@@ -14,6 +14,7 @@ if BACKEND not in sys.path:
 import auto_pin  # noqa: E402
 import context_layer  # noqa: E402
 import raw_events  # noqa: E402
+from tests import test_cognitive_deterministic as acceptance  # noqa: E402
 
 
 class AutoPinTests(unittest.TestCase):
@@ -270,7 +271,8 @@ class CommunicationAgreementTests(unittest.TestCase):
                            ('explicit_decision', '睡觉前就按这个方案')):
             self.assertEqual([p['pin_type'] for p in auto_pin.detect_auto_pins(text)], [kind])
 
-    def test_agreement_survives_hot_window_and_source_deletion_removes_it_from_prompt(self):
+    def test_agreement_survives_hot_window_and_source_deletion_keeps_it_in_prompt(self):
+        """Persistent agreements survive source deletion in the long-term section."""
         text = '以后我发🦖就是想你了'
         now = datetime(2026, 10, 15, 5, 0, tzinfo=timezone.utc)
         self._write_agreement(text, now=now)
@@ -281,12 +283,10 @@ class CommunicationAgreementTests(unittest.TestCase):
                 pack = context_layer.assemble_from_events(
                     events, user_id='u', character_id='gojo', include_recall=False,
                     deleted_ids=deleted, now=now + timedelta(days=30))
-                if deleted:
-                    self.assertNotIn(text, pack.pinned_prompt_text)
-                else:
-                    self.assertIn('[communication_agreement]', pack.pinned_prompt_text)
-                    self.assertIn(f'约定（原话）：「{text}」', pack.pinned_prompt_text)
-                    self.assertNotIn('agreement-1', pack.recent_event_ids)
+                self.assertIn('[communication_agreement]', pack.pinned_prompt_text)
+                self.assertIn(f'约定（原话）：「{text}」', pack.pinned_prompt_text)
+                self.assertIn('长期有效', pack.pinned_prompt_text)
+                self.assertNotIn('agreement-1', pack.recent_event_ids)
 
     def test_context_ignores_character_agreements_and_disabled_replay(self):
         now = datetime(2026, 10, 15, 5, 0, tzinfo=timezone.utc)
@@ -303,6 +303,235 @@ class CommunicationAgreementTests(unittest.TestCase):
                     current_event_id='pending-user', now=now, auto_pin_enabled=False)
                 writer.assert_not_called()
             self.assertEqual(context_layer.list_pins('u', 'gojo'), [])
+
+    def test_expanded_verb_patterns_detect_agreements(self):
+        for text in ('以后我发🦖代表想你了', '以后我发🦖表示想你了',
+                     '以后我发🦖意思是想你了', '记住🦖代表想你了',
+                     '记住🦖表示想你', '记住🦖意思是想你了',
+                     '🦖的意思就是想你了', '🦖的意思是想你'):
+            with self.subTest(text=text):
+                pins = auto_pin.detect_auto_pins(text)
+                self.assertTrue(any(p['pin_type'] == 'communication_agreement' for p in pins))
+
+    def test_expanded_verbs_write_persistent_pins(self):
+        for index, text in enumerate(('以后我发🦖代表想你了', '🦖的意思是想你')):
+            with self.subTest(text=text):
+                rows = self._write_agreement(text, event_id=f'expanded-{index}')
+                self.assertEqual(len(rows), 1)
+                self.assertTrue(rows[0].get('persistent'))
+
+    def test_communication_agreement_pins_are_persistent(self):
+        rows = self._write_agreement('以后我发🦖就是想你了')
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].get('persistent'))
+
+    def test_non_agreement_pins_are_not_persistent(self):
+        cases = ('先把 readme 做完', '就按这个方案', '不要 push', '今晚之前做好',
+                 '我回来之后继续', '还没解决', '互相冲突')
+        for index, text in enumerate(cases):
+            with self.subTest(text=text):
+                rows = auto_pin.maybe_auto_pin('u', 'gojo', text, source_event_ids=[f'transient-{index}'])
+                self.assertTrue(rows)
+                self.assertTrue(all(not row.get('persistent') for row in rows))
+
+    def test_persistent_pin_survives_source_deletion_in_verified_derived(self):
+        row = self._write_agreement('以后我发🦖就是想你了')[0]
+        self.assertTrue(row.get('persistent'))
+        pins = context_layer.list_pins('u', 'gojo')
+        verified = context_layer._verified_derived(
+            pins, deleted={'agreement-1'}, user_id='u', character_id='gojo')
+        self.assertEqual([pin['pin_id'] for pin in verified], [row['pin_id']])
+        self.assertEqual(verified[0]['source_event_ids'], ('agreement-1',))
+
+    def test_transient_pin_still_dropped_when_sources_deleted(self):
+        row = context_layer.upsert_pin(
+            'u', 'gojo', 'test transient pin', pin_type='current_task',
+            source_event_ids=('src-1',), persistent=False)
+        self.assertEqual(context_layer._verified_derived(
+            [row], deleted={'src-1'}, user_id='u', character_id='gojo'), [])
+
+    def test_persistent_pins_formatted_in_dedicated_section(self):
+        persistent_item = context_layer.ContextItem(
+            item_id='pin:persistent', item_type='pinned', text='长期约定原话',
+            source_event_ids=('e1',), priority=85,
+            metadata={'pin': {'persistent': True}, 'pin_type': 'communication_agreement'})
+        transient_item = context_layer.ContextItem(
+            item_id='pin:transient', item_type='pinned', text='当前任务原话',
+            source_event_ids=('e2',), priority=88,
+            metadata={'pin': {'persistent': False}, 'pin_type': 'current_task'})
+        block = context_layer._format_pinned_block([persistent_item, transient_item])
+        permanent, working = block.split('【当前重要事项——工作集，不是永久记忆】')
+        self.assertIn('长期有效', permanent)
+        self.assertIn('一直遵守', permanent)
+        self.assertIn(persistent_item.text, permanent)
+        self.assertNotIn(transient_item.text, permanent)
+        self.assertIn(transient_item.text, working)
+        self.assertNotIn(persistent_item.text, working)
+        self.assertNotIn('工作集', context_layer._format_pinned_block([persistent_item]))
+        self.assertNotIn('长期有效', context_layer._format_pinned_block([transient_item]))
+        self.assertEqual(context_layer._format_pinned_block([]), '')
+
+    def test_agreement_matches_with_whitespace_in_source_content(self):
+        text = '以后我发🦖就是想你了'
+        event = {'event_id': 'e-ws', 'role': 'user', 'content': f'  {text}  \n'}
+        with patch.object(raw_events, 'get_active_events_by_ids', return_value=[event]):
+            rows = auto_pin.maybe_auto_pin('u', 'gojo', text, source_event_ids=['e-ws'])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['pin_type'], 'communication_agreement')
+        self.assertEqual(rows[0]['text'], f'用户约定（原话）：「{text}」')
+
+    def test_whitespace_matching_preserves_distinct_source_owned_pin_ids(self):
+        texts = ('以后我发🦖就是想你了', '以后我发🦖就是想抱抱了')
+        sources = [{'event_id': f'padded-{index}', 'role': 'user', 'content': f'  {text}\n'}
+                   for index, text in enumerate(texts)]
+        with patch.object(raw_events, 'get_active_events_by_ids', return_value=sources):
+            first = auto_pin.maybe_auto_pin('u', 'gojo', texts[0], source_event_ids=['padded-0', 'padded-1'])[0]
+            second = auto_pin.maybe_auto_pin('u', 'gojo', texts[1], source_event_ids=['padded-0', 'padded-1'])[0]
+            replay = auto_pin.maybe_auto_pin('u', 'gojo', texts[0], source_event_ids=['padded-1', 'padded-0'])[0]
+        self.assertNotEqual(first['pin_id'], second['pin_id'])
+        self.assertEqual(first['pin_id'], replay['pin_id'])
+        self.assertEqual({row['text'] for row in context_layer.list_pins('u', 'gojo')},
+                         {f'用户约定（原话）：「{text}」' for text in texts})
+
+    def test_persistent_pin_still_respects_resolved_status(self):
+        row = self._write_agreement('以后我发🦖就是想你了')[0]
+        context_layer.resolve_pin(row['pin_id'])
+        self.assertEqual(context_layer.list_pins('u', 'gojo'), [])
+        self.assertEqual(context_layer._pin_items(context_layer.list_pins('u', 'gojo', status=None)), [])
+
+    def test_schema_adds_persistent_default_without_rewriting_existing_pins(self):
+        connection = MagicMock()
+        cursor = connection.cursor.return_value
+        with patch.object(context_layer, 'get_conn', return_value=connection):
+            context_layer.init_context_layer_tables()
+        statements = [' '.join(call.args[0].split()) for call in cursor.execute.call_args_list]
+        self.assertIn('ALTER TABLE pinned_context ADD COLUMN IF NOT EXISTS persistent BOOLEAN NOT NULL DEFAULT FALSE',
+                      statements)
+        self.assertFalse(any(statement.startswith('UPDATE pinned_context') for statement in statements))
+        connection.commit.assert_called_once()
+
+    def test_database_upsert_and_list_round_trip_persistent_flag(self):
+        connection = MagicMock()
+        cursor = connection.cursor.return_value
+        with patch.object(context_layer, '_USE_MEMORY_STORE', False), \
+                patch.object(context_layer, 'get_conn', return_value=connection), \
+                patch('cognitive_revision.sources_current_for_derivation', return_value=False) as validate:
+            row = context_layer.upsert_pin(
+                'u', 'gojo', '长期约定', pin_type='communication_agreement',
+                source_event_ids=('source',), pin_id='persistent-db', persistent=True)
+            validate.assert_not_called()
+            self.assertEqual(row['status'], 'active')
+            sql, params = cursor.execute.call_args.args
+            self.assertIn('persistent', sql)
+            self.assertIn('persistent = EXCLUDED.persistent', sql)
+            self.assertEqual(params[-1], True)
+            cursor.fetchall.return_value = [(
+                row['pin_id'], 'u', 'gojo', row['text'], row['pin_type'], '["source"]',
+                row['priority'], row['status'], None, row['created_at'], row['updated_at'], True)]
+            pins = context_layer.list_pins('u', 'gojo')
+            self.assertIn('updated_at, persistent', ' '.join(cursor.execute.call_args.args[0].split()))
+        self.assertEqual(len(pins), 1)
+        self.assertTrue(pins[0]['persistent'])
+        self.assertEqual(pins[0]['source_event_ids'], ('source',))
+
+    def test_database_transient_write_keeps_provenance_gate(self):
+        connection = MagicMock()
+        for current in (False, True):
+            with self.subTest(current=current), \
+                    patch.object(context_layer, '_USE_MEMORY_STORE', False), \
+                    patch.object(context_layer, 'get_conn', return_value=connection), \
+                    patch('cognitive_revision.sources_current_for_derivation', return_value=current) as validate:
+                row = context_layer.upsert_pin('u', 'gojo', '当前任务', source_event_ids=('source',))
+                validate.assert_called_once_with(connection.cursor.return_value, 'u', 'gojo', ('source',))
+                self.assertFalse(row['persistent'])
+                self.assertEqual(row['status'], 'active' if current else 'superseded')
+
+    def test_legacy_and_null_database_rows_default_to_transient(self):
+        legacy = ('pin', 'u', 'gojo', '旧任务', 'current_task', '["source"]',
+                  80, 'active', None, None, None)
+        for row in (legacy, legacy + (None,), legacy + (False,)):
+            with self.subTest(row=row):
+                self.assertFalse(context_layer._row_pin(row)['persistent'])
+        self.assertTrue(context_layer._row_pin(legacy + (True,))['persistent'])
+
+    def test_database_verification_preserves_transient_provenance_filter(self):
+        persistent = {'pin_id': 'agreement', 'pin_type': 'communication_agreement',
+                      'persistent': True, 'source_event_ids': ('deleted',)}
+        transient = {'pin_id': 'task', 'pin_type': 'current_task',
+                     'persistent': False, 'source_event_ids': ('deleted',)}
+        summary = {'summary_id': 'summary', 'source_event_ids': ('deleted',)}
+        with patch.object(context_layer, '_USE_MEMORY_STORE', False), \
+                patch('memory_authority.filter_derived_answer_sources', return_value=[]) as validate:
+            verified = context_layer._verified_derived(
+                [transient, persistent, summary], deleted={'deleted'}, user_id='u', character_id='gojo')
+        self.assertEqual(verified, [persistent])
+        validate.assert_called_once_with([transient, summary], 'u', 'gojo')
+
+    def test_final_prompt_revalidation_retains_only_persistent_pin_without_sources(self):
+        items = [
+            context_layer.ContextItem(
+                item_id='pin:agreement', item_type='pinned', text='仍然有效的长期约定',
+                source_event_ids=('deleted',),
+                metadata={'pin': {'persistent': True, 'pin_type': 'communication_agreement'},
+                          'pin_type': 'communication_agreement'}),
+            context_layer.ContextItem(
+                item_id='pin:task', item_type='pinned', text='失效任务',
+                source_event_ids=('deleted',), metadata={'pin': {'persistent': False}}),
+            context_layer.ContextItem(item_id='summary', item_type='rolling_summary',
+                                      text='失效摘要', source_event_ids=('deleted',)),
+            context_layer.ContextItem(item_id='episode', item_type='episodic_memory',
+                                      text='失效经历', source_event_ids=('deleted',)),
+        ]
+        pack = context_layer.ChatContextPack(items=items)
+        with patch('memory_authority.filter_derived_answer_sources', return_value=[]) as validate, \
+                patch('cognitive_reader.build_cognitive_prompt_context', return_value=''):
+            blocks = context_layer.revalidate_pack_blocks(pack, 'u', 'gojo', '你好')
+        self.assertIn(items[0].text, blocks['pinned_prompt_text'])
+        self.assertIn('长期有效', blocks['pinned_prompt_text'])
+        self.assertNotIn(items[1].text, blocks['pinned_prompt_text'])
+        self.assertEqual(blocks['summary_prompt_text'], '')
+        self.assertEqual(blocks['episode_prompt_text'], '')
+        candidates, user_id, character_id = validate.call_args.args
+        self.assertEqual((user_id, character_id), ('u', 'gojo'))
+        self.assertEqual([candidate['item'].item_id for candidate in candidates],
+                         ['pin:task', 'summary', 'episode'])
+
+
+@unittest.skipUnless(os.getenv('COGNITIVE_TEST_PGLITE'), 'set COGNITIVE_TEST_PGLITE to the local test-only package')
+class PersistentAgreementDatabaseTests(unittest.TestCase):
+    setUpClass = classmethod(acceptance.OfflineDatabaseTests.setUpClass.__func__)
+    tearDownClass = classmethod(acceptance.OfflineDatabaseTests.tearDownClass.__func__)
+    tearDown = acceptance.OfflineDatabaseTests.tearDown
+    sql = acceptance.OfflineDatabaseTests.sql
+    source = acceptance.OfflineDatabaseTests.source
+
+    def setUp(self):
+        acceptance.OfflineDatabaseTests.setUp(self)
+        context_layer.init_context_layer_tables()
+
+    def test_canonical_agreement_survives_deleted_source_through_final_prompt(self):
+        text = '以后我发🦖代表想你了'
+        self.source('agreement', text)
+        row = auto_pin.maybe_auto_pin('u', 'c', text, source_event_ids=['agreement'])[0]
+        self.assertTrue(row['persistent'])
+        context_layer.upsert_pin('u', 'c', '临时任务', source_event_ids=['agreement'], pin_id='transient')
+        pins = context_layer.list_pins('u', 'c')
+        self.assertEqual({pin['pin_id']: pin['persistent'] for pin in pins},
+                         {row['pin_id']: True, 'transient': False})
+        pack = context_layer.ChatContextPack(items=context_layer._pin_items(pins))
+        self.sql("DELETE FROM chat_log WHERE event_id='agreement'")
+        self.database.commit()
+        verified = context_layer._verified_derived(
+            pins, deleted={'agreement'}, user_id='u', character_id='c')
+        self.assertEqual([pin['pin_id'] for pin in verified], [row['pin_id']])
+        with patch('cognitive_reader.build_cognitive_prompt_context', return_value=''):
+            blocks = context_layer.revalidate_pack_blocks(pack, 'u', 'c', '你好')
+        self.assertIn(text, blocks['pinned_prompt_text'])
+        self.assertIn('长期有效', blocks['pinned_prompt_text'])
+        self.assertNotIn('临时任务', blocks['pinned_prompt_text'])
+        context_layer.resolve_pin(row['pin_id'])
+        self.assertFalse(any(pin['pin_id'] == row['pin_id']
+                             for pin in context_layer.list_pins('u', 'c')))
 
 
 if __name__ == '__main__':

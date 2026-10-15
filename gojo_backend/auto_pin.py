@@ -67,11 +67,12 @@ _PATTERNS = {
 
 # Keep agreement matching separate from the original seven types' casual filter.
 _COMMUNICATION_AGREEMENT_PATTERNS = tuple(re.compile(pattern) for pattern in (
-    r'(?:^|[。！？!?；;\n，,])\s*以后[^。！？!?；;\n]+就[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
+    r'(?:^|[。！？!?；;\n，,])\s*以后[^。！？!?；;\n]+(?:就是?|代表|表示|意思是)[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
     r'(?:^|[。！？!?；;\n，,])\s*我们约好[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
     r'(?:^|[。！？!?；;\n，,])\s*约定(?!(?:俗成|(?:已经|已)?被?(?:取消|作废|撤销|失效)))[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
     r'(?:^|[。！？!?；;\n，,])\s*(?:我们的)?暗号(?:是|为|[:：])[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
-    r'(?:^|[。！？!?；;\n，,])\s*记住[^。！？!?；;\n]+就是[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
+    r'(?:^|[。！？!?；;\n，,])\s*记住[^。！？!?；;\n]+(?:就是|代表|表示|意思是)[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
+    r'(?:^|[。！？!?；;\n，,])\s*[^。！？!?；;\n]{1,20}的意思(?:就是|是)[^。！？!?；;\n]+(?<![吗么])(?=[。！!；;\n]|$)',
 ))
 
 _PUSH_BLOCK = re.compile(r'(不要\s*push|先不要\s*push|先别\s*push|别\s*push|不要提交|不要推)')
@@ -182,11 +183,11 @@ def maybe_auto_pin(
                 continue
             if ({source['event_id'] for source in sources} != set(ids)
                     or any(source.get('role') != 'user' for source in sources)
-                    or not any(source.get('content') == text for source in sources)):
+                    or not any((source.get('content') or '').strip() == (text or '').strip() for source in sources)):
                 continue
             # Each source set owns its pin; replay cannot overwrite another agreement.
             topic = '\0'.join(sorted({source['event_id'] for source in sources
-                                      if source.get('content') == text}))
+                                      if (source.get('content') or '').strip() == (text or '').strip()}))
         if draft.get('action') == 'allow-push':
             for item in list_pins(user_id, character_id, status='active', limit=20, now=now):
                 meta_type = item.get('pin_type')
@@ -226,6 +227,7 @@ def maybe_auto_pin(
             pin_id=pid,
             status='active',
             expires_at=(now + timedelta(days=14)) if pin_type in ('deadline', 'current_task') else None,
+            persistent=(pin_type == 'communication_agreement'),
         )
         written.append(row)
     return written
