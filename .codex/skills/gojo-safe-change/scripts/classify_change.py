@@ -135,6 +135,7 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
     "memory": (
         "gojo_backend/auto_pin.py",
         "gojo_backend/context_budget.py",
+        "gojo_backend/shadow_audit.py",
         "gojo_backend/context_layer.py",
         "gojo_backend/route_memory.py",
         "memory_",

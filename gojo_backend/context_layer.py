@@ -1665,6 +1665,15 @@ def assemble_from_events(
         except Exception as exc:
             print(f'[context_layer] auto pin skipped:{exc}')
 
+    try:
+        from shadow_audit import SHADOW_AUDIT_ENABLED, shadow_log_turn
+        if SHADOW_AUDIT_ENABLED:
+            shadow_log_turn(user_id, character_id, user_message,
+                            source_event_ids=tuple(_event_id_set(current_event_id)),
+                            now=now)
+    except Exception as exc:
+        print(f'[context_layer] shadow audit skipped:{exc}')
+
     deleted = set(deleted_ids or ())
     if deleted:
         try:
