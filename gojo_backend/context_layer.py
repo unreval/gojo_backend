@@ -299,6 +299,10 @@ def select_hot_window(
         cost = estimate_tokens(text)
         age = _event_minutes(now, event.get('timestamp'))
         neighbor = selected[-1] if selected else None
+        if n > 1:
+            gap = _event_minutes(neighbor.get('timestamp'), event.get('timestamp'))
+            if gap > cfg.hot_max_gap_minutes:
+                break
         continuous = (
             is_continuous(neighbor, event, selected_ids, cfg) if neighbor else True
         )

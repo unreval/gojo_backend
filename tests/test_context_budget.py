@@ -153,6 +153,81 @@ class AdaptiveHotContextTests(unittest.TestCase):
         self.assertGreater(len(hot), 40)
         self.assertEqual(hot[0]['metadata']['task_id'], 'recall-v2')
 
+    def test_previous_night_arrival_spills_after_long_gap(self):
+        now = NOW.astimezone(context_layer.CN_TZ).replace(hour=20, minute=0)
+        previous_night = now.replace(hour=23, minute=5) - timedelta(days=1)
+        events = [
+            _event(0, text='到家了', now=now,
+                   minutes_ago=(now - previous_night).total_seconds() / 60),
+            _event(2, text='今晚继续聊', now=now),
+        ]
+
+        hot, spill = context_layer.select_hot_window(events, now=now)
+
+        self.assertEqual(hot, [events[-1]])
+        self.assertEqual(spill, [events[0]])
+
+    def test_same_day_continuous_chat_keeps_entire_window(self):
+        events = [_event(i, minutes_ago=(19 - i) * 20) for i in range(20)]
+
+        hot, spill = context_layer.select_hot_window(events, now=NOW)
+
+        self.assertEqual(hot, events)
+        self.assertEqual(spill, [])
+
+    def test_long_gap_overrides_reply_and_task_continuity(self):
+        for link in ('reply_to', 'task_id'):
+            for recent_count in (1, 8):
+                with self.subTest(link=link, recent_count=recent_count):
+                    task_id = 'same-task' if link == 'task_id' else None
+                    old = _event(0, minutes_ago=600, task_id=task_id)
+                    recent = [
+                        _event(i + 1, minutes_ago=recent_count - 1 - i,
+                               task_id=task_id,
+                               reply_to='e0' if link == 'reply_to' and i == 0 else None)
+                        for i in range(recent_count)
+                    ]
+
+                    hot, spill = context_layer.select_hot_window(
+                        [old] + recent, now=NOW)
+
+                    self.assertEqual(hot, recent)
+                    self.assertEqual(spill, [old])
+
+    def test_max_gap_boundary_uses_selected_neighbor(self):
+        for limit in (360, 45):
+            cfg = context_budget.BudgetConfig(hot_max_gap_minutes=limit)
+            for excess_seconds in (0, 1):
+                with self.subTest(limit=limit, excess_seconds=excess_seconds):
+                    latest = _event(2, minutes_ago=120)
+                    old = _event(
+                        0, minutes_ago=120 + limit + excess_seconds / 60)
+
+                    hot, spill = context_layer.select_hot_window(
+                        [old, latest], config=cfg, now=NOW)
+
+                    self.assertEqual(hot, [latest] if excess_seconds else [old, latest])
+                    self.assertEqual(spill, [old] if excess_seconds else [])
+
+    def test_missing_timestamp_does_not_create_gap(self):
+        for missing_index in (0, 1):
+            with self.subTest(missing_index=missing_index):
+                events = [_event(0, minutes_ago=600), _event(2)]
+                events[missing_index]['timestamp'] = None
+
+                hot, spill = context_layer.select_hot_window(events, now=NOW)
+
+                self.assertEqual(hot, events)
+                self.assertEqual(spill, [])
+
+    def test_latest_event_survives_when_older_than_max_gap(self):
+        latest = _event(0, minutes_ago=24 * 60)
+
+        hot, spill = context_layer.select_hot_window([latest], now=NOW)
+
+        self.assertEqual(hot, [latest])
+        self.assertEqual(spill, [])
+
     def test_topic_shift_moves_old_segment_to_summary(self):
         old = [
             _event(i, text=f'Canonical Raw Event 讨论 {i}', minutes_ago=280 - i,
