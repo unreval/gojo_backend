@@ -3,7 +3,7 @@ import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID
+from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
 from ai_client import extract_text
 from db import get_conn
 from memory_authority import AUTHORITY, authoritative_memory_sql
@@ -191,7 +191,7 @@ async def reclassify_memories(data: dict):
     for mem_id, content in rows:
         try:
             response = claude_client.messages.create(
-                model='claude-haiku-4-5-20251001',
+                model=MODEL_JP_AUX,
                 max_tokens=30,
                 messages=[{
                     'role': 'user',

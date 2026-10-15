@@ -10,6 +10,8 @@ MODEL_MAIN = os.getenv('MODEL_MAIN', 'claude-opus-4-6')
 # MODEL_JP_AUX: 日语辅助任务(流式语音/提醒/scheduler 反应/主动消息)—— Haiku 便宜快
 MODEL_JP_AUX = os.getenv('MODEL_JP_AUX', 'claude-haiku-4-5-20251001')
 
+MODEL_MID = os.getenv('MODEL_MID', 'claude-sonnet-4-6')
+
 # MODEL_CN_AUX: 中文辅助任务(记忆提取/日记生成/纠错)—— DeepSeek 便宜、中文好
 MODEL_CN_AUX = os.getenv('MODEL_CN_AUX', 'deepseek-v4-flash')
 

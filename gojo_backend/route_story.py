@@ -13,7 +13,7 @@ import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID
+from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_MID
 from utils import extract_json, sanitize_jp
 from ai_client import extract_text
 from tts import tts_to_b64
@@ -232,7 +232,7 @@ async def story_generate(data: dict):
     for attempt in range(5):
         try:
             response = claude_client.messages.create(
-                model='claude-sonnet-4-6',
+                model=MODEL_MID,
                 max_tokens=10000,    # ★ 长故事 + 可能夹 thinking，给够输出额度
                 system=system_prompt,
                 messages=messages,
