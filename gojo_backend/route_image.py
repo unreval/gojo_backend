@@ -11,16 +11,15 @@ import base64
 import binascii
 import time
 
-import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from db_chat_media import persist_image, public_media
 from media_storage import MediaStorageError
 
-from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
+from config import EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
 from utils import ingest_model_output, finalize_user_messages, valid_reply_msg, commit_ready_msgs
-from ai_client import extract_text, response_metadata
+from ai_client import extract_text, response_metadata, get_anthropic
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
@@ -33,7 +32,6 @@ from temporal_awareness import get_temporal_snapshot, record_turn
 from characters import get_character
 
 router = APIRouter()
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY, max_retries=0)
 
 
 def _safe_reply_to(data):
@@ -141,7 +139,7 @@ def _analyze_visual_summary(images, display_text, is_video, user_text=''):
     ]
     content.append({'type': 'text', 'text': hint})
     try:
-        response = claude_client.messages.create(
+        response = get_anthropic(max_retries=0).messages.create(
             model=MODEL_MAIN,
             max_tokens=300,
             messages=[{'role': 'user', 'content': content}],
@@ -580,7 +578,7 @@ async def chat_image(data: dict):
             if remaining <= 0:
                 break
             try:
-                response = claude_client.messages.create(
+                response = get_anthropic(max_retries=0).messages.create(
                     model=MODEL_MAIN,
                     max_tokens=max_tokens,
                     system=system_blocks,

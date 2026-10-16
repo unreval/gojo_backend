@@ -17,6 +17,10 @@
 - 'claude-*' → Anthropic
 - 'deepseek-*' → DeepSeek(OpenAI 兼容 API)
 """
+from __future__ import annotations
+
+import os
+import threading
 import requests
 import anthropic
 from config import ANTHROPIC_KEY, DEEPSEEK_KEY, DEEPSEEK_BASE_URL
@@ -30,6 +34,43 @@ def _get_anthropic():
     if _anthropic_client is None:
         _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     return _anthropic_client
+
+
+# ── 统一客户端工厂（R6 收口） ──
+
+_DEFAULT_TIMEOUT = float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '120'))
+
+
+def get_anthropic(*, max_retries: int = 2, timeout: float | None = None) -> anthropic.Anthropic:
+    """统一的同步客户端入口。
+
+    默认重试 2 次，超时由 ANTHROPIC_TIMEOUT_SECONDS 配置（默认 120 秒）。
+    with_options() 仅叠加调用方配置，复用 _get_anthropic() 的连接池。
+    """
+    base = _get_anthropic()
+    effective_timeout = timeout if timeout is not None else _DEFAULT_TIMEOUT
+    return base.with_options(
+        max_retries=max_retries,
+        timeout=effective_timeout,
+    )
+
+
+_async_client: anthropic.AsyncAnthropic | None = None
+_async_lock = threading.Lock()
+
+
+def get_async_anthropic(*, max_retries: int = 2, timeout: float | None = None) -> anthropic.AsyncAnthropic:
+    """统一的异步客户端入口（仅 route_voice_stream 使用）。"""
+    global _async_client
+    if _async_client is None:
+        with _async_lock:
+            if _async_client is None:
+                _async_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_KEY)
+    effective_timeout = timeout if timeout is not None else _DEFAULT_TIMEOUT
+    return _async_client.with_options(
+        max_retries=max_retries,
+        timeout=effective_timeout,
+    )
 
 
 def extract_text(response, sep=''):

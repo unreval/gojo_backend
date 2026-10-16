@@ -85,6 +85,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.tts = Mock(return_value='audio' * 40)
         self.llm_text = ''
         self.stream_calls = []
+        self.client = Mock()
         self.memory = stub(
             'user_memory',
             save_short_memory=self.save_short,
@@ -92,7 +93,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
             get_short_memory=self.get_short,
         )
         modules = {
-            'anthropic': stub('anthropic', Anthropic=Mock(), AsyncAnthropic=Mock()),
+            'ai_client': stub('ai_client', get_async_anthropic=Mock(return_value=self.client)),
             'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
             'fastapi.responses': stub(
                 'fastapi.responses',
@@ -171,7 +172,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
             self.stream_calls.append(kwargs)
             return FakeStream(self.llm_text)
 
-        self.route.async_claude.messages.stream = _stream
+        self.client.messages.stream = _stream
         log_patch = patch('builtins.print')
         self.log = log_patch.start()
         self.addCleanup(log_patch.stop)

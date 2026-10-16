@@ -5,15 +5,12 @@
 """
 import random
 from datetime import datetime, timedelta
-from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
-import anthropic
+from config import CN_TZ, DEFAULT_CHARACTER_ID
 
 from characters import get_character
 from user_memory import get_bond_memories, get_short_memory, get_long_memory, get_first_interaction_days
 from role_view import render_role_view
 import db_diary
-
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 EMOTIONS_FOR_DIARY = ['平静', '温柔', '调皮', '认真', '开心', '疑惑', '悲伤', '自信']
 

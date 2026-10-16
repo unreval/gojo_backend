@@ -5,11 +5,10 @@
 import threading
 import time
 from datetime import datetime
-from config import CN_TZ, ANTHROPIC_KEY, MODEL_MAIN
-import anthropic
+from config import CN_TZ, MODEL_MAIN
 
 from characters import get_character
-from ai_client import extract_text
+from ai_client import extract_text, get_anthropic
 from user_memory import get_bond_memories, get_short_memory, commit_visible_assistant_message
 from character_relations import get_relations_text
 from temporal_awareness import (
@@ -17,8 +16,6 @@ from temporal_awareness import (
 )
 import proactive_msg
 import db_promise
-
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 _thread = None
 _stop = False
@@ -124,7 +121,7 @@ def generate_from_promise(promise, now):
 说 → {{"jp":"日语","zh":"中文","emotion":"平静/自信/调皮/认真/温柔/冷淡"}}
 不说 → {{"skip": true, "reason": "原因"}}'''
 
-        resp = claude_client.messages.create(
+        resp = get_anthropic().messages.create(
             model=MODEL_MAIN,
             max_tokens=400,
             system=_SYSTEM,

@@ -17,14 +17,13 @@
 
 调度与回复都要求模型返回【单行 JSON】——因为 utils.extract_json 会把换行抹掉，多行 JSON 会被破坏。
 """
-import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX, MODEL_MID
+from config import EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX, MODEL_MID
 from db import get_conn
 from utils import extract_json, sanitize_jp
-from ai_client import extract_text
+from ai_client import extract_text, get_anthropic
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
@@ -33,7 +32,6 @@ from user_memory import update_chat_days
 from temporal_awareness import record_assistant_message, record_turn
 
 router = APIRouter()
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 # 一轮群对话里,角色发言总条数上限(用户1句 + 角色最多 7 句你来我往)
 # 8 = 让角色之间能真的"驳回 / 自由聊起来",但有硬上限防止无限互怼烧 API
@@ -261,7 +259,7 @@ def _schedule_speakers(members, history, user_text, mentioned_id=None):
 {{"speakers":["角色id1","角色id2"]}}'''
 
     try:
-        resp = claude_client.messages.create(
+        resp = get_anthropic().messages.create(
             model=MODEL_JP_AUX,
             max_tokens=120,
             messages=[{'role': 'user', 'content': sched_prompt}]
@@ -337,7 +335,7 @@ def _schedule_interaction(candidates, history, all_members):
 {{"speakers":[]}}'''
 
     try:
-        resp = claude_client.messages.create(
+        resp = get_anthropic().messages.create(
             model=MODEL_JP_AUX,
             max_tokens=80,
             messages=[{'role': 'user', 'content': sched_prompt}]
@@ -528,7 +526,7 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
 
     for attempt in range(3):
         try:
-            resp = claude_client.messages.create(
+            resp = get_anthropic().messages.create(
                 model=MODEL_MID,
                 max_tokens=800,
                 system=system_blocks,

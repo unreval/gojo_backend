@@ -10,8 +10,8 @@
 import time
 import threading
 from datetime import datetime
-from config import ANTHROPIC_KEY, CN_TZ, MODEL_JP_AUX
-from ai_client import extract_text
+from config import CN_TZ, MODEL_JP_AUX
+from ai_client import extract_text, get_anthropic
 
 _cache: dict = {}
 _CACHE_TTL = 7 * 24 * 3600
@@ -24,8 +24,7 @@ def _now_month():
 
 
 def _search_trending(city='tokyo'):
-    import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    client = get_anthropic()
 
     year, month = _now_month()
     city_jp = {'tokyo': '東京', 'kyoto': '京都', 'osaka': '大阪',
@@ -78,8 +77,7 @@ def _search_trending(city='tokyo'):
 def _search_without_tool(city, city_cn, year, month):
     """web_search 工具不可用时,直接让 Claude 用训练数据里的知识回答。
     不是实时的,但 Claude 知道很多日本的连锁店和常见的季节限定。"""
-    import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    client = get_anthropic()
 
     month_season = {1:'冬',2:'冬',3:'春',4:'春',5:'春',6:'夏',7:'夏',8:'夏',9:'秋',10:'秋',11:'秋',12:'冬'}
     season = month_season.get(month, '夏')

@@ -300,7 +300,8 @@ class RuntimeCognitionTests(unittest.TestCase):
                     stack.enter_context(patch.object(scheduler, name, return_value=value))
                 load = stack.enter_context(patch('context_layer.load_profile_transcript',
                     return_value=('recent', self.pack(unresolved))))
-                llm = stack.enter_context(patch.object(scheduler.claude_client.messages, 'create'))
+                client = stack.enter_context(patch.object(scheduler, 'get_anthropic'))
+                llm = client.return_value.messages.create
                 stack.enter_context(patch.object(scheduler, 'extract_text', return_value='{}'))
                 scheduler.generate_from_promise(dict(id=1, character_id='gojo', user_id='u',
                     context='明天回答称呼问题', origin_text='是否接受称呼', trigger_kind='time'), pending.NOW)
@@ -316,7 +317,7 @@ class RuntimeCognitionTests(unittest.TestCase):
                 stack.enter_context(patch('character_relations.get_relations_text', return_value=''))
                 load = stack.enter_context(patch('context_layer.load_profile_transcript',
                     return_value=('recent', self.pack(unresolved))))
-                client = stack.enter_context(patch('anthropic.Anthropic'))
+                client = stack.enter_context(patch.object(diary_scheduler, 'get_anthropic'))
                 stack.enter_context(patch('ai_client.extract_text', return_value='{}'))
                 diary_scheduler._generate_comment_reaction('gojo', '日记内容', '答案呢', 1)
                 self.assert_contract(client.return_value.messages.create.call_args.kwargs['messages'][0]['content'], unresolved)

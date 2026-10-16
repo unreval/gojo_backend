@@ -86,6 +86,7 @@ class ImageFailureTests(unittest.TestCase):
         self.state = Mock()
         self.record_turn = Mock()
         self.ai = load_client()
+        self.ai.get_anthropic = Mock(return_value=self.client)
         self.persist_image = Mock(return_value={
             'id': '11111111-1111-1111-1111-111111111111',
             'media_kind': 'image',

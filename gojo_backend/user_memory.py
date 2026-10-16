@@ -32,7 +32,6 @@ get_short_memory(n) 保留兼容读取（优先 ledger，再合并 cache）。
 私聊与群聊都只提交 canonical raw evidence，不调用模型提取事实或关系。
 long/bond 的事实读取要求当前原始来源与确定性裁决；历史生成性记录不自动取得权威。
 """
-import anthropic
 import hashlib
 import json
 import re
@@ -40,7 +39,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from config import ANTHROPIC_KEY, CN_TZ, DEFAULT_CHARACTER_ID
+from config import CN_TZ, DEFAULT_CHARACTER_ID
 from db import get_conn
 from memory_authority import authoritative_memory_sql
 from role_view import PROJECTION_VERSION, render_role_view
@@ -52,8 +51,6 @@ from structured_output import (
 )
 from utils import is_emoji_only
 from character_relations import get_relations_text
-
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 # ────────── 当前对话上下文范围（短期记忆喂给模型的部分）──────────
 SHORT_MEMORY_HOURS = 24   # 把最近这么多小时的对话当"当前上下文"（想要两天就改 48）

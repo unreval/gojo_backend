@@ -6,6 +6,7 @@ authority.
 """
 from datetime import datetime
 from config import CN_TZ, MODEL_CN_AUX
+from ai_client import get_anthropic
 from characters import get_character
 from characters_data._loader import load_core
 from character_rhythm import get_rhythm_text, get_sleep_window
@@ -228,10 +229,9 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
 ]}}'''
 
     try:
-        import anthropic
-        from config import ANTHROPIC_KEY, MODEL_MAIN
+        from config import MODEL_MAIN
         from ai_client import extract_text
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        client = get_anthropic()
 
         full_prompt = system_prompt + '\n\n' + prompt
 

@@ -113,7 +113,8 @@ class ChatCommitGateTests(unittest.TestCase):
                 MODEL_JP_AUX='claude-haiku-test',
             ),
             'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
-            'ai_client': stub('ai_client', extract_text=lambda response, sep='': ''),
+            'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
+                              extract_text=lambda response, sep='': ''),
             'tts': stub('tts', tts_to_b64=self.tts, transcribe_audio_b64=Mock()),
             'prompt': stub(
                 'prompt',
@@ -810,7 +811,8 @@ class VoiceProactiveIdentityTests(unittest.TestCase):
                 MODEL_JP_AUX='claude-haiku-test',
             ),
             'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
-            'ai_client': stub('ai_client', extract_text=lambda response, sep='': ''),
+            'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
+                              extract_text=lambda response, sep='': ''),
             'tts': stub('tts', tts_to_b64=Mock(return_value='audio'), transcribe_audio_b64=Mock()),
             'prompt': stub(
                 'prompt',

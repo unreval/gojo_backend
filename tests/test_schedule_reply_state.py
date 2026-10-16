@@ -994,6 +994,9 @@ class BusyImageVisionTests(unittest.TestCase):
                 extract_json=lambda raw: {'visual_summary': '蓝色马克杯，杯沿有裂纹'}),
             'ai_client': stub(
                 'ai_client', extract_text=lambda r: r,
+                get_anthropic=Mock(return_value=Mock(messages=Mock(create=Mock(
+                    return_value='{"visual_summary":"蓝色马克杯，杯沿有裂纹"}'
+                )))),
                 response_metadata=Mock()),
             'tts': stub('tts', tts_to_b64=Mock(return_value='')),
             'prompt': stub(

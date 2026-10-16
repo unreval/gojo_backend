@@ -1,10 +1,9 @@
 """用户记忆相关路由（★ 记忆列表 / 重分类均包含 shared 共享桶）"""
-import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
-from ai_client import extract_text
+from config import DEFAULT_CHARACTER_ID, MODEL_JP_AUX
+from ai_client import extract_text, get_anthropic
 from db import get_conn
 from memory_authority import AUTHORITY, authoritative_memory_sql
 from role_view import PROJECTION_VERSION, render_role_view
@@ -16,7 +15,6 @@ from user_memory import (
 )
 
 router = APIRouter()
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 
 @router.get('/memories')
@@ -190,7 +188,7 @@ async def reclassify_memories(data: dict):
 
     for mem_id, content in rows:
         try:
-            response = claude_client.messages.create(
+            response = get_anthropic().messages.create(
                 model=MODEL_JP_AUX,
                 max_tokens=30,
                 messages=[{
