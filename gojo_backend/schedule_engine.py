@@ -330,6 +330,7 @@ def _sanitize(raw_items, character_id=None, poi_candidates=None,
             return False
 
     want_start = sleep_start
+    sched_date = target_date or _now().date()
 
     def _general_area(raw):
         value = (raw or '').strip()
@@ -361,6 +362,21 @@ def _sanitize(raw_items, character_id=None, poi_candidates=None,
         it['end_time'] = et
         it['title'] = title
         place = _resolved_place(it)
+        # A1: filter POIs that are definitely closed at this time slot
+        if place:
+            try:
+                from opening_hours import is_definitely_closed
+                spec = place.get('opening_spec')
+                if spec:
+                    st_parts = it['start_time'].split(':')
+                    time_min = int(st_parts[0]) * 60 + int(st_parts[1])
+                    if is_definitely_closed(spec, sched_date.weekday(), time_min):
+                        poi_name = place.get('canonical_name') or place.get('name', '?')
+                        print(f'[schedule] A1: POI definitely closed, falling back: '
+                              f'{poi_name} at {it["start_time"]} on {sched_date}')
+                        place = None
+            except Exception:
+                pass  # parsing failure → don't filter
         if place:
             # A concrete display location can only come from this resolver.
             it['planned_place'] = place
@@ -409,7 +425,6 @@ def _sanitize(raw_items, character_id=None, poi_candidates=None,
     # item when a later one overlaps it instead of creating two active events.
     from schedule_contract import timeline_is_valid
     timeline = []
-    sched_date = target_date or _now().date()
     for item in ok:
         if timeline_is_valid(timeline + [item], sched_date, CN_TZ):
             timeline.append(item)
