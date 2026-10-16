@@ -234,20 +234,12 @@ def resolve_schedule_poi(reference, candidates):
     return None
 
 
-def search_places(city='tokyo', category='cafe', limit=30):
-    """Nominatim 搜索。支持所有品类。"""
-    cache_key = f'{city}_{category}'
-    now = time.time()
-    if cache_key in _cache:
-        ct, cd = _cache[cache_key]
-        if now - ct < _CACHE_TTL:
-            return random.sample(cd, min(limit, len(cd)))
-
+def _nominatim_search(city, category):
+    """A2: Extract Nominatim HTTP call for reuse by search_places and prefetch."""
     city_info = CITIES.get(city, CITIES['tokyo'])
-    cat_info = CATEGORIES.get(category, CATEGORIES.get('cafe'))
+    cat_info = CATEGORIES.get(category)
     if not cat_info:
         return []
-
     try:
         resp = requests.get(
             'https://nominatim.openstreetmap.org/search',
@@ -269,16 +261,90 @@ def search_places(city='tokyo', category='cafe', limit=30):
     except Exception as e:
         print(f'[places] Nominatim 请求失败: {e}')
         return []
-
     results = []
     for item in data:
         verified = validate_nominatim_result(item, category, city)
         if verified:
             results.append(verified)
+    return results
 
+
+def _db_poi_to_candidate(row, city='tokyo'):
+    """A2: Convert a DB cache row into a full POI candidate dict."""
+    cat = row.get('verified_category', '')
+    cat_info = CATEGORIES.get(cat, {})
+    raw_type = row.get('provider_raw_type') or {}
+    result = {
+        # Canonical resolver fields
+        'provider': row['provider'],
+        'provider_place_id': row['provider_place_id'],
+        'canonical_name': row['canonical_name'],
+        'canonical_address': row['canonical_address'],
+        'lat': row['lat'],
+        'lng': row['lng'],
+        'verified_category': cat,
+        'provider_raw_type': raw_type,
+        'fetched_at': row.get('fetched_at', ''),
+        # Compatibility aliases (schedule_engine uses these)
+        'name': row['canonical_name'],
+        'address': row['canonical_address'],
+        'category': cat,
+        'category_label': cat_info.get('label_cn', cat),
+        'city': city,
+        'osm_id': (raw_type.get('osm_id') if isinstance(raw_type, dict) else None),
+    }
+    # A1 compatibility: re-derive opening_spec from stored tags if module exists
+    try:
+        from opening_hours import parse_opening_hours
+        tags = raw_type.get('tags') or {} if isinstance(raw_type, dict) else {}
+        oh_str = tags.get('opening_hours', '')
+        if oh_str:
+            result['opening_spec'] = parse_opening_hours(oh_str)
+    except ImportError:
+        pass  # A1 not deployed yet — no opening_spec field
+    return result
+
+
+def search_places(city='tokyo', category='cafe', limit=30):
+    """A2: DB 缓存优先 → 冷启动才打 Nominatim。"""
+    cache_key = f'{city}_{category}'
+    now = time.time()
+
+    # 1. In-memory cache (fastest, same process)
+    if cache_key in _cache:
+        ct, cd = _cache[cache_key]
+        if now - ct < _CACHE_TTL:
+            return random.sample(cd, min(limit, len(cd)))
+
+    # 2. DB cache (survives restart)
+    city_info = CITIES.get(city, CITIES['tokyo'])
+    try:
+        from db_schedule import get_cached_pois
+        db_rows = get_cached_pois(
+            city_info['lat'] - 0.1, city_info['lat'] + 0.1,
+            city_info['lng'] - 0.15, city_info['lng'] + 0.15,
+            category, limit=50,
+        )
+        if db_rows:
+            db_candidates = [_db_poi_to_candidate(r, city) for r in db_rows]
+            _cache[cache_key] = (now, db_candidates)
+            print(f'[places] DB 缓存命中 {city}/{category}: {len(db_candidates)} 个地点')
+            return random.sample(db_candidates, min(limit, len(db_candidates)))
+    except Exception as e:
+        print(f'[places] DB 缓存查询失败: {e}')
+
+    # 3. Nominatim fallback (cold start only)
+    results = _nominatim_search(city, category)
     if results:
         _cache[cache_key] = (now, results)
-        print(f'[places] ✅ {city}/{category}: 搜到 {len(results)} 个地点')
+        # Write to DB cache for next time
+        try:
+            from db_schedule import bulk_cache_pois
+            bulk_cache_pois(results)
+            print(f'[places] ✅ {city}/{category}: Nominatim → {len(results)} 个地点 (已存 DB)')
+        except Exception as e:
+            print(f'[places] DB 缓存写入失败: {e}')
+            print(f'[places] ✅ {city}/{category}: Nominatim → {len(results)} 个地点')
     return random.sample(results, min(limit, len(results))) if results else []
 
 
@@ -289,29 +355,48 @@ def get_random_place(city='tokyo', category=None):
     return random.choice(places) if places else None
 
 
-def get_schedule_places(city='tokyo', count=5):
-    """给 schedule_engine 用:食 3 + 非食 2 左右的混搭。
+def prefetch_pois(city='tokyo'):
+    """A2: 预取 2 个随机品类到 DB 缓存。由 diary_scheduler 调用,始终打 Nominatim。"""
+    cats = random.sample(list(CATEGORIES.keys()), min(2, len(CATEGORIES)))
+    total = 0
+    for cat in cats:
+        results = _nominatim_search(city, cat)
+        if results:
+            try:
+                from db_schedule import bulk_cache_pois
+                bulk_cache_pois(results)
+                total += len(results)
+                print(f'[places] 预取 {city}/{cat}: {len(results)} 个地点')
+            except Exception as e:
+                print(f'[places] 预取写入 DB 失败 {city}/{cat}: {e}')
+        # Respect Nominatim rate limit (1 req/sec policy)
+        time.sleep(1.5)
+    print(f'[places] 预取完成 {city}: 共 {total} 个地点, {len(cats)} 个品类')
+    return total
+
+
+def get_schedule_places(city='tokyo', count=15):
+    """A2: 增大候选池到 15。食 8 + 非食 7 左右的混搭。
 
     ★ v4:不再只搜吃的。一天的日程应该有吃有逛有打卡。
+    ★ A2:候选从 5 增到 15,让模型有更多选择余地。
     """
-    # 食物类:搜 3 个
-    food_cats = random.sample(list(FOOD_CATEGORIES.keys()), min(3, len(FOOD_CATEGORIES)))
+    # 食物类:搜 5 个品类,每品类取 2 个,上限 8
+    food_cats = random.sample(list(FOOD_CATEGORIES.keys()), min(5, len(FOOD_CATEGORIES)))
     food_places = []
     for cat in food_cats:
-        p = get_random_place(city, cat)
-        if p:
-            food_places.append(p)
-        if len(food_places) >= 3:
+        places = search_places(city, cat, limit=3)
+        food_places.extend(places[:2])
+        if len(food_places) >= 8:
             break
 
-    # 非食类:搜 2 个
-    act_cats = random.sample(list(ACTIVITY_CATEGORIES.keys()), min(3, len(ACTIVITY_CATEGORIES)))
+    # 非食类:搜 4 个品类,每品类取 2 个,上限 7
+    act_cats = random.sample(list(ACTIVITY_CATEGORIES.keys()), min(4, len(ACTIVITY_CATEGORIES)))
     act_places = []
     for cat in act_cats:
-        p = get_random_place(city, cat)
-        if p:
-            act_places.append(p)
-        if len(act_places) >= 2:
+        places = search_places(city, cat, limit=3)
+        act_places.extend(places[:2])
+        if len(act_places) >= 7:
             break
 
     # Do not inject a fixed seasonal venue every year. It anchored generation

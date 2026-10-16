@@ -1541,6 +1541,54 @@ _PHASE_COLUMNS = '''id, schedule_id, ordinal, title, phase_kind,
                     status, reply_state, planned_place, provenance, revision'''
 
 
+def get_cached_pois(lat_min, lat_max, lng_min, lng_max, category, limit=50):
+    """A2: Read POI candidates from DB cache by category + bounding box."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute('''SELECT provider, provider_place_id, canonical_name,
+                              canonical_address, lat, lng, verified_category,
+                              provider_raw_type, fetched_at
+                       FROM char_schedule_poi_cache
+                       WHERE verified_category = %s
+                         AND lat BETWEEN %s AND %s
+                         AND lng BETWEEN %s AND %s
+                       ORDER BY RANDOM()
+                       LIMIT %s''',
+                    (category, lat_min, lat_max, lng_min, lng_max, limit))
+        rows = cur.fetchall()
+        return [
+            {
+                'provider': r[0],
+                'provider_place_id': r[1],
+                'canonical_name': r[2],
+                'canonical_address': r[3],
+                'lat': r[4],
+                'lng': r[5],
+                'verified_category': r[6],
+                'provider_raw_type': _json_object(r[7]),
+                'fetched_at': _iso(r[8]),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def bulk_cache_pois(pois):
+    """A2: Write multiple POIs to DB cache in one transaction."""
+    if not pois:
+        return
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for poi in pois:
+            _cache_poi_tx(cur, poi)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _cache_poi_tx(cur, place):
     if not place:
         return
