@@ -141,3 +141,56 @@ def count_visited(user_id, character_id=None):
     cur.close()
     conn.close()
     return int(n or 0)
+
+
+# ── A4: 到访权重 ──
+_NEGATIVE_KEYWORDS = frozenset([
+    '不好', '难吃', '不推荐', '差劲', '踩雷', '不来了', '不想再来',
+    '失望', '糟糕', '不行', '很差', '太差', '难喝', '不好吃',
+    '不新鲜', '服务差', '不干净', '坑', '避雷', '再也不去',
+])
+NEGATIVE_SUPPRESS_DAYS = 56  # 8 weeks
+
+
+def _is_negative_review(review_text):
+    """确定性关键词匹配,不调 LLM。"""
+    if not review_text:
+        return False
+    text = review_text.strip()
+    return any(kw in text for kw in _NEGATIVE_KEYWORDS)
+
+
+def get_visit_weight_map(character_id, user_id, city=None):
+    """Return latest-visit weights keyed by 'provider:provider_place_id'.
+
+    Non-negative visits get 2.5; negative visits within 56 days get 0.05.
+    Older negative visits return to 1.0, also the caller's unvisited default.
+    """
+    from datetime import date, timedelta
+    visits = list_visited(user_id, character_id=character_id, city=city, limit=500)
+    if not visits:
+        return {}
+    cutoff = date.today() - timedelta(days=NEGATIVE_SUPPRESS_DAYS)
+    weight_map = {}
+    for visit in visits:
+        provider = visit.get('provider') or ''
+        pid = visit.get('provider_place_id') or ''
+        if not provider or not pid:
+            continue
+        poi_key = f'{provider}:{pid}'
+        # list_visited orders newest first, including created_at for same-day visits.
+        if poi_key in weight_map:
+            continue
+        if _is_negative_review(visit.get('char_review', '')):
+            visit_date_str = visit.get('visit_date')
+            weight = 0.05  # Missing or invalid dates conservatively stay suppressed.
+            if visit_date_str:
+                try:
+                    if date.fromisoformat(visit_date_str[:10]) < cutoff:
+                        weight = 1.0
+                except (ValueError, TypeError):
+                    pass
+            weight_map[poi_key] = weight
+        else:
+            weight_map[poi_key] = 2.5
+    return weight_map
