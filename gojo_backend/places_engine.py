@@ -180,6 +180,17 @@ def validate_nominatim_result(item, requested_category, city='tokyo'):
         'osm_id': item.get('osm_id'),
         'tags': _raw_tags(item),
     }
+    # A1: parse opening_hours from OSM extratags
+    opening_spec = None
+    try:
+        from opening_hours import parse_opening_hours
+        tags = _raw_tags(item)
+        oh_raw = tags.get('opening_hours')
+        if oh_raw:
+            opening_spec = parse_opening_hours(oh_raw)
+    except Exception:
+        opening_spec = None
+
     return {
         # Canonical resolver fields.
         'provider': 'nominatim',
@@ -191,6 +202,7 @@ def validate_nominatim_result(item, requested_category, city='tokyo'):
         'verified_category': requested_category,
         'provider_raw_type': raw_type,
         'fetched_at': datetime.now(timezone.utc).isoformat(),
+        'opening_spec': opening_spec,
         # Compatibility/display aliases. They are derived only from the
         # verified fields above, never from a model-generated location string.
         'name': name,
