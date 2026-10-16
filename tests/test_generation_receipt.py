@@ -712,7 +712,8 @@ class RouteIdempotencyTests(unittest.TestCase):
                 MODEL_JP_AUX='claude-haiku-test',
             ),
             'db': stub('db', get_conn=lambda: FakeConn(self.store)),
-            'ai_client': stub('ai_client', extract_text=lambda response, sep='': ''),
+            'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
+                              extract_text=lambda response, sep='': ''),
             'tts': stub('tts', tts_to_b64=self.tts, transcribe_audio_b64=Mock()),
             'prompt': stub(
                 'prompt',
@@ -950,7 +951,7 @@ class RouteIdempotencyTests(unittest.TestCase):
     def test_salvaged_body_replay_has_one_receipt_turn_link_and_effect_application(self):
         raw = '今はゆっくり話そう'
         with patch.object(self.route, '_emit_generation_turn_link') as link, \
-                patch.object(self.route.claude_client.messages, 'create',
+                patch.object(self.route, '_provider_create',
                              side_effect=AssertionError('translation must be local')):
             first, body1 = self.send([raw], 'salvage-once')
             self.assertEqual(self.tts.call_count, 1)
@@ -1533,6 +1534,7 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
             'db': stub('db', get_conn=lambda: FakeConn(self.store)),
             'ai_client': stub(
                 'ai_client',
+                get_anthropic=Mock(return_value=self.client),
                 extract_text=lambda response, sep='': response.content[0].text,
                 response_metadata=lambda response: {
                     'stop_reason': getattr(response, 'stop_reason', 'end_turn'),

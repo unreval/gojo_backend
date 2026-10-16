@@ -29,11 +29,10 @@ import json
 import re
 import unicodedata
 import uuid
-import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
+from config import EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
 from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
     finalize_user_messages, classify_reply_content,
@@ -42,7 +41,7 @@ from utils import (
 from generation_contract import (
     GENERATION_ENVELOPE_SCHEMA, degraded_reply, rejection_reason,
 )
-from ai_client import extract_text
+from ai_client import extract_text, get_anthropic
 from provider_error import diagnostics as provider_diagnostics
 from provider_error import is_auth_error, retry_delay_seconds
 from context_budget import estimate_tokens
@@ -60,7 +59,6 @@ from temporal_awareness import (
 from characters import get_character
 
 router = APIRouter()
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY, max_retries=1)
 _schema_unavailable_models = set()
 _provider_call_counter = ContextVar('provider_call_counter', default=None)
 
@@ -69,7 +67,7 @@ def _provider_create(**kwargs):
     counter = _provider_call_counter.get()
     if counter is not None:
         counter[0] += 1
-    return claude_client.messages.create(**kwargs)
+    return get_anthropic(max_retries=1).messages.create(**kwargs)
 
 
 def _create_json(model, max_tokens, system_blocks, messages):
@@ -194,7 +192,7 @@ def _trace_error_type(error):
 
 def _provider_base_url():
     try:
-        return claude_client.base_url
+        return get_anthropic(max_retries=1).base_url
     except Exception:
         return None
 

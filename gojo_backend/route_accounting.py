@@ -2,11 +2,10 @@
 insights 用五条悟的人设,但显式跳过用户长短期记忆表,只喂财务摘要。
 """
 import json
-import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
+from config import DEFAULT_CHARACTER_ID, MODEL_JP_AUX
 from accounting import (
     list_accounts, create_account, update_account, delete_account,
     list_records, create_record, delete_record, create_transfer,
@@ -15,10 +14,9 @@ from accounting import (
 from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock
 from utils import extract_json
-from ai_client import extract_text
+from ai_client import extract_text, get_anthropic
 
 router = APIRouter()
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 
 # ══════════════════════════════════════════════
@@ -205,7 +203,7 @@ async def get_insights(user_id: str = 'default',
     text_jp, text_zh = '', ''
     for attempt in range(3):
         try:
-            response = claude_client.messages.create(
+            response = get_anthropic().messages.create(
                 model=MODEL_JP_AUX,
                 max_tokens=300,
                 system=system_prompt,

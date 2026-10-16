@@ -22,11 +22,11 @@
 import asyncio
 import json
 import re
-import anthropic
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
+from config import EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
+from ai_client import get_async_anthropic
 from tts import tts_to_b64
 from prompt import build_system_blocks
 from user_memory import save_short_memory, save_user_short_memory_once, get_short_memory
@@ -35,10 +35,6 @@ from temporal_awareness import get_temporal_snapshot, record_turn
 from utils import has_visible_text, valid_reply_pair
 
 router = APIRouter()
-
-# ★ 用 AsyncAnthropic 才能在 async generator 里流式迭代
-async_claude = anthropic.AsyncAnthropic(api_key=ANTHROPIC_KEY)
-
 
 # 让 LLM 用行标记格式输出,方便流式解析。绝不用 JSON——
 # JSON 只有全部生成完才可解析,和流式冲突。
@@ -270,7 +266,7 @@ async def chat_voice_stream(data: dict):
             return out
 
         try:
-            async with async_claude.messages.stream(
+            async with get_async_anthropic().messages.stream(
                 model=MODEL_JP_AUX,
                 max_tokens=500,
                 system=system_blocks,

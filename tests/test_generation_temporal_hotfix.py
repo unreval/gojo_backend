@@ -1,6 +1,6 @@
 """Narrow generation contract and transient-context regressions; no live models."""
 from datetime import datetime, timedelta, timezone
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import json
 import types
 import unittest
@@ -15,12 +15,20 @@ import context_budget
 import prompt
 
 
+@contextmanager
+def mock_provider_create(**kwargs):
+    provider = Mock(**kwargs)
+    client = types.SimpleNamespace(messages=types.SimpleNamespace(create=provider))
+    with patch.object(route_chat, 'get_anthropic', return_value=client):
+        yield provider
+
+
 class PlaintextContractTests(unittest.TestCase):
     def generate(self, raw, *, stop_reason='end_turn', **kwargs):
         response = types.SimpleNamespace(
             content=[types.SimpleNamespace(type='text', text=raw)],
             stop_reason=stop_reason, usage=None)
-        with patch.object(route_chat.claude_client.messages, 'create', return_value=response) as provider, \
+        with mock_provider_create(return_value=response) as provider, \
                 patch('builtins.print') as logged:
             result, state = route_chat._generate_or_none(
                 'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',
@@ -158,7 +166,7 @@ class GenerationEnvelopeTransportTests(unittest.TestCase):
     def test_request_uses_the_shared_json_schema(self):
         model = 'claude-structured-contract-test'
         route_chat._schema_unavailable_models.discard(model)
-        with patch.object(route_chat.claude_client.messages, 'create',
+        with mock_provider_create(
                           return_value=self.response()) as provider:
             raw, _ = route_chat._create_json(model, 100, [], [])
         self.assertIn('そうだね', raw)
@@ -172,7 +180,7 @@ class GenerationEnvelopeTransportTests(unittest.TestCase):
         model = 'claude-unsupported-schema-test'
         route_chat._schema_unavailable_models.discard(model)
         try:
-            with patch.object(route_chat.claude_client.messages, 'create',
+            with mock_provider_create(
                               side_effect=[TypeError('unexpected keyword argument output_config'),
                                            self.response(), self.response()]) as provider, \
                     patch('builtins.print'):
@@ -189,7 +197,7 @@ class GenerationEnvelopeTransportTests(unittest.TestCase):
         model = 'claude-schema-fallback-count-test'
         route_chat._schema_unavailable_models.discard(model)
         try:
-            with patch.object(route_chat.claude_client.messages, 'create', side_effect=[
+            with mock_provider_create(side_effect=[
                     TypeError('unexpected keyword argument output_config'),
                     self.response()]) as provider, patch('builtins.print') as logged:
                 result, _ = route_chat._generate_or_none(
@@ -214,7 +222,7 @@ class GenerationEnvelopeTransportTests(unittest.TestCase):
 
         model = 'claude-rate-limited-test'
         route_chat._schema_unavailable_models.discard(model)
-        with patch.object(route_chat.claude_client.messages, 'create',
+        with mock_provider_create(
                           side_effect=RateLimited('429')) as provider, \
                 patch('builtins.print'):
             result, state = route_chat._generate_or_none(

@@ -8,15 +8,13 @@ import time
 import random
 from datetime import datetime, timedelta
 
-from config import CN_TZ, ANTHROPIC_KEY, MODEL_MAIN
-import anthropic
+from config import CN_TZ, MODEL_MAIN
+from ai_client import get_anthropic
 import db_schedule
 import proactive_msg
 from temporal_awareness import (
     build_prompt_context, get_temporal_snapshot, record_assistant_message,
 )
-
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 TARGET_USER = 'user_mofpiyd7442ia7'
 
@@ -176,7 +174,7 @@ def _generate_share(character_id, user_id, activity):
 不发 → {{"skip": true, "reason": "原因"}}'''
 
     try:
-        resp = claude_client.messages.create(
+        resp = get_anthropic().messages.create(
             model=MODEL_MAIN,
             max_tokens=500,
             system=_SYSTEM,

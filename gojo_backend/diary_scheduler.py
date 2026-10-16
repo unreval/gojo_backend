@@ -17,6 +17,7 @@ import time
 import random
 from datetime import datetime
 from config import CN_TZ, MODEL_JP_AUX
+from ai_client import get_anthropic
 
 import db_diary
 import diary_engine
@@ -133,8 +134,6 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
 
     revisit_count: 第几次追加反应(0=首次,1=第一次追加,...)
     """
-    import anthropic
-    from config import ANTHROPIC_KEY
     from ai_client import extract_text
     from characters import get_character
     from user_memory import get_short_memory, get_bond_memories, save_bond_memory
@@ -227,7 +226,7 @@ def _generate_comment_reaction(character_id, diary_content, comment_content, com
 如果反应完还是气不过 → 上面 jp/zh/emotion 照给,同时 still_bothering=true, revisit_after_hours=数字, revisit_context="..."'''
 
     try:
-        claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        claude_client = get_anthropic()
         resp = claude_client.messages.create(
             model=MODEL_JP_AUX,
             max_tokens=400,

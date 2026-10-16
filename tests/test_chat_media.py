@@ -385,8 +385,9 @@ class ChatImagePersistRouteTests(unittest.TestCase):
         self.store = ChatMediaStore()
         self.put = Mock()
         self.llm = Mock(side_effect=RuntimeError('llm down'))
-        route_image.claude_client = types.SimpleNamespace(messages=types.SimpleNamespace(create=self.llm))
         self.patchers = [
+            patch.object(route_image, 'get_anthropic', return_value=types.SimpleNamespace(
+                messages=types.SimpleNamespace(create=self.llm))),
             patch.object(db_chat_media, 'get_conn', side_effect=lambda: FakeConn(self.store)),
             patch.object(route_image, 'persist_image', wraps=db_chat_media.persist_image),
             patch.object(media_storage, 'is_configured', return_value=True),
@@ -592,7 +593,7 @@ class ChatMediaBackfillTests(unittest.TestCase):
             patch.object(media_storage, 'is_configured', return_value=True),
             patch.object(media_storage, 'put_bytes', self.put),
             patch.object(media_storage, 'signed_get_url', return_value='https://r2.example/backfill'),
-            patch.object(route_image, 'claude_client', Mock()),
+            patch.object(route_image, 'get_anthropic', Mock()),
             patch('builtins.print'),
         ]
         for item in self.patchers:
@@ -625,7 +626,7 @@ class ChatMediaBackfillTests(unittest.TestCase):
         self.assertEqual(first['media']['id'], second['media']['id'])
         self.assertEqual(len(self.store.rows), 1)
         self.assertEqual(self.put.call_count, 1)
-        route_image.claude_client.messages.create.assert_not_called()
+        route_image.get_anthropic.return_value.messages.create.assert_not_called()
 
 
 class MediaStorageConfigTests(unittest.TestCase):

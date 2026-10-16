@@ -324,7 +324,8 @@ class NonverbalDeliveryTests(unittest.TestCase):
             stack.enter_context(patch.object(scheduler.db_promise, 'mark_fired'))
             stack.enter_context(patch.object(tts, 'tts_to_b64', REAL_TTS))
             provider = stack.enter_context(patch.object(tts, 'fish_tts'))
-            generate = stack.enter_context(patch.object(scheduler.claude_client.messages, 'create'))
+            client = stack.enter_context(patch.object(scheduler, 'get_anthropic'))
+            generate = client.return_value.messages.create
             stack.enter_context(patch.object(scheduler, 'extract_text', return_value=json.dumps(
                 {'jp': '🥺...', 'zh': '🥺...', 'emotion': '平静'})))
             result = scheduler.generate_from_promise(dict(id=1, character_id='c', user_id='u',

@@ -37,7 +37,7 @@ class ReceiptWindowTests(unittest.TestCase):
                 route_chat, 'log_cache_usage'), patch.object(
                 route_chat, '_create_json', return_value=(json.dumps({
                     'messages': [{'jp': reply, 'zh': translation}]}), Mock())) as generate, patch.object(
-                route_chat.claude_client.messages, 'create', side_effect=AssertionError('extra model call')), patch.object(
+                route_chat, '_provider_create', side_effect=AssertionError('extra model call')), patch.object(
                 route_chat, '_commit_offline_state'), patch.object(
                 route_chat, '_reject_schedule_candidate', return_value=None), patch.object(
                 route_chat, '_commit_schedule_candidate', return_value={'ok': True, 'noop': True}), patch.object(

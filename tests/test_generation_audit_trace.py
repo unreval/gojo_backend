@@ -42,7 +42,7 @@ class GenerationAuditTraceTests(unittest.TestCase):
                 ('{"messages":[{"jp":"🥺...","zh":"🥺..."}]}', 'structured')):
             with self.subTest(mode=mode), patch.object(
                     route_chat, '_create_json', return_value=(raw, self.response)) as generate, patch.object(
-                    route_chat.claude_client.messages, 'create', side_effect=AssertionError('extra model call')) as translate, patch.object(
+                    route_chat, '_provider_create', side_effect=AssertionError('extra model call')) as translate, patch.object(
                     route_chat, 'log_cache_usage'), patch('builtins.print') as logged:
                 result, state = route_chat._generate_or_none(
                     'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',

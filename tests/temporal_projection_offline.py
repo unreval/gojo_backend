@@ -38,11 +38,13 @@ def response(content, status_code=200):
 @contextmanager
 def offline_environment():
     # These are dependency adapters, never connections to a database or vendor.
-    fake_client = SimpleNamespace(messages=SimpleNamespace(create=denied))
+    fake_client = SimpleNamespace(messages=SimpleNamespace(create=denied, stream=denied))
+    fake_client.with_options = lambda **_kwargs: fake_client
     dependencies = {
         'db': module('db', get_conn=denied),
         'psycopg2': module('psycopg2', connect=denied, _connect=denied),
-        'anthropic': module('anthropic', Anthropic=lambda **_kwargs: fake_client),
+        'anthropic': module('anthropic', Anthropic=lambda **_kwargs: fake_client,
+                            AsyncAnthropic=lambda **_kwargs: fake_client),
         'requests': module('requests', get=denied, post=denied, request=denied,
                            Session=lambda: SimpleNamespace(request=denied)),
         'fastapi': module('fastapi', APIRouter=FakeRouter),

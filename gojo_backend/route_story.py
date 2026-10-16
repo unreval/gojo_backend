@@ -9,18 +9,16 @@
 import json
 import re
 import random
-import anthropic
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import ANTHROPIC_KEY, EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_MID
+from config import EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_MID
 from utils import extract_json, sanitize_jp
-from ai_client import extract_text
+from ai_client import extract_text, get_anthropic
 from tts import tts_to_b64
 from characters import get_character
 
 router = APIRouter()
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 STORY_MAX_JP = 80        # ★ 单段日语超过这个长度，就按句子再切（调短了，语音更稳，不易跑偏）
 SEGMENT_PAUSE_MS = 1500  # ★ 每段之间停顿多少毫秒（想更慢就调大，比如 2200；更快就调小）
@@ -231,7 +229,7 @@ async def story_generate(data: dict):
     best = None
     for attempt in range(5):
         try:
-            response = claude_client.messages.create(
+            response = get_anthropic().messages.create(
                 model=MODEL_MID,
                 max_tokens=10000,    # ★ 长故事 + 可能夹 thinking，给够输出额度
                 system=system_prompt,
