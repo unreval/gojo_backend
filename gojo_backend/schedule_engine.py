@@ -58,11 +58,14 @@ def _seasonal_hints(month: int) -> str:
     return hints.get(month, '')
 
 
-def _fetch_real_places(city='tokyo'):
-    """★ v5:搜食物 + 景点 + 活动场地,不再只有吃的。"""
+def _fetch_real_places(city='tokyo', character_id=None, user_id=None):
+    """★ v5:搜食物 + 景点 + 活动场地,不再只有吃的。
+    A4: 传入 character_id/user_id 启用到访加权。"""
     try:
         import places_engine
-        places = places_engine.get_schedule_places(city, count=15)
+        places = places_engine.get_schedule_places(
+            city, count=15,
+            character_id=character_id, user_id=user_id)
         return places
     except Exception as e:
         print(f'[schedule] 搜真实地点失败(不影响日程生成): {e}')
@@ -146,7 +149,7 @@ def generate_daily_schedule(character_id, user_id, target_date=None, force=False
         city_note = f'\n★ 今天角色{random.choice(["出差去了", "临时跑去了", "心血来潮去了"])}{city_names.get(other, other)},日程安排在那边。\n'
 
     # Only resolver-verified candidates can become exact planned POIs.
-    real_places = _fetch_real_places(main_city)
+    real_places = _fetch_real_places(main_city, character_id=character_id, user_id=user_id)
     places_block = _place_candidates_block(real_places)
     responsibility_block = _role_responsibility_block(
         character_id, user_id, target_date)

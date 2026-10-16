@@ -390,7 +390,41 @@ def prefetch_pois(city='tokyo'):
     return total
 
 
-def get_schedule_places(city='tokyo', count=15):
+def _weighted_sample_without_replacement(candidates, weights, k):
+    """Sample candidates without replacement using equally sized weights.
+
+    When k covers the pool, return every candidate in shuffled order.
+    All-zero remaining weights fall back to uniform random selection.
+    """
+    if not candidates:
+        return []
+    n = len(candidates)
+    if k >= n:
+        paired = list(zip(candidates, weights))
+        random.shuffle(paired)
+        return [candidate for candidate, _ in paired]
+    items = list(zip(range(n), weights))
+    selected_indices = []
+    for _ in range(k):
+        if not items:
+            break
+        total = sum(weight for _, weight in items)
+        if total <= 0:
+            index = random.randrange(len(items))
+            selected_indices.append(items.pop(index)[0])
+            continue
+        draw = random.random() * total
+        cumulative = 0.0
+        for index, (original_index, weight) in enumerate(items):
+            cumulative += weight
+            if draw < cumulative:
+                selected_indices.append(original_index)
+                items.pop(index)
+                break
+    return [candidates[index] for index in selected_indices]
+
+
+def get_schedule_places(city='tokyo', count=15, character_id=None, user_id=None):
     """A2: 增大候选池到 15。食 8 + 非食 7 左右的混搭。
 
     ★ v4:不再只搜吃的。一天的日程应该有吃有逛有打卡。
@@ -419,5 +453,25 @@ def get_schedule_places(city='tokyo', count=15):
     # variety is now an abstract prompt hint and POIs always come from the
     # validated resolver pool above.
     combined = food_places + act_places
+
+    # ── A4: 到访记录回流到候选权重 ──
+    if character_id and user_id:
+        try:
+            import db_visited_places
+            visit_weights = db_visited_places.get_visit_weight_map(
+                character_id, user_id, city=city)
+        except Exception as e:
+            print(f'[places] A4 到访权重查询失败(不影响选候选): {e}')
+            visit_weights = {}
+        if visit_weights:
+            weights = []
+            for place in combined:
+                provider = place.get('provider', '')
+                pid = place.get('provider_place_id', '')
+                poi_key = f'{provider}:{pid}' if provider and pid else ''
+                weights.append(visit_weights.get(poi_key, 1.0))
+            return _weighted_sample_without_replacement(combined, weights, count)
+
+    # 无到访记录或未传身份时保留原逻辑。
     random.shuffle(combined)
     return combined[:count]
