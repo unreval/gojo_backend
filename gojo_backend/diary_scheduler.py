@@ -352,6 +352,19 @@ def _maybe_generate_schedule(character_id):
         print(f'[diary_scheduler] {character_id} 生成日程出错:{e}')
 
 
+def _maybe_revise_schedule(character_id):
+    """B1: 确定性日程复核 — 零 LLM,挂在 _tick。"""
+    try:
+        import schedule_revision
+        results = schedule_revision.revise_schedule(character_id, TARGET_USER)
+        for r in results:
+            print(f'[diary_scheduler] B1 {r["rule"]}: '
+                  f'event #{r["event_id"]} → {r["action"]} '
+                  f'(ok={r.get("ok", "?")}) {r.get("detail", "")}')
+    except Exception as e:
+        print(f'[diary_scheduler] {character_id} 自主复核出错:{e}')
+
+
 def _maybe_prefetch_pois():
     """A2: 单进程内每天最多尝试一次 POI 预取到 DB 缓存。
 
@@ -385,6 +398,10 @@ def _tick():
             _maybe_generate_schedule(cid)     # ★ 先确保今天有日程
         except Exception as e:
             print(f'[diary_scheduler] {cid} 日程 tick 出错:{e}')
+        try:
+            _maybe_revise_schedule(cid)        # ★ B1: 确定性复核
+        except Exception as e:
+            print(f'[diary_scheduler] {cid} 复核 tick 出错:{e}')
         try:
             _maybe_write_diary(cid)
         except Exception as e:

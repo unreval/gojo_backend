@@ -58,6 +58,14 @@ _ACTION_ALIASES = {
     'insert_event': ACTION_INSERT,
 }
 
+REVISION_REASONS = frozenset({
+    'poi_closed',
+    'unreachable',
+    'overrun',
+    'fatigue',
+    'conflict',
+})
+
 # Guard only: it never writes a state and it never infers an intent from text.
 _COMPLETION_CLAIM = re.compile(
     r'(?:已经|已|终于|刚刚)?(?:结束了|完成了|做完了|处理完了|搞定了|收尾了)'
@@ -304,6 +312,12 @@ def normalize_action_intent(value: Any) -> Optional[Dict[str, Any]]:
     if action not in ACTION_TYPES:
         return None
     intent = {'type': action}
+    # Optional revision reason (white-list enum).
+    _reason = value.get('reason')
+    if _reason is not None:
+        _reason = str(_reason).strip().lower()
+        if _reason in REVISION_REASONS:
+            intent['reason'] = _reason
     if action != ACTION_INSERT:
         event_id = value.get('event_id')
         if isinstance(event_id, bool) or event_id in (None, ''):

@@ -1434,7 +1434,7 @@ def _normalize_planned_place(place):
 
 def _general_area(value):
     """A model may describe an area, but cannot create a map point from it."""
-    return str(value or '').strip()[:120]
+    return str(value or '').strip()[:120] or '一般区域'
 
 
 def _category_for_item(item):
