@@ -10,6 +10,7 @@ import requests
 import random
 import time
 from datetime import datetime, timezone
+from math import radians, cos, sin, asin, sqrt
 
 _cache: dict = {}
 _CACHE_TTL = 24 * 3600
@@ -50,6 +51,20 @@ ACTIVITY_CATEGORIES = {
 
 # 合并:所有品类
 CATEGORIES = {**FOOD_CATEGORIES, **ACTIVITY_CATEGORIES}
+
+
+def haversine_km(lat1, lng1, lat2, lng2):
+    """Haversine great-circle distance in kilometres.
+
+    Pure deterministic, no external API. Used by:
+      - schedule_engine._sanitize (A3: generation-time filter)
+      - schedule_revision (B1: review-time check, future)
+    """
+    lat1, lng1, lat2, lng2 = map(radians, (lat1, lng1, lat2, lng2))
+    dlat = lat2 - lat1
+    dlng = lng2 - lng1
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlng / 2) ** 2
+    return 2 * 6371 * asin(sqrt(a))
 
 
 # Nominatim's query text is only a search hint. It is never enough to decide

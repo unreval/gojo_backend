@@ -432,6 +432,43 @@ def _sanitize(raw_items, character_id=None, poi_candidates=None,
             print(f'[schedule] dropped overlapping item: {item["title"]}')
     ok = timeline
 
+    # A3: geographic reachability — degrade POI when travel between
+    # adjacent concrete POIs is impossible given the time gap.
+    # Pure Haversine, no routing API, deliberately coarse (18 km/h).
+    try:
+        from places_engine import haversine_km
+        _A3_SPEED_KMH = 18  # door-to-door avg, includes walk + transit
+        for i in range(1, len(ok)):
+            prev, curr = ok[i - 1], ok[i]
+            pp = prev.get('planned_place')
+            cp = curr.get('planned_place')
+            if not pp or not cp:
+                continue
+            try:
+                dist = haversine_km(pp['lat'], pp['lng'], cp['lat'], cp['lng'])
+            except (KeyError, TypeError):
+                continue
+            # Time gap in minutes between prev end and curr start
+            try:
+                pe_h, pe_m = map(int, prev['end_time'].split(':'))
+                cs_h, cs_m = map(int, curr['start_time'].split(':'))
+                gap_min = (cs_h * 60 + cs_m) - (pe_h * 60 + pe_m)
+                if gap_min < 0:
+                    gap_min += 24 * 60
+            except (ValueError, KeyError):
+                continue
+            travel_min = (dist / _A3_SPEED_KMH) * 60
+            if travel_min > gap_min:
+                poi_name = cp.get('canonical_name') or cp.get('name', '?')
+                prev_name = pp.get('canonical_name') or pp.get('name', '?')
+                print(f'[schedule] A3: unreachable POI, degrading: '
+                      f'{prev_name} → {poi_name} ({dist:.1f}km, '
+                      f'gap={gap_min}min, need={travel_min:.0f}min)')
+                curr['planned_place'] = None
+                curr['location'] = '一般区域'
+    except ImportError:
+        pass
+
     hard_busy = [it for it in ok
             if it.get('reply_state') == db_schedule.REPLY_HARD_BUSY
             and not any(k in it['title'] for k in SLEEP_KEYWORDS)]
