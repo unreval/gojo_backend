@@ -62,7 +62,7 @@ def _fetch_real_places(city='tokyo'):
     """★ v5:搜食物 + 景点 + 活动场地,不再只有吃的。"""
     try:
         import places_engine
-        places = places_engine.get_schedule_places(city, count=7)
+        places = places_engine.get_schedule_places(city, count=15)
         return places
     except Exception as e:
         print(f'[schedule] 搜真实地点失败(不影响日程生成): {e}')

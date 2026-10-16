@@ -29,6 +29,7 @@ TARGET_USER = 'user_mofpiyd7442ia7'
 TICK_SECONDS = 3 * 3600
 WRITE_CHANCE = 0.12
 PEEK_CHANCE = 0.18
+_last_prefetch_date = None  # A2: track daily POI prefetch
 
 _thread = None
 _stop = False
@@ -351,11 +352,34 @@ def _maybe_generate_schedule(character_id):
         print(f'[diary_scheduler] {character_id} 生成日程出错:{e}')
 
 
+def _maybe_prefetch_pois():
+    """A2: 单进程内每天最多尝试一次 POI 预取到 DB 缓存。
+
+    在 _tick 的角色循环前调用,为日程生成预热候选。
+    每次随机预取 2 个品类,跨日可能重复,不保证固定周期内覆盖全部品类。
+    """
+    global _last_prefetch_date
+    today = datetime.now().date()
+    if _last_prefetch_date == today:
+        return
+    _last_prefetch_date = today
+    try:
+        import places_engine
+        places_engine.prefetch_pois('tokyo')
+    except Exception as e:
+        print(f'[diary_scheduler] POI 预取出错: {e}')
+
+
 def _tick():
     """一次 tick:遍历所有角色,每人各自 3 种行为"""
     char_ids = _get_active_character_ids()
     if not char_ids:
         return
+    # A2: prefetch POIs to DB cache (at most once per day, before generation)
+    try:
+        _maybe_prefetch_pois()
+    except Exception as e:
+        print(f'[diary_scheduler] POI 预取 tick 出错: {e}')
     for cid in char_ids:
         try:
             _maybe_generate_schedule(cid)     # ★ 先确保今天有日程
