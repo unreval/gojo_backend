@@ -324,6 +324,8 @@ def filter_recall_authority(result, user_id, character_id):
             cur = database.cursor()
             try:
                 refs = 'source_event_refs' if table == 'long_memory' else "'[]'::jsonb"
+                bond_filter = ("AND COALESCE(semantic_payload->>'predicate','') <> 'quoted_utterance'"
+                               if table == 'bond_memory' else '')
                 cur.execute(f"""SELECT id, content, projection_version, semantic_payload,
                            character_id, {refs},
                            ARRAY(SELECT mse.source_event_id FROM memory_source_events mse
@@ -331,6 +333,7 @@ def filter_recall_authority(result, user_id, character_id):
                                  ORDER BY mse.source_event_id)
                            FROM {table}
                     WHERE user_id=%s AND character_id IN (%s,%s) AND id=ANY(%s)
+                      {bond_filter}
                       AND {authoritative_memory_sql(table)}""",
                     (user_id, character_id, 'shared' if table == 'long_memory' else character_id, ids))
                 allowed[table] = {row[0]: row for row in cur.fetchall()}

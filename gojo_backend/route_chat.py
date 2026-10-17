@@ -125,6 +125,7 @@ _TRACE_RETRY_REASONS = {
     'tomorrow_noon_rewritten_as_today',
     'past_noon_used_as_future_deadline',
     'active_event_completion_claim_without_intent',
+    'schedule_change_claim_without_intent',
     'current_clock_phase_conflict',
     'bilingual_numeric_anchor_mismatch',
     'temporal_prompt_marker_echo',

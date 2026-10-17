@@ -119,9 +119,11 @@ class MemoryAuthorityTests(unittest.TestCase):
         self.group_source(2, '她是火星人，我们结婚了', role='character', sender='c')
         self.process_group(2)
         bonds = user_memory.get_bond_memories('u', 'c')
-        self.assertEqual(len(bonds), 2)
-        quote = next(text for _, text, _ in bonds if '我实际说过' in text)
-        self.assertIn('不证明话中内容或关系', quote)
+        self.assertEqual(len(bonds), 1)
+        self.assertIn('谈论体重', bonds[0][1])
+        self.assertEqual(self.sql("""SELECT adjudication->>'status' AS status,
+            adjudication->'operations'->'main'->>'action' AS action FROM cognitive_events
+            WHERE source_event_type='canonical_assistant_turn'"""), [('applied', 'quoted')])
         self.assertEqual(user_memory.get_bond_memories('u', 'd'), [])
         self.assertEqual(self.sql("SELECT COUNT(*) FROM cognitive_beliefs WHERE statement LIKE '%结婚%'")[0][0], 0)
 
@@ -573,7 +575,11 @@ class MemoryAuthorityTests(unittest.TestCase):
         import cognitive_worker
         cognitive_worker.run_worker_once(now=self.now+timedelta(seconds=1))
         self.assertEqual(self.sql('SELECT COUNT(*) FROM cognitive_beliefs')[0][0],1)
-        quote=user_memory.get_bond_memories('u','c')[0][1]
+        self.assertEqual(user_memory.get_bond_memories('u','c'), [])
+        decision = self.sql("SELECT adjudication FROM cognitive_events WHERE source_event_id='reply'")[0][0]
+        self.assertEqual((decision['status'], decision['action']), ('applied', 'quoted'))
+        self.assertNotIn('memory_table', decision['operations']['main'])
+        quote = decision['memory_content']
         self.assertIn('她是火星人',quote)
         self.assertNotIn('伪造另一句话',quote)
 
