@@ -1,0 +1,211 @@
+"""Deterministic candidate checks and projection through existing authority.
+
+Passing these bounded checks does not confer cognitive or recall authority.
+The caller owns the cursor's transaction and the lifetime of source read locks.
+"""
+import hashlib
+import json
+import logging
+import re
+import unicodedata
+
+from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
+from memory_authority import project_canonical_memory
+from utils import _check_number_consistency
+
+
+_PREDICATES = frozenset({
+    'reported_preference', 'reported_state', 'reported_identity', 'reported_fact',
+})
+_LOGGER = logging.getLogger(__name__)
+_NUMBER = re.compile(
+    r'[-+负]?(?:[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?'
+    r'|[0-9零〇一二三四五六七八九十百千万萬亿億兆两]+(?:[.点][0-9零〇一二三四五六七八九]+)?)'
+)
+_HELPER_NUMBER = re.compile(r'(?:[0-9]+|[零〇一二三四五六七八九十百千]+)')
+
+# Chinese side of utils' translation guards. These are bounded lexical checks,
+# not a general entailment or multi-clause polarity classifier.
+_DOUBLE_NEGATION = re.compile(r'不是不|并非不|不能不|不得不|没有不')
+_NEGATION = re.compile(
+    r'不(?:是|会|能|想|要|行|可以|可能|应该|对|知道|必|用|需要|愿意|喜欢|爱|亏)'
+    r'|没(?:有|什么|啥|吃|睡|去|来|见|说|想|做|听|看|回|能|亏)'
+    r'|别(?:想|说|闹|来|急|忘)|才不|才没|并不|绝不|从不'
+)
+_TIME_WORDS = {
+    '早上': 'morning', '上午': 'morning', '清晨': 'morning', '今早': 'morning',
+    '早饭': 'morning', '早餐': 'morning',
+    '中午': 'noon', '正午': 'noon', '午饭': 'noon', '午餐': 'noon',
+    '下午': 'afternoon', '傍晚': 'evening', '黄昏': 'evening',
+    '晚上': 'night', '今晚': 'night', '晚饭': 'night', '晚餐': 'night',
+    '深夜': 'late_night', '半夜': 'late_night',
+    '昨晚': 'night', '明晚': 'night', '明早': 'morning',
+}
+_COMPATIBLE_TIMES = {
+    'morning': {'morning'}, 'noon': {'noon'}, 'afternoon': {'afternoon'},
+    'evening': {'evening', 'night'},
+    'night': {'night', 'evening', 'late_night'},
+    'late_night': {'late_night', 'night'},
+}
+_DAY_WORDS = {
+    '前天': -2, '昨天': -1, '昨日': -1, '昨晚': -1,
+    '今天': 0, '今日': 0, '今早': 0, '今晚': 0,
+    '明天': 1, '明日': 1, '明早': 1, '明晚': 1, '后天': 2,
+}
+_PERSPECTIVE_ASSERTION = re.compile(
+    r'(?:她|他|你|您|用户|对方)(?:其实|心里|内心|肯定|一定|在想|不敢说)'
+    r'|(?:她|他|你|您|用户|对方)[^，。！？；\n]{0,12}'
+    r'(?:在意|喜欢|讨厌|爱|想要|希望|害怕|担心|难过|开心|嫉妒|依赖|安全感)'
+)
+
+
+def _same_number(left, right):
+    left, right = left.replace(',', ''), right.replace(',', '')
+    if left == right:
+        return True
+    # The existing helper ignores long/unsupported tokens. None is evidence of
+    # equality only when both tokens are known to be within its numeric grammar.
+    if all(len(token) <= 6 and _HELPER_NUMBER.fullmatch(token)
+           for token in (left, right)):
+        return _check_number_consistency(left, right) is None
+    return False
+
+
+def _numbers_match(quote, summary):
+    source_numbers = _NUMBER.findall(unicodedata.normalize('NFKC', quote))
+    summary_numbers = _NUMBER.findall(unicodedata.normalize('NFKC', summary))
+    # Compare every summary value separately so a shared value cannot mask an
+    # invented one. Clock values are checked too; translation exemptions do not
+    # authorize adding numbers to a memory candidate.
+    return all(any(_same_number(number, source) for source in source_numbers)
+               for number in summary_numbers)
+
+
+def _time_words(text, vocabulary):
+    return {vocabulary[match.group()] for match in re.finditer(
+        '|'.join(sorted(vocabulary, key=len, reverse=True)), text)}
+
+
+def _times_match(quote, summary):
+    source_days = _time_words(quote, _DAY_WORDS)
+    summary_days = _time_words(summary, _DAY_WORDS)
+    if source_days and summary_days and not summary_days.issubset(source_days):
+        return False
+    periods = []
+    for text in (quote, summary):
+        for period, replacement in (('上午', '深夜'), ('下午', '正午')):
+            text = re.sub(period + r'(?=(?:12|１２|十二)点)', replacement, text)
+        periods.append(_time_words(text, _TIME_WORDS))
+    source_times, summary_times = periods
+    return not source_times or all(
+        any(period in _COMPATIBLE_TIMES[source] for source in source_times)
+        for period in summary_times)
+
+
+def validate_candidate(cur, user_id, character_id, candidate):
+    """Return (accepted, reason), without writing or calling a model.
+
+    G1 compares the locked live source with the existing cognitive ingress
+    snapshot, never with a caller-provided copy. Missing/changed sources fail
+    closed. Database errors propagate to the caller.
+
+    G8 alone mutates the input: an unsafe/uncertain perspective is removed and
+    (True, 'perspective_dropped') is returned. Earlier rejection leaves the
+    candidate untouched. No perspective is persisted by this module.
+    """
+    source_id = candidate.get('source_event_id') if isinstance(candidate, dict) else None
+    if not isinstance(source_id, str) or not source_id.strip():
+        return False, 'source_not_active_or_changed'
+    cur.execute('''SELECT payload FROM cognitive_events
+        WHERE user_id=%s AND character_id=%s
+          AND source_event_type='canonical_user_turn' AND source_event_id=%s
+        FOR SHARE''', (user_id, character_id, source_id))
+    row = cur.fetchone()
+    payload = row[0] if row and isinstance(row[0], dict) else {}
+    chat_id = payload.get('source_chat_id') or character_id
+    raw = get_active_events_by_ids(
+        user_id, chat_id, [source_id], conn=cur.connection, lock=True)
+    if len(raw) != 1:
+        return False, 'source_not_active_or_changed'
+    if raw[0]['role'] != 'user':
+        return False, 'source_not_active_or_not_user'
+    raw_content = raw[0]['content']
+    if (not isinstance(raw_content, str) or raw_content != payload.get('content')
+            or not cognitive_source_matches_scope(raw[0], character_id, chat_id)):
+        return False, 'source_not_active_or_changed'
+
+    quote = candidate.get('quote')
+    if not isinstance(quote, str) or raw_content.find(quote) < 0:
+        return False, 'quote_not_verbatim'
+    if len(re.sub(r'\s', '', quote)) < 4:
+        return False, 'quote_too_short'
+
+    summary = candidate.get('summary')
+    if isinstance(summary, str):
+        if not _numbers_match(quote, summary):
+            return False, 'number_value_mismatch'
+        if (bool(_NEGATION.search(_DOUBLE_NEGATION.sub('', quote)))
+                != bool(_NEGATION.search(_DOUBLE_NEGATION.sub('', summary)))):
+            return False, 'negation_polarity_mismatch'
+        if not _times_match(quote, summary):
+            return False, 'time_word_contradiction'
+    predicate = candidate.get('predicate')
+    if (not isinstance(predicate, str) or predicate not in _PREDICATES
+            or not isinstance(summary, str) or not summary.strip() or len(summary) > 60
+            or any(not isinstance(candidate.get(key), str) or not candidate[key].strip()
+                   for key in ('object', 'value'))):
+        return False, 'invalid_predicate_or_summary'
+
+    if 'perspective' in candidate:
+        perspective = candidate['perspective']
+        if (not isinstance(perspective, str) or not perspective.strip()
+                or len(perspective) > 40 or not perspective.strip().startswith('我')
+                or perspective.strip().startswith('我们')
+                or _PERSPECTIVE_ASSERTION.search(perspective)):
+            candidate.pop('perspective')
+            return True, 'perspective_dropped'
+    return True, None
+
+
+def apply_candidate(cur, user_id, character_id, candidate, *, occurred_at,
+                    event_id, operation_id):
+    """Validate and project in the caller's transaction, without adjudicating.
+
+    The caller supplies canonical ingress and adjudication. A physical projection
+    alone never grants recall authority: the unchanged reader gate still checks
+    the complete adjudication, stable belief and current source. No perspective
+    text enters the claim, projection, or log. The caller's candidate is unchanged.
+    """
+    checked = dict(candidate) if isinstance(candidate, dict) else candidate
+    accepted, reason = validate_candidate(cur, user_id, character_id, checked)
+    if not accepted:
+        return {'status': 'rejected', 'reason': reason}
+    perspective_dropped = 'perspective' in candidate
+    checked.pop('perspective', None)
+    if perspective_dropped:
+        _LOGGER.info('perspective_dropped source_event_id=%s', checked['source_event_id'])
+
+    cur.execute('''SELECT adjudication FROM cognitive_events
+        WHERE id=%s AND user_id=%s AND character_id=%s
+          AND source_event_type='canonical_user_turn' AND source_event_id=%s
+        FOR SHARE''', (event_id, user_id, character_id, checked['source_event_id']))
+    row = cur.fetchone()
+    if row is None:
+        return {'status': 'rejected', 'reason': 'source_not_active_or_changed'}
+    adjudication = row[0] if isinstance(row[0], dict) else {}
+    decision = (adjudication.get('operations', {}).get(operation_id, {})
+                if 'operations' in adjudication else adjudication)
+    scope = {'subject': 'user:' + user_id, 'predicate': checked['predicate'],
+             'object': checked['object'], 'time_scope': checked.get('time_scope', 'unspecified'),
+             'source': 'canonical_user_turn'}
+    question_key = 'report.' + hashlib.sha256(
+        json.dumps(scope, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()[:24]
+    claim = dict(scope, value=checked['value'], question_key=question_key,
+                 text=checked['quote'], display_summary=checked['summary'])
+    projection = project_canonical_memory(
+        cur, user_id=user_id, character_id=character_id, event_id=event_id,
+        source_id=checked['source_event_id'], content=checked['summary'], claim=claim,
+        belief_key=decision.get('belief_key'), occurred_at=occurred_at,
+        operation_id=operation_id, dependencies=[{'source_id': checked['source_event_id']}])
+    return dict(projection, status='validated_projection', claim=claim,
+                perspective_dropped=perspective_dropped)

@@ -56,6 +56,9 @@ def render_canonical_semantic(semantic, *, observer_id):
     if not isinstance(semantic, dict):
         return ''
     source = semantic.get('source_scope') or semantic.get('observer_ref')
+    display_summary = semantic.get('display_summary')
+    if isinstance(display_summary, str) and display_summary.strip():
+        return _sentence(_render_legacy(display_summary, observer_id, source))
     who = _person(semantic.get('subject_ref'), observer_id, source)
     object_text = _object(semantic.get('object'), observer_id, source)
     value = semantic.get('value')
