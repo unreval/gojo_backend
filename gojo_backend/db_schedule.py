@@ -2460,36 +2460,109 @@ def commit_schedule_transition(character_id, user_id, intent, *, now=None,
     }
 
 
+def _remaining_planned_events_tx(cur, character_id, user_id, now):
+    """Read today's future plans after the canonical reader advanced the clock."""
+    cur.execute(
+        '''SELECT id, revision, planned_start_at, planned_end_at, title, location,
+                  fixedness, category, reply_state
+           FROM char_schedule
+           WHERE character_id=%s AND user_id=%s
+             AND status=%s AND planned_start_at > %s AND sched_date=%s
+           ORDER BY planned_start_at ASC
+           LIMIT 8''',
+        (character_id, user_id, EVENT_PLANNED, now,
+         now.astimezone(_canonical_tz()).date()))
+    return cur.fetchall() or []
+
+
+def _recent_user_linked_transitions_tx(cur, character_id, user_id, now):
+    """Read only committed changes linked to conversation source events."""
+    # 不让他说的事实，就不要放进提示词——否则「别主动汇报」只能靠提示词祈祷。
+    # 这是本次刻意的取舍，不是遗漏。后台改动如何影响语气，留到有确定性检查之后再做。
+    cur.execute(
+        '''SELECT t.intent, t.created_at, s.title
+           FROM char_schedule_transition t
+           LEFT JOIN char_schedule s ON s.id = t.schedule_id
+           WHERE t.character_id=%s AND t.user_id=%s
+             AND t.status='committed' AND t.created_at > %s
+             AND COALESCE(t.source_event_id,'') NOT IN ('', 'tick_revision')
+           ORDER BY t.created_at DESC
+           LIMIT 3''',
+        (character_id, user_id, now - timedelta(hours=24)))
+    return cur.fetchall() or []
+
+
 def format_world_prompt(character_id, user_id, now=None):
     """One prompt representation for text, image, delayed, and voice routes."""
+    tz = _canonical_tz()
+    now = now or datetime.now(tz)
+    now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
     world = get_current_world_state(character_id, user_id, now)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        planned = _remaining_planned_events_tx(cur, character_id, user_id, now)
+        transitions = _recent_user_linked_transitions_tx(cur, character_id, user_id, now)
+    finally:
+        cur.close()
+        conn.close()
     event = world.get('event')
     activity = world.get('activity')
     phase = world.get('phase')
-    if not event or not activity:
-        return '', world
-    where = f'（在{activity.get("location")}）' if activity.get('location') else ''
-    note = f'\n你当时的想法：{activity.get("note")}' if activity.get('note') else ''
-    state = world['availability']['reply_state']
-    phase_line = ''
-    if phase:
-        phase_line = (
-            f'\n当前 phase：{_hhmm(phase.get("planned_start_at"))}~'
-            f'{_hhmm(phase.get("planned_end_at"))} {phase.get("title")}'
-            f'（{state}）')
-    intent_hint = (
-        '\n如果你要让此事提前完成、延长、取消、换地点或插入新安排，'
-        '只能额外输出结构化 schedule_action_intent；没有已提交 intent 时，'
-        '绝不能说它已经结束。'
-    )
-    return (
-        '\n【你此刻正在做的事——canonical world state】\n'
-        f'event_id={event["id"]} revision={event["revision"]} status={event["status"]}\n'
-        f'{activity["start_time"]}~{activity["end_time"]} {activity["title"]}{where}'
-        f'{note}{phase_line}{intent_hint}\n'
-        '这是唯一的当前现实：问在干嘛时照实说；不要另编一个，也不要用台词改写事实。',
-        world,
-    )
+    sections = []
+    if event and activity:
+        where = f'（在{activity.get("location")}）' if activity.get('location') else ''
+        note = f'\n你当时的想法：{activity.get("note")}' if activity.get('note') else ''
+        state = world['availability']['reply_state']
+        phase_line = ''
+        if phase:
+            phase_line = (
+                f'\n当前 phase：{_hhmm(phase.get("planned_start_at"))}~'
+                f'{_hhmm(phase.get("planned_end_at"))} {phase.get("title")}'
+                f'（{state}）')
+        intent_hint = (
+            '\n如果你要让此事提前完成、延长、取消、换地点或插入新安排，'
+            '只能额外输出结构化 schedule_action_intent；没有已提交 intent 时，'
+            '绝不能说它已经结束。'
+        )
+        sections.append(
+            '\n【你此刻正在做的事——canonical world state】\n'
+            f'event_id={event["id"]} revision={event["revision"]} status={event["status"]}\n'
+            f'{activity["start_time"]}~{activity["end_time"]} {activity["title"]}{where}'
+            f'{note}{phase_line}{intent_hint}\n'
+            '这是唯一的当前现实：问在干嘛时照实说；不要另编一个，也不要用台词改写事实。')
+    if planned:
+        lines = ['\n【今天接下来的安排——canonical，可调整】']
+        for (event_id, revision, start, end, title, location,
+             fixedness, _category, _reply_state) in planned:
+            where = f'（{location}）' if location else ''
+            lines.append(
+                f'event_id={event_id} revision={revision} '
+                f'{_hhmm(start)}~{_hhmm(end)} {title}{where} fixedness={fixedness}')
+        lines.extend([
+            '这些还没发生，可以为她调整：要改就输出结构化 schedule_action_intent'
+            '（cancel / relocate / insert）。',
+            'cancel / relocate 的 event_id 必须照抄上面的值，'
+            'expected_revision 必须照抄对应的 revision；insert 使用新安排的 event。',
+            'fixedness=fixed 的改不动，别承诺。没有已提交 intent 时，不能说你已经改了。',
+        ])
+        sections.append('\n'.join(lines))
+    if transitions:
+        actions = {
+            ACTION_CANCEL: '取消了', ACTION_RELOCATE: '换了地点',
+            ACTION_INSERT: '新增了', ACTION_COMPLETE: '提前完成了',
+            ACTION_EXTEND: '延长了',
+        }
+        lines = ['\n【最近在你们对话里改过的安排】']
+        for intent, created_at, title in transitions:
+            created_local = created_at.astimezone(tz)
+            days_ago = (now.date() - created_local.date()).days
+            day = {0: '今天', 1: '昨天'}.get(days_ago, created_local.strftime('%m-%d'))
+            action = actions[_json_object(intent)['type']]
+            lines.append(f'- {day} {_hhmm(created_at)} {title or "安排"}：{action}')
+        lines.append('她问起时照实说；不要主动一条条汇报。')
+        sections.append('\n'.join(lines))
+    return '\n'.join(sections), world
 
 
 # Historical implementation is retained only for forensic migration support.
