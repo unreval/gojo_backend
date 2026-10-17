@@ -166,6 +166,7 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
         "structured_output",
     ),
     "schedule/proactive": (
+        "gojo_backend/opening_hours.py",
         "gojo_backend/db_visited_places.py",
         "gojo_backend/places_engine.py",
         "schedule",

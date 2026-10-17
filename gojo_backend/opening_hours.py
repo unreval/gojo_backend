@@ -169,32 +169,39 @@ def is_definitely_closed(opening_spec, weekday, time_minutes):
     if not rules:
         return False
 
-    # Find the LAST rule that covers this weekday (OSM: later rules override)
-    matching_rule = None
+    # Find the LAST rule for today and yesterday (later rules override).
+    previous_day = (weekday - 1) % 7
+    today_rule = prev_rule = None
+    today_index = prev_index = -1
     for index, rule in enumerate(rules):
         if weekday in rule.get('days', []):
-            matching_rule = rule
-            matching_index = index
+            today_rule = rule
+            today_index = index
+        if previous_day in rule.get('days', []):
+            prev_rule = rule
+            prev_index = index
 
-    if matching_rule is None:
+    spillover_open = (
+        prev_rule is not None and not prev_rule.get('off')
+        and any(end <= start and time_minutes < end
+                for start, end in prev_rule.get('ranges') or [])
+    )
+    # Yesterday's opening hours survive today's daytime ranges, but a later
+    # explicit day-off rule still overrides the overnight tail.
+    if spillover_open:
+        if not (today_rule is not None and today_rule.get('off')
+                and today_index > prev_index):
+            return False
+
+    if today_rule is None:
         # No rule covers this day. Could mean closed, could mean not specified.
         # Conservative: don't filter.
         return False
 
-    # A later rule may carry yesterday's opening hours past midnight.
-    # Keep a potentially open POI; an earlier spillover is overridden by
-    # today's last rule, just like an ordinary same-day opening rule.
-    previous_day = (weekday - 1) % 7
-    for rule in rules[matching_index + 1:]:
-        if previous_day in rule.get('days', []) and not rule.get('off'):
-            for start, end in rule.get('ranges') or []:
-                if end <= start and time_minutes < end:
-                    return False
-
-    if matching_rule.get('off'):
+    if today_rule.get('off'):
         return True
 
-    ranges = matching_rule.get('ranges')
+    ranges = today_rule.get('ranges')
     if not ranges:
         # Has a rule for this day but no time ranges → ambiguous
         return False

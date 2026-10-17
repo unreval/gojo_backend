@@ -475,3 +475,79 @@ def test_later_day_off_overrides_previous_day_overnight():
     from opening_hours import parse_opening_hours, is_definitely_closed
     spec = parse_opening_hours('Mo 22:00-02:00; Tu off')
     assert is_definitely_closed(spec, 1, 60) is True
+
+
+@pytest.mark.parametrize('raw', [
+    'Mo 22:00-02:00; Tu 10:00-18:00',
+    'Tu 10:00-18:00; Mo 22:00-02:00',
+])
+@pytest.mark.parametrize('time_minutes,closed', [
+    (30, False), (60, False), (119, False), (120, True), (540, True),
+])
+def test_overnight_tail_with_daytime_rule_is_order_independent(raw, time_minutes, closed):
+    from opening_hours import parse_opening_hours, is_definitely_closed
+    spec = parse_opening_hours(raw)
+    assert is_definitely_closed(spec, 1, time_minutes) is closed
+
+
+@pytest.mark.parametrize('raw,weekday', [
+    ('Fr-Sa 18:00-03:00; Su 12:00-22:00', 6),
+    ('Su 22:00-02:00; Mo 10:00-18:00', 0),
+])
+def test_natural_order_overnight_tail_across_weekend(raw, weekday):
+    from opening_hours import parse_opening_hours, is_definitely_closed
+    assert is_definitely_closed(parse_opening_hours(raw), weekday, 60) is False
+
+
+@pytest.mark.parametrize('override', ['Mo off', 'Mo 08:00-09:00'])
+def test_overridden_previous_day_overnight_does_not_keep_poi_open(override):
+    from opening_hours import parse_opening_hours, is_definitely_closed
+    spec = parse_opening_hours('Tu 10:00-18:00; Mo 22:00-02:00; ' + override)
+    assert is_definitely_closed(spec, 1, 60) is True
+
+
+@pytest.mark.parametrize('time_minutes', [60, 120])
+def test_uncovered_day_with_previous_overnight_is_never_filtered(time_minutes):
+    from opening_hours import parse_opening_hours, is_definitely_closed
+    spec = parse_opening_hours('Mo 22:00-02:00')
+    assert is_definitely_closed(spec, 1, time_minutes) is False
+
+
+@pytest.mark.parametrize('raw,day', [
+    ('Mo 22:00-02:00; Tu 10:00-18:00', 20),
+    ('Fr-Sa 18:00-03:00; Su 12:00-22:00', 18),
+])
+def test_sanitize_keeps_natural_order_overnight_poi(raw, day):
+    from datetime import date
+    from schedule_engine import _sanitize
+    candidate = TestSanitizeOpeningHoursFiltering()._make_candidate(raw)
+    item = {'start_time': '01:00', 'end_time': '01:30', 'title': '夜间散步',
+            'location': '渋谷', 'planned_place_ref': 'nominatim:test_poi_001'}
+    result = _sanitize([item], poi_candidates=[candidate],
+                       target_date=date(2026, 10, day))
+    assert result[0]['planned_place']['provider_place_id'] == 'test_poi_001'
+
+
+@pytest.mark.parametrize('fixedness', ['flexible', 'optional'])
+@pytest.mark.parametrize('raw,day', [
+    ('Mo 22:00-02:00; Tu 10:00-18:00', 20),
+    ('Fr-Sa 18:00-03:00; Su 12:00-22:00', 18),
+])
+def test_revision_does_not_commit_poi_closed_for_overnight_tail(monkeypatch, raw, day, fixedness):
+    from copy import deepcopy
+    from datetime import datetime
+    from unittest.mock import Mock
+    from config import CN_TZ
+    import schedule_revision
+    commit = Mock()
+    monkeypatch.setattr(schedule_revision, '_commit', commit)
+    now = datetime(2026, 10, day, 0, 30, tzinfo=CN_TZ)
+    event = {
+        'id': 1, 'revision': 1, 'fixedness': fixedness,
+        'planned_start_at': now.replace(hour=1, minute=0),
+        'planned_place': {'provider_raw_type': {'tags': {'opening_hours': raw}}},
+    }
+    original = deepcopy(event)
+    assert schedule_revision._rule_poi_closed([event], 'c1', 'u1', now) is None
+    commit.assert_not_called()
+    assert event == original
