@@ -232,6 +232,8 @@ def canonical_semantic_payload(*, user_id, character_id, source_id, claim=None,
                        evidence_text=claim['text'])
         if claim.get('deadline'):
             payload['deadline'] = claim['deadline']
+        if 'display_summary' in claim:
+            payload['display_summary'] = claim['display_summary']
     else:
         payload.update(semantic or {})
     if not payload.get('subject_ref') or not payload.get('predicate'):
