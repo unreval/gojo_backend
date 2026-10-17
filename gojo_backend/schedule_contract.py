@@ -406,3 +406,42 @@ def completion_claim_conflict(messages: Iterable[Dict[str, Any]],
             and intent.get('expected_revision') == event.get('revision')):
         return None
     return 'active_event_completion_claim_without_intent'
+
+
+def change_claim_conflict(messages: Iterable[Dict[str, Any]],
+                          world: Optional[Dict[str, Any]], planned: Iterable,
+                          intent: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Reject change claims; ``planned`` is the canonical future-plan read.
+
+    This checks expression only. The structured intent still needs the existing
+    writer's event/revision validation before anything can be committed.
+    """
+    event = (world or {}).get('event') or {}
+    if not planned and event.get('status') != EVENT_ACTIVE:
+        return None
+    if intent and intent.get('type') in (
+            ACTION_CANCEL, ACTION_RELOCATE, ACTION_INSERT, ACTION_EXTEND):
+        return None
+    claim = re.compile(
+        r'挪|推迟|延后|提前(?!告诉|通知|提醒|说)|取消|空出来|腾出来'
+        r'|改到|换到|换(?:了)?地方|不去了'
+        r'|ずらした|延期した|前倒しにした|キャンセルした|空けた|場所を変えた|行かないことにした')
+    nonclaim = re.compile(
+        r'[?？]|要不要|能不能|可以[吗么]|能否|是否|[吗么]'
+        r'|如果|假如|假设|要是|只要|除非|的话|もし|なら|たら'
+        r'|昨天|前天|上周|上个月|去年|昨日|一昨日|先週|去年'
+        r'|^(?:我)?(?:以前|之前|当时|那天|上次|曾经)')
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        for field in ('jp', 'zh'):
+            for sentence in re.findall(r'[^。！？!?\n]+[。！？!?]?', str(item.get(field) or '')):
+                if nonclaim.search(sentence):
+                    continue
+                for match in claim.finditer(sentence):
+                    # A denied/requested change is not an assertion that it happened.
+                    prefix = re.split(r'[，,；;]', sentence[:match.start()])[-1][-8:]
+                    if re.search(r'没(?:有)?|尚未|并未|不能|不会|不要|别', prefix):
+                        continue
+                    return 'schedule_change_claim_without_intent'
+    return None

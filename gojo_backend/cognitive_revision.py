@@ -974,7 +974,7 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
     """Reload and lock canonical sources; adjudicate each bounded operation once."""
     from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
     from cognitive_predictions import settle_pending_predictions
-    from memory_authority import project_canonical_memory
+    from memory_authority import canonical_semantic_payload
 
     ids = [r['event_id'] for r in output['evidence_refs']]
     cur.execute(
@@ -1015,18 +1015,20 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                 operations = {}
                 if role == 'assistant':
                     quote_op = 'utterance' if supported else 'main'
-                    from role_view import render_role_view
+                    from role_view import PROJECTION_VERSION, render_role_view
                     quote_semantic = {'subject_ref': 'character:' + character_id,
                                       'predicate': 'quoted_utterance',
                                       'evidence_text': raw[0]['content']}
                     content = render_role_view('', observer_id=character_id,
                                                source_character_id=character_id,
                                                semantic={**quote_semantic, 'source_scope': character_id})
+                    # chat_log and cognitive_events are the authoritative speech
+                    # record; assistant utterances need no second memory projection.
                     operations[quote_op] = dict(status='applied', action='quoted',
-                        **project_canonical_memory(cur, user_id=user_id, character_id=character_id,
-                            event_id=event_id, source_id=source_id, content=content,
-                            occurred_at=occurred_at, operation_id=quote_op,
-                            semantic=quote_semantic))
+                        memory_content=content, projection_version=PROJECTION_VERSION,
+                        semantic_payload=canonical_semantic_payload(
+                            user_id=user_id, character_id=character_id,
+                            source_id=source_id, semantic=quote_semantic))
                 for part in parts:
                     op = part['operation_id']
                     if part['kind'] in ('question', 'answer', 'deferred'):

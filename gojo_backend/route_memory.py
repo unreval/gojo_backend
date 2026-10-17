@@ -255,7 +255,8 @@ async def list_bond_memory(user_id: str = 'default', character_id: str = DEFAULT
         kind_filter = 'AND kind = %s' if kind else ''
         cur.execute(
             f'''SELECT id, content, timestamp,
-                      ({authoritative_memory_sql('bond_memory')}) AS recallable,
+                      (({authoritative_memory_sql('bond_memory')})
+                       AND COALESCE(semantic_payload->>'predicate','') <> 'quoted_utterance') AS recallable,
                       authority = '{AUTHORITY}' AS content_locked,
                       semantic_payload, projection_version
                FROM bond_memory

@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
-from schedule_contract import completion_claim_conflict, normalize_action_intent
+from schedule_contract import (
+    EVENT_ACTIVE, change_claim_conflict, completion_claim_conflict,
+    normalize_action_intent,
+)
 
 
 def validate_generated_schedule_reply(character_id: str, user_id: str,
@@ -31,7 +34,24 @@ def validate_generated_schedule_reply(character_id: str, user_id: str,
         (parsed or {}).get('messages') or [], world, intent)
     if conflict:
         return conflict, world
-    return None, world
+    planned = []
+    if ((world or {}).get('event') or {}).get('status') != EVENT_ACTIVE:
+        try:
+            conn = db_schedule.get_conn()
+            try:
+                cur = conn.cursor()
+                try:
+                    planned = db_schedule._remaining_planned_events_tx(
+                        cur, character_id, user_id, world['now'])
+                finally:
+                    cur.close()
+            finally:
+                conn.close()
+        except Exception as exc:
+            # Preserve the existing unavailable-reader behavior for ordinary chat.
+            print(f'[schedule] planned truth guard skipped: {exc}')
+    return change_claim_conflict(
+        (parsed or {}).get('messages') or [], world, planned, intent), world
 
 
 def commit_generated_schedule_intent(character_id: str, user_id: str,

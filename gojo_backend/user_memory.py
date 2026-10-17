@@ -1304,6 +1304,7 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
             f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
                  {legacy_told_only}
+                 AND COALESCE(semantic_payload->>'predicate','') <> 'quoted_utterance'
                  AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC LIMIT %s''',
@@ -1313,6 +1314,7 @@ def get_bond_memories(user_id, character_id, kind=None, limit=30):
         cur.execute(
             f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s
+                 AND COALESCE(semantic_payload->>'predicate','') <> 'quoted_utterance'
                  AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                ORDER BY timestamp DESC LIMIT %s''',

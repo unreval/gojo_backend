@@ -337,6 +337,7 @@ def search_bond_memory(user_id, character_id, kind, query_text, top_k=6):
         cur.execute(
             f'''SELECT id, content, timestamp, semantic_payload, projection_version FROM bond_memory
                WHERE user_id = %s AND character_id = %s AND kind = %s
+                 AND COALESCE(semantic_payload->>'predicate','') <> 'quoted_utterance'
                  AND {authoritative_memory_sql('bond_memory')}
                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)''',
             (user_id, character_id, kind)
