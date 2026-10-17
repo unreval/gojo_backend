@@ -199,7 +199,9 @@ emotion字段从以下选一个：{emotion_list}
 {{"schedule_action_intent":{{"type":"relocate","event_id":123,"expected_revision":4,
  "planned_place":{{"provider":"nominatim","provider_place_id":"已验证候选ID"}}}}}}
 {{"schedule_action_intent":{{"type":"insert","event":{{"title":"简短事项","duration_minutes":20,
- "reply_state":"soft_busy","category":"routine","fixedness":"flexible"}}}}}}
+ "reply_state":"free","category":"routine","fixedness":"flexible"}}}}}}
+reply_state 按事情本身的性质选：没法看手机→hard_busy；能瞄一眼→soft_busy；能正常回→free。
+为她空出来陪她的时段一律 free——那段时间的全部意义就是能回她。
 绝不从自由文本猜地点、地址、坐标或完成状态；没有后端提交成功前，台词也不得把变化说成事实。
 
 【提醒功能——添加新提醒】

@@ -2429,13 +2429,19 @@ def commit_schedule_transition(character_id, user_id, intent, *, now=None,
             conn.rollback()
             return {'ok': False, 'reason': 'unsupported_action'}
 
+        intent_payload = dict(normalized)
+        if reflowed:
+            intent_payload['reflowed_event_ids'] = list(reflowed)
+            intent_payload['reflowed_minutes'] = (
+                event_spec['duration_minutes'] if action == ACTION_INSERT
+                else normalized['extend_minutes'])
         cur.execute(
             '''INSERT INTO char_schedule_transition
                   (schedule_id, user_id, character_id, source_event_id, intent,
                    prior_revision, committed_revision, status)
                VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,'committed')''',
             (result_event_id, user_id, character_id, str(source_event_id or '')[:120],
-             json.dumps(normalized, ensure_ascii=False), prior_revision,
+             json.dumps(intent_payload, ensure_ascii=False), prior_revision,
              committed_revision))
         conn.commit()
     except Exception as exc:
@@ -2558,8 +2564,13 @@ def format_world_prompt(character_id, user_id, now=None):
             created_local = created_at.astimezone(tz)
             days_ago = (now.date() - created_local.date()).days
             day = {0: '今天', 1: '昨天'}.get(days_ago, created_local.strftime('%m-%d'))
-            action = actions[_json_object(intent)['type']]
-            lines.append(f'- {day} {_hhmm(created_at)} {title or "安排"}：{action}')
+            intent_data = _json_object(intent)
+            action = actions[intent_data['type']]
+            reflow = ''
+            if intent_data.get('reflowed_event_ids'):
+                reflow = (f'（后续 {len(intent_data["reflowed_event_ids"])} 项各顺延 '
+                          f'{intent_data["reflowed_minutes"]} 分钟）')
+            lines.append(f'- {day} {_hhmm(created_at)} {title or "安排"}：{action}{reflow}')
         lines.append('她问起时照实说；不要主动一条条汇报。')
         sections.append('\n'.join(lines))
     return '\n'.join(sections), world
