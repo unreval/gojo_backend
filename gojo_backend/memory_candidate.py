@@ -254,6 +254,8 @@ def apply_candidate(cur, user_id, character_id, candidate, *, occurred_at,
     adjudication = row[0] if isinstance(row[0], dict) else {}
     decision = (adjudication.get('operations', {}).get(operation_id, {})
                 if 'operations' in adjudication else adjudication)
+    if adjudication and not decision:
+        return {'status': 'rejected', 'reason': 'adjudication_operation_missing'}
     scope = {'subject': 'user:' + user_id, 'predicate': checked['predicate'],
              'object': checked['object'], 'time_scope': checked.get('time_scope', 'unspecified'),
              'source': 'canonical_user_turn'}

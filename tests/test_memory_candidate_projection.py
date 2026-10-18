@@ -195,6 +195,20 @@ class CandidateProjectionTests(unittest.TestCase):
         self.assertEqual(self.recalled(), [])
         self.assertEqual(user_memory.get_long_memory('u', 'c'), [])
 
+    def test_missing_adjudication_operation_rejects_without_projection_or_links(self):
+        candidate = self.candidate()
+        seeded = self.seed(candidate, operation_id='other-op')
+        before = self.database_state()
+        with patch.object(memory_candidate, 'project_canonical_memory',
+                          side_effect=AssertionError('unexpected projection')) as project:
+            result = self.apply(candidate, seeded, operation_id='main')
+        self.assertEqual(result, {
+            'status': 'rejected', 'reason': 'adjudication_operation_missing'})
+        project.assert_not_called()
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+        self.assertEqual(self.sql('SELECT count(*) FROM memory_source_events'), [(0,)])
+        self.assertEqual(self.database_state(), before)
+
     def test_source_edit_rejects_cached_projection_even_when_quote_survives(self):
         candidate = self.candidate()
         seeded = self.seed(candidate)
