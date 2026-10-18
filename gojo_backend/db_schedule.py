@@ -29,6 +29,7 @@ import threading
 import uuid
 from db import get_conn
 from db_read_receipt import mark_source_events_seen_tx, source_event_ids_from_claim
+from delayed_reply_retry import failure_retry_seconds
 from schedule_contract import (
     ACTION_CANCEL,
     ACTION_COMPLETE,
@@ -842,13 +843,12 @@ def release_claimed_phone_check(cur, oid, token, *, retry_at=None,
     if not row:
         return 0
     fail_count = int(row[0] or 0) + 1
-    expired = reason == 'source_invalid' or fail_count >= 5
+    retry_seconds = failure_retry_seconds(
+        fail_count, auth_failed=reason == 'provider_auth_failed')
+    expired = reason == 'source_invalid' or retry_seconds is None
     retry_not_before = None
     if not expired:
-        minutes = (2, 10, 30, 120)[fail_count - 1]
-        if reason == 'provider_auth_failed':
-            minutes = max(minutes, 15)
-        retry_not_before = now + timedelta(minutes=minutes)
+        retry_not_before = now + timedelta(seconds=retry_seconds)
         if retry_at is not None:
             retry_not_before = max(retry_not_before, retry_at)
     state = ('expired' if expired else

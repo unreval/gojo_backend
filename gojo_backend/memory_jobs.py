@@ -343,6 +343,13 @@ def _loop():
 def start_memory_worker():
     global _THREAD
     with _LOCK:
+        try:
+            from memory_candidate_shadow import start_candidate_shadow_worker
+            start_candidate_shadow_worker()
+        except Exception as exc:
+            print(json.dumps({'log_type': 'memory_candidate_shadow',
+                              'kind': 'worker_failure', 'stage': 'startup',
+                              'status': 'failed', 'reason': type(exc).__name__}), flush=True)
         if _THREAD is not None and _THREAD.is_alive():
             return
         _THREAD = threading.Thread(target=_loop, name='memory-jobs', daemon=True)

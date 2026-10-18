@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from reply_availability import format_pending_bundle_context, parse_pending_event_meta
 from db_read_receipt import source_event_ids_from_claim
+from delayed_reply_retry import PROVIDER_PAUSE_SECONDS
 
 
 _thread = None
@@ -472,8 +473,9 @@ def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
             reason = (generated or {}).get('reason') or 'generation_failed'
             provider_failed = reason in ('provider_auth_failed', 'provider_retryable')
             if provider_failed:
-                _pause_until = time.monotonic() + 600
-                print(f'[delayed_reply] provider circuit opened reason={reason} pause_seconds=600')
+                _pause_until = time.monotonic() + PROVIDER_PAUSE_SECONDS
+                print(f'[delayed_reply] provider circuit opened reason={reason} '
+                      f'pause_seconds={PROVIDER_PAUSE_SECONDS}')
             expired = False
             try:
                 failure_now = _now() if live_clock else now
