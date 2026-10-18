@@ -120,9 +120,83 @@ class MemoryCandidateGateTests(unittest.TestCase):
                 self.assertEqual(self.validate(self.candidate(quote=quote, summary=summary),
                                                raw_text=quote), (True, None))
 
+    def test_supported_chinese_number_values_remain_distinct(self):
+        from utils import _check_number_consistency
+
+        for left, right in (
+                ('六十九', '九十六'), ('三十', '十三'), ('二', '八'),
+                ('一百', '一千'), ('十', '百'), ('六十九', '六十八')):
+            with self.subTest(left=left, right=right):
+                self.assertEqual(_check_number_consistency(left, right),
+                                 'number_value_mismatch')
+                self.assertFalse(memory_candidate._same_number(left, right))
+
+    def test_supported_chinese_number_changes_are_rejected_end_to_end(self):
+        for quote, summary in (
+                ('今天交易亏了六十九元', '她亏了九十六元'),
+                ('今天交易亏了三十元', '她亏了十三元')):
+            with self.subTest(quote=quote, summary=summary):
+                self.assertFalse(memory_candidate._numbers_match(quote, summary))
+                self.assertEqual(self.validate(self.candidate(quote=quote, summary=summary),
+                                               raw_text=quote),
+                                 (False, 'number_value_mismatch'))
+
     def test_number_may_be_omitted_from_summary(self):
         self.assertEqual(self.validate(self.candidate(summary='她今天买咖啡亏钱了')),
                          (True, None))
+
+    def test_colloquial_and_large_numbers_match_equivalent_values(self):
+        for quote, summary in (
+                ('我两点下班', '她2点下班'),
+                ('我有两个弟弟', '她有2个弟弟'),
+                ('存了三万块', '她存了30000块'),
+                ('今天交易亏了一亿元', '她亏了100000000元'),
+                ('今天交易亏了三萬元', '她亏了30000元'),
+                ('今天交易亏了两億元', '她亏了200000000元')):
+            with self.subTest(quote=quote, summary=summary):
+                self.assertEqual(self.validate(self.candidate(quote=quote, summary=summary),
+                                               raw_text=quote), (True, None))
+
+    def test_colloquial_and_large_number_changes_are_rejected(self):
+        for quote, summary in (
+                ('今天交易亏了三万元', '她亏了四万元'),
+                ('今天交易亏了六十九万元', '她亏了九十六万元'),
+                ('今天交易亏了一亿元', '她亏了两亿元'),
+                ('我两点下班', '她三点下班')):
+            with self.subTest(quote=quote, summary=summary):
+                self.assertEqual(self.validate(self.candidate(quote=quote, summary=summary),
+                                               raw_text=quote),
+                                 (False, 'number_value_mismatch'))
+
+    def test_extended_integer_normalization_is_symmetric(self):
+        for left, right in (
+                ('两', '二'), ('两百', '200'), ('两千零二', '2002'),
+                ('三百二十万', '3200000'), ('六十九万', '690000'),
+                ('九十六万', '960000'), ('3万', '30000'),
+                ('两亿', '200000000'), ('两億', '二亿')):
+            with self.subTest(left=left, right=right):
+                self.assertTrue(memory_candidate._same_number(left, right))
+                self.assertTrue(memory_candidate._same_number(right, left))
+
+    def test_ambiguous_extended_number_tokens_remain_exact_only(self):
+        for token, unsupported_equivalent in (
+                ('一万二', '10002'), ('两百二', '202'),
+                ('两三万', '230000'), ('两三', '23'), ('三四万', '340000'),
+                ('两百零', '200'), ('两百零零三', '203'), ('零两百', '200'),
+                ('两千零三百', '2300'), ('两十零三', '23'),
+                ('一百二万', '1020000'), ('三万零五', '30005'),
+                ('一亿三万', '100030000'), ('一万万', '100000000'),
+                ('两十百', '120'), ('两点五万', '25000'),
+                ('负两万', '-20000'), ('两兆', '2000000000000')):
+            with self.subTest(token=token):
+                self.assertTrue(memory_candidate._same_number(token, token))
+                self.assertFalse(memory_candidate._same_number(token, unsupported_equivalent))
+                self.assertFalse(memory_candidate._same_number(unsupported_equivalent, token))
+
+    def test_extended_number_comparison_does_not_parse_unbounded_python_integers(self):
+        huge = '9' * 5000
+        self.assertFalse(memory_candidate._same_number('两', huge))
+        self.assertFalse(memory_candidate._same_number(huge, '两'))
 
     def test_grouped_amounts_cannot_match_only_their_digit_fragments(self):
         for quote, summary, expected in (
@@ -147,6 +221,7 @@ class MemoryCandidateGateTests(unittest.TestCase):
                                  (False, 'number_value_mismatch'))
 
     def test_unsupported_number_tokens_require_an_exact_token_match(self):
+        # 这里的同值用例靠 token 原样相等通过，未经过 _check_number_consistency。
         for quote, summary, expected in (
                 ('今天交易亏了六十九万元', '她亏了六十九万元', (True, None)),
                 ('今天交易亏了六十九万元', '她亏了九十六万元',

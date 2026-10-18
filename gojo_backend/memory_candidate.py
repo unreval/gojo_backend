@@ -63,6 +63,47 @@ def _same_number(left, right):
     left, right = left.replace(',', ''), right.replace(',', '')
     if left == right:
         return True
+    if any(char in left + right for char in '两万萬亿億'):
+        def integer_value(token):
+            # Only explicit integers, optionally scaled by one final 万/亿.
+            # Compound/shorthand forms stay exact-only (e.g. 一万二, 两百二).
+            token = token.replace('两', '二').replace('萬', '万').replace('億', '亿')
+            scale = {'万': 10000, '亿': 100000000}.get(token[-1], 1)
+            if scale != 1:
+                token = token[:-1]
+            if not _HELPER_NUMBER.fullmatch(token):
+                return None
+            if token.isascii():
+                coefficient = token.lstrip('0') or '0'
+                return coefficient + ('0' * (len(str(scale)) - 1) if coefficient != '0' else '')
+            digits = dict(zip('零〇一二三四五六七八九', (0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9)))
+            if all(char in digits for char in token):
+                # 连写 can mean an approximate range, e.g. 两三万.
+                return str(digits[token] * scale) if len(token) == 1 else None
+            total, digit, last_unit = 0, None, 10000
+            for index, char in enumerate(token):
+                if char in digits:
+                    if digit not in (None, 0):
+                        return None
+                    if char in '零〇' and (index == 0 or index == len(token) - 1
+                                           or digit == 0 or last_unit == 10):
+                        return None
+                    digit = digits[char]
+                else:
+                    unit = {'十': 10, '百': 100, '千': 1000}[char]
+                    if (unit >= last_unit or digit == 0
+                            or (digit is None and (char != '十' or index != 0))
+                            or (index >= 2 and token[index - 2] in '零〇'
+                                and unit * 10 == last_unit)):
+                        return None
+                    total += (digit or 1) * unit
+                    digit, last_unit = None, unit
+            if digit and last_unit > 10 and token[-2] not in '零〇':
+                return None
+            return str((total + (digit or 0)) * scale)
+
+        values = [integer_value(token) for token in (left, right)]
+        return None not in values and values[0] == values[1]
     # The existing helper ignores long/unsupported tokens. None is evidence of
     # equality only when both tokens are known to be within its numeric grammar.
     if all(len(token) <= 6 and _HELPER_NUMBER.fullmatch(token)
@@ -213,6 +254,8 @@ def apply_candidate(cur, user_id, character_id, candidate, *, occurred_at,
     adjudication = row[0] if isinstance(row[0], dict) else {}
     decision = (adjudication.get('operations', {}).get(operation_id, {})
                 if 'operations' in adjudication else adjudication)
+    if adjudication and not decision:
+        return {'status': 'rejected', 'reason': 'adjudication_operation_missing'}
     scope = {'subject': 'user:' + user_id, 'predicate': checked['predicate'],
              'object': checked['object'], 'time_scope': checked.get('time_scope', 'unspecified'),
              'source': 'canonical_user_turn'}
