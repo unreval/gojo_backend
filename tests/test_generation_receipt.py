@@ -697,9 +697,10 @@ class RouteIdempotencyTests(unittest.TestCase):
             'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
             'fastapi.responses': stub(
                 'fastapi.responses',
-                JSONResponse=lambda content, status_code=200: types.SimpleNamespace(
+                JSONResponse=lambda content, status_code=200, headers=None: types.SimpleNamespace(
                     body=json.dumps(content, ensure_ascii=False, default=str).encode(),
                     status_code=status_code,
+                    headers=headers or {},
                 ),
             ),
             'config': stub(
@@ -710,6 +711,8 @@ class RouteIdempotencyTests(unittest.TestCase):
                 DEFAULT_CHARACTER_ID='gojo',
                 MODEL_MAIN='claude-test',
                 MODEL_JP_AUX='claude-haiku-test',
+                PROVIDER_TRANSPORT_ATTEMPTS=2,
+                PROVIDER_TRANSPORT_BACKOFF_SECONDS=0.0,
             ),
             'db': stub('db', get_conn=lambda: FakeConn(self.store)),
             'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
@@ -947,6 +950,51 @@ class RouteIdempotencyTests(unittest.TestCase):
         self.assertEqual(self.save_short.call_count, 1)
         self.assertEqual(self.record_turn.call_count, 1)
         db_read_receipt.mark_immediate_seen.assert_called_with('u', 'gojo', 'dup-1')
+
+    def test_transport_retry_completes_one_receipt_and_replay_does_not_generate(self):
+        from provider_error import ProviderHTTPError
+
+        self.route._create_json = Mock(side_effect=[
+            ProviderHTTPError(503, provider='anthropic', model='claude-test'),
+            (chat_reply('そうだね', '是啊'), Mock()),
+        ])
+        first, body1 = self.send([], 'transport-once')
+        second, body2 = self.send([], 'transport-once')
+        self.assertEqual((first.status_code, second.status_code), (200, 200))
+        self.assertEqual(self.route._create_json.call_count, 2)
+        self.assertEqual(body1['assistant_turn_id'], body2['assistant_turn_id'])
+        self.assertEqual(len(self.store.receipts), 1)
+        self.assertEqual(self.store.receipts[
+            ('u', 'gojo', 'transport-once', 'chat_text')]['status'], 'completed')
+        self.save_short.assert_called_once()
+        self.record_turn.assert_called_once()
+        self.promise_detect.assert_called_once()
+
+    def test_exhausted_transport_retry_fails_receipt_without_effects_then_recovers(self):
+        from provider_error import ProviderHTTPError
+
+        self.route._create_json = Mock(side_effect=ProviderHTTPError(
+            503, provider='anthropic', model='claude-test'))
+        failed, body = self.send([], 'transport-recovery')
+        self.assertEqual(failed.status_code, 503)
+        self.assertEqual(failed.headers['Retry-After'], '60')
+        self.assertEqual(body['error'], 'provider_unavailable')
+        self.assertEqual(self.route._create_json.call_count, 2)
+        receipt_key = ('u', 'gojo', 'transport-recovery', 'chat_text')
+        self.assertEqual(self.store.receipts[receipt_key]['status'], 'failed')
+        self.assertEqual(self.store.effects, {})
+        self.save_short.assert_not_called()
+        self.record_turn.assert_not_called()
+        self.promise_detect.assert_not_called()
+
+        self.route._create_json = Mock(return_value=(chat_reply('そうだね', '是啊'), Mock()))
+        recovered, _ = self.send([], 'transport-recovery')
+        self.assertEqual(recovered.status_code, 200)
+        self.route._create_json.assert_called_once()
+        self.assertEqual(len(self.store.receipts), 1)
+        self.assertEqual(self.store.receipts[receipt_key]['status'], 'completed')
+        self.save_short.assert_called_once()
+        self.record_turn.assert_called_once()
 
     def test_salvaged_body_replay_has_one_receipt_turn_link_and_effect_application(self):
         raw = '今はゆっくり話そう'

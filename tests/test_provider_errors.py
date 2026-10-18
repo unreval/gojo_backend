@@ -154,15 +154,22 @@ class ProviderErrorTests(unittest.TestCase):
     def test_generation_429_stops_after_one_candidate_and_reports_delay(self):
         error_out = {}
         error = ProviderHTTPError(429, provider='anthropic', model='claude-test')
-        with patch.object(route_chat, '_create_json', side_effect=error) as create, patch(
-                'builtins.print'):
+        with patch.object(route_chat, '_create_json', side_effect=error) as create, \
+                patch.object(route_chat, 'PROVIDER_TRANSPORT_ATTEMPTS', 2), \
+                patch.object(route_chat, 'PROVIDER_TRANSPORT_BACKOFF_SECONDS', 0.0), \
+                patch.object(route_chat, '_emit_generation_trace') as trace, \
+                patch('builtins.print'):
             result, state = route_chat._generate_or_none(
                 'claude-test', 100, [], [{'role': 'user', 'content': 'hello'}],
                 attempts=2, log_tag='chat:test', cache_tag='chat:test',
                 error_out=error_out)
         self.assertIsNone(result)
         self.assertIsNone(state)
-        create.assert_called_once()
+        self.assertEqual(create.call_count, 2)
+        self.assertEqual(create.call_args_list[0], create.call_args_list[1])
+        trace.assert_called_once()
+        self.assertEqual(trace.call_args.kwargs['attempt'], 1)
+        self.assertEqual(trace.call_args.kwargs['outcome'], 'provider_error')
         self.assertEqual(error_out['provider_retry_delay_seconds'], 120)
 
     def test_deepseek_error_exposes_safe_metadata_and_never_raw_body(self):

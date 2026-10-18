@@ -224,13 +224,23 @@ class GenerationEnvelopeTransportTests(unittest.TestCase):
         route_chat._schema_unavailable_models.discard(model)
         with mock_provider_create(
                           side_effect=RateLimited('429')) as provider, \
+                patch.object(route_chat, 'PROVIDER_TRANSPORT_ATTEMPTS', 2), \
+                patch.object(route_chat, 'PROVIDER_TRANSPORT_BACKOFF_SECONDS', 0.0), \
+                patch.object(route_chat, '_emit_generation_trace') as trace, \
+                patch.object(route_chat, '_emit_generation_result') as summary, \
                 patch('builtins.print'):
             result, state = route_chat._generate_or_none(
                 model, 100, [], [], attempts=3, log_tag='test', cache_tag='test',
                 salvage=True)
         self.assertIsNone(result)
         self.assertIsNone(state)
-        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(provider.call_args_list[0], provider.call_args_list[1])
+        trace.assert_called_once()
+        self.assertEqual(trace.call_args.kwargs['attempt'], 1)
+        self.assertFalse(trace.call_args.kwargs['will_retry'])
+        summary.assert_called_once()
+        self.assertEqual(summary.call_args.args[-2:], (2, 0))
 
 
 
