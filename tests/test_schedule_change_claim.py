@@ -23,6 +23,11 @@ CLAIM = {'messages': [{'jp': '君のために予定を後ろにずらしたよ�
                        'zh': '给你往后挪了。'}]}
 REASON = 'schedule_change_claim_without_intent'
 ACTIVE = {'event': {'id': 7, 'status': 'active', 'revision': 3}, 'now': NOW}
+PLANNED = [{'id': 47, 'status': 'planned', 'planned_start_at': NOW + timedelta(hours=1)}]
+NONACTIVE_WORLDS = (None, {}, {'event': None},
+                    {'event': {'status': 'planned'}},
+                    {'event': {'status': 'completed'}},
+                    {'event': {'status': 'cancelled'}})
 
 
 class ScheduleChangeClaimContractTests(unittest.TestCase):
@@ -44,6 +49,59 @@ class ScheduleChangeClaimContractTests(unittest.TestCase):
                      'もしよければ場所を変えたらどう？'):
             with self.subTest(text=text):
                 self.assertIsNone(change_claim_conflict([{'zh': text}], ACTIVE, [], None))
+
+    def test_reported_declarative_sentences_require_intent_for_future_plans(self):
+        for text in (
+                '我把明天的安排挪到后天了。',
+                '不知道为什么，我把明天的安排取消了。',
+                '总之我怎么说呢，今天的行程我提前了。',
+                '那么，我把它改到周五了。',
+                '我什么都没做，不过我把它取消了。'):
+            for world in NONACTIVE_WORLDS:
+                with self.subTest(text=text, world=world):
+                    self.assertEqual(change_claim_conflict(
+                        [{'zh': text}], world, PLANNED, None), REASON)
+
+    def test_lexical_me_before_a_change_claim_is_not_a_question_particle(self):
+        for prefix in ('不知道为什么', '我怎么说呢', '这么一来', '那么', '不论它多么重要'):
+            text = prefix + '，我把明天的安排取消了。'
+            with self.subTest(text=text):
+                self.assertEqual(change_claim_conflict(
+                    [{'zh': text}], None, PLANNED, None), REASON)
+
+    def test_real_questions_remain_nonclaims_with_future_plans(self):
+        for text in ('为什么取消了会议？', '你想怎么取消会议？',
+                     '你说什么安排取消了？', '你要不要我挪一下？',
+                     '这事儿怎么安排比较好？', '有什么需要我改到周五的吗？',
+                     '你想把会议改到什么时候？', '怎么把会议往后挪？',
+                     '能不能改到周五', '是否取消了会议',
+                     '改到周五吗', '改到周五么', '可以取消会议么',
+                     '会议取消了么，我还没收到通知'):
+            for world in NONACTIVE_WORLDS:
+                with self.subTest(text=text, world=world):
+                    self.assertIsNone(change_claim_conflict(
+                        [{'zh': text}], world, PLANNED, None))
+
+    def test_denials_conditions_and_past_remain_nonclaims_with_future_plans(self):
+        for text in ('我没有取消。', '我不会取消明天的安排。',
+                     '不要取消明天的安排。', '如果你想聊天，我就取消会议。',
+                     '要是你有空，我就取消会议。', '上周我取消了会议。',
+                     '你愿意的话我挪一下。', '昨天我把它取消了。',
+                     '之前我把会议往后挪了。'):
+            with self.subTest(text=text):
+                self.assertIsNone(change_claim_conflict(
+                    [{'zh': text}], None, PLANNED, None))
+
+    def test_change_claim_rule_is_deterministic_without_database_or_model_calls(self):
+        with patch.object(db_schedule, 'get_conn') as connect, \
+                patch('ai_client.create_chat') as create, \
+                patch('ai_client.get_anthropic') as client, \
+                patch('structured_output.invoke_structured_llm') as structured:
+            for _ in range(2):
+                self.assertEqual(change_claim_conflict(
+                    [{'zh': '我把明天的安排取消了。'}], None, PLANNED, None), REASON)
+            for dependency in (connect, create, client, structured):
+                dependency.assert_not_called()
 
     def test_question_or_past_sentence_does_not_hide_another_claim(self):
         for text in ('要不要一起吃饭？我已经把会议取消了。',
