@@ -344,6 +344,44 @@ def _check_time_word_consistency(jp: str, zh: str) -> str | None:
     return None
 
 
+# Lexicalised forms that merely contain negation morphology. Their natural
+# Chinese rendering carries no negation marker, so counting them as denial
+# flips the polarity comparison on its own.
+_JP_NEGATION_NON_DENIALS = (
+    '少なくとも', '少ない', '少なく', '危ない', '切ない', 'つまらない',
+    'くだらない', '情けない', 'もったいない', 'あっけない', 'そっけない',
+    'とんでもない',
+)
+# Conjunctions, degree words and compounds that contain 不 / 没 / 别 without
+# negating the clause.
+_ZH_NEGATION_NON_DENIALS = (
+    '不过', '不但', '不仅', '不光', '不只', '不如', '不管', '不论', '不然',
+    '不妨', '不料', '不住', '要不', '差不多', '了不起', '不好意思', '没准',
+)
+_JP_NEGATION_PATTERNS = (
+    # Covers ない / なかった and therefore じゃない・ではない・わけない too.
+    r'な(?:い|かった)',
+    # Obligation forms (なきゃ / なければ) are affirmative and stay excluded.
+    r'なく(?!ちゃ|ては|ても)',
+    r'ね[ぇえー]',
+    r'ませ(?:ん|んでした)',
+    r'ず(?:に|[、。）」])',
+)
+_ZH_NEGATION_PATTERNS = (
+    # 不 / 没 negate whatever follows, so the negated word is not enumerable.
+    r'[不没](?![\s，。！？、])',
+    r'无法', r'毫无', r'并非', r'未(?!来)', r'甭',
+)
+# 别 also means "other"; only the prohibitive sense counts.
+_ZH_PROHIBITIVE_PATTERN = r'(?<![特区分性告差级派识个])别(?![的人])'
+
+
+def _strip_all(text: str, fragments) -> str:
+    for fragment in fragments:
+        text = text.replace(fragment, '')
+    return text
+
+
 def _check_negation_consistency(jp: str, zh: str) -> str | None:
     """Compare strong negation markers, leaving short or ambiguous wording alone."""
     if len(jp.strip()) < 6 or len(zh.strip()) < 6:
@@ -353,22 +391,19 @@ def _check_negation_consistency(jp: str, zh: str) -> str | None:
                   r'(?:じゃない|ではない)(?:か|[？?])', jp)
             or re.search(r'不是不|并非不|不能不|不得不|没有不', zh)):
         return None
-    jp_neg_patterns = (
-        r'ない(?:[。！？!?、，,\s]|$|よ|ね|な|ぞ|ん|だろ|でしょ|です)',
-        r'ません(?:[。！？!?、，,\s]|$|よ|ね|でした)',
-        r'ずに', r'じゃない', r'ではない', r'ねーよ', r'ねぇよ',
-        r'わけない', r'はずない',
-    )
-    zh_neg_patterns = (
-        r'不(?:是|会|能|想|要|行|可以|可能|应该|对|知道|必|用|需要|愿意)',
-        r'没(?:有|什么|啥|吃|睡|去|来|见|说|想|做|听|看|回|能)',
-        r'别(?:想|说|闹|来|急|忘)',
-        r'才不', r'才没', r'并不', r'绝不', r'从不',
-    )
-    if (any(re.search(pattern, jp) for pattern in jp_neg_patterns)
-            != any(re.search(pattern, zh) for pattern in zh_neg_patterns)):
-        return 'negation_polarity_mismatch'
-    return None
+    jp_text = _strip_all(jp, _JP_NEGATION_NON_DENIALS)
+    zh_text = _strip_all(zh, _ZH_NEGATION_NON_DENIALS)
+    jp_neg = any(re.search(pattern, jp_text) for pattern in _JP_NEGATION_PATTERNS)
+    zh_neg = any(re.search(pattern, zh_text) for pattern in _ZH_NEGATION_PATTERNS)
+    zh_prohibitive = bool(re.search(_ZH_PROHIBITIVE_PATTERN, zh_text))
+    if jp_neg == (zh_neg or zh_prohibitive):
+        return None
+    # Japanese prohibition (言うなよ / 〜ちゃダメ) cannot be separated from the
+    # sentence-final particle な, so a Chinese 别-only prohibition is ambiguous
+    # evidence rather than a polarity flip.
+    if not jp_neg and zh_prohibitive and not zh_neg:
+        return None
+    return 'negation_polarity_mismatch'
 
 
 def _check_number_consistency(jp: str, zh: str) -> str | None:
