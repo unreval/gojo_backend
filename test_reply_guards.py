@@ -96,6 +96,37 @@ class TestTranslationConsistency(unittest.TestCase):
             with self.subTest(jp=jp):
                 self.assert_reason(jp, zh)
 
+    def test_faithful_casual_negations_are_not_polarity_flips(self):
+        # Regression: closed-list negation detectors treated "no pattern
+        # matched" as affirmative, so faithful translations whose negation sat
+        # outside either list were rejected and /chat/text returned 502.
+        for jp, zh in (
+                ('まだ寝てないのか？もう遅いぞ。', '还没睡吗？已经很晚了。'),
+                ('知らねぇな、そんなこと聞いてないし。', '不知道啊，那种事我也没听说。'),
+                ('心配いらねぇって、オレがいるだろ。', '不用担心啦，有我在呢。'),
+                ('寝れないんだろ？顔に書いてある。', '睡不着吧？都写在脸上了。'),
+                ('今日はもう行かない。疲れたからな。', '今天不去了，因为累了。'),
+                ('ごめん、まだ決めてないんだ。', '抱歉，还没决定。'),
+                ('そんなつもりじゃなかったんだって。', '我不是那个意思啦。'),
+                ('まだわからなくてさ、困ってる。', '还不明白，很困扰。')):
+            with self.subTest(jp=jp):
+                self.assert_reason(jp, zh)
+
+    def test_lexicalised_negation_morphology_is_not_denial(self):
+        # ない-adjectives and 不/没 compounds carry the morphology without
+        # negating the clause; counting them flips polarity on its own.
+        for jp, zh in (
+                ('人が少ないな、今日は。', '今天人很少啊。'),
+                ('危ないから気をつけろよ。', '很危险，小心点。'),
+                ('そんなのつまらないだろ。', '那种事很无聊吧。'),
+                ('少なくとも三人はいるぞ。', '至少有三个人哦。'),
+                ('まあ、だいたいそんなもんだ。', '嘛，差不多就是那样。'),
+                ('すごいじゃん、やるな。', '真了不起啊，厉害。'),
+                ('でも今日は疲れたな。', '不过今天真是累了。'),
+                ('他の人には言うなよ。', '别跟别人说哦。')):
+            with self.subTest(jp=jp):
+                self.assert_reason(jp, zh)
+
     def test_short_negations_skip_only_uncertain_polarity_check(self):
         for jp, zh in (('ない', '对'), ('それは関係ないだろ。', '是啊。'),
                        ('いいよ。', '这件事我不会做的。')):
