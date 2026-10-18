@@ -40,6 +40,27 @@ class MemoryCandidateGateTests(unittest.TestCase):
             self.assertTrue(call.args[0].lstrip().upper().startswith('SELECT'))
         return result
 
+    def validate_with_grounding_coverage(self, candidate, raw_text=None):
+        """Observe the real gate's coverage without reproducing its algorithm."""
+        measured = {}
+        code = memory_candidate.validate_candidate.__code__
+        previous_trace = sys.gettrace()
+
+        def trace(frame, event, _arg):
+            if frame.f_code is not code:
+                return None
+            if event == 'return' and 'chars' in frame.f_locals:
+                measured['coverage'] = (
+                    sum(frame.f_locals.get('covered', [])), len(frame.f_locals['chars']))
+            return trace
+
+        try:
+            sys.settrace(trace)
+            result = self.validate(candidate, raw_text=raw_text)
+        finally:
+            sys.settrace(previous_trace)
+        return result, measured.get('coverage')
+
     def test_matching_quote_and_summary_pass_without_mutation(self):
         candidate = self.candidate()
         original = copy.deepcopy(candidate)
@@ -157,11 +178,97 @@ class MemoryCandidateGateTests(unittest.TestCase):
     def test_double_negatives_are_not_treated_as_plain_denial(self):
         for quote, summary in (
                 ('我今天不得不去上班', '她今天去上班'),
-                ('我今天去上班了', '她今天不得不去上班'),
                 ('我不是不喜欢咖啡', '她喜欢咖啡')):
             with self.subTest(quote=quote, summary=summary):
                 self.assertEqual(self.validate(self.candidate(quote=quote, summary=summary),
                                                raw_text=quote), (True, None))
+
+    def test_grounding_contract_cases_report_actual_covered_positions(self):
+        cases = (
+            (self.raw_text, '她今天买咖啡亏了69元', (5, 6), True),
+            (self.raw_text, '她今天买咖啡亏钱了', (4, 6), True),
+            ('今天交易亏了六十九元', '她亏了69元', (2, 3), True),
+            ('今天交易亏了69元', '她亏了六十九元', (2, 3), True),
+            ('我昨天晚上喝咖啡', '她昨晚喝咖啡', (3, 3), True),
+            ('我明天早上喝咖啡', '她明早喝咖啡', (3, 3), True),
+            ('我\t爱 咖\n啡', '她爱咖啡', (3, 3), True),
+            ('我今天不得不去上班', '她今天去上班', (3, 3), True),
+            ('我今天去上班了', '她今天不得不去上班', (3, 6), False),
+            ('我今天很累', '在新加坡读书', (0, 6), False),
+            ('我今天很累', '讨厌香菜', (0, 4), False),
+            ('我今天很累', '喜欢吃辣', (0, 4), False),
+            ('我今天很累', '她今天很好', (0, 2), False),
+        )
+        with patch('ai_client.create_chat') as create, \
+                patch('ai_client.get_anthropic') as client, \
+                patch('structured_output.invoke_structured_llm') as structured:
+            for quote, summary, coverage, accepted in cases:
+                with self.subTest(quote=quote, summary=summary):
+                    result, actual_coverage = self.validate_with_grounding_coverage(
+                        self.candidate(quote=quote, summary=summary), raw_text=quote)
+                    self.assertEqual(actual_coverage, coverage)
+                    self.assertEqual(result, (True, None) if accepted else
+                                     (False, 'summary_not_grounded_in_quote'))
+            for model in (create, client, structured):
+                model.assert_not_called()
+
+    def test_adding_double_negative_fails_grounding_at_fifty_percent(self):
+        quote = '我今天去上班了'
+        result, coverage = self.validate_with_grounding_coverage(
+            self.candidate(quote=quote, summary='她今天不得不去上班'), raw_text=quote)
+        self.assertEqual(coverage, (3, 6))
+        self.assertEqual(result, (False, 'summary_not_grounded_in_quote'))
+
+    def test_grounding_does_not_require_abstract_object_or_value_in_the_quote(self):
+        quote = '我今天很累'
+        result, coverage = self.validate_with_grounding_coverage(self.candidate(
+            quote=quote, summary='她今天很累', object='身体状态', value='疲惫'),
+            raw_text=quote)
+        self.assertEqual(coverage, (2, 2))
+        self.assertEqual(result, (True, None))
+
+    def test_earlier_gates_keep_their_reason_without_executing_grounding(self):
+        for changes, reason in (
+                ({'source_event_id': ''}, 'source_not_active_or_changed'),
+                ({'quote': '不存在的引用'}, 'quote_not_verbatim'),
+                ({'quote': '今天'}, 'quote_too_short'),
+                ({'summary': '她亏了96元'}, 'number_value_mismatch'),
+                ({'summary': '她没亏69元'}, 'negation_polarity_mismatch'),
+                ({'summary': '她昨天亏了69元'}, 'time_word_contradiction'),
+                ({'predicate': 'invalid', 'summary': '她今天很好'},
+                 'invalid_predicate_or_summary'),
+                ({'summary': ''}, 'invalid_predicate_or_summary'),
+                ({'summary': '她' * 61}, 'invalid_predicate_or_summary')):
+            with self.subTest(reason=reason, changes=changes):
+                candidate = self.candidate(perspective='她其实很在意', **changes)
+                original = copy.deepcopy(candidate)
+                result, coverage = self.validate_with_grounding_coverage(candidate)
+                self.assertEqual(result, (False, reason))
+                self.assertIsNone(coverage)
+                self.assertEqual(candidate, original)
+
+    def test_empty_grounding_residue_still_runs_perspective_validation(self):
+        for perspective, dropped in (('我想认真听她说', False), ('她其实很在意', True)):
+            with self.subTest(perspective=perspective):
+                candidate = self.candidate(summary='她今天69', perspective=perspective)
+                result, coverage = self.validate_with_grounding_coverage(candidate)
+                self.assertEqual(coverage, (0, 0))
+                self.assertEqual(result, (True, 'perspective_dropped' if dropped else None))
+                self.assertEqual('perspective' in candidate, not dropped)
+                self.assertEqual(candidate['summary'], '她今天69')
+
+    def test_grounding_uses_position_union_and_the_sixty_percent_boundary(self):
+        for summary, expected_coverage, accepted in (
+                ('她喝咖啡提神', (3, 5), True),
+                ('她喝咖啡来提神', (3, 6), False),
+                ('她喝咖啡喝咖啡', (6, 6), True)):
+            with self.subTest(summary=summary):
+                quote = '我喜欢喝咖啡'
+                result, coverage = self.validate_with_grounding_coverage(
+                    self.candidate(quote=quote, summary=summary), raw_text=quote)
+                self.assertEqual(coverage, expected_coverage)
+                self.assertEqual(result, (True, None) if accepted else
+                                 (False, 'summary_not_grounded_in_quote'))
 
     def test_yesterday_cannot_replace_today(self):
         self.assertEqual(self.validate(self.candidate(summary='她昨天买咖啡亏了69元')),
