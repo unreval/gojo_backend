@@ -19,6 +19,15 @@ MODEL_CN_AUX = os.getenv('MODEL_CN_AUX', 'deepseek-v4-flash')
 DEEPSEEK_KEY = os.getenv('DEEPSEEK_KEY', '')
 DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
 
+# 对指定的临时 HTTP 故障及连接建立失败做有界重试；5xx 不保证上游未生成/计费。
+# PROVIDER_TRANSPORT_ATTEMPTS 是每个语义候选的外层总尝试次数（1 = 关闭外层重试）。
+# 普通路径的 HTTP 次数上限为 attempts * (1 + SDK max_retries)；
+# 默认刻意保持 2，与当前 SDK max_retries=1 合计最多 4 次，schema 回退另计。
+PROVIDER_TRANSPORT_ATTEMPTS = max(1, min(4, int(
+    os.getenv('PROVIDER_TRANSPORT_ATTEMPTS', '2'))))
+PROVIDER_TRANSPORT_BACKOFF_SECONDS = max(0.0, min(5.0, float(
+    os.getenv('PROVIDER_TRANSPORT_BACKOFF_SECONDS', '0.4'))))
+
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_KEY', '')
 FISH_KEY      = os.environ.get('FISH_KEY', '')
 FISH_VOICE_ID = os.environ.get('FISH_VOICE_ID', 'bfcbd07c927742d6803f52084f6bb776')

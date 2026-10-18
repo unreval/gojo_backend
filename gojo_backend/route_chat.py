@@ -32,7 +32,10 @@ import uuid
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX
+from config import (
+    EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX,
+    PROVIDER_TRANSPORT_ATTEMPTS, PROVIDER_TRANSPORT_BACKOFF_SECONDS,
+)
 from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
     finalize_user_messages, classify_reply_content,
@@ -43,7 +46,7 @@ from generation_contract import (
 )
 from ai_client import extract_text, get_anthropic
 from provider_error import diagnostics as provider_diagnostics
-from provider_error import is_auth_error, retry_delay_seconds
+from provider_error import call_with_transport_retry, is_auth_error, retry_delay_seconds
 from context_budget import estimate_tokens
 from tts import tts_to_b64, transcribe_audio_b64
 from prompt import build_system_blocks, log_cache_usage
@@ -68,6 +71,27 @@ def _provider_create(**kwargs):
     if counter is not None:
         counter[0] += 1
     return get_anthropic(max_retries=1).messages.create(**kwargs)
+
+
+def _create_json_resilient(model, max_tokens, system_blocks, messages):
+    """Bound transport retries separately from semantic repair.
+
+    A relay 503 is a transport failure, not a semantic one, so it must not
+    consume the two-attempt semantic repair budget. ``is_retryable_transport``
+    excludes ambiguous read/write failures from this outer retry layer.
+    The SDK retains its own retries, including timeouts. The wait is short;
+    durable jobs keep using the much longer ``retry_delay_seconds``.
+    """
+    def _log_retry(attempt, delay, exc):
+        print(f'[generation] transport retry {attempt}/'
+              f'{PROVIDER_TRANSPORT_ATTEMPTS - 1} after {delay:.2f}s '
+              f'status={getattr(exc, "status_code", None) or "-"}')
+
+    return call_with_transport_retry(
+        lambda: _create_json(model, max_tokens, system_blocks, messages),
+        attempts=PROVIDER_TRANSPORT_ATTEMPTS,
+        backoff_seconds=PROVIDER_TRANSPORT_BACKOFF_SECONDS,
+        on_retry=_log_retry)
 
 
 def _create_json(model, max_tokens, system_blocks, messages):
@@ -557,7 +581,12 @@ def resolve_chat_proactive_event_id(data):
     return f'proactive:chat:{uuid.uuid4()}'
 
 
-def _generation_failed_response(user_id: str, character_id: str, total_days=None, attempts=2):
+def _generation_failed_response(user_id: str, character_id: str, total_days=None,
+                                attempts=2, error_out=None):
+    """Expose temporary provider failures as 503 with a retry delay.
+
+    Other generation failures retain the existing 502 response.
+    """
     print(f'[{user_id}][{character_id}] generation_failed; '
           f'max_semantic_attempts={attempts}; commit skipped')
     body = {
@@ -567,7 +596,13 @@ def _generation_failed_response(user_id: str, character_id: str, total_days=None
     }
     if total_days is not None:
         body['total_days'] = total_days
-    return JSONResponse(body, status_code=502)
+    retry_after = (error_out or {}).get('provider_retry_delay_seconds')
+    if not isinstance(retry_after, int) or isinstance(retry_after, bool) or retry_after <= 0:
+        return JSONResponse(body, status_code=502)
+    body['error'] = 'provider_unavailable'
+    body['retry_after_seconds'] = retry_after
+    return JSONResponse(body, status_code=503,
+                        headers={'Retry-After': str(retry_after)})
 
 
 def _parse_reply(raw: str):
@@ -608,7 +643,7 @@ def _generate_or_none(
     attempts, log_tag, cache_tag, min_messages=1, salvage=False, reject_fn=None,
     generation_trace=None, error_out=None, observe_fn=None,
 ):
-    """One provider request per semantic candidate, with at most one repair."""
+    """Bound transport attempts per semantic candidate, with at most one repair."""
     semantic_attempts = min(attempts, 2)
     repair_reason = None
     provider_calls = [0]
@@ -630,7 +665,7 @@ def _generate_or_none(
         generation_calls += 1
         counter_token = _provider_call_counter.set(provider_calls)
         try:
-            raw, response = _create_json(
+            raw, response = _create_json_resilient(
                 model, max_tokens, request_system_blocks, messages)
         except Exception as exc:
             if error_out is not None:
@@ -1541,6 +1576,7 @@ async def chat_text(data: dict):
         'provider': 'anthropic',
         'context_pack': pack,
     }
+    generation_error = {}
 
     from db_generation_receipt import GenerationHeartbeat
     with GenerationHeartbeat(
@@ -1555,6 +1591,7 @@ async def chat_text(data: dict):
             observe_fn=lambda parsed: _observe_temporal_candidate(
                 parsed, temporal_snapshot, pack, source_event_id),
             generation_trace=generation_trace,
+            error_out=generation_error,
         )
     llm_ms = (_time.perf_counter() - _tmark) * 1000.0
     _trace.mark('llm', llm_ms)
@@ -1569,7 +1606,8 @@ async def chat_text(data: dict):
         except Exception:
             pass
         _latency_emit()
-        return _generation_failed_response(user_id, character_id, total_days, attempts=2)
+        return _generation_failed_response(user_id, character_id, total_days,
+                                           attempts=2, error_out=generation_error)
 
     emotion, msgs = _finalize_committed(result)
     if msgs is None:

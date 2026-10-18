@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 _TOKEN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$')
 _HOST = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$')
+_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 _ERROR_CODES = frozenset({
     'authentication_error', 'permission_error', 'invalid_request_error',
     'rate_limit_error', 'api_error', 'overloaded_error',
@@ -85,6 +86,58 @@ def is_auth_error(error):
         status = None
     return status in (401, 403) or type(error).__name__ in (
         'AuthenticationError', 'PermissionDeniedError')
+
+
+def is_retryable_transport(error):
+    """Allow bounded retries for selected HTTP or connection setup failures.
+
+    HTTP failures do not prove that the upstream did no work or billing.
+    Read/write failures and unknown connection phases are excluded here;
+    an SDK APIConnectionError alone does not identify the failed phase.
+    SDK timeouts are excluded here; this does not disable SDK-level retries.
+    """
+    for _ in range(3):
+        if error is None:
+            return False
+        name = type(error).__name__
+        if (isinstance(error, TimeoutError) or name in (
+                'APITimeoutError', 'Timeout', 'ReadTimeout', 'WriteTimeout',
+                'ReadError', 'WriteError', 'RemoteProtocolError')):
+            return False
+        status = getattr(error, 'status_code', None)
+        if isinstance(status, int) and not isinstance(status, bool):
+            if status in _RETRYABLE_STATUSES:
+                return True
+            if 400 <= status <= 599:
+                return False
+        if name in ('ConnectError', 'ConnectTimeout'):
+            return True
+        error = getattr(error, '__cause__', None)
+    return False
+
+
+def call_with_transport_retry(call, *, attempts, backoff_seconds,
+                              sleep=None, on_retry=None, random_=None):
+    """Repeat ``call`` only for failures allowed by the transport policy.
+
+    ``sleep``/``random_`` are injectable so the backoff is testable without
+    real waiting. The final attempt always re-raises.
+    """
+    import random as _random
+    import time as _time
+    sleep = sleep or _time.sleep
+    random_ = random_ or _random
+    for attempt in range(max(1, attempts)):
+        try:
+            return call()
+        except Exception as exc:
+            if attempt + 1 >= max(1, attempts) or not is_retryable_transport(exc):
+                raise
+            delay = backoff_seconds * (2 ** attempt)
+            delay += random_.uniform(0, delay / 2) if delay else 0
+            if on_retry:
+                on_retry(attempt + 1, delay, exc)
+            sleep(delay)
 
 
 def retry_delay_seconds(error):

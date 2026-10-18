@@ -98,9 +98,10 @@ class ChatCommitGateTests(unittest.TestCase):
             'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
             'fastapi.responses': stub(
                 'fastapi.responses',
-                JSONResponse=lambda content, status_code=200: types.SimpleNamespace(
+                JSONResponse=lambda content, status_code=200, headers=None: types.SimpleNamespace(
                     body=json.dumps(content, ensure_ascii=False).encode(),
                     status_code=status_code,
+                    headers=headers or {},
                 ),
             ),
             'config': stub(
@@ -111,6 +112,8 @@ class ChatCommitGateTests(unittest.TestCase):
                 DEFAULT_CHARACTER_ID='gojo',
                 MODEL_MAIN='claude-test',
                 MODEL_JP_AUX='claude-haiku-test',
+                PROVIDER_TRANSPORT_ATTEMPTS=2,
+                PROVIDER_TRANSPORT_BACKOFF_SECONDS=0.0,
             ),
             'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
             'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
@@ -248,6 +251,85 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assert_generation_failed(response, body)
         self.assertNotIn('abcdefghijklmnopqrstuvwx',
                          ' '.join(str(call) for call in self.log.call_args_list))
+
+    def test_transient_provider_503_retries_identically_and_commits_once(self):
+        self.route._create_json = Mock(side_effect=[
+            ProviderHTTPError(503, provider='anthropic', model='claude-test'),
+            (chat_reply('そうだね', '是啊'), Mock()),
+        ])
+        response = asyncio.run(self.route.chat_text({
+            'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
+            'source_event_id': 'evt-transient-503',
+        }))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.route._create_json.call_count, 2)
+        self.assertEqual(self.route._create_json.call_args_list[0],
+                         self.route._create_json.call_args_list[1])
+        self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
+        self.save_user_once.assert_called_once()
+        self.save_short.assert_called_once()
+        self.record_turn.assert_called_once()
+        self.assertEqual([trace['attempt'] for trace in self.generation_traces()
+                          if 'attempt' in trace], [1])
+
+    def test_exhausted_provider_503_returns_retry_after_without_assistant_commit(self):
+        self.route._create_json = Mock(side_effect=ProviderHTTPError(
+            503, provider='anthropic', model='claude-test'))
+        response = asyncio.run(self.route.chat_text({
+            'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
+            'source_event_id': 'evt-exhausted-503',
+        }))
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers['Retry-After'], '60')
+        self.assertEqual(body, {
+            'error': 'provider_unavailable', 'generation_failed': True,
+            'messages': [], 'total_days': 3, 'retry_after_seconds': 60,
+        })
+        self.assertEqual(self.route._create_json.call_count, 2)
+        self.assert_assistant_commit_skipped()
+        self.assertEqual(self.user_memory_roles(), ['user'])
+        self.save_user_once.assert_called_once()
+        sys.modules['db_generation_receipt'].fail_generation.assert_called_once_with(
+            'u', 'gojo', 'evt-exhausted-503', 'chat_text',
+            'passthrough', last_error='generation_failed')
+
+    def test_read_timeout_is_not_repeated_by_transport_wrapper(self):
+        class ReadTimeout(Exception):
+            pass
+
+        self.route._create_json = Mock(side_effect=ReadTimeout('read failed'))
+        response = asyncio.run(self.route.chat_text({
+            'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
+            'source_event_id': 'evt-read-timeout',
+        }))
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers['Retry-After'], '60')
+        self.assertEqual(json.loads(response.body)['error'], 'provider_unavailable')
+        self.route._create_json.assert_called_once()
+        self.assert_assistant_commit_skipped()
+
+    def test_transport_retry_preserves_the_single_semantic_repair(self):
+        unavailable = ProviderHTTPError(503, provider='anthropic', model='claude-test')
+        self.route._create_json = Mock(side_effect=[
+            unavailable, (chat_reply('こんにちは', 'こんにちは'), Mock()),
+            unavailable, (chat_reply('そうだね', '是啊'), Mock()),
+        ])
+        response = asyncio.run(self.route.chat_text({
+            'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
+            'source_event_id': 'evt-transport-semantic',
+        }))
+        self.assertEqual(response.status_code, 200)
+        calls = self.route._create_json.call_args_list
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[0], calls[1])
+        self.assertEqual(calls[2], calls[3])
+        self.assertEqual(len(calls[2].args[2]), len(calls[0].args[2]) + 1)
+        self.assertEqual([trace['attempt'] for trace in self.generation_traces()
+                          if 'attempt' in trace], [1, 2])
+        self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
+        self.save_short.assert_called_once()
+        self.record_turn.assert_called_once()
 
     def test_prompt_messages_do_not_fallback_on_source_validity_error(self):
         import raw_events
@@ -796,9 +878,10 @@ class VoiceProactiveIdentityTests(unittest.TestCase):
             'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
             'fastapi.responses': stub(
                 'fastapi.responses',
-                JSONResponse=lambda content, status_code=200: types.SimpleNamespace(
+                JSONResponse=lambda content, status_code=200, headers=None: types.SimpleNamespace(
                     body=json.dumps(content, ensure_ascii=False).encode(),
                     status_code=status_code,
+                    headers=headers or {},
                 ),
             ),
             'config': stub(
@@ -809,6 +892,8 @@ class VoiceProactiveIdentityTests(unittest.TestCase):
                 DEFAULT_CHARACTER_ID='gojo',
                 MODEL_MAIN='claude-test',
                 MODEL_JP_AUX='claude-haiku-test',
+                PROVIDER_TRANSPORT_ATTEMPTS=2,
+                PROVIDER_TRANSPORT_BACKOFF_SECONDS=0.0,
             ),
             'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
             'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
