@@ -12,6 +12,40 @@ from config import CN_TZ
 import db_promise
 
 
+_CN_DIGITS = {'零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+              '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+# 时钟表达:12点 / 十二点 / 四点半。半 → 30 分,不能丢。
+_CN_CLOCK = r'([0-9]{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*[点時时](\s*半)?'
+
+
+def _cn_hour(token: str):
+    """把 '12' 或 '十二' 解析成小时数;无法解析返回 None。"""
+    token = (token or '').strip()
+    if not token:
+        return None
+    if token.isdecimal():
+        value = int(token)
+        return value if 0 <= value <= 23 else None
+    if any(char not in _CN_DIGITS for char in token):
+        return None
+    if '十' not in token:
+        if len(token) != 1:
+            return None
+        return _CN_DIGITS[token]
+    head, _, tail = token.partition('十')
+    value = (_CN_DIGITS[head] if head else 1) * 10 + (_CN_DIGITS[tail] if tail else 0)
+    return value if 0 <= value <= 23 else None
+
+
+def _extract_clock(text: str):
+    """返回 (hour, minute),取第一个能解析的时钟表达;没有则 (None, None)。"""
+    for match in re.finditer(_CN_CLOCK, text or ''):
+        hour = _cn_hour(match.group(1))
+        if hour is not None:
+            return hour, 30 if match.group(2) else 0
+    return None, None
+
+
 # 承诺关键词:角色回复的中文翻译(zh)里包含这些就可能是承诺
 _PROMISE_PATTERNS = [
     # 主动联系类
@@ -24,9 +58,11 @@ _PROMISE_PATTERNS = [
     (r'(连续|一直|不停)(发|发消息|找你|吵你|烦你)', 'spam'),
     (r'(收不到|不回).{0,6}(就|就会|我就)(发|吵|找|烦)', 'spam'),
     (r'轰炸', 'spam'),
-    # 时间约定类
-    (r'(明天|后天|晚上|早上|下午).{0,6}(找你|叫你|提醒你|说一声)', 'timed'),
-    (r'(\d{1,2})(点|時).{0,6}(找你|叫你|提醒|告诉)', 'timed'),
+    # 主动开口类:角色自己说"我主动发",没有"会/要"前缀
+    (r'(主动|亲自|先)(给你)?(发|发消息|发信息|找你|联系你|说一声)', 'contact'),
+    # 时间约定类。小时可以是阿拉伯数字,也可以是中文数字(四点半)
+    (r'(明天|后天|晚上|早上|下午).{0,6}(找你|叫你|提醒你|说一声|发消息|我发|我主动)', 'timed'),
+    (_CN_CLOCK + r'.{0,8}(找你|叫你|提醒|告诉|发消息|我发|主动发)', 'timed'),
     # 定期类
     (r'每天.{0,6}(找你|提醒|叫你|问你|发)', 'daily'),
     (r'每(早|晚|天早上|天晚上).{0,6}(找你|提醒|叫)', 'daily'),
@@ -82,11 +118,9 @@ def detect_and_save(character_id, user_id, user_text, reply_zh,
             trigger_kind = 'daily'
             trigger_time = '09:00'
             # 看看有没有具体时间
-            time_match = re.search(r'(\d{1,2})(点|時)', reply_zh)
-            if time_match:
-                h = int(time_match.group(1))
-                if 0 <= h <= 23:
-                    trigger_time = f'{h:02d}:00'
+            hour, minute = _extract_clock(reply_zh)
+            if hour is not None:
+                trigger_time = f'{hour:02d}:{minute:02d}'
             context = f'角色答应每天{trigger_time}主动联系。原话:「{matched_text}」'
             return _save_promise(character_id, user_id, trigger_kind,
                                 trigger_time=trigger_time,
@@ -104,12 +138,14 @@ def detect_and_save(character_id, user_id, user_text, reply_zh,
             elif '后天' in reply_zh:
                 trigger_at = now + timedelta(days=2)
 
-            # 看有没有具体小时
-            time_match = re.search(r'(\d{1,2})(点|時)', reply_zh)
-            if time_match:
-                h = int(time_match.group(1))
-                if 0 <= h <= 23:
-                    trigger_at = trigger_at.replace(hour=h, minute=0)
+            # 看有没有具体小时。「四点半」要保留 30 分,不能抹成整点。
+            hour, minute = _extract_clock(reply_zh)
+            if hour is not None:
+                trigger_at = trigger_at.replace(
+                    hour=hour, minute=minute, second=0, microsecond=0)
+                # 没写明天/后天又已经过点了,说的就是明天那一次。
+                if trigger_at <= now and not ('明天' in reply_zh or '后天' in reply_zh):
+                    trigger_at += timedelta(days=1)
 
             context = f'角色答应在特定时间联系。原话:「{matched_text}」'
             return _save_promise(character_id, user_id, trigger_kind,
