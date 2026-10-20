@@ -1,0 +1,24 @@
+{
+  "source_commit": "6c1d238",
+  "group": "targeted",
+  "argv": [
+    "-v",
+    "-p",
+    "no:cacheprovider",
+    "tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_twenty_message_matrix",
+    "tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_forty_message_matrix"
+  ],
+  "exit_code": 0,
+  "passed": 2,
+  "failures": [],
+  "errors": [],
+  "skipped": [],
+  "passed_tests": [
+    "tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_twenty_message_matrix",
+    "tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_forty_message_matrix"
+  ],
+  "subtests_passed": 6,
+  "pglite_package": "C:\\Users\\张三\\AppData\\Local\\Temp\\gojo-pglite-test\\node_modules\\@electric-sql\\pglite",
+  "pytest_version": "9.1.1",
+  "offline_guard": "external-network-and-real-psycopg2-disabled"
+}

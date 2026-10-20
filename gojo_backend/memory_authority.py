@@ -286,6 +286,23 @@ def project_canonical_memory(cur, *, user_id, character_id, event_id,
               PROJECTION_VERSION, json.dumps(semantic_payload, ensure_ascii=False)))
     row = cur.fetchone()
     if row:
+        if table == 'bond_memory':
+            cur.execute(f'''SELECT id FROM long_memory
+                WHERE user_id=%s AND character_id=%s AND category IS NOT NULL
+                  AND category <> ''
+                  AND timestamp <= COALESCE(%s::timestamptz, CURRENT_TIMESTAMP)
+                  AND {authoritative_memory_sql('long_memory')}
+                ORDER BY EXISTS (SELECT 1 FROM memory_source_events mse
+                    WHERE mse.memory_type='long_memory' AND mse.memory_id=long_memory.id
+                      AND mse.source_event_id=%s) DESC,
+                    timestamp DESC NULLS LAST, id DESC LIMIT 1''',
+                (user_id, character_id, occurred_at, source_id))
+            fact_row = cur.fetchone()
+            if fact_row:
+                cur.execute('''UPDATE bond_memory SET linked_fact_id=%s
+                    WHERE id=%s AND user_id=%s AND character_id=%s
+                      AND linked_fact_id IS NULL''',
+                    (fact_row[0], row[0], user_id, character_id))
         for dependency in dependencies or [{'source_id': source_id}]:
             cur.execute("""INSERT INTO memory_source_events(memory_type,memory_id,source_event_id)
                            VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",

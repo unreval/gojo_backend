@@ -1,0 +1,12 @@
+{
+  "head": "6c1d2387be05708443489ed9fe0107f7921b8e0d",
+  "branch": "",
+  "main": "610564654f79229aea4590f5608723458c9b0145",
+  "origin_main": "6c1d2387be05708443489ed9fe0107f7921b8e0d",
+  "status": "M .codex/skills/gojo-safe-change/scripts/classify_change.py\n M gojo_backend/cognitive_revision.py\n M gojo_backend/config.py\n M gojo_backend/gojo_server.py\n M gojo_backend/memory_authority.py\n?? gojo_backend/candidate_producer.py\n?? review/\n?? tests/test_candidate_producer.py\n?? tests/test_candidate_producer_projection.py",
+  "diff_stat": ".../skills/gojo-safe-change/scripts/classify_change.py  |  2 ++\n gojo_backend/cognitive_revision.py                      |  6 +++++-\n gojo_backend/config.py                                  |  6 ++++++\n gojo_backend/gojo_server.py                             |  5 +++++\n gojo_backend/memory_authority.py                        | 17 +++++++++++++++++\n 5 files changed, 35 insertions(+), 1 deletion(-)",
+  "commit_created": false,
+  "pushed": false,
+  "deployed": false,
+  "patch_files": 9
+}

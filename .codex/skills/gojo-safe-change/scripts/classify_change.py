@@ -133,6 +133,8 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
         "rel_declared",
     ),
     "memory": (
+        "gojo_backend/candidate_producer.py",
+        "gojo_backend/gojo_server.py",
         "gojo_backend/auto_pin.py",
         "gojo_backend/context_budget.py",
         "gojo_backend/shadow_audit.py",

@@ -1,0 +1,30 @@
+source_commit=working-tree
+pytest_argv=["-v", "-p", "no:cacheprovider", "tests/test_cognitive_worker_controls.py"]
+offline_guard=external-network-and-real-psycopg2-disabled
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\张三\AppData\Local\GojoAssistant-test-env\python311\python.exe
+rootdir: C:\Users\张三\Documents\GojoAssistant-live\.worktrees\memory-candidate-producer-20261020
+collecting ... collected 14 items
+
+tests/test_cognitive_worker_controls.py::WorkerControlsSQLTests::test_controls_defer_ingress_and_do_not_preclaim_pending_pairs PASSED [  7%]
+tests/test_cognitive_worker_controls.py::WorkerControlsSQLTests::test_disabled_direct_aggregation_recovers_without_reclaiming PASSED [ 14%]
+tests/test_cognitive_worker_controls.py::WorkerControlsSQLTests::test_disabled_duplicate_ingress_recovers_a_running_cycle PASSED [ 21%]
+tests/test_cognitive_worker_controls.py::WorkerControlsSQLTests::test_disabled_ingress_never_claims_or_exhausts_new_evidence PASSED [ 28%]
+tests/test_cognitive_worker_controls.py::WorkerControlsSQLTests::test_disabled_ingress_recovers_old_leases_without_reclaim_or_refund PASSED [ 35%]
+tests/test_cognitive_worker_controls.py::WorkerControlsSQLTests::test_enabled_question_reactivation_completes_and_consumes PASSED [ 42%]
+tests/test_cognitive_worker_controls.py::WorkerControlsSQLTests::test_failed_cycle_counts_toward_process_limit PASSED [ 50%]
+tests/test_cognitive_worker_controls.py::WorkerControlsSQLTests::test_process_limit_and_monotonic_interval_preserve_unprocessed_cycles PASSED [ 57%]
+tests/test_cognitive_worker_controls.py::WorkerControlsPersistenceTests::test_disabled_owned_duplicate_persists_recovery_across_connections PASSED [ 64%]
+tests/test_cognitive_worker_controls.py::WorkerControlsPersistenceTests::test_disabled_owned_ingress_persists_recovery_across_connections PASSED [ 71%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_control_integer_settings_default_and_clamp_to_zero SUBPASSED(setting='COGNITIVE_MAX_CYCLES_PER_RUN', value=None) [ 78%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_control_integer_settings_default_and_clamp_to_zero SUBPASSED(setting='COGNITIVE_MAX_CYCLES_PER_RUN', value='-1') [ 78%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_control_integer_settings_default_and_clamp_to_zero SUBPASSED(setting='COGNITIVE_MAX_CYCLES_PER_RUN', value='invalid') [ 78%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_control_integer_settings_default_and_clamp_to_zero SUBPASSED(setting='COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES', value=None) [ 78%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_control_integer_settings_default_and_clamp_to_zero SUBPASSED(setting='COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES', value='-1') [ 78%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_control_integer_settings_default_and_clamp_to_zero SUBPASSED(setting='COGNITIVE_MIN_SECONDS_BETWEEN_CYCLES', value='invalid') [ 78%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_control_integer_settings_default_and_clamp_to_zero PASSED [ 78%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_disabled_single_step_has_no_maintenance_or_claim PASSED [ 85%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_loop_waits_for_guards_and_keeps_running_until_stopped PASSED [ 92%]
+tests/test_cognitive_worker_controls.py::WorkerControlUnitTests::test_thread_restart_does_not_reset_process_budget PASSED [100%]
+
+=================== 14 passed, 6 subtests passed in 37.51s ====================

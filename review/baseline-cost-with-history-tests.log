@@ -1,0 +1,18 @@
+source_commit=6c1d238
+pytest_argv=["-v", "-p", "no:cacheprovider", "tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_twenty_message_matrix", "tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_forty_message_matrix"]
+offline_guard=external-network-and-real-psycopg2-disabled
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\张三\AppData\Local\GojoAssistant-test-env\python311\python.exe
+rootdir: C:\Users\张三\AppData\Local\Temp\gojo-memory-baseline-wy5qx23l
+collecting ... collected 2 items
+
+tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_twenty_message_matrix SUBPASSED(spacing='two_minutes') [ 50%]
+tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_twenty_message_matrix SUBPASSED(spacing='two_hours') [ 50%]
+tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_twenty_message_matrix SUBPASSED(spacing='cross_midnight') [ 50%]
+tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_twenty_message_matrix PASSED [ 50%]
+tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_forty_message_matrix SUBPASSED(spacing='two_minutes') [100%]
+tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_forty_message_matrix SUBPASSED(spacing='two_hours') [100%]
+tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_forty_message_matrix SUBPASSED(spacing='cross_midnight') [100%]
+tests/test_time_cognition_cost_audit.py::TokenCostAuditTests::test_fixed_forty_message_matrix PASSED [100%]
+
+==================== 2 passed, 6 subtests passed in 8.86s =====================

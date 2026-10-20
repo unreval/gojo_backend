@@ -1,0 +1,109 @@
+========================================================================
+GOJO DIFF AUDIT
+========================================================================
+Repository      : C:/Users/张三/Documents/GojoAssistant-live/.worktrees/memory-candidate-producer-20261020
+Branch          : (detached HEAD)
+Base            : 6c1d238
+Allowed domains : cognitive-loop, generation, memory, workflow-governance
+Status          : NEEDS_REVIEW
+
+Changed files   : 43
+Production files: 5
+
+Scope audit:
+  - No out-of-scope production file detected.
+
+Authority-sensitive paths:
+  - REVIEW: gojo_backend/cognitive_revision.py
+  - REVIEW: gojo_backend/memory_authority.py
+
+Sensitive added-line signals:
+  - [BACKGROUND_EXECUTION] gojo_backend/candidate_producer.py
+      + _THREAD_LOCK = threading.Lock()
+  - [BACKGROUND_EXECUTION] gojo_backend/candidate_producer.py
+      + _STOP = threading.Event()
+  - [DATABASE_WRITE] gojo_backend/candidate_producer.py
+      + cur.execute('''INSERT INTO event_processing_state
+  - [DATABASE_WRITE] gojo_backend/candidate_producer.py
+      + ON CONFLICT (event_id,processor_type,processor_version) DO UPDATE SET
+  - [DATABASE_WRITE] gojo_backend/candidate_producer.py
+      + cur.execute('''INSERT INTO event_processing_state
+  - [DATABASE_WRITE] gojo_backend/candidate_producer.py
+      + ON CONFLICT (event_id,processor_type,processor_version) DO UPDATE SET
+  - [DATABASE_WRITE] gojo_backend/candidate_producer.py
+      + cur.execute('''UPDATE event_processing_state
+  - [DATABASE_WRITE] gojo_backend/candidate_producer.py
+      + cur.execute('''UPDATE event_processing_state
+  - [BROAD_EXCEPTION] gojo_backend/candidate_producer.py
+      + except Exception as exc:
+  - [BROAD_EXCEPTION] gojo_backend/candidate_producer.py
+      + except Exception:
+  - [BROAD_EXCEPTION] gojo_backend/candidate_producer.py
+      + except Exception:
+  - [BROAD_EXCEPTION] gojo_backend/candidate_producer.py
+      + except Exception as exc:
+  - [BROAD_EXCEPTION] gojo_backend/candidate_producer.py
+      + except Exception as exc:
+  - [BACKGROUND_EXECUTION] gojo_backend/candidate_producer.py
+      + _THREAD = threading.Thread(target=_producer_loop, name='candidate-producer', daemon=True)
+  - [DATABASE_WRITE] gojo_backend/candidate_producer.py
+      + cur.execute('UPDATE cognitive_events SET adjudication=%s::jsonb WHERE id=%s',
+  - [BROAD_EXCEPTION] gojo_backend/candidate_producer.py
+      + except Exception:
+  - [BROAD_EXCEPTION] gojo_backend/gojo_server.py
+      + except Exception as e:
+  - [DATABASE_WRITE] gojo_backend/memory_authority.py
+      + cur.execute('''UPDATE bond_memory SET linked_fact_id=%s
+
+Changed files:
+  - [NON-PRODUCTION] [workflow-governance] .codex/skills/gojo-safe-change/scripts/classify_change.py
+  - [PRODUCTION] [memory] gojo_backend/candidate_producer.py
+  - [PRODUCTION] [cognitive-loop] gojo_backend/cognitive_revision.py
+  - [PRODUCTION] [generation] gojo_backend/config.py
+  - [PRODUCTION] [memory] gojo_backend/gojo_server.py
+  - [PRODUCTION] [memory] gojo_backend/memory_authority.py
+  - [NON-PRODUCTION] [workflow-governance] review/a-final-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/a-final-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/a-review-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/a-review-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/a-targeted-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/a-targeted-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/baseline-cost-with-history-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/baseline-cost-with-history-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/baseline-full-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/baseline-full-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/baseline-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/baseline-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/comparison.json
+  - [NON-PRODUCTION] [workflow-governance] review/final-classification.log
+  - [NON-PRODUCTION] [workflow-governance] review/final-diff-audit.log
+  - [NON-PRODUCTION] [workflow-governance] review/final-diff.patch
+  - [NON-PRODUCTION] [workflow-governance] review/final-full-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/final-full-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/final-git-state.json
+  - [NON-PRODUCTION] [workflow-governance] review/final-patch-check.log
+  - [NON-PRODUCTION] [workflow-governance] review/final-producer-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/final-producer-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/final-targeted-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/final-targeted-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/impact-review.md
+  - [NON-PRODUCTION] [workflow-governance] review/original-root-git-state.json
+  - [NON-PRODUCTION] [workflow-governance] review/preference-reproduction-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/preference-reproduction-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/producer-integrated-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/producer-integrated-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/run_memory_validation.py
+  - [NON-PRODUCTION] [workflow-governance] review/worker-controls-confirmation-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/worker-controls-confirmation-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/worker-controls-isolated-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/worker-controls-isolated-tests.log
+  - [NON-PRODUCTION] [other] tests/test_candidate_producer.py
+  - [NON-PRODUCTION] [other] tests/test_candidate_producer_projection.py
+
+Interpretation:
+  PASS         = no deterministic scope/sensitive signal found.
+  NEEDS_REVIEW = sensitive path or added behavior requires review.
+  BLOCKED      = actual production diff exceeded approved domains.
+
+This audit cannot lower semantic risk determined by gojo-safe-change.
+========================================================================

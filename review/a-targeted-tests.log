@@ -1,0 +1,61 @@
+source_commit=working-tree
+pytest_argv=["-v", "-p", "no:cacheprovider", "tests/test_candidate_producer.py"]
+offline_guard=external-network-and-real-psycopg2-disabled
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\张三\AppData\Local\GojoAssistant-test-env\python311\python.exe
+rootdir: C:\Users\张三\Documents\GojoAssistant-live\.worktrees\memory-candidate-producer-20261020
+collecting ... collected 17 items
+
+tests/test_candidate_producer.py::ProducerPureTests::test_batch_trigger_uses_count_or_oldest_age_with_exact_boundary PASSED [  5%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn SUBPASSED(text='[]', stop='max_tokens') [ 11%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn SUBPASSED(text='[]', stop='tool_use') [ 11%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn SUBPASSED(text='not JSON', stop='end_turn') [ 11%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn SUBPASSED(text='{}', stop='end_turn') [ 11%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn PASSED [ 11%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default SUBPASSED(enabled=None, shadow=None) [ 17%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default SUBPASSED(enabled='true', shadow='false') [ 17%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default SUBPASSED(enabled='1', shadow='0') [ 17%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default SUBPASSED(enabled='false', shadow='true') [ 17%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default PASSED [ 17%]
+tests/test_candidate_producer.py::ProducerPureTests::test_disabled_entry_points_do_not_open_database_model_or_thread PASSED [ 23%]
+tests/test_candidate_producer.py::ProducerPureTests::test_worker_is_wired_at_existing_process_startup PASSED [ 29%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_assistant_raw_role_cannot_become_user_fact PASSED [ 35%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_invented_quote_and_foreign_source_id_are_rejected PASSED [ 41%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_live_mode_projects_only_after_validation_and_is_recallable FAILED [ 47%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_malformed_json_and_non_array_do_not_project_or_complete_events SUBPASSED(raw='not JSON') [ 52%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_malformed_json_and_non_array_do_not_project_or_complete_events SUBPASSED(raw='{}') [ 52%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_malformed_json_and_non_array_do_not_project_or_complete_events PASSED [ 52%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_nine_events_make_one_batch_of_eight_using_unchanged_main_model PASSED [ 58%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_one_invalid_candidate_does_not_discard_seven_valid_candidates PASSED [ 64%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_replay_of_done_event_never_calls_provider_again PASSED [ 70%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_seven_recent_events_wait_but_exactly_five_minutes_triggers PASSED [ 76%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_shadow_runs_real_gates_and_changes_only_processing_state PASSED [ 82%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_three_provider_failures_pause_user_and_recovery_is_possible PASSED [ 88%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_truncated_output_leaves_events_pending_and_halves_retry_batch PASSED [ 94%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_twenty_batch_daily_budget_is_shared_across_user_characters PASSED [100%]
+
+================================== FAILURES ===================================
+_ ProducerDatabaseTests.test_live_mode_projects_only_after_validation_and_is_recallable _
+
+self = <tests.test_candidate_producer.ProducerDatabaseTests testMethod=test_live_mode_projects_only_after_validation_and_is_recallable>
+
+    def test_live_mode_projects_only_after_validation_and_is_recallable(self):
+        self.seed()
+        self.run_pair(shadow=False)
+        from memory_authority import authoritative_memory_sql
+        gate = authoritative_memory_sql('long_memory')
+>       self.assertEqual(self.sql(f'SELECT content FROM long_memory WHERE {gate}'),
+                         [('她今天亏了69元。',)])
+E       AssertionError: Lists differ: [] != [('她今天亏了69元。',)]
+E       
+E       Second list contains 1 additional elements.
+E       First extra element 0:
+E       ('她今天亏了69元。',)
+E       
+E       - []
+E       + [('她今天亏了69元。',)]
+
+tests\test_candidate_producer.py:276: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_candidate_producer.py::ProducerDatabaseTests::test_live_mode_projects_only_after_validation_and_is_recallable
+============== 1 failed, 16 passed, 10 subtests passed in 16.78s ==============

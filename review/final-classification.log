@@ -1,0 +1,89 @@
+====================================================================
+GOJO CHANGE CLASSIFIER
+====================================================================
+Repository : C:/Users/张三/Documents/GojoAssistant-live/.worktrees/memory-candidate-producer-20261020
+Branch     : (detached HEAD)
+Base       : 6c1d238
+Risk       : RED
+
+Changed files    : 43
+Production files : 5
+
+Reasons:
+  - Touched authority-sensitive or migration/schema path(s): gojo_backend/cognitive_revision.py, gojo_backend/memory_authority.py
+
+Detected domains:
+  - cognitive-loop
+  - generation
+  - memory
+  - tests
+  - workflow-governance
+
+Candidate architecture invariants:
+  - INV-AUTH-002
+  - INV-COG-001
+  - INV-COG-002
+  - INV-COG-003
+  - INV-EVID-001
+  - INV-EVID-002
+  - INV-EVID-003
+  - INV-FAIL-002
+  - INV-GEN-001
+  - INV-PERSIST-001
+  - INV-STATE-001
+  - INV-STATE-002
+
+Candidate historical regressions:
+  - REG-001
+  - REG-002
+  - REG-006
+  - REG-007
+  - REG-008
+
+Files:
+  - [workflow-governance] .codex/skills/gojo-safe-change/scripts/classify_change.py
+  - [memory] gojo_backend/candidate_producer.py
+  - [cognitive-loop] gojo_backend/cognitive_revision.py
+  - [generation] gojo_backend/config.py
+  - [memory] gojo_backend/gojo_server.py
+  - [memory] gojo_backend/memory_authority.py
+  - [workflow-governance] review/a-final-tests.json
+  - [workflow-governance] review/a-final-tests.log
+  - [workflow-governance] review/a-review-tests.json
+  - [workflow-governance] review/a-review-tests.log
+  - [workflow-governance] review/a-targeted-tests.json
+  - [workflow-governance] review/a-targeted-tests.log
+  - [workflow-governance] review/baseline-cost-with-history-tests.json
+  - [workflow-governance] review/baseline-cost-with-history-tests.log
+  - [workflow-governance] review/baseline-full-tests.json
+  - [workflow-governance] review/baseline-full-tests.log
+  - [workflow-governance] review/baseline-tests.json
+  - [workflow-governance] review/baseline-tests.log
+  - [workflow-governance] review/comparison.json
+  - [workflow-governance] review/final-classification.log
+  - [workflow-governance] review/final-diff-audit.log
+  - [workflow-governance] review/final-diff.patch
+  - [workflow-governance] review/final-full-tests.json
+  - [workflow-governance] review/final-full-tests.log
+  - [workflow-governance] review/final-git-state.json
+  - [workflow-governance] review/final-patch-check.log
+  - [workflow-governance] review/final-producer-tests.json
+  - [workflow-governance] review/final-producer-tests.log
+  - [workflow-governance] review/final-targeted-tests.json
+  - [workflow-governance] review/final-targeted-tests.log
+  - [workflow-governance] review/impact-review.md
+  - [workflow-governance] review/original-root-git-state.json
+  - [workflow-governance] review/preference-reproduction-tests.json
+  - [workflow-governance] review/preference-reproduction-tests.log
+  - [workflow-governance] review/producer-integrated-tests.json
+  - [workflow-governance] review/producer-integrated-tests.log
+  - [workflow-governance] review/run_memory_validation.py
+  - [workflow-governance] review/worker-controls-confirmation-tests.json
+  - [workflow-governance] review/worker-controls-confirmation-tests.log
+  - [workflow-governance] review/worker-controls-isolated-tests.json
+  - [workflow-governance] review/worker-controls-isolated-tests.log
+  - [tests] tests/test_candidate_producer.py
+  - [tests] tests/test_candidate_producer_projection.py
+
+NOTE: This is a deterministic minimum-risk classifier. Semantic review may only raise the risk level, never lower it.
+====================================================================

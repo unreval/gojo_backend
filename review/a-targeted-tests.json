@@ -1,0 +1,43 @@
+{
+  "source_commit": "working-tree",
+  "group": "targeted",
+  "argv": [
+    "-v",
+    "-p",
+    "no:cacheprovider",
+    "tests/test_candidate_producer.py"
+  ],
+  "exit_code": 1,
+  "passed": 16,
+  "failures": [
+    {
+      "test": "tests/test_candidate_producer.py::ProducerDatabaseTests::test_live_mode_projects_only_after_validation_and_is_recallable",
+      "phase": "call",
+      "traceback": "self = <tests.test_candidate_producer.ProducerDatabaseTests testMethod=test_live_mode_projects_only_after_validation_and_is_recallable>\n\n    def test_live_mode_projects_only_after_validation_and_is_recallable(self):\n        self.seed()\n        self.run_pair(shadow=False)\n        from memory_authority import authoritative_memory_sql\n        gate = authoritative_memory_sql('long_memory')\n>       self.assertEqual(self.sql(f'SELECT content FROM long_memory WHERE {gate}'),\n                         [('她今天亏了69元。',)])\nE       AssertionError: Lists differ: [] != [('她今天亏了69元。',)]\nE       \nE       Second list contains 1 additional elements.\nE       First extra element 0:\nE       ('她今天亏了69元。',)\nE       \nE       - []\nE       + [('她今天亏了69元。',)]\n\ntests\\test_candidate_producer.py:276: AssertionError"
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "passed_tests": [
+    "tests/test_candidate_producer.py::ProducerPureTests::test_batch_trigger_uses_count_or_oldest_age_with_exact_boundary",
+    "tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn",
+    "tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default",
+    "tests/test_candidate_producer.py::ProducerPureTests::test_disabled_entry_points_do_not_open_database_model_or_thread",
+    "tests/test_candidate_producer.py::ProducerPureTests::test_worker_is_wired_at_existing_process_startup",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_assistant_raw_role_cannot_become_user_fact",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_invented_quote_and_foreign_source_id_are_rejected",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_malformed_json_and_non_array_do_not_project_or_complete_events",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_nine_events_make_one_batch_of_eight_using_unchanged_main_model",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_one_invalid_candidate_does_not_discard_seven_valid_candidates",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_replay_of_done_event_never_calls_provider_again",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_seven_recent_events_wait_but_exactly_five_minutes_triggers",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_shadow_runs_real_gates_and_changes_only_processing_state",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_three_provider_failures_pause_user_and_recovery_is_possible",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_truncated_output_leaves_events_pending_and_halves_retry_batch",
+    "tests/test_candidate_producer.py::ProducerDatabaseTests::test_twenty_batch_daily_budget_is_shared_across_user_characters"
+  ],
+  "subtests_passed": 10,
+  "pglite_package": "C:\\Users\\张三\\AppData\\Local\\Temp\\gojo-pglite-test\\node_modules\\@electric-sql\\pglite",
+  "pytest_version": "9.1.1",
+  "offline_guard": "external-network-and-real-psycopg2-disabled"
+}
