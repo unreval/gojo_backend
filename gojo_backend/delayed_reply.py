@@ -151,6 +151,40 @@ def assistant_already_committed(user_id, character_id, phone_check_id):
         return False
 
 
+def _apply_promise_effects(user_id, character_id, result, msgs,
+                           *, user_text='', turn_id=''):
+    """Record promises made inside a delayed reply.
+
+    /chat/text runs these through commit_and_run_effects; the delayed path
+    commits messages itself, so the same two effects are applied here against
+    the delivery turn id. Never raises: delivery must not depend on it.
+    """
+    try:
+        from generation_effects import (
+            ENDPOINT_CHAT_TEXT, apply_proactive_promise, apply_promise_detector,
+        )
+        payload = dict(result or {})
+        promise = payload.get('proactive_promise') or payload.get('_proactive_promise')
+        ctx = {
+            'user_id': user_id,
+            'character_id': character_id,
+            'endpoint': ENDPOINT_CHAT_TEXT,
+            'source_event_id': turn_id,
+            'user_text': user_text or '',
+            'msgs': msgs,
+            'payload': {
+                '_user_text': user_text or '',
+                'messages': msgs,
+                '_proactive_promise': promise,
+            },
+        }
+        if promise:
+            apply_proactive_promise(ctx)
+        apply_promise_detector(ctx)
+    except Exception as exc:
+        print(f'[delayed_reply] promise effects skipped: {type(exc).__name__}: {exc}')
+
+
 def cancel_orphan_busy_promises(now=None):
     """Old architecture wrote wake-up promises. Do not generate from them."""
     try:
@@ -372,6 +406,12 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
         )
     except Exception as exc:
         print(f'[{user_id}] delayed behavior observation skipped:{exc}')
+
+    # 延迟回复同样可能许下承诺。不走这一步的话,角色说了"等会儿找你"却没有任何
+    # 任务落库,下一轮他读回自己的台词还会以为已经发过了。fail-safe:不影响投递。
+    _apply_promise_effects(
+        user_id, character_id, result, msgs,
+        user_text=pending_text, turn_id=turn_id)
 
     _push_delayed_reply(user_id, character_id, char.get('name') or character_id, msgs)
     update_chat_days(user_id)

@@ -1253,5 +1253,87 @@ class DelayedGroundingTests(unittest.TestCase):
                          [first['content'], second['content'], third['content']])
 
 
+class DelayedReplyPromiseEffectTests(unittest.TestCase):
+    """Regression: a promise made inside a delayed reply must be recorded.
+
+    /chat/text applies proactive_promise through commit_and_run_effects. The
+    delayed path commits messages itself, so it previously dropped every
+    structured promise: the character said "I'll message you at 4:30", no row
+    was written, nothing fired, and the next turn read his own line back as
+    proof he had already sent it.
+    """
+
+    MSGS = [{'jp': '四時半に僕から送る。', 'zh': '四点半我主动发。'}]
+
+    def test_structured_promise_in_delayed_reply_is_saved(self):
+        saved = []
+        with patch('generation_effects.apply_proactive_promise',
+                   side_effect=lambda ctx: saved.append(ctx)), \
+             patch('generation_effects.apply_promise_detector',
+                   return_value={}):
+            delayed_reply._apply_promise_effects(
+                'u', 'gojo',
+                {'messages': self.MSGS,
+                 'proactive_promise': {'trigger_kind': 'once',
+                                       'trigger_at': '2026-10-20 16:30',
+                                       'context': '答应四点半主动发消息'}},
+                self.MSGS, user_text='你明天几点有空', turn_id='pc:9:0')
+        self.assertEqual(len(saved), 1)
+        ctx = saved[0]
+        self.assertEqual(ctx['source_event_id'], 'pc:9:0')
+        self.assertEqual(ctx['payload']['_proactive_promise']['trigger_kind'], 'once')
+
+    def test_text_fallback_detector_runs_on_delayed_reply(self):
+        seen = []
+        with patch('generation_effects.apply_proactive_promise') as structured, \
+             patch('generation_effects.apply_promise_detector',
+                   side_effect=lambda ctx: seen.append(ctx)):
+            delayed_reply._apply_promise_effects(
+                'u', 'gojo', {'messages': self.MSGS}, self.MSGS,
+                user_text='', turn_id='pc:9:0')
+        structured.assert_not_called()
+        self.assertEqual(seen[0]['msgs'], self.MSGS)
+
+    def test_promise_effect_failure_never_blocks_delivery(self):
+        with patch('generation_effects.apply_promise_detector',
+                   side_effect=RuntimeError('db down')):
+            delayed_reply._apply_promise_effects(
+                'u', 'gojo', {'messages': self.MSGS}, self.MSGS,
+                user_text='', turn_id='pc:9:0')
+
+
+class PromiseDetectorCoverageTests(unittest.TestCase):
+    """Regression: the detector missed the character's own casual promises."""
+
+    import promise_detector as _pd
+
+    def test_self_initiated_promises_are_detected(self):
+        for line in (
+                '我说了四点半我主动发消息。要是找不到人，随你怎么整我都行。',
+                '刚才说过了吧。明天四点半，我主动发。',
+                '等我忙完十一点给你发消息。'):
+            with self.subTest(line=line):
+                self.assertTrue(
+                    any(__import__('re').search(pattern, line)
+                        for pattern, _ in self._pd._PROMISE_PATTERNS),
+                    f'no promise pattern matched: {line}')
+
+    def test_ordinary_lines_are_not_promises(self):
+        for line in ('今天人很少啊，训练场空荡荡的。',
+                     '四点半的会议真是无聊透了。'):
+            with self.subTest(line=line):
+                self.assertFalse(
+                    any(__import__('re').search(pattern, line)
+                        for pattern, _ in self._pd._PROMISE_PATTERNS))
+
+    def test_cjk_numerals_and_half_hours_parse(self):
+        for text, expected in (('四点半', (4, 30)), ('十二点', (12, 0)),
+                               ('4点半', (4, 30)), ('十一点', (11, 0)),
+                               ('七点半', (7, 30)), ('二十三点', (23, 0)),
+                               ('没有时间', (None, None))):
+            with self.subTest(text=text):
+                self.assertEqual(self._pd._extract_clock(text), expected)
+
+
 if __name__ == '__main__':
     unittest.main()
