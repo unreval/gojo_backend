@@ -1,0 +1,11 @@
+source_commit=working-tree
+pytest_argv=["-v", "-p", "no:cacheprovider", "tests/test_cognitive_worker_controls.py::WorkerControlsPersistenceTests::test_disabled_owned_duplicate_persists_recovery_across_connections"]
+offline_guard=external-network-and-real-psycopg2-disabled
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\张三\AppData\Local\GojoAssistant-test-env\python311\python.exe
+rootdir: C:\Users\张三\Documents\GojoAssistant-live\.worktrees\memory-candidate-producer-20261020
+collecting ... collected 1 item
+
+tests/test_cognitive_worker_controls.py::WorkerControlsPersistenceTests::test_disabled_owned_duplicate_persists_recovery_across_connections PASSED [100%]
+
+============================= 1 passed in 22.11s ==============================

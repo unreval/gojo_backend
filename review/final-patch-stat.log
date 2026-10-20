@@ -1,0 +1,10 @@
+ .../gojo-safe-change/scripts/classify_change.py    |    2 
+ gojo_backend/cognitive_revision.py                 |    6 
+ gojo_backend/config.py                             |    6 
+ gojo_backend/gojo_server.py                        |    5 
+ gojo_backend/memory_authority.py                   |   17 +
+ gojo_backend/candidate_producer.py                 |  602 ++++++++++++++++++++
+ tests/test_candidate_producer.py                   |  389 +++++++++++++
+ tests/test_candidate_producer_projection.py        |  392 +++++++++++++
+ review/run_memory_validation.py                    |  144 +++++
+ 9 files changed, 1562 insertions(+), 1 deletion(-)

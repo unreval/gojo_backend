@@ -131,6 +131,11 @@ init_push_table()
 from memory_jobs import init_memory_jobs_table, start_memory_worker
 init_memory_jobs_table()
 start_memory_worker()
+try:
+    from candidate_producer import start_candidate_producer
+    start_candidate_producer()
+except Exception as e:
+    print(f'[init] candidate producer skipped:{type(e).__name__}')
 if _HAS_EXPLORE:
     try:
         init_visited_places_table()

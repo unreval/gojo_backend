@@ -1,0 +1,22 @@
+{
+  "source_commit": "working-tree",
+  "group": "targeted",
+  "argv": [
+    "-v",
+    "-p",
+    "no:cacheprovider",
+    "tests/test_cognitive_worker_controls.py::WorkerControlsPersistenceTests::test_disabled_owned_duplicate_persists_recovery_across_connections"
+  ],
+  "exit_code": 0,
+  "passed": 1,
+  "failures": [],
+  "errors": [],
+  "skipped": [],
+  "passed_tests": [
+    "tests/test_cognitive_worker_controls.py::WorkerControlsPersistenceTests::test_disabled_owned_duplicate_persists_recovery_across_connections"
+  ],
+  "subtests_passed": 0,
+  "pglite_package": "C:\\Users\\张三\\AppData\\Local\\Temp\\gojo-pglite-test\\node_modules\\@electric-sql\\pglite",
+  "pytest_version": "9.1.1",
+  "offline_guard": "external-network-and-real-psycopg2-disabled"
+}

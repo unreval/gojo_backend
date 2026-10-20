@@ -1,0 +1,7 @@
+{
+  "branch": "feat/time-cognition-projection-20261014",
+  "head": "b22841ebc900939985120c6e94d6f41f79a9dd69",
+  "main": "610564654f79229aea4590f5608723458c9b0145",
+  "origin_main": "6c1d2387be05708443489ed9fe0107f7921b8e0d",
+  "status": "M gojo_backend/ai_client.py\n M gojo_backend/config.py\n M gojo_backend/provider_error.py\n M gojo_backend/route_group.py\n M gojo_backend/route_memory.py\n M gojo_backend/route_story.py\n M gojo_backend/trending_engine.py\n?? .worktrees/\n?? docs/\n?? review/\n?? tests/test_model_env_config.py\n?? tests/test_tagged_model_provider.py\n?? tests/test_time_cognition_compact_proposal.py"
+}

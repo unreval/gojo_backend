@@ -1,0 +1,49 @@
+source_commit=working-tree
+pytest_argv=["-v", "-p", "no:cacheprovider", "tests/test_candidate_producer.py"]
+offline_guard=external-network-and-real-psycopg2-disabled
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\张三\AppData\Local\GojoAssistant-test-env\python311\python.exe
+rootdir: C:\Users\张三\Documents\GojoAssistant-live\.worktrees\memory-candidate-producer-20261020
+collecting ... collected 22 items
+
+tests/test_candidate_producer.py::ProducerPureTests::test_audit_marks_short_circuited_gates_as_not_evaluated PASSED [  4%]
+tests/test_candidate_producer.py::ProducerPureTests::test_batch_trigger_uses_count_or_oldest_age_with_exact_boundary PASSED [  9%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn SUBPASSED(text='[]', stop='max_tokens') [ 13%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn SUBPASSED(text='[]', stop='tool_use') [ 13%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn SUBPASSED(text='not JSON', stop='end_turn') [ 13%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn SUBPASSED(text='{}', stop='end_turn') [ 13%]
+tests/test_candidate_producer.py::ProducerPureTests::test_complete_output_must_be_json_array_and_end_turn PASSED [ 13%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default SUBPASSED(enabled=None, shadow=None) [ 18%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default SUBPASSED(enabled='true', shadow='false') [ 18%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default SUBPASSED(enabled='1', shadow='0') [ 18%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default SUBPASSED(enabled='false', shadow='true') [ 18%]
+tests/test_candidate_producer.py::ProducerPureTests::test_configuration_is_disabled_and_shadow_by_default PASSED [ 18%]
+tests/test_candidate_producer.py::ProducerPureTests::test_disabled_entry_points_do_not_open_database_model_or_thread PASSED [ 22%]
+tests/test_candidate_producer.py::ProducerPureTests::test_existing_seven_literal_forms_keep_their_original_semantics SUBPASSED(text='我喜欢咖啡。') [ 27%]
+tests/test_candidate_producer.py::ProducerPureTests::test_existing_seven_literal_forms_keep_their_original_semantics SUBPASSED(text='我的职业是「老师」。') [ 27%]
+tests/test_candidate_producer.py::ProducerPureTests::test_existing_seven_literal_forms_keep_their_original_semantics SUBPASSED(text='我拒绝「拍照」。') [ 27%]
+tests/test_candidate_producer.py::ProducerPureTests::test_existing_seven_literal_forms_keep_their_original_semantics SUBPASSED(text='不要「拍照」。') [ 27%]
+tests/test_candidate_producer.py::ProducerPureTests::test_existing_seven_literal_forms_keep_their_original_semantics SUBPASSED(text='我承诺在2026-10-21前完成「作业」。') [ 27%]
+tests/test_candidate_producer.py::ProducerPureTests::test_existing_seven_literal_forms_keep_their_original_semantics SUBPASSED(text='我已兑现截至2026-10-21的承诺「作业」。') [ 27%]
+tests/test_candidate_producer.py::ProducerPureTests::test_existing_seven_literal_forms_keep_their_original_semantics SUBPASSED(text='更正：「我讨厌咖啡」不对，应为「我喜欢咖啡」。') [ 27%]
+tests/test_candidate_producer.py::ProducerPureTests::test_existing_seven_literal_forms_keep_their_original_semantics PASSED [ 27%]
+tests/test_candidate_producer.py::ProducerPureTests::test_worker_is_wired_at_existing_process_startup PASSED [ 31%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_assistant_raw_role_cannot_become_user_fact PASSED [ 36%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_committed_reservation_with_unknown_ack_retains_budget_and_cooldown PASSED [ 40%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_equal_source_ids_in_distinct_character_scopes_do_not_suppress_each_other PASSED [ 45%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_invented_quote_and_foreign_source_id_are_rejected PASSED [ 50%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_live_mode_projects_only_after_validation_and_is_recallable PASSED [ 54%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_malformed_json_and_non_array_do_not_project_or_complete_events SUBPASSED(raw='not JSON') [ 59%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_malformed_json_and_non_array_do_not_project_or_complete_events SUBPASSED(raw='{}') [ 59%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_malformed_json_and_non_array_do_not_project_or_complete_events PASSED [ 59%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_nine_events_make_one_batch_of_eight_using_unchanged_main_model PASSED [ 63%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_one_invalid_candidate_does_not_discard_seven_valid_candidates PASSED [ 68%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_replay_of_done_event_never_calls_provider_again PASSED [ 72%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_seven_recent_events_wait_but_exactly_five_minutes_triggers PASSED [ 77%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_shadow_runs_real_gates_and_changes_only_processing_state PASSED [ 81%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_three_provider_failures_pause_user_and_recovery_is_possible PASSED [ 86%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_truncated_output_leaves_events_pending_and_halves_retry_batch PASSED [ 90%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_twenty_batch_daily_budget_is_shared_across_user_characters PASSED [ 95%]
+tests/test_candidate_producer.py::ProducerDatabaseTests::test_unknown_completion_ack_does_not_repeat_provider_or_spend_budget PASSED [100%]
+
+=================== 22 passed, 17 subtests passed in 17.64s ===================

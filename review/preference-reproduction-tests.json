@@ -1,0 +1,26 @@
+{
+  "source_commit": "working-tree",
+  "group": "targeted",
+  "argv": [
+    "-v",
+    "-p",
+    "no:cacheprovider",
+    "tests/test_candidate_producer_projection.py::CandidateProducerProjectionTests::test_unsupported_preference_value_rejects_only_this_candidate"
+  ],
+  "exit_code": 1,
+  "passed": 0,
+  "failures": [
+    {
+      "test": "tests/test_candidate_producer_projection.py::CandidateProducerProjectionTests::test_unsupported_preference_value_rejects_only_this_candidate",
+      "phase": "call",
+      "traceback": "self = <tests.test_candidate_producer_projection.CandidateProducerProjectionTests testMethod=test_unsupported_preference_value_rejects_only_this_candidate>\n\n    def test_unsupported_preference_value_rejects_only_this_candidate(self):\n        candidate = self.candidate(quote='我最爱喝黑咖啡了', summary='她最爱喝黑咖啡',\n            predicate='reported_preference', object='饮品', value='黑咖啡')\n        self.seed(candidate, adjudicated=False, include_claim=False)\n        before = self.database_state()\n>       result = self.produce(candidate)\n                 ^^^^^^^^^^^^^^^^^^^^^^^\n\ntests\\test_candidate_producer_projection.py:150: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\ntests\\test_candidate_producer_projection.py:39: in produce\n    return candidate_producer.adjudicate_and_project(\ngojo_backend\\candidate_producer.py:557: in adjudicate_and_project\n    decision = _apply_literal_operation(cur, cycle_id=None, user_id=user_id,\ngojo_backend\\cognitive_revision.py:950: in _apply_literal_operation\n    create_prediction(user_id=user_id, character_id=character_id,\ngojo_backend\\cognitive_predictions.py:346: in create_prediction\n    normalized_metadata = validate_signal_prediction_contract(\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\n\nresolver_name = 'explicit_report_outcome', fulfillment_operator = '>='\nfulfillment_value = 1, violation_operator = '<=', violation_value = -1\nmetadata = {'claim_scope': {'subject': 'user:u', 'predicate': 'reported_preference', 'object': '饮品', 'time_scope': 'unspecified', ...}, 'expected_value': '黑咖啡', 'source_chat_id': 'c', 'basis_belief_keys': ['report.9b466fb88d22117a81f5abbf.e1'], ...}\n\n    def validate_signal_prediction_contract(\n        resolver_name,\n        fulfillment_operator,\n        fulfillment_value,\n        violation_operator,\n        violation_value,\n        metadata,\n    ):\n        if resolver_name not in {'current_event_signal_outcome', 'explicit_report_outcome'}:\n            raise ValueError('semantic_prediction_resolver_required')\n        if fulfillment_operator != '>=' or float(fulfillment_value) != 1.0:\n            raise ValueError('semantic_prediction_fulfillment_rule_invalid')\n        if violation_operator != '<=' or float(violation_value) != -1.0:\n            raise ValueError('semantic_prediction_violation_rule_invalid')\n        if resolver_name == 'explicit_report_outcome':\n            value = _json_value(metadata, {})\n            scope = value.get('claim_scope') or {}\n            if (set(scope) != {'subject', 'predicate', 'object', 'time_scope', 'source'}\n                    or any(not isinstance(v, str) or not v for v in scope.values())\n                    or scope['predicate'] not in {'reported_preference', 'explicit_promise'}\n                    or scope['source'] != 'canonical_user_turn'\n                    or value.get('expected_value') not in (\n                        {'已兑现'} if scope.get('predicate') == 'explicit_promise' else {'喜欢', '不喜欢', '讨厌'})):\n>               raise ValueError('explicit_prediction_scope_invalid')\nE               ValueError: explicit_prediction_scope_invalid\n\ngojo_backend\\cognitive_predictions.py:205: ValueError"
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "passed_tests": [],
+  "subtests_passed": 0,
+  "pglite_package": "C:\\Users\\张三\\AppData\\Local\\Temp\\gojo-pglite-test\\node_modules\\@electric-sql\\pglite",
+  "pytest_version": "9.1.1",
+  "offline_guard": "external-network-and-real-psycopg2-disabled"
+}

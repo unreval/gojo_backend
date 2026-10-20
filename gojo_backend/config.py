@@ -12,6 +12,12 @@ MODEL_JP_AUX = os.getenv('MODEL_JP_AUX', 'claude-haiku-4-5-20251001')
 
 MODEL_MID = os.getenv('MODEL_MID', 'claude-sonnet-4-6')
 
+# 候选产生独立于聊天；默认关闭，启用后也默认只记录影子结果。
+CANDIDATE_PRODUCER_ENABLED = os.getenv(
+    'CANDIDATE_PRODUCER_ENABLED', 'false').strip().lower() in ('1', 'true')
+CANDIDATE_PRODUCER_SHADOW = os.getenv(
+    'CANDIDATE_PRODUCER_SHADOW', 'true').strip().lower() not in ('0', 'false')
+
 # MODEL_CN_AUX: 中文辅助任务(记忆提取/日记生成/纠错)—— DeepSeek 便宜、中文好
 MODEL_CN_AUX = os.getenv('MODEL_CN_AUX', 'deepseek-v4-flash')
 

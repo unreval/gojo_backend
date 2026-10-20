@@ -984,7 +984,11 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
     events = cur.fetchall()
     decisions = []
     for event_id, event_type, source_id, stored, occurred_at, adjudication in events:
-        if _json(adjudication, {}).get('processed_by_cycle_id'):
+        existing = _json(adjudication, {})
+        if (existing.get('processed_by_cycle_id')
+                or (event_type == 'canonical_user_turn'
+                    and existing.get('produced_by') == 'candidate_producer'
+                    and existing.get('status') in ('applied', 'pending'))):
             decisions.append({'event_id': event_id, 'action': 'already_processed'})
             continue
         payload = _json(stored, {})
