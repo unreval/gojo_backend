@@ -98,7 +98,12 @@ def parse_candidates(raw, stop_reason):
         raise BatchOutputError('truncated_response' if stop_reason in (
             'max_tokens', 'length') else 'incomplete_response')
     try:
-        candidates = json.loads(raw)
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+        candidates = json.loads(text)
     except (TypeError, ValueError):
         raise BatchOutputError('invalid_json') from None
     if not isinstance(candidates, list):
