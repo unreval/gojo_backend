@@ -31,13 +31,71 @@ class ProducerPureTests(unittest.TestCase):
         self.assertTrue(producer.batch_ready(self.events(1, 300), self.now))
         self.assertFalse(producer.batch_ready([], self.now))
 
-    def test_complete_output_must_be_json_array_and_end_turn(self):
-        self.assertEqual(producer.parse_candidates('[]', 'end_turn'), [])
-        for text, stop in (('[]', 'max_tokens'), ('[]', 'tool_use'),
-                           ('not JSON', 'end_turn'), ('{}', 'end_turn')):
+    def test_structured_output_preserves_batch_schema_and_failure_codes(self):
+        from structured_output import invoke_structured_llm, StructuredParseResult
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元')
+        invalid_shapes = [({}, 'root_not_array'),
+                          ([candidate, None], 'item_1_not_object'),
+                          ([0], 'item_0_not_object')]
+        for field in sorted(producer._REQUIRED):
+            invalid_shapes.append(([{key: value for key, value in candidate.items()
+                                     if key != field}], f'item_0_missing_{field}'))
+        for field in ('extra_field', 'z_field'):
+            invalid_shapes.append(([dict(candidate, **{field: True})],
+                                   f'item_0_unknown_field_{field}'))
+        invalid_shapes.extend((
+            ([{}], 'item_0_missing_object'),
+            ([dict(candidate, a_field=1, z_field=2)], 'item_0_unknown_field_a_field'),
+        ))
+        for value, detail in invalid_shapes:
+            with self.subTest(detail=detail):
+                with self.assertRaises(producer._CandidateBatchSchemaError) as error:
+                    producer._validate_candidate_batch(value)
+                self.assertEqual(error.exception.detail, detail)
+                self.assertEqual(str(error.exception), detail)
+        # This validator owns shape only; the existing contract owns content.
+        for value in ([], [candidate], [dict(candidate, predicate='invented',
+                      source_event_id='outside-batch', quote=None,
+                      summary=[], time_scope=123, perspective={})]):
+            with self.subTest(value=value):
+                self.assertIs(producer._validate_candidate_batch(value), value)
+        for text, stop, expected in (
+                ('[]', 'end_turn', None), ('[]', 'stop', None),
+                ('[]', 'max_tokens', 'truncated_response'),
+                ('[]', 'length', 'truncated_response'),
+                ('[]', 'refusal', 'incomplete_response'),
+                ('[]', 'content_filter', 'incomplete_response'),
+                ('[]', 'tool_use', 'incomplete_response'),
+                ('[]', 'pause_turn', 'incomplete_response'),
+                ('[]', None, 'incomplete_response'),
+                ('[]', 'unknown', 'incomplete_response'),
+                ('not JSON', 'end_turn', 'invalid_json'),
+                ('', 'end_turn', 'invalid_json'),
+                ('[] [1]', 'end_turn', 'invalid_json'),
+                ('{}', 'end_turn', 'invalid_batch_shape'),
+                ('[{}]', 'end_turn', 'invalid_batch_shape')):
             with self.subTest(text=text, stop=stop):
-                with self.assertRaises(producer.BatchOutputError):
-                    producer.parse_candidates(text, stop)
+                call = invoke_structured_llm(
+                    domain='candidate_producer',
+                    create_chat_fn=Mock(return_value=(text, {'stop_reason': stop})),
+                    model='offline-model', messages=[],
+                    schema_validator=producer._validate_candidate_batch,
+                    schema_name='candidate_producer_batch', root_type='array')
+                if expected is None:
+                    self.assertTrue(call.parsed.ok)
+                    self.assertEqual(call.parsed.value, [])
+                else:
+                    self.assertEqual(producer._parse_error_to_code(call.parsed, stop),
+                                     expected)
+        for code, expected in (('truncated_response', 'truncated_response'),
+                               ('model_refused', 'incomplete_response'),
+                               ('schema_validation_failed', 'invalid_batch_shape'),
+                               ('root_not_array', 'invalid_batch_shape')):
+            with self.subTest(code=code):
+                self.assertEqual(producer._parse_error_to_code(
+                    StructuredParseResult(error_code=code), 'end_turn'), expected)
 
     def test_configuration_is_disabled_and_shadow_by_default(self):
         for enabled, shadow, expected in (
@@ -126,7 +184,10 @@ class ProducerDatabaseTests(unittest.TestCase):
     database_state = source_fixture.CandidateSourceTests.database_state
 
     def setUp(self):
+        from structured_output import invoke_structured_llm
         source_fixture.CandidateSourceTests.setUp(self)
+        self.structured_call = self.stack.enter_context(patch(
+            'structured_output.invoke_structured_llm', wraps=invoke_structured_llm))
         import raw_events
         processing = [ddl for ddl in raw_events.RAW_EVENT_DDL
                       if 'CREATE TABLE IF NOT EXISTS event_processing_state' in ddl]
@@ -169,9 +230,9 @@ class ProducerDatabaseTests(unittest.TestCase):
                 [self.candidate()] if candidates is None else candidates, ensure_ascii=False),
             {'stop_reason': stop_reason}))
 
-    def run_pair(self, model=None, *, now=None, character='c', shadow=True):
+    def run_pair(self, model=None, *, now=None, character='c', user='u', shadow=True):
         return producer.run_pair(
-            'u', character, now=now or self.now,
+            user, character, now=now or self.now,
             create_chat_fn=model if model is not None else self.model(),
             conn=self.database, emit=self.logs.append, enabled=True, shadow=shadow)
 
@@ -181,6 +242,204 @@ class ProducerDatabaseTests(unittest.TestCase):
     def non_processing_state(self):
         return {key: value for key, value in self.database_state().items()
                 if key != 'event_processing_state'}
+
+    def processing_rows(self, *, user='u', shadow=True):
+        return self.sql('''SELECT status,retry_count,last_error,consumed_at
+            FROM event_processing_state WHERE processor_type=%s
+            AND processor_version=%s ORDER BY event_id''',
+            (producer._processor(user, 'c'), producer._receipt_version(shadow)))
+
+    def assert_parse_failure(self, raw, reason, *, stop_reason='end_turn',
+                             user='u', shadow=False):
+        self.seed(prefix=user, user=user)
+        before = self.non_processing_state()
+        model = self.model(raw=raw, stop_reason=stop_reason)
+        with patch.object(producer, '_process_candidates',
+                          wraps=producer._process_candidates) as process:
+            result = self.run_pair(model, user=user, shadow=shadow)
+        model.assert_called_once()
+        process.assert_not_called()
+        self.assertEqual((result['status'], result['stage'], result['reason']),
+                         ('failed', 'parse', reason))
+        self.assertEqual(result['candidates_produced'], 0)
+        self.assertEqual(result['shadow'], shadow)
+        rows = self.processing_rows(user=user, shadow=shadow)
+        self.assertEqual(len(rows), 8)
+        self.assertTrue(all(row == ('pending', 1, reason, None) for row in rows))
+        self.assertEqual(self.non_processing_state(), before)
+        self.assertEqual(self.candidate_logs(), [])
+        return result
+
+    def assert_parsed_candidates(self, raw):
+        self.seed()
+        with patch.object(producer, '_process_candidates',
+                          wraps=producer._process_candidates) as process:
+            result = self.run_pair(self.model(raw=raw))
+        process.assert_called_once()
+        self.assertEqual(process.call_args.args[3], [self.candidate()])
+        self.assertEqual((result['status'], result['candidates_produced'],
+                          result['accepted']), ('succeeded', 1, 1))
+        self.assertEqual(len(self.processing_rows()), 8)
+        self.assertTrue(all(row[0] == 'succeeded' for row in self.processing_rows()))
+        self.assertTrue(self.candidate_logs()[0]['accepted'])
+
+    def test_structured_01_pure_array_uses_default_chat_and_original_request(self):
+        self.seed()
+        model = self.model()
+        tagged_model = '[冰咖啡]claude-opus-4-6'
+        with patch('config.MODEL_MAIN', tagged_model), \
+                patch('ai_client.create_chat', model), \
+                patch.object(producer, '_process_candidates',
+                             wraps=producer._process_candidates) as process:
+            result = producer.run_pair('u', 'c', now=self.now, conn=self.database,
+                emit=self.logs.append, enabled=True, shadow=True)
+        process.assert_called_once()
+        model.assert_called_once()
+        request = model.call_args.kwargs
+        self.assertEqual(request['model'], tagged_model)
+        self.assertEqual(request['max_tokens'], 2000)
+        self.assertEqual(request['max_retries'], 0)
+        self.assertFalse({'tools', 'tool_choice', 'input_schema'} & request.keys())
+        self.assertEqual(request['system'], producer._SYSTEM % ', '.join(
+            sorted(producer._PREDICATES)))
+        self.assertEqual(len(json.loads(request['messages'][0]['content'])), 8)
+        self.structured_call.assert_called_once()
+        structured = self.structured_call.call_args.kwargs
+        self.assertEqual(structured['domain'], 'candidate_producer')
+        self.assertEqual(structured['schema_name'], 'candidate_producer_batch')
+        self.assertEqual(structured['root_type'], 'array')
+        self.assertIs(structured['schema_validator'], producer._validate_candidate_batch)
+        self.assertEqual((result['status'], result['accepted']), ('succeeded', 1))
+        self.assertEqual(process.call_args.args[3], [self.candidate()])
+        self.seed(prefix='fallback', user='fallback')
+        fallback = Mock(return_value=(json.dumps([]), {'finish_reason': 'stop'}))
+        self.assertEqual(self.run_pair(fallback, user='fallback')['status'], 'succeeded')
+        self.assertTrue(all(row[0] == 'succeeded'
+                            for row in self.processing_rows(user='fallback')))
+
+    def test_structured_02_markdown_fence_reaches_existing_candidate_gates(self):
+        raw = json.dumps([self.candidate()], ensure_ascii=False)
+        self.assert_parsed_candidates('```json\n' + raw + '\n```')
+
+    def test_structured_03_prose_before_and_after_fence_is_extracted(self):
+        raw = json.dumps([self.candidate()], ensure_ascii=False)
+        self.assert_parsed_candidates('以下是候选：\n```json\n' + raw + '\n```\n以上。')
+
+    def test_structured_04_tilde_and_nested_fences_are_extracted(self):
+        raw = json.dumps([self.candidate()], ensure_ascii=False)
+        for index, wrapped in enumerate(('~~~\n' + raw + '\n~~~',
+                '```markdown\n```json\n' + raw + '\n```\n```')):
+            with self.subTest(wrapper=index):
+                user = 'wrapper-' + str(index)
+                ids = self.seed(prefix=user, user=user)
+                content = wrapped.replace('source-0', ids[0])
+                result = self.run_pair(self.model(raw=content), user=user)
+                self.assertEqual((result['status'], result['accepted']), ('succeeded', 1))
+                self.assertTrue(all(row[0] == 'succeeded'
+                                    for row in self.processing_rows(user=user)))
+
+    def test_structured_05_empty_array_completes_sources_without_retry(self):
+        self.seed()
+        model = self.model(raw='[]')
+        result = self.run_pair(model)
+        self.assertEqual((result['status'], result['candidates_produced']), ('succeeded', 0))
+        self.assertEqual(self.candidate_logs(), [])
+        self.assertTrue(all(row[0:3] == ('succeeded', 0, None)
+                            for row in self.processing_rows()))
+        self.assertEqual(self.run_pair(model, now=self.now + timedelta(seconds=300))['status'],
+                         'waiting')
+        model.assert_called_once()
+
+    def test_structured_06_missing_field_fails_schema_before_processing(self):
+        self.assert_parse_failure('[{"source_event_id":"e1","quote":"..."}]',
+                                  'invalid_batch_shape')
+
+    def test_structured_07_extra_field_fails_schema_before_processing(self):
+        raw = json.dumps([self.candidate(extra_field='unexpected')], ensure_ascii=False)
+        self.assert_parse_failure(raw, 'invalid_batch_shape')
+
+    def test_structured_08_object_root_maps_to_invalid_batch_shape(self):
+        raw = json.dumps({'candidates': [self.candidate()]}, ensure_ascii=False)
+        self.assert_parse_failure(raw, 'invalid_batch_shape')
+
+    def test_structured_09_truncation_stays_pending_for_both_provider_reasons(self):
+        for stop in ('max_tokens', 'length'):
+            with self.subTest(stop=stop):
+                self.assert_parse_failure('[]', 'truncated_response',
+                                          stop_reason=stop, user=stop)
+
+    def test_structured_10_refusal_and_incomplete_stops_cannot_consume_sources(self):
+        for index, stop in enumerate(('refusal', 'content_filter', 'tool_use',
+                                      'pause_turn', None, 'unknown')):
+            with self.subTest(stop=stop):
+                self.assert_parse_failure('[]', 'incomplete_response',
+                                          stop_reason=stop, user=f'stop-{index}')
+
+    def test_structured_11_one_malformed_item_rejects_the_whole_batch(self):
+        for index, item in enumerate((None, {'source_event_id': 'e1'})):
+            with self.subTest(item=item):
+                raw = json.dumps([self.candidate(), item], ensure_ascii=False)
+                self.assert_parse_failure(raw, 'invalid_batch_shape', user=f'mixed-{index}')
+
+    def test_structured_12_unknown_predicate_only_rejects_its_candidate(self):
+        ids = self.seed()
+        candidates = [self.candidate(ids[0], predicate='invented_relationship_judgment'),
+                      self.candidate(ids[1])]
+        self.assertEqual(producer._validate_candidate_batch(candidates), candidates)
+        result = self.run_pair(self.model(candidates))
+        self.assertEqual((result['status'], result['candidates_produced'],
+                          result['accepted'], result['rejected']), ('succeeded', 2, 1, 1))
+        rows = self.candidate_logs()
+        self.assertEqual(rows[0]['reason'], 'invalid_predicate_or_summary')
+        self.assertFalse(rows[0]['accepted'])
+        self.assertTrue(rows[1]['accepted'])
+        self.assertTrue(all(row[0] == 'succeeded' for row in self.processing_rows()))
+
+    def test_structured_13_invalid_json_retries_pending_sources_then_recovers(self):
+        self.seed()
+        failed = self.model(raw='not JSON')
+        result = self.run_pair(failed)
+        self.assertEqual((result['status'], result['reason']), ('failed', 'invalid_json'))
+        self.assertTrue(all(row == ('pending', 1, 'invalid_json', None)
+                            for row in self.processing_rows()))
+        self.assertEqual(self.run_pair(failed, now=self.now + timedelta(seconds=29))['status'],
+                         'cooldown')
+        failed.assert_called_once()
+        recovered = self.model(raw='[]')
+        result = self.run_pair(recovered, now=self.now + timedelta(seconds=31))
+        self.assertEqual(result['status'], 'succeeded')
+        recovered.assert_called_once()
+        self.assertEqual(len(json.loads(recovered.call_args.kwargs['messages'][0]['content'])), 8)
+        self.assertTrue(all(row[0:3] == ('succeeded', 1, None)
+                            for row in self.processing_rows()))
+
+    def test_structured_14_three_parse_failures_pause_then_recover_after_cooldown(self):
+        self.seed()
+        failed = self.model(raw='not JSON')
+        for count, seconds in enumerate((0, 31, 92), start=1):
+            result = self.run_pair(failed, now=self.now + timedelta(seconds=seconds))
+            self.assertEqual((result['status'], result['reason']), ('failed', 'invalid_json'))
+            self.assertTrue(all(row == ('pending', count, 'invalid_json', None)
+                                for row in self.processing_rows()))
+        self.assertEqual(failed.call_count, 3)
+        self.assertEqual(self.run_pair(failed, now=self.now + timedelta(seconds=1891))['status'],
+                         'cooldown')
+        self.assertEqual(failed.call_count, 3)
+        recovered = self.model(raw='[]')
+        result = self.run_pair(recovered, now=self.now + timedelta(seconds=1893))
+        self.assertEqual(result['status'], 'succeeded')
+        recovered.assert_called_once()
+        self.assertTrue(all(row[0:3] == ('succeeded', 3, None)
+                            for row in self.processing_rows()))
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_structured_15_schema_failure_is_identical_in_live_and_shadow(self):
+        for shadow in (False, True):
+            with self.subTest(shadow=shadow):
+                result = self.assert_parse_failure('[{}]', 'invalid_batch_shape',
+                    user='shadow-' + str(shadow), shadow=shadow)
+                self.assertEqual(result['reasons'], {'invalid_batch_shape': 1})
+                self.assertEqual(self.logs[-1]['shadow'], shadow)
 
     def test_nine_events_make_one_batch_of_eight_using_unchanged_main_model(self):
         self.seed(9)

@@ -93,22 +93,38 @@ def batch_ready(events, now):
         (now - events[0]['occurred_at']).total_seconds() >= MAX_WAIT_SECONDS)
 
 
-def parse_candidates(raw, stop_reason):
-    if stop_reason != 'end_turn':
-        raise BatchOutputError('truncated_response' if stop_reason in (
-            'max_tokens', 'length') else 'incomplete_response')
-    try:
-        text = raw.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-        if text.endswith("```"):
-            text = text[:-3].strip()
-        candidates = json.loads(text)
-    except (TypeError, ValueError):
-        raise BatchOutputError('invalid_json') from None
-    if not isinstance(candidates, list):
-        raise BatchOutputError('invalid_batch_shape')
-    return candidates
+class _CandidateBatchSchemaError(ValueError):
+    def __init__(self, detail):
+        self.detail = detail
+        super().__init__(detail)
+
+
+def _validate_candidate_batch(value):
+    """Check shape only; field semantics remain with the contract and gates."""
+    if not isinstance(value, list):
+        raise _CandidateBatchSchemaError('root_not_array')
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise _CandidateBatchSchemaError(f'item_{i}_not_object')
+        missing = _REQUIRED - item.keys()
+        if missing:
+            raise _CandidateBatchSchemaError(f'item_{i}_missing_{sorted(missing)[0]}')
+        extra = item.keys() - _FIELDS
+        if extra:
+            raise _CandidateBatchSchemaError(f'item_{i}_unknown_field_{sorted(extra)[0]}')
+    return value
+
+
+def _parse_error_to_code(parsed, stop_reason):
+    """Keep the producer's existing batch failure codes and completion gate."""
+    code = parsed.error_code
+    if stop_reason in {'max_tokens', 'length'} or code == 'truncated_response':
+        return 'truncated_response'
+    if stop_reason not in {'end_turn', 'stop'} or code == 'model_refused':
+        return 'incomplete_response'
+    if code in {'schema_validation_failed', 'root_not_array'}:
+        return 'invalid_batch_shape'
+    return 'invalid_json'
 
 
 def candidate_contract_reason(candidate, allowed_ids):
@@ -330,20 +346,27 @@ def run_pair(user_id, character_id, *, now=None, create_chat_fn=None, conn=None,
         committing = False
 
         stage = 'model_call'
-        request = dict(model=MODEL_MAIN, max_tokens=MAX_TOKENS,
-            system=_SYSTEM % ', '.join(sorted(_PREDICATES)),
-            messages=[{'role': 'user', 'content': json.dumps([
-                {key: item[key].isoformat() if key == 'occurred_at' else item[key]
-                 for key in ('source_event_id', 'content', 'occurred_at')}
-                for item in inputs], ensure_ascii=False)}])
-        if create_chat_fn is None:
-            from ai_client import get_anthropic, extract_text, response_metadata
-            response = get_anthropic(max_retries=0, timeout=120).messages.create(**request)
-            raw, usage = extract_text(response), response_metadata(response)
-        else:
-            raw, usage = create_chat_fn(**request, max_retries=0)
+        system = _SYSTEM % ', '.join(sorted(_PREDICATES))
+        messages = [{'role': 'user', 'content': json.dumps([
+            {key: item[key].isoformat() if key == 'occurred_at' else item[key]
+             for key in ('source_event_id', 'content', 'occurred_at')}
+            for item in inputs], ensure_ascii=False)}]
+        chat_fn = create_chat_fn
+        if chat_fn is None:
+            from ai_client import create_chat as chat_fn
+        from structured_output import invoke_structured_llm
+        call = invoke_structured_llm(
+            domain='candidate_producer',
+            create_chat_fn=lambda **kw: chat_fn(**kw, max_retries=0),
+            model=MODEL_MAIN, messages=messages, system=system,
+            max_tokens=MAX_TOKENS, schema_validator=_validate_candidate_batch,
+            schema_name='candidate_producer_batch', root_type='array')
         stage = 'parse'
-        candidates = parse_candidates(raw, usage.get('stop_reason'))
+        usage, parsed = call.usage, call.parsed
+        stop_reason = usage.get('stop_reason') or usage.get('finish_reason')
+        if not parsed.ok or stop_reason not in {'end_turn', 'stop'}:
+            raise BatchOutputError(_parse_error_to_code(parsed, stop_reason))
+        candidates = parsed.value
         stage = 'validation'
         records = _process_candidates(cur, user_id, character_id, candidates, inputs, common, shadow)
         stage = 'persistence'
