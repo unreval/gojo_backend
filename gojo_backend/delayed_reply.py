@@ -306,7 +306,8 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     pack, messages = helpers._turn_context(
         user_id, character_id, pending_text, profile='text',
-        current_event_id=pending_ids or None, auto_pin_enabled=False)
+        current_event_id=pending_ids or None, auto_pin_enabled=False,
+        expand_recall_query=False)
     messages = helpers._history_plus_current(messages, trigger)
     recall_query = pending_text or trigger
     system_blocks = build_system_blocks(

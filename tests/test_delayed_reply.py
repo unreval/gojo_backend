@@ -110,6 +110,7 @@ class HelpersStub:
         self.user_message = None
         self.current_event_id = None
         self.auto_pin_enabled = None
+        self.expand_recall_query = None
         self.bubbles = bubbles or [
             {'jp': '今見た', 'zh': '刚才看到了'},
             {'jp': 'ちょっと待ってた', 'zh': '让你等了一下'},
@@ -118,11 +119,13 @@ class HelpersStub:
         self.extra_messages = None
 
     def _turn_context(self, user_id, character_id, user_message='', profile='default',
-                      current_event_id=None, auto_pin_enabled=True):
+                      current_event_id=None, auto_pin_enabled=True,
+                      expand_recall_query=True):
         self.context_calls += 1
         self.user_message = user_message
         self.current_event_id = current_event_id
         self.auto_pin_enabled = auto_pin_enabled
+        self.expand_recall_query = expand_recall_query
         skip = current_event_id or []
         if isinstance(skip, (str, int)):
             skip = [skip]
