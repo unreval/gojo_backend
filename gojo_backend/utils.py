@@ -357,6 +357,7 @@ _JP_NEGATION_NON_DENIALS = (
 _ZH_NEGATION_NON_DENIALS = (
     '不过', '不但', '不仅', '不光', '不只', '不如', '不管', '不论', '不然',
     '不妨', '不料', '不住', '要不', '差不多', '了不起', '不好意思', '没准',
+    '不错', '没事', '没关系', '没问题', '不客气',
 )
 _JP_NEGATION_PATTERNS = (
     # Covers ない / なかった and therefore じゃない・ではない・わけない too.
@@ -444,7 +445,24 @@ def _check_number_consistency(jp: str, zh: str) -> str | None:
     return None
 
 
-def reply_message_rejection_reason(m: dict):
+def log_translation_check(reason, message_index, jp, zh):
+    """Record bounded lexical hits, never a candidate prefix or full reply."""
+    from config import TRANSLATION_CHECKS_BLOCKING
+    patterns = {
+        'negation_polarity_mismatch': r'なかった|ない|なく|ね[ぇえー]|ません|无法|毫无|并非|[不没未甭别].?',
+        'time_word_contradiction': r'午前|午後|早朝|今朝|正午|夕方|夕暮れ|今晩|今夜|深夜|夜中|朝|昼|夜|早上|上午|清晨|今早|早饭|早餐|中午|午饭|午餐|下午|傍晚|黄昏|晚上|今晚|晚饭|晚餐|半夜',
+        'number_value_mismatch': r'[0-9０-９零〇一二三四五六七八九十百千万萬亿億兆]+',
+        'bilingual_numeric_anchor_mismatch': r'日元|日圆|分钟|分鐘|分間|時間|小时|小時|円|元|天|日|年|月|个|個|時|时|点|分',
+    }
+    markers = list(dict.fromkeys(
+        match.group()[:8] for match in re.finditer(patterns[reason], jp + ' ' + zh)))[:6]
+    print('[translation_check] ' + json.dumps({
+        'reason': reason, 'message_index': message_index,
+        'markers': markers, 'blocking': TRANSLATION_CHECKS_BLOCKING,
+    }, ensure_ascii=False, separators=(',', ':')))
+
+
+def reply_message_rejection_reason(m: dict, *, message_index=1):
     """Return a stable protocol reason, or None for a safe bilingual message."""
     if not isinstance(m, dict):
         return 'invalid_message_field'
@@ -466,9 +484,13 @@ def reply_message_rejection_reason(m: dict):
     han = sum('\u3400' <= ch <= '\u9fff' for ch in gate_text)
     if kana > han:
         return 'zh_contains_kana'
-    return (_check_time_word_consistency(jp, zh)
-            or _check_negation_consistency(jp, zh)
-            or _check_number_consistency(jp, zh))
+    from config import TRANSLATION_CHECKS_BLOCKING
+    reasons = [reason for check in (
+        _check_time_word_consistency, _check_negation_consistency, _check_number_consistency,
+    ) if (reason := check(jp, zh))]
+    for reason in reasons:
+        log_translation_check(reason, message_index, jp, zh)
+    return reasons[0] if reasons and TRANSLATION_CHECKS_BLOCKING else None
 
 
 def valid_reply_msg(m: dict) -> bool:
@@ -482,7 +504,9 @@ def valid_reply_pair(jp, zh) -> bool:
 
 def commit_ready_msgs(msgs) -> bool:
     """最终 commit gate：非空且每条正文有效。"""
-    return bool(msgs) and all(valid_reply_msg(m) for m in msgs)
+    return bool(msgs) and all(
+        reply_message_rejection_reason(m, message_index=index) is None
+        for index, m in enumerate(msgs, 1))
 
 
 def _extract_state_from_messages(messages):
