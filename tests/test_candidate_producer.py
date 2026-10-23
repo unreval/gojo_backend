@@ -722,6 +722,44 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertTrue(candidates[0]['shadow'])
         self.assertTrue(candidates[0]['gates'])
 
+    def test_shadow_schedule_grounding_and_rejections_never_write_authority(self):
+        ids = self.seed(3, age=300)
+        schedule = '周六调休了周三的课，今天早八到晚九'
+        cards = '我今天也要打牌，他们过来我家'
+        candidates = []
+        for source_id, quote, summary in (
+                (ids[0], schedule, '她周六调休补周三的课，今天课程从早八到晚九'),
+                (ids[1], schedule, '她周六调休补周三的课，今天课程从早八到晚十'),
+                (ids[2], cards, '她今天要在家里和朋友打牌，朋友会来她家')):
+            self.sql('UPDATE chat_log SET text=%s WHERE event_id=%s', (quote, source_id))
+            self.sql('UPDATE cognitive_events SET payload=%s::jsonb WHERE source_event_id=%s',
+                     (json.dumps({'content': quote}, ensure_ascii=False), source_id))
+            candidates.append(self.candidate(source_id, quote=quote, summary=summary,
+                                             object='活动安排', value=quote))
+        self.database.commit()
+        before = self.non_processing_state()
+        with patch.object(producer, 'adjudicate_and_project',
+                          side_effect=AssertionError('shadow adjudicated candidate')) as project, \
+                patch.object(self.database, 'query', wraps=self.database.query) as queries:
+            result = self.run_pair(self.model(candidates))
+        project.assert_not_called()
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual((result['gates_accepted'], result['accepted'], result['rejected']),
+                         (1, 1, 2))
+        self.assertEqual(result['reasons'],
+                         {'number_value_mismatch': 1, 'summary_not_grounded_in_quote': 1})
+        self.assertEqual(self.non_processing_state(), before)
+        # Count attempted writes as well as comparing the committed table state.
+        for call in queries.call_args_list:
+            sql = ' '.join(call.args[0].split()).upper()
+            self.assertTrue(sql.startswith(('SELECT ', 'INSERT INTO EVENT_PROCESSING_STATE ',
+                'UPDATE EVENT_PROCESSING_STATE ', 'BEGIN', 'COMMIT', 'ROLLBACK')), sql)
+        logs = self.candidate_logs()
+        self.assertEqual(logs[0]['gates']['G9']['status'], 'passed')
+        self.assertEqual(logs[1]['gates']['G4']['status'], 'rejected')
+        self.assertEqual(logs[1]['gates']['G9']['status'], 'not_evaluated')
+        self.assertEqual(logs[2]['gates']['G9']['status'], 'rejected')
+
     def test_truncated_output_leaves_events_pending_and_halves_retry_batch(self):
         self.seed()
         model = self.model(stop_reason='max_tokens')

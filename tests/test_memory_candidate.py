@@ -294,6 +294,29 @@ class MemoryCandidateGateTests(unittest.TestCase):
         self.assertEqual(coverage, (3, 6))
         self.assertEqual(result, (False, 'summary_not_grounded_in_quote'))
 
+    def test_weekday_and_clock_numbers_remain_grounded_as_complete_words(self):
+        quote = '周六调休了周三的课，今天早八到晚九'
+        summary = '她周六调休补周三的课，今天课程从早八到晚九'
+        result, coverage = self.validate_with_grounding_coverage(
+            self.candidate(quote=quote, summary=summary), raw_text=quote)
+        self.assertEqual(result, (True, None))
+        self.assertEqual(coverage, (13, 17))
+
+    def test_grounded_schedule_cannot_add_a_number_not_in_the_quote(self):
+        quote = '周六调休了周三的课，今天早八到晚九'
+        summary = '她周六调休补周三的课，今天课程从早八到晚十'
+        result, coverage = self.validate_with_grounding_coverage(
+            self.candidate(quote=quote, summary=summary), raw_text=quote)
+        self.assertEqual(result, (False, 'number_value_mismatch'))
+        self.assertIsNone(coverage)
+
+    def test_synonym_rewrite_still_fails_summary_grounding(self):
+        quote = '我今天也要打牌，他们过来我家'
+        summary = '她今天要在家里和朋友打牌，朋友会来她家'
+        self.assertEqual(self.validate(self.candidate(quote=quote, summary=summary),
+                                       raw_text=quote),
+                         (False, 'summary_not_grounded_in_quote'))
+
     def test_grounding_does_not_require_abstract_object_or_value_in_the_quote(self):
         quote = '我今天很累'
         result, coverage = self.validate_with_grounding_coverage(self.candidate(

@@ -48,6 +48,7 @@ source_event_id、quote、summary、predicate、object、value、time_scope?、p
 所有字段值必须是合法JSON字符串；字符串内不得出现未转义的英文双引号，引用词语时使用中文引号「」。
 source_event_id必须来自输入。quote必须从该消息逐字截取连续片段，不得改写或拼接。
 summary用角色视角写中文短句，以“她”代指用户，最多60字，忠于原文的数字、否定和时间。
+summary尽量复用原文词语，不要同义替换：原文「他们」就写「他们」，不要写「朋友」；原文「我家」就写「我家」，不要写「在家里」；允许压缩与补全时间。
 predicate只能是：%s。object是事实主题，value是事实值。
 time_scope是时间范围，不明确可省略。
 perspective是角色自己的感受，最多40字，以“我”开头，没把握时省略该字段，不要输出空字符串；它不是用户事实。
