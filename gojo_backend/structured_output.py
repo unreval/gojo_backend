@@ -176,6 +176,7 @@ def _top_level_containers(text: str):
     """Decode only outer containers; nested objects never become candidates."""
     candidates = []
     invalid_count = 0
+    decode_error_detail = None
     incomplete = False
     fence_ranges = _markdown_fence_ranges(text)
     index = 0
@@ -196,8 +197,12 @@ def _top_level_containers(text: str):
         candidate_text = text[index:end]
         try:
             value = _decode_container(candidate_text)
-        except (TypeError, ValueError, RecursionError):
+        except (TypeError, ValueError, RecursionError) as exc:
             invalid_count += 1
+            if decode_error_detail is None:
+                # Decoder positions are relative to this container, not its wrapper.
+                position = exc.pos if isinstance(exc, json.JSONDecodeError) else 0
+                decode_error_detail = f'{type(exc).__name__}@{position}'
         else:
             candidates.append(_Candidate(
                 index=len(candidates),
@@ -207,7 +212,7 @@ def _top_level_containers(text: str):
                 extraction_mode=_extraction_mode(text, index, end, fence_ranges),
             ))
         index = end
-    return candidates, invalid_count, incomplete
+    return candidates, invalid_count, incomplete, decode_error_detail
 
 
 def _canonical_json(value) -> str:
@@ -254,7 +259,7 @@ def parse_structured_output(
         return StructuredParseResult(
             error_code='empty_response', schema_name=schema_name)
 
-    candidates, invalid_count, incomplete = _top_level_containers(text)
+    candidates, invalid_count, incomplete, decode_error_detail = _top_level_containers(text)
     candidate_count = len(candidates)
     if incomplete:
         return StructuredParseResult(
@@ -263,6 +268,7 @@ def parse_structured_output(
     if invalid_count:
         return StructuredParseResult(
             error_code='invalid_json', candidate_count=candidate_count,
+            error_detail=decode_error_detail,
             schema_name=schema_name)
     if not candidates:
         return StructuredParseResult(

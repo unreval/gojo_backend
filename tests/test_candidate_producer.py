@@ -249,6 +249,232 @@ class ProducerDatabaseTests(unittest.TestCase):
             AND processor_version=%s ORDER BY event_id''',
             (producer._processor(user, 'c'), producer._receipt_version(shadow)))
 
+    def control_state(self, user='u'):
+        return producer._load_control(self.database.cursor(),
+            'candidate-producer:user:' + producer._digest(user))
+
+    def set_batch_size(self, size, user='u', *, solo_failures=None):
+        state = {'batch_size': size}
+        if solo_failures is not None:
+            state['solo_failures'] = solo_failures
+        producer._save_control(self.database.cursor(),
+            'candidate-producer:user:' + producer._digest(user), state)
+        self.database.commit()
+
+    def test_historical_batch_retries_do_not_skip_first_solo_parse_failure(self):
+        ids = self.seed(1, age=300)
+        self.set_batch_size(1)
+        producer._reserve_sources(self.database.cursor(),
+            [{'source_event_id': ids[0]}], producer._processor('u', 'c'),
+            producer._receipt_version(True))
+        self.sql('UPDATE event_processing_state SET retry_count=48 WHERE event_id=%s',
+                 (ids[0],))
+        self.database.commit()
+        before = self.non_processing_state()
+        result = self.run_pair(self.model(raw='not JSON'))
+        self.assertEqual((result['status'], result['reason']), ('failed', 'invalid_json'))
+        self.assertEqual(self.processing_rows(), [('pending', 49, 'invalid_json', None)])
+        self.assertEqual(self.control_state()['solo_failures'], {ids[0]: 1})
+        self.assertFalse(any(record.get('kind') == 'source_skipped' for record in self.logs))
+        self.assertEqual(self.non_processing_state(), before)
+
+    def test_batch_parse_failure_does_not_increment_existing_solo_failures(self):
+        ids = self.seed(2, age=300)
+        counts = {ids[0]: 2, ids[1]: 1}
+        self.set_batch_size(2, solo_failures=counts)
+        before = self.non_processing_state()
+        result = self.run_pair(self.model(raw='not JSON'))
+        self.assertEqual((result['status'], result['batch_size']), ('failed', 2))
+        self.assertEqual(self.control_state()['solo_failures'], counts)
+        self.assertEqual(self.processing_rows(), [('pending', 1, 'invalid_json', None)] * 2)
+        self.assertEqual(self.non_processing_state(), before)
+        self.assertFalse(any(record.get('kind') == 'source_skipped' for record in self.logs))
+
+    def test_success_clears_only_completed_sources_from_solo_failures(self):
+        ids = self.seed(3, age=300)
+        self.set_batch_size(2, solo_failures={ids[0]: 1, ids[1]: 2, ids[2]: 1})
+        before = self.non_processing_state()
+        result = self.run_pair(self.model(raw='[]'))
+        self.assertEqual((result['status'], result['batch_size']), ('succeeded', 2))
+        self.assertEqual(self.control_state()['solo_failures'], {ids[2]: 1})
+        self.assertEqual(self.control_state()['batch_size'], 4)
+        self.assertEqual([row[:3] for row in self.processing_rows()],
+                         [('succeeded', 0, None)] * 2)
+        self.assertEqual(self.non_processing_state(), before)
+
+    def test_success_restores_batch_size_by_one_step_up_to_limit(self):
+        for size, expected in ((0, 2), (1, 2), (4, 8), (8, 8)):
+            user = 'restore-' + str(size)
+            with self.subTest(batch_size=size):
+                self.seed(age=300, user=user, prefix=user)
+                self.set_batch_size(size, user)
+                result = self.run_pair(self.model(raw='[]'), user=user)
+                self.assertEqual((result['status'], result['batch_size']), ('succeeded', size))
+                self.assertEqual(self.control_state(user)['batch_size'], expected)
+
+    def test_parse_failures_reduce_batches_to_one_without_authoritative_writes(self):
+        cases = (('invalid_json', '[{"summary":"private malformed "quote" text"}]', 'end_turn'),
+                 ('invalid_batch_shape', '[{}]', 'end_turn'),
+                 ('incomplete_response', '[]', 'pause_turn'),
+                 ('truncated_response', '[]', 'max_tokens'))
+        for shadow in (False, True):
+            for reason, raw, stop in cases:
+                user = reason + str(shadow)
+                with self.subTest(reason=reason, shadow=shadow):
+                    ids = self.seed(user=user, prefix=user, age=300)
+                    before = self.non_processing_state()
+                    model = self.model(raw=raw, stop_reason=stop)
+                    with patch.object(producer, '_process_candidates') as process, \
+                            patch.object(producer, 'adjudicate_and_project') as adjudicate, \
+                            patch.object(producer, 'DAILY_LIMIT', 100):
+                        for index, size in enumerate((4, 2, 1, 1, 1, 1)):
+                            result = self.run_pair(model, user=user, shadow=shadow,
+                                now=self.now + timedelta(seconds=index * 1801))
+                            self.assertEqual((result['status'], result['reason']),
+                                             ('failed', reason))
+                            self.assertEqual(result['batch_size'], (8, 4, 2, 1, 1, 1)[index])
+                            self.assertEqual(self.control_state(user)['batch_size'], size)
+                            self.assertEqual(self.control_state(user).get('solo_failures', {}),
+                                {ids[0]: index - 2} if 3 <= index < 5 else {})
+                            skipped = self.sql('''SELECT event_id FROM event_processing_state
+                                WHERE processor_type=%s AND status='skipped' ''',
+                                (producer._processor(user, 'c'),))
+                            self.assertEqual(skipped, [(ids[0],)] if index == 5 else [])
+                    process.assert_not_called()
+                    adjudicate.assert_not_called()
+                    self.assertEqual(self.non_processing_state(), before)
+                    self.assertEqual(self.candidate_logs(), [])
+
+    def test_single_source_threshold_is_audited_and_later_sources_progress(self):
+        ids = self.seed(3, age=300)
+        self.set_batch_size(1)
+        before = self.non_processing_state()
+        failed = self.model(raw='[{"summary":"private malformed "quote" text"}]')
+        for count, seconds in enumerate((0, 31, 92), start=1):
+            result = self.run_pair(failed, now=self.now + timedelta(seconds=seconds))
+            self.assertEqual((result['status'], result['reason']), ('failed', 'invalid_json'))
+            row = self.sql('''SELECT status,retry_count,last_error,consumed_at
+                FROM event_processing_state WHERE event_id=%s AND processor_type=%s''',
+                (ids[0], producer._processor('u', 'c')))[0]
+            self.assertEqual(row, ('skipped' if count == 3 else 'pending',
+                                  count, 'invalid_json', None))
+            self.assertEqual(self.control_state().get('solo_failures', {}),
+                             {} if count == 3 else {ids[0]: count})
+        skipped = [record for record in self.logs if record.get('kind') == 'source_skipped']
+        self.assertEqual(len(skipped), 1)
+        audit = skipped[0]
+        self.assertEqual((audit['source_event_id'], audit['retry_count'], audit['last_error']),
+                         (ids[0], 3, 'invalid_json'))
+        self.assertFalse({'content', 'quote', 'summary', 'value'} & audit.keys())
+        self.assertNotIn('private malformed', json.dumps(self.logs))
+        self.assertNotIn('今天我亏了69元', json.dumps(self.logs, ensure_ascii=False))
+        self.assertEqual(self.non_processing_state(), before)
+        pending = producer._pending_inputs(self.database.cursor(), 'u', 'c',
+                                           producer._receipt_version(True))
+        self.assertEqual([item['source_event_id'] for item in pending], ids[1:])
+        self.database.rollback()
+        recovered = self.model(raw='[]')
+        self.assertEqual(self.run_pair(recovered,
+            now=self.now + timedelta(seconds=1893))['status'], 'succeeded')
+        request = json.loads(recovered.call_args.kwargs['messages'][0]['content'])
+        self.assertEqual([item['source_event_id'] for item in request], ids[1:2])
+        self.assertEqual(self.control_state()['batch_size'], 2)
+        reprocessable = producer._pending_inputs(self.database.cursor(), 'u', 'c',
+                                                 'next-processor-version.shadow')
+        self.assertEqual([item['source_event_id'] for item in reprocessable], ids)
+        self.assertEqual(self.non_processing_state(), before)
+
+    def test_non_parse_errors_never_shrink_or_isolate_sources(self):
+        for stage in ('model_call', 'validation', 'persistence'):
+            with self.subTest(stage=stage):
+                self.seed(1, age=300, user=stage, prefix=stage)
+                counts = {stage + '-0': 2}
+                self.set_batch_size(4, stage, solo_failures=counts)
+                before = self.non_processing_state()
+                model = self.model(raw='[]')
+                error = producer.BatchOutputError('invalid_json')
+                if stage == 'model_call':
+                    model.side_effect = error
+                with patch.object(producer, '_process_candidates',
+                        side_effect=error if stage == 'validation' else None,
+                        return_value=[]), patch.object(producer, '_mark_sources_done',
+                        side_effect=error if stage == 'persistence' else None):
+                    for index in range(3):
+                        result = self.run_pair(model, user=stage, shadow=False,
+                            now=self.now + timedelta(seconds=index * 1801))
+                        self.assertEqual((result['status'], result['stage']), ('failed', stage))
+                        self.assertEqual(self.control_state(stage)['batch_size'], 4)
+                        self.assertEqual(self.control_state(stage)['solo_failures'], counts)
+                self.assertEqual(self.processing_rows(user=stage, shadow=False),
+                                 [('pending', 3, 'invalid_json', None)])
+                self.assertEqual(self.non_processing_state(), before)
+        self.assertFalse(any(record.get('kind') == 'source_skipped' for record in self.logs))
+
+    def test_failed_success_state_save_does_not_restore_batch_size(self):
+        ids = self.seed(1, age=300)
+        self.set_batch_size(1, solo_failures={ids[0]: 2})
+        save = producer._save_control
+
+        def fail_completion(cur, event_id, state):
+            if event_id.startswith('candidate-producer:user:') and state.get('fail_count') == 0:
+                raise RuntimeError('completion state not saved')
+            return save(cur, event_id, state)
+
+        before = self.non_processing_state()
+        with patch.object(producer, '_save_control', side_effect=fail_completion):
+            result = self.run_pair(self.model(raw='[]'))
+        self.assertEqual((result['status'], result['stage']), ('failed', 'persistence'))
+        self.assertEqual(self.control_state()['batch_size'], 1)
+        self.assertEqual(self.control_state()['fail_count'], 1)
+        self.assertEqual(self.control_state()['solo_failures'], {ids[0]: 2})
+        self.assertEqual(self.processing_rows(), [('pending', 1, 'RuntimeError', None)])
+        self.assertEqual(self.non_processing_state(), before)
+
+    def test_source_skip_audit_follows_commit_and_failed_commit_emits_no_skip(self):
+        for fail_commit in (False, True):
+            user = 'commit-' + str(fail_commit)
+            with self.subTest(fail_commit=fail_commit):
+                ids = self.seed(1, age=300, user=user, prefix=user)
+                self.set_batch_size(1, user, solo_failures={ids[0]: 2})
+                producer._reserve_sources(self.database.cursor(),
+                    [{'source_event_id': ids[0]}], producer._processor(user, 'c'),
+                    producer._receipt_version(True))
+                self.sql('UPDATE event_processing_state SET retry_count=2 WHERE event_id=%s',
+                         (ids[0],))
+                self.database.commit()
+                commit = self.database.commit
+                commits, audited = [], []
+
+                def maybe_commit():
+                    if fail_commit and len(commits) == 1:
+                        raise RuntimeError('failure receipt not committed')
+                    commit()
+                    commits.append('committed')
+
+                def emit(record):
+                    if record['kind'] == 'source_skipped':
+                        self.assertEqual(len(commits), 2)
+                        audited.append(record)
+
+                def run():
+                    return producer.run_pair(user, 'c', now=self.now,
+                        create_chat_fn=self.model(raw='not JSON'), conn=self.database,
+                        emit=emit, enabled=True, shadow=True)
+
+                before = self.non_processing_state()
+                with patch.object(self.database, 'commit', side_effect=maybe_commit):
+                    if fail_commit:
+                        with self.assertRaises(RuntimeError):
+                            run()
+                    else:
+                        self.assertEqual(run()['status'], 'failed')
+                self.assertEqual(len(audited), 0 if fail_commit else 1)
+                row = self.processing_rows(user=user)[0]
+                self.assertEqual(row[:2], ('pending', 2) if fail_commit else ('skipped', 3))
+                self.assertEqual(self.control_state(user)['solo_failures'],
+                                 {ids[0]: 2} if fail_commit else {})
+                self.assertEqual(self.non_processing_state(), before)
+
     def assert_parse_failure(self, raw, reason, *, stop_reason='end_turn',
                              user='u', shadow=False):
         self.seed(prefix=user, user=user)
@@ -409,9 +635,10 @@ class ProducerDatabaseTests(unittest.TestCase):
         result = self.run_pair(recovered, now=self.now + timedelta(seconds=31))
         self.assertEqual(result['status'], 'succeeded')
         recovered.assert_called_once()
-        self.assertEqual(len(json.loads(recovered.call_args.kwargs['messages'][0]['content'])), 8)
-        self.assertTrue(all(row[0:3] == ('succeeded', 1, None)
-                            for row in self.processing_rows()))
+        self.assertEqual(len(json.loads(recovered.call_args.kwargs['messages'][0]['content'])), 4)
+        self.assertEqual([row[0:3] for row in self.processing_rows()],
+                         [('succeeded', 1, None)] * 4 + [('pending', 1, 'invalid_json')] * 4)
+        self.assertEqual(self.control_state()['batch_size'], producer.BATCH_SIZE)
 
     def test_structured_14_three_parse_failures_pause_then_recover_after_cooldown(self):
         self.seed()
@@ -419,8 +646,10 @@ class ProducerDatabaseTests(unittest.TestCase):
         for count, seconds in enumerate((0, 31, 92), start=1):
             result = self.run_pair(failed, now=self.now + timedelta(seconds=seconds))
             self.assertEqual((result['status'], result['reason']), ('failed', 'invalid_json'))
-            self.assertTrue(all(row == ('pending', count, 'invalid_json', None)
-                                for row in self.processing_rows()))
+            expected_counts = [sum(index < size for size in (8, 4, 2)[:count])
+                               for index in range(8)]
+            self.assertEqual(self.processing_rows(),
+                [('pending', retries, 'invalid_json', None) for retries in expected_counts])
         self.assertEqual(failed.call_count, 3)
         self.assertEqual(self.run_pair(failed, now=self.now + timedelta(seconds=1891))['status'],
                          'cooldown')
@@ -429,8 +658,10 @@ class ProducerDatabaseTests(unittest.TestCase):
         result = self.run_pair(recovered, now=self.now + timedelta(seconds=1893))
         self.assertEqual(result['status'], 'succeeded')
         recovered.assert_called_once()
-        self.assertTrue(all(row[0:3] == ('succeeded', 3, None)
-                            for row in self.processing_rows()))
+        self.assertEqual([row[0:3] for row in self.processing_rows()],
+            [('succeeded', 3, None), ('pending', 3, 'invalid_json')]
+            + [('pending', 2, 'invalid_json')] * 2 + [('pending', 1, 'invalid_json')] * 4)
+        self.assertEqual(self.control_state()['batch_size'], 2)
         self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
 
     def test_structured_15_schema_failure_is_identical_in_live_and_shadow(self):
@@ -553,6 +784,8 @@ class ProducerDatabaseTests(unittest.TestCase):
         with patch.object(self.database, 'commit', side_effect=commit_then_disconnect) as commits:
             result = self.run_pair(model)
         self.assertEqual(result['status'], 'commit_unknown')
+        self.assertTrue(all(row[:2] == ('pending', 0) for row in self.processing_rows()))
+        self.assertFalse(any(row.get('kind') == 'source_skipped' for row in self.logs))
         commits.assert_called_once()
         model.assert_not_called()
         self.run_pair(model, now=self.now + timedelta(seconds=1))
@@ -579,6 +812,8 @@ class ProducerDatabaseTests(unittest.TestCase):
         with patch.object(self.database, 'commit', side_effect=commit_then_maybe_disconnect):
             result = self.run_pair(model)
         self.assertEqual(result['status'], 'commit_unknown')
+        self.assertTrue(all(row[:2] == ('succeeded', 0) for row in self.processing_rows()))
+        self.assertFalse(any(row.get('kind') == 'source_skipped' for row in self.logs))
         self.run_pair(model, now=self.now + timedelta(seconds=300))
         model.assert_called_once()
         budget = self.sql('''SELECT result_ref FROM event_processing_state
