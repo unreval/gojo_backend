@@ -381,12 +381,13 @@ class ChatCommitGateTests(unittest.TestCase):
         private_raw = '今日は疲れたよ'
         response, body = self.send([
             chat_reply(private_raw, private_raw),
-            chat_reply('そうだね', 'ねえ、悟って呼んで。'),
+            json.dumps({'emotion': '平静', 'messages': [{'jp': 'こんにちは'}]},
+                       ensure_ascii=False),
         ])
         self.assert_generation_failed(response, body, attempts=2)
         traces = self.generation_traces()
         self.assertEqual([t['parse_invalid_reason'] for t in traces],
-                         ['jp_equals_zh_verbal', 'zh_contains_kana'])
+                         ['jp_equals_zh_verbal', 'invalid_message_field'])
         self.assertEqual([t['retry_reason'] for t in traces],
                          ['jp_equals_zh_verbal', None])
         self.assertNotIn(private_raw, json.dumps(traces, ensure_ascii=False))
@@ -428,16 +429,24 @@ class ChatCommitGateTests(unittest.TestCase):
                          'jp_equals_zh_verbal')
         self.assertEqual(body['messages'][0]['zh'], '今天有点累。')
 
-    def test_mostly_japanese_zh_retries_but_short_quote_passes(self):
+    def test_mostly_japanese_zh_commits_once_and_short_quote_passes(self):
+        zh = 'ねえ、悟って呼んで。'
         response, body = self.send([
-            chat_reply('そうだね', 'ねえ、悟って呼んで。'),
+            chat_reply('そうだね', zh),
             chat_reply('そうだね', '是啊，叫我悟就好。'),
         ])
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.route._create_json.call_count, 2)
-        self.assertEqual(self.generation_traces()[0]['parse_invalid_reason'],
-                         'zh_contains_kana')
-        self.assertEqual(body['messages'][0]['zh'], '是啊，叫我悟就好。')
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.assertEqual(body['messages'][0]['jp'], 'そうだね。')
+        self.assertEqual(body['messages'][0]['zh'], zh)
+        assistant = [row for row in self.short_rows if row['role'] == 'assistant']
+        self.assertEqual([row['content'] for row in assistant], ['そうだね。'])
+        warnings = [json.loads(call.args[0].split(' ', 1)[1])
+                    for call in self.log.call_args_list
+                    if call.args and str(call.args[0]).startswith('[translation_check] ')]
+        self.assertEqual(warnings[0]['reason'], 'zh_contains_kana')
+        self.assertFalse(warnings[0]['blocking'])
+        self.assertNotIn(zh, json.dumps(warnings, ensure_ascii=False))
 
         self.log.reset_mock()
         response, body = self.send([
@@ -560,17 +569,21 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertTrue(self.route._valid_msg({'jp': 'ん？', 'zh': '嗯？'}))
         self.assertTrue(self.route._valid_msg({'jp': 'え？', 'zh': '诶？'}))
 
-    def test_bilingual_gate_rejects_identical_text_and_mostly_japanese_chinese(self):
+    def test_bilingual_gate_rejects_identical_text_and_observes_kana_zh(self):
         from utils import valid_reply_pair
 
-        for jp, zh in (('今日は疲れたよ', '今日は疲れたよ'),
-                       ('そうだね', 'ねえ、悟って呼んで。')):
-            with self.subTest(jp=jp, zh=zh):
-                message = {'jp': jp, 'zh': zh}
-                self.assertFalse(self.route._valid_msg(message))
-                self.assertFalse(valid_reply_pair(jp, zh))
-                self.assertEqual(self.route._finalize_committed(
-                    {'messages': [message]}), (None, None))
+        identical = {'jp': '今日は疲れたよ', 'zh': '今日は疲れたよ'}
+        self.assertFalse(self.route._valid_msg(identical))
+        self.assertFalse(valid_reply_pair(identical['jp'], identical['zh']))
+        self.assertEqual(self.route._protocol_rejection_reason({'messages': [identical]}),
+                         'jp_equals_zh_verbal')
+        observed = {'jp': 'そうだね', 'zh': 'ねえ、悟って呼んで。'}
+        self.assertTrue(self.route._valid_msg(observed))
+        self.assertTrue(valid_reply_pair(observed['jp'], observed['zh']))
+        emotion, messages = self.route._finalize_committed({'messages': [observed]})
+        self.assertEqual(messages[0]['jp'], 'そうだね。')
+        self.assertEqual(messages[0]['zh'], observed['zh'])
+        self.assertTrue(emotion)
         self.assertTrue(valid_reply_pair('了解', '知道了'))
         self.assertTrue(valid_reply_pair('😒', '😒'))
         self.assertTrue(valid_reply_pair('そうだね', '是啊ね'))
@@ -578,15 +591,18 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertTrue(valid_reply_pair('そうだね', '他说「おはよう」。'))
 
     def test_invalid_bilingual_candidates_retry_before_commit(self):
-        for index, pair in enumerate((('今日は疲れたよ', '今日は疲れたよ'),
-                                      ('そうだね', 'ねえ、悟って呼んで。'))):
-            with self.subTest(pair=pair):
-                raw = chat_reply(*pair)
-                response, body = self.send([raw] * 3,
-                                           source_event_id=f'invalid-pair-{index}')
-                self.assertEqual(response.status_code, 502)
-                self.assertEqual(body['messages'], [])
-                self.assertEqual(self.route._create_json.call_count, 2)
+        raw = chat_reply('今日は疲れたよ', '今日は疲れたよ')
+        response, body = self.send([raw] * 3, source_event_id='invalid-pair-equal')
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(body['messages'], [])
+        self.assertEqual(self.route._create_json.call_count, 2)
+
+        response, body = self.send(
+            [chat_reply('そうだね', 'ねえ、悟って呼んで。')] * 3,
+            source_event_id='invalid-pair-kana')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['messages'][0]['zh'], 'ねえ、悟って呼んで。')
+        self.assertEqual(self.route._create_json.call_count, 1)
 
     def test_no_fallback_pool_in_source(self):
         src = Path(ROUTE_CHAT).read_text(encoding='utf-8')

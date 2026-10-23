@@ -116,10 +116,6 @@ class PlaintextContractTests(unittest.TestCase):
             ('{"messages":[{"jp":"こんにちは"}]}', 'invalid_message_field'),
             ('{"messages":[{"jp":"今日は","zh":"今日は"}]}',
              'jp_equals_zh_verbal'),
-            ('{"messages":[{"jp":"そうだね","zh":"ねえ、悟って呼んで"}]}',
-             'zh_contains_kana'),
-            ('{"messages":[{"jp":"そうだね","zh":"「おはよう」"}]}',
-             'zh_contains_kana'),
         )
         for raw, reason in cases:
             with self.subTest(reason=reason):
@@ -131,6 +127,18 @@ class PlaintextContractTests(unittest.TestCase):
                                  [reason] * expected_calls)
                 self.assertEqual([t['retry_reason'] for t in traces],
                                  [reason, None] if expected_calls == 2 else [None])
+
+    def test_kana_heavy_zh_is_accepted_on_the_first_attempt(self):
+        for raw in (
+                '{"messages":[{"jp":"そうだね","zh":"ねえ、悟って呼んで"}]}',
+                '{"messages":[{"jp":"そうだね","zh":"「おはよう」"}]}',
+        ):
+            with self.subTest(raw=raw):
+                result, _, calls, traces = self.generate(raw)
+                self.assertEqual(calls, 1)
+                self.assertEqual(result['messages'][0]['jp'], 'そうだね')
+                self.assertEqual(traces[0]['outcome'], 'accepted')
+                self.assertIsNone(traces[0]['parse_invalid_reason'])
 
     def test_model_cannot_spoof_the_degraded_mode(self):
         raw = json.dumps({

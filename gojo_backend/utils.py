@@ -453,6 +453,7 @@ def log_translation_check(reason, message_index, jp, zh):
         'time_word_contradiction': r'午前|午後|早朝|今朝|正午|夕方|夕暮れ|今晩|今夜|深夜|夜中|朝|昼|夜|早上|上午|清晨|今早|早饭|早餐|中午|午饭|午餐|下午|傍晚|黄昏|晚上|今晚|晚饭|晚餐|半夜',
         'number_value_mismatch': r'[0-9０-９零〇一二三四五六七八九十百千万萬亿億兆]+',
         'bilingual_numeric_anchor_mismatch': r'日元|日圆|分钟|分鐘|分間|時間|小时|小時|円|元|天|日|年|月|个|個|時|时|点|分',
+        'zh_contains_kana': r'[\u3041-\u3096\u30a1-\u30fa\uff66-\uff9f]+',
     }
     markers = list(dict.fromkeys(
         match.group()[:8] for match in re.finditer(patterns[reason], jp + ' ' + zh)))[:6]
@@ -482,12 +483,11 @@ def reply_message_rejection_reason(m: dict, *, message_index=1):
     kana = sum('\u3041' <= ch <= '\u3096' or '\u30a1' <= ch <= '\u30fa'
                or '\uff66' <= ch <= '\uff9f' for ch in gate_text)
     han = sum('\u3400' <= ch <= '\u9fff' for ch in gate_text)
-    if kana > han:
-        return 'zh_contains_kana'
     from config import TRANSLATION_CHECKS_BLOCKING
-    reasons = [reason for check in (
+    reasons = ['zh_contains_kana'] if kana > han else []
+    reasons.extend(reason for check in (
         _check_time_word_consistency, _check_negation_consistency, _check_number_consistency,
-    ) if (reason := check(jp, zh))]
+    ) if (reason := check(jp, zh)))
     for reason in reasons:
         log_translation_check(reason, message_index, jp, zh)
     return reasons[0] if reasons and TRANSLATION_CHECKS_BLOCKING else None

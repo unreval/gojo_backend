@@ -15,6 +15,7 @@ CASES = (
     ('number_value_mismatch', 'りんごを三つ買ったよ。', '我买了五个苹果。'),
     ('time_word_contradiction', '朝に散歩しよう。', '我们晚上去散步吧。'),
     ('bilingual_numeric_anchor_mismatch', '午前十一時に帰るよ。', '23:00回家就好了。'),
+    ('zh_contains_kana', 'そうだね。', 'ねえ、悟って呼んで。'),
 )
 SNAPSHOT = {'now_utc': datetime(2026, 10, 23, 6, tzinfo=timezone.utc)}
 
@@ -85,8 +86,7 @@ class TranslationPolicyTests(unittest.TestCase):
     def test_hard_protocol_failure_in_later_bubble_is_never_masked(self):
         cases = ((None, 'malformed_json'), ({}, 'missing_messages'),
                  ({'messages': [{'jp': 'こんにちは'}]}, 'invalid_message_field'),
-                 ({'messages': [{'jp': 'こんにちは', 'zh': 'こんにちは'}]}, 'jp_equals_zh_verbal'),
-                 ({'messages': [{'jp': 'こんにちは', 'zh': 'そうだね'}]}, 'zh_contains_kana'))
+                 ({'messages': [{'jp': 'こんにちは', 'zh': 'こんにちは'}]}, 'jp_equals_zh_verbal'))
         for blocking in (False, True):
             for candidate, expected in cases:
                 with self.subTest(blocking=blocking, reason=expected), patch.object(
@@ -97,6 +97,69 @@ class TranslationPolicyTests(unittest.TestCase):
             if not blocking:
                 with patch.object(config, 'TRANSLATION_CHECKS_BLOCKING', False, create=True):
                     self.assertEqual(route_chat._protocol_rejection_reason(candidate), 'invalid_message_field')
+
+    def test_kana_heavy_zh_is_logged_and_committed_unless_blocking(self):
+        secret = 'PRIVATE-CANDIDATE-TEXT-DO-NOT-LOG'
+        samples = (
+            ('そうだね。', 'ねえ、悟って呼んで。' + secret),
+            ('そうだね', '「おはよう」'),
+        )
+        for jp, zh in samples:
+            with self.subTest(zh=zh):
+                result, (_, messages), calls, logged = self.generate([{'jp': jp, 'zh': zh}])
+                self.assertIsNotNone(result)
+                self.assertEqual(calls, 1)
+                self.assertEqual(messages[0]['zh'], zh)
+                self.assertTrue(utils.commit_ready_msgs(messages))
+                warnings = [json.loads(call.args[0].split(' ', 1)[1])
+                            for call in logged.call_args_list
+                            if call.args and str(call.args[0]).startswith('[translation_check] ')]
+                self.assertGreaterEqual(len(warnings), 1)
+                self.assertTrue(all(row['reason'] == 'zh_contains_kana' for row in warnings))
+                for row in warnings:
+                    self.assertEqual(row['message_index'], 1)
+                    self.assertFalse(row['blocking'])
+                    self.assertTrue(row['markers'])
+                    self.assertTrue(all(len(marker) <= 8 for marker in row['markers']))
+                    self.assertEqual(set(row), {'reason', 'message_index', 'markers', 'blocking'})
+                encoded = json.dumps(warnings, ensure_ascii=False)
+                self.assertNotIn(secret, encoded)
+                self.assertNotIn(zh, encoded)
+        for jp, zh in samples:
+            with self.subTest(blocking=True, zh=zh), patch.object(
+                    config, 'TRANSLATION_CHECKS_BLOCKING', True, create=True):
+                self.assertEqual(utils.reply_message_rejection_reason({'jp': jp, 'zh': zh}),
+                                 'zh_contains_kana')
+                self.assertFalse(utils.commit_ready_msgs([{'jp': jp, 'zh': zh}]))
+                self.assertIsNone(self.generate([{'jp': jp, 'zh': zh}], blocking=True)[0])
+
+    def test_kana_observation_does_not_mask_a_later_hard_failure(self):
+        candidate = {'messages': [
+            {'jp': 'そうだね。', 'zh': 'ねえ、悟って呼んで。'},
+            {'jp': 'こんにちは'},
+        ]}
+        for blocking, expected in ((False, 'invalid_message_field'), (True, 'zh_contains_kana')):
+            with self.subTest(blocking=blocking), patch.object(
+                    config, 'TRANSLATION_CHECKS_BLOCKING', blocking, create=True), \
+                    patch('builtins.print') as logged:
+                self.assertEqual(route_chat._protocol_rejection_reason(candidate), expected)
+                warnings = [json.loads(call.args[0].split(' ', 1)[1])
+                            for call in logged.call_args_list
+                            if call.args and str(call.args[0]).startswith('[translation_check] ')]
+                self.assertEqual(warnings[0]['reason'], 'zh_contains_kana')
+                self.assertIs(warnings[0]['blocking'], blocking)
+
+    def test_short_japanese_quote_inside_chinese_is_not_a_kana_warning(self):
+        for zh in ('他说「おはよう」，我听懂了。', '他说「おはよう」。'):
+            for blocking in (False, True):
+                with self.subTest(zh=zh, blocking=blocking), patch.object(
+                        config, 'TRANSLATION_CHECKS_BLOCKING', blocking, create=True), \
+                        patch('builtins.print') as logged:
+                    self.assertIsNone(route_chat._protocol_rejection_reason(
+                        {'messages': [{'jp': 'そうだね', 'zh': zh}]}))
+                    self.assertFalse(any(
+                        call.args and 'zh_contains_kana' in str(call.args[0])
+                        for call in logged.call_args_list))
 
     def test_clock_conflict_remains_hard_in_both_modes(self):
         for blocking in (False, True):
