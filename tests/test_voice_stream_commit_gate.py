@@ -103,6 +103,7 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
             ),
             'config': stub(
                 'config',
+                TRANSLATION_CHECKS_BLOCKING=False,
                 ANTHROPIC_KEY='',
                 EMOTIONS=['平静', '调皮', '疑惑'],
                 DEFAULT_CHARACTER_ID='gojo',

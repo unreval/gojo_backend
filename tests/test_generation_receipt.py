@@ -705,6 +705,7 @@ class RouteIdempotencyTests(unittest.TestCase):
             ),
             'config': stub(
                 'config',
+                TRANSLATION_CHECKS_BLOCKING=False,
                 ANTHROPIC_KEY='',
                 EMOTIONS=['平静', '调皮', '疑惑'],
                 TTS_PROVIDER='fish',
@@ -1577,7 +1578,8 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
                 ),
             ),
             'config': stub(
-                'config', ANTHROPIC_KEY='', EMOTIONS=['平静'], TTS_PROVIDER='fish',
+                'config', TRANSLATION_CHECKS_BLOCKING=False,
+                ANTHROPIC_KEY='', EMOTIONS=['平静'], TTS_PROVIDER='fish',
                 DEFAULT_CHARACTER_ID='gojo', MODEL_MAIN='claude-test'),
             'db': stub('db', get_conn=lambda: FakeConn(self.store)),
             'ai_client': stub(

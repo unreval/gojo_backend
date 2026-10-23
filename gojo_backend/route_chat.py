@@ -1175,8 +1175,7 @@ def _observe_temporal_candidate(parsed, snapshot, context_pack, event_id):
     text = ' '.join(f'{message.get("jp", "")} {message.get("zh", "")}'
                     for message in (parsed or {}).get('messages') or [])
     prefix = re.sub(r'\s+', ' ', text).strip()
-    checks = [('clock_phase', _find_reply_clock_phase_conflict(text, snapshot), prefix),
-              ('bilingual_numeric', _find_bilingual_numeric_conflict(parsed), prefix)]
+    checks = [('clock_phase', _find_reply_clock_phase_conflict(text, snapshot), prefix)]
     for message in (parsed or {}).get('messages') or []:
         for language in ('jp', 'zh'):
             candidate = (message.get(language) or '').lstrip()
@@ -1199,15 +1198,21 @@ def _observe_temporal_candidate(parsed, snapshot, context_pack, event_id):
 
 
 def _reject_temporal_candidate(parsed, snapshot):
-    """Reject the temporal conflicts recorded by the independent observer."""
+    """Keep time/marker guards hard; translation anchors follow shared policy."""
+    from config import TRANSLATION_CHECKS_BLOCKING
+    from utils import log_translation_check
     text = ' '.join(f'{message.get("jp", "")} {message.get("zh", "")}'
                     for message in (parsed or {}).get('messages') or [])
     clock_conflict = _find_reply_clock_phase_conflict(text, snapshot)
     if clock_conflict:
         return clock_conflict
-    numeric_conflict = _find_bilingual_numeric_conflict(parsed)
-    if numeric_conflict:
-        return numeric_conflict
+    for index, message in enumerate((parsed or {}).get('messages') or [], 1):
+        numeric_conflict = _find_bilingual_numeric_conflict({'messages': [message]})
+        if numeric_conflict:
+            log_translation_check(numeric_conflict, index,
+                                  message.get('jp') or '', message.get('zh') or '')
+            if TRANSLATION_CHECKS_BLOCKING:
+                return numeric_conflict
     for message in (parsed or {}).get('messages') or []:
         for language in ('jp', 'zh'):
             candidate = (message.get(language) or '').lstrip()

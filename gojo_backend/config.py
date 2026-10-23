@@ -12,6 +12,10 @@ MODEL_JP_AUX = os.getenv('MODEL_JP_AUX', 'claude-haiku-4-5-20251001')
 
 MODEL_MID = os.getenv('MODEL_MID', 'claude-sonnet-4-6')
 
+# Translation diagnostics do not veto a reply; true restores strict checks.
+TRANSLATION_CHECKS_BLOCKING = os.getenv(
+    'TRANSLATION_CHECKS_BLOCKING', 'false').strip().lower() in ('1', 'true')
+
 # 候选产生独立于聊天；默认关闭，启用后也默认只记录影子结果。
 CANDIDATE_PRODUCER_ENABLED = os.getenv(
     'CANDIDATE_PRODUCER_ENABLED', 'false').strip().lower() in ('1', 'true')

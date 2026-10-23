@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path[:0] = [str(ROOT / 'gojo_backend'), str(ROOT / 'tests')]
 
 import utils
+import config
 from temporal_projection_offline import offline_environment
 
 ZONE = timezone(timedelta(hours=8))
@@ -48,6 +49,12 @@ def snapshot(hour=13, minute=30, day=14):
 
 
 class TestTranslationConsistency(unittest.TestCase):
+    def setUp(self):
+        # Preserve the strict-mode detector contract; default policy is tested separately.
+        self.blocking = patch.object(config, 'TRANSLATION_CHECKS_BLOCKING', True)
+        self.blocking.start()
+        self.addCleanup(self.blocking.stop)
+
     def assert_reason(self, jp, zh, reason=None):
         self.assertEqual(utils.reply_message_rejection_reason({'jp': jp, 'zh': zh}), reason)
 
@@ -229,6 +236,11 @@ class TestTranslationConsistency(unittest.TestCase):
 
 
 class OfflineRouteTests(unittest.TestCase):
+    def setUp(self):
+        blocking = patch.object(config, 'TRANSLATION_CHECKS_BLOCKING', True)
+        blocking.start()
+        self.addCleanup(blocking.stop)
+
     @classmethod
     def setUpClass(cls):
         cls.environment = ExitStack()
@@ -312,8 +324,8 @@ class TestTemporalRejection(OfflineRouteTests):
             'jp': '今は朝だ。', 'zh': '现在是早上了。'}, snap),
             'current_clock_phase_conflict')
 
-    def test_observer_still_emits_three_existing_telemetry_types(self):
-        for reason, message in TEMPORAL_CASES:
+    def test_observer_keeps_hard_guard_telemetry_without_numeric_candidate_prefix(self):
+        for reason, message in (TEMPORAL_CASES[0], TEMPORAL_CASES[2]):
             with self.subTest(reason=reason), patch('builtins.print') as logged:
                 self.route._observe_temporal_candidate(
                     envelope(message), snapshot(), SimpleNamespace(history_time_facts={}), 'evt')
@@ -394,6 +406,8 @@ class TestChatGuardCommit(unittest.TestCase):
         real_temporal = importlib.import_module('temporal_awareness')
         self.fixture = importlib.import_module('test_chat_commit_gate').ChatCommitGateTests
         self.fixture.setUp(self)
+        self.environment.enter_context(patch.object(
+            sys.modules['config'], 'TRANSLATION_CHECKS_BLOCKING', True))
         # The existing commit fixture replaces the temporal DB adapter. Retain
         # its in-memory snapshot and the real deterministic phase classifier.
         sys.modules['temporal_awareness'].clock_phase = real_temporal.clock_phase
@@ -489,6 +503,35 @@ class TestChatGuardCommit(unittest.TestCase):
         frozen = self.route.get_temporal_snapshot.return_value
         self.assertTrue(all(call.args[1] is frozen for call in reject.call_args_list))
         self.assertTrue(all(call.args[1] is frozen for call in observer.call_args_list))
+
+    def test_default_translation_warnings_commit_original_reply_on_first_attempt(self):
+        with patch.object(sys.modules['config'], 'TRANSLATION_CHECKS_BLOCKING', False):
+            for index, (reason, message) in enumerate(TRANSLATION_CASES + (TEMPORAL_CASES[1],)):
+                with self.subTest(reason=reason):
+                    response, body = self.send([raw(message)], source_event_id=f'observe-{index}')
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(body['messages'][0]['jp'], message['jp'])
+                    self.assertEqual(body['messages'][0]['zh'], message['zh'])
+                    self.assertEqual(self.route._create_json.call_count, 1)
+        self.assertEqual(self.save_short.call_count, 4)
+
+    def test_default_mode_keeps_calendar_and_schedule_rejections(self):
+        with patch.object(sys.modules['config'], 'TRANSLATION_CHECKS_BLOCKING', False), \
+                patch.object(self.route, 'find_reply_calendar_conflict',
+                             return_value='tomorrow_noon_rewritten_as_today'):
+            response, body = self.send([raw(GOOD), raw(GOOD)])
+        self.assert_exhausted_result(response, body, 'tomorrow_noon_rewritten_as_today')
+
+    def assert_exhausted_result(self, response, body, reason):
+        self.assert_generation_failed(response, body, attempts=2)
+        self.assertEqual(self.generation_traces()[0]['retry_reason'], reason)
+
+    def test_default_mode_keeps_schedule_rejection(self):
+        with patch.object(sys.modules['config'], 'TRANSLATION_CHECKS_BLOCKING', False), \
+                patch.object(self.route, '_reject_schedule_candidate',
+                             return_value='active_event_completion_claim_without_intent'):
+            response, body = self.send([raw(GOOD), raw(GOOD)])
+        self.assert_exhausted_result(response, body, 'active_event_completion_claim_without_intent')
 
 
 if __name__ == '__main__':

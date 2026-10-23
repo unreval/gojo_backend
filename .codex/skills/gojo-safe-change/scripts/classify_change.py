@@ -72,6 +72,7 @@ def is_test(path: str) -> bool:
     p = path.lower()
     return (
         p.startswith("tests/")
+        or (p.startswith("test_") and "/" not in p and p.endswith(".py"))
         or "/tests/" in p
         or p.endswith("_test.py")
         or p.startswith("__tests__/")
@@ -155,6 +156,7 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
         "fast_loop",
     ),
     "generation": (
+        "gojo_backend/utils.py",
         "gojo_backend/ai_client.py",
         "gojo_backend/provider_error.py",
         "gojo_backend/config.py",

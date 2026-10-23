@@ -321,7 +321,7 @@ class ObservationOnlyTests(unittest.TestCase):
         self.assertEqual(candidate, before)
         logs = [json.loads(call.args[0].split(' ', 1)[1]) for call in logged.call_args_list
                 if call.args and str(call.args[0]).startswith('[temporal_check] ')]
-        self.assertEqual({row['check_type'] for row in logs}, {'clock_phase', 'bilingual_numeric'})
+        self.assertEqual({row['check_type'] for row in logs}, {'clock_phase'})
         for row in logs:
             self.assertEqual(row['event_id'], 'event-123')
             self.assertEqual(row['now'], snap['now_local'].isoformat())

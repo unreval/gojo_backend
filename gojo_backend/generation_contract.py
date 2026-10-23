@@ -85,8 +85,8 @@ def rejection_reason(parsed, raw='', min_messages=1, acceptance_mode=None):
                 and messages[0].get('zh') == ''):
             return None
         return 'invalid_message_field'
-    for message in messages:
-        reason = reply_message_rejection_reason(message)
+    for index, message in enumerate(messages, 1):
+        reason = reply_message_rejection_reason(message, message_index=index)
         if reason:
             return reason
     return None
