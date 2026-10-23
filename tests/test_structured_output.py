@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+from contextlib import redirect_stdout
+import io
+import json
 import os
 import sys
 import unittest
@@ -61,6 +64,50 @@ class StructuredOutputParserTests(unittest.TestCase):
 
         self.assertEqual(invalid.error_code, 'invalid_json')
         self.assertEqual(incomplete.error_code, 'incomplete_json')
+
+    def test_unescaped_quotes_report_decoder_position_without_repair(self):
+        raw = '[{"summary":"PRIVATE-PREFIX-satoru"quoted words"PRIVATE-SUFFIX"}]'
+        for wrapped in (raw, '```json\n' + raw + '\n```', 'Result: ' + raw):
+            with self.subTest(wrapped=wrapped):
+                validator = Mock()
+                result = structured_output.parse_structured_output(
+                    wrapped, root_type='array', schema_validator=validator,
+                    schema_name='candidate_producer_batch')
+
+                self.assertEqual(result.error_code, 'invalid_json')
+                self.assertRegex(result.error_detail, r'^[A-Za-z]+@\d+$')
+                self.assertEqual(result.error_detail,
+                                 'JSONDecodeError@' + str(raw.index('quoted words')))
+                self.assertIsNone(result.value)
+                self.assertEqual(result.candidate_count, 0)
+                validator.assert_not_called()
+
+    def test_decode_failure_telemetry_never_includes_response_fragments(self):
+        raw = '[{"summary":"PRIVATE-PREFIX-satoru"quoted words"PRIVATE-SUFFIX"}]'
+        output = io.StringIO()
+        with redirect_stdout(output):
+            call = structured_output.invoke_structured_llm(
+                domain='test', create_chat_fn=lambda **_: (raw, {}),
+                model='test', messages=[], root_type='array',
+                schema_name='candidate_producer_batch')
+
+        self.assertEqual(call.parsed.error_code, 'invalid_json')
+        self.assertRegex(call.parsed.error_detail, r'^[A-Za-z]+@\d+$')
+        self.assertIn('reason=' + call.parsed.error_detail, output.getvalue())
+        telemetry = json.dumps(call.parsed.telemetry()) + output.getvalue()
+        for start in range(len(raw) - 7):
+            self.assertNotIn(raw[start:start + 8], telemetry)
+
+    def test_decode_errors_without_position_do_not_expose_private_keys(self):
+        for raw in ('{"PRIVATE-DUPLICATE-KEY":1,"PRIVATE-DUPLICATE-KEY":2}',
+                    '{"value":NaN}', '{"value":Infinity}', '{"value":1e400}'):
+            with self.subTest(raw=raw):
+                result = structured_output.parse_structured_output(raw)
+
+                self.assertEqual(result.error_code, 'invalid_json')
+                self.assertEqual(result.error_detail, 'ValueError@0')
+                self.assertIsNone(result.value)
+                self.assertNotIn('PRIVATE-DUPLICATE-KEY', str(result.telemetry()))
 
     def test_rejects_duplicate_keys_constants_and_mixed_outer_roots(self):
         for raw in ('{"x":1,"x":2}', '{"x":NaN}', '{"x":Infinity}',

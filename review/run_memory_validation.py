@@ -16,6 +16,8 @@ LOCAL_TEMP = Path('C:/Users/\u5f20\u4e09/AppData/Local/Temp')
 TARGETED = [
     'tests/test_candidate_producer.py',
     'tests/test_candidate_producer_projection.py',
+    'tests/test_structured_output.py',
+    'tests/test_structured_output_architecture.py',
     'tests/test_memory_candidate.py',
     'tests/test_memory_candidate_projection.py',
     'tests/test_memory_candidate_source.py',
