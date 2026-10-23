@@ -228,14 +228,28 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         self.jobs.assert_not_called()
         self.record_turn.assert_not_called()
 
-    def test_identical_verbal_or_mostly_japanese_zh_never_commits(self):
-        for raw in ('JP: そうだね\nZH: そうだね\n',
-                    'JP: そうだね\nZH: ねえ、悟って呼んで。\n'):
-            with self.subTest(raw=raw):
-                events = self.events(raw)
-                self.assertIn('generation_failed', self.types(events))
-                self.assertNotIn('audio', self.types(events))
-                self.save_short.assert_not_called()
+    def test_identical_verbal_never_commits(self):
+        events = self.events('JP: そうだね\nZH: そうだね\n')
+        self.assertIn('generation_failed', self.types(events))
+        self.assertNotIn('audio', self.types(events))
+        self.save_short.assert_not_called()
+
+    def test_kana_heavy_zh_commits_japanese_and_records_reason(self):
+        zh = 'ねえ、悟って呼んで。'
+        events = self.events(f'JP: そうだね\nZH: {zh}\n')
+        self.assertNotIn('generation_failed', self.types(events))
+        audio = next(event for event in events if event['type'] == 'audio')
+        self.assertEqual(audio['jp'], 'そうだね')
+        self.assertEqual(audio['zh'], zh)
+        self.save_short.assert_called_once()
+        self.assertEqual(self.save_short.call_args.args[1], 'assistant')
+        self.assertEqual(self.save_short.call_args.args[2], 'そうだね')
+        warnings = [json.loads(call.args[0].split(' ', 1)[1])
+                    for call in self.log.call_args_list
+                    if call.args and str(call.args[0]).startswith('[translation_check] ')]
+        self.assertEqual(warnings[0]['reason'], 'zh_contains_kana')
+        self.assertFalse(warnings[0]['blocking'])
+        self.assertNotIn(zh, json.dumps(warnings, ensure_ascii=False))
 
     def test_short_japanese_quote_in_chinese_zh_commits(self):
         events = self.events('JP: そうだね\nZH: 他说「おはよう」。\n')
