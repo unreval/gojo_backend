@@ -1141,8 +1141,9 @@ def _numeric_anchors(text):
     remaining = list(text)
     for start, end in spans:
         remaining[start:end] = ' ' * (end - start)
-    for match in re.finditer(r'(' + number + r')(分钟|分鐘|分間|分|時間|小时|小時|天|日|年|月|円|元|个|個)', ''.join(remaining)):
-        unit = {'分钟': 'minutes', '分鐘': 'minutes', '分間': 'minutes', '分': 'minutes',
+    for match in re.finditer(r'(' + number + r')(日元|日圆|分钟|分鐘|分間|分|時間|小时|小時|天|日|年|月|円|元|个|個)', ''.join(remaining)):
+        unit = {'日元': 'currency', '日圆': 'currency',
+                '分钟': 'minutes', '分鐘': 'minutes', '分間': 'minutes', '分': 'minutes',
                 '時間': 'hours', '小时': 'hours', '小時': 'hours',
                 '天': 'days', '日': 'days', '円': 'currency', '元': 'currency',
                 '个': 'count', '個': 'count'}.get(match.group(2), match.group(2))
