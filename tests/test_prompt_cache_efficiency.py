@@ -112,6 +112,21 @@ class PromptCacheStabilityTests(unittest.TestCase):
         self.long.assert_not_called()
         self.bonds.assert_not_called()
 
+    def test_recall_not_ready_keeps_existing_expanded_query_fallback(self):
+        pack = self.pack()
+        pack.recall_ready = False
+        pack.recent_event_ids = ['hot-1']
+        query = '当前问题 路由扩展的前文一 前文二'
+        with patch('smart_recall.two_level_recall', return_value=self.recall('FALLBACK-RECALL')) as recall, \
+                patch.object(prompt.memory_search, 'is_vector_ready', return_value=False):
+            blocks = prompt.build_system_blocks('u', 'gojo', query, context_pack=pack)
+            self.assertEqual(recall.call_args.args, ('u', 'gojo', query))
+            self.assertEqual(recall.call_args.kwargs['exclude_event_ids'], ['hot-1'])
+            self.assertIn('FALLBACK-RECALL', blocks[-1]['text'])
+            pack.recall_ready = True
+            prompt.build_system_blocks('u', 'gojo', query, context_pack=pack)
+            recall.assert_called_once()
+
 
 class CurrentTurnGroundingTests(unittest.TestCase):
     def setUp(self):
@@ -202,7 +217,12 @@ class CurrentTurnGroundingTests(unittest.TestCase):
         hot = [self.event('hot-user', '海报用蓝色怎么样？', minutes_ago=2),
                self.event('hot-assistant', '我喜欢蓝色那版。', 'assistant')]
         current = '蓝色？'
-        pack = self.pack(hot, query=current)
+        # Inject unrelated derived context to exercise grounding/revocation;
+        # the expanded specific query need not retrieve an unrelated episode.
+        unrelated = episodic_index.recall_episodes('u', 'gojo', current)
+        self.assertTrue(unrelated)
+        with patch.object(episodic_index, 'recall_episodes', return_value=unrelated):
+            pack = self.pack(hot, query=current)
         messages = context_layer.append_current_user_turn(pack.messages, current)
         self.assertEqual(messages[-1], {'role': 'user', 'content': current})
         self.assertIn('海报用蓝色怎么样？', '\n'.join(row['content'] for row in messages))

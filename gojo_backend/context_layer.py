@@ -1675,6 +1675,7 @@ def assemble_from_events(
     temporal_snapshot=None,
     auto_pin_enabled=True,
     include_time_markers=True,
+    expand_recall_query=True,
 ) -> ChatContextPack:
     cfg = config or BudgetConfig()
     manager = ContextBudgetManager(cfg)
@@ -1742,14 +1743,21 @@ def assemble_from_events(
     recall_result = None
     if include_recall:
         try:
+            if expand_recall_query:
+                tails = [str(ev.get('prompt_text') or ev.get('content') or '').strip()
+                         for ev in hot[-2:]]
+                recall_query = ' '.join(
+                    [user_message or ''] + [text for text in tails if text]).strip()
+            else:
+                recall_query = user_message or ''
             from smart_recall import two_level_recall
             from recall_candidates import (
                 collapse_candidates, from_recall_result, to_recall_result,
             )
             with _latency_span('recall'):
-                query_embedding = _build_recall_query_embedding(user_message)
+                query_embedding = _build_recall_query_embedding(recall_query)
                 recall_result = two_level_recall(
-                    user_id, character_id, user_message or '',
+                    user_id, character_id, recall_query,
                     query_embedding=query_embedding,
                     exclude_event_ids=recent_ids,
                 )
@@ -1758,7 +1766,7 @@ def assemble_from_events(
                         from episodic_index import recall_episodes
                         recall_result = dict(recall_result)
                         recall_result['episodes'] = recall_episodes(
-                            user_id, character_id, user_message or '',
+                            user_id, character_id, recall_query,
                             query_embedding=query_embedding,
                         )
                     except Exception as episode_exc:
@@ -1909,6 +1917,7 @@ def build_chat_context(
     current_event_id=None,
     temporal_snapshot=None,
     auto_pin_enabled=True,
+    expand_recall_query=True,
 ) -> ChatContextPack:
     """Fast path: bounded ledger fetch + deterministic window. No LLM."""
     cfg = BudgetConfig.for_profile(profile)
@@ -1944,6 +1953,7 @@ def build_chat_context(
             current_event_id=current_event_id,
             temporal_snapshot=temporal_snapshot,
             auto_pin_enabled=auto_pin_enabled,
+            expand_recall_query=expand_recall_query,
             include_time_markers=profile in _TIME_MARKER_PROFILES,
         )
     except Exception as exc:
