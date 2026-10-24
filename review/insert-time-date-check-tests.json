@@ -1,0 +1,36 @@
+{
+  "source_commit": "working-tree",
+  "group": "targeted",
+  "argv": [
+    "-v",
+    "-p",
+    "no:cacheprovider",
+    "tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end"
+  ],
+  "exit_code": 0,
+  "collected": 2,
+  "collected_tests": [
+    "tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now0-23:30-120-expected_start0]",
+    "tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now1-01:00-60-expected_start1]"
+  ],
+  "passed": 2,
+  "passed_call_records": 2,
+  "failure_records": 0,
+  "failed_node_count": 0,
+  "failed_nodes": [],
+  "error_records": 0,
+  "error_node_count": 0,
+  "pytest_testsfailed": 0,
+  "failures": [],
+  "errors": [],
+  "skipped": [],
+  "passed_tests": [
+    "tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now0-23:30-120-expected_start0]",
+    "tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now1-01:00-60-expected_start1]"
+  ],
+  "subtests_passed": 0,
+  "pglite_package": "C:\\Users\\张三\\AppData\\Local\\Temp\\gojo-pglite-test\\node_modules\\@electric-sql\\pglite",
+  "pytest_version": "9.1.1",
+  "offline_guard": "external-network-and-real-psycopg2-disabled",
+  "git_history": "working-tree"
+}

@@ -1,0 +1,41 @@
+{
+  "source_commit": "working-tree",
+  "group": "targeted",
+  "argv": [
+    "-v",
+    "-p",
+    "no:cacheprovider",
+    "tests/test_generation_temporal_hotfix.py::GenerationEnvelopeTransportTests::test_provider_schema_allows_optional_timed_insert_and_round_trips_it"
+  ],
+  "exit_code": 1,
+  "collected": 1,
+  "collected_tests": [
+    "tests/test_generation_temporal_hotfix.py::GenerationEnvelopeTransportTests::test_provider_schema_allows_optional_timed_insert_and_round_trips_it"
+  ],
+  "passed": 0,
+  "passed_call_records": 0,
+  "failure_records": 1,
+  "failed_node_count": 1,
+  "failed_nodes": [
+    "tests/test_generation_temporal_hotfix.py::GenerationEnvelopeTransportTests::test_provider_schema_allows_optional_timed_insert_and_round_trips_it"
+  ],
+  "error_records": 0,
+  "error_node_count": 0,
+  "pytest_testsfailed": 1,
+  "failures": [
+    {
+      "test": "tests/test_generation_temporal_hotfix.py::GenerationEnvelopeTransportTests::test_provider_schema_allows_optional_timed_insert_and_round_trips_it",
+      "phase": "call",
+      "subtest": false,
+      "traceback": "self = <tests.test_generation_temporal_hotfix.GenerationEnvelopeTransportTests testMethod=test_provider_schema_allows_optional_timed_insert_and_round_trips_it>\n\n    def test_provider_schema_allows_optional_timed_insert_and_round_trips_it(self):\n        from schedule_contract import normalize_action_intent\n    \n        model = 'claude-timed-insert-contract-test'\n        route_chat._schema_unavailable_models.discard(model)\n        intent = {'type': 'insert', 'event': {\n            'title': '陪她学日语', 'start_time': '21:00',\n            'duration_minutes': 60, 'reply_state': 'free'}}\n        envelope = json.loads(self.response().content[0].text)\n        envelope['schedule_action_intent'] = intent\n        with mock_provider_create(return_value=self.response(\n                json.dumps(envelope, ensure_ascii=False))) as provider:\n            raw, _ = route_chat._create_json(model, 100, [], [])\n        schema = provider.call_args.kwargs['output_config']['format']['schema']\n        event_schema = schema['properties']['schedule_action_intent']['properties']['event']\n>       self.assertEqual(event_schema['properties']['start_time'], {'type': 'string'})\n                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       KeyError: 'start_time'\n\ntests\\test_generation_temporal_hotfix.py:202: KeyError"
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "passed_tests": [],
+  "subtests_passed": 0,
+  "pglite_package": "C:\\Users\\张三\\AppData\\Local\\Temp\\gojo-pglite-test\\node_modules\\@electric-sql\\pglite",
+  "pytest_version": "9.1.1",
+  "offline_guard": "external-network-and-real-psycopg2-disabled",
+  "git_history": "working-tree"
+}

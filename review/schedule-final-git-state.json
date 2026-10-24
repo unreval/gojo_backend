@@ -1,0 +1,10 @@
+{
+  "task": {
+    "status": "## feat/schedule-insert-at-time-20261024...origin/main\n M gojo_backend/db_schedule.py\n M gojo_backend/generation_contract.py\n M gojo_backend/prompt.py\n M gojo_backend/schedule_contract.py\n M tests/test_generation_temporal_hotfix.py\n M tests/test_insert_intent_prompt.py\n M tests/test_schedule_future_prompt.py\n M tests/test_schedule_reflow_transition.py\n?? review/insert-time-date-check-tests.json\n?? review/insert-time-date-check-tests.log\n?? review/insert-time-reproduction-tests.json\n?? review/insert-time-reproduction-tests.log\n?? review/insert-time-targeted-tests.json\n?? review/insert-time-targeted-tests.log\n?? review/run_schedule_validation.py\n?? review/schedule-baseline-full-tests.json\n?? review/schedule-baseline-full-tests.log\n?? review/schedule-completion.md\n?? review/schedule-final-classification.log\n?? review/schedule-final-diff-audit.log\n?? review/schedule-final-diff.patch\n?? review/schedule-final-full-tests.json\n?? review/schedule-final-full-tests.log\n?? review/schedule-final-patch-check.log\n?? review/schedule-final-review-report.log\n?? review/schedule-final-whitespace.log\n?? review/schedule-full-comparison.json\n?? review/schedule-full-comparison.md\n?? review/schedule-generation-regression-tests.json\n?? review/schedule-generation-regression-tests.log\n?? review/schedule-governance-results.json\n?? review/schedule-independent-review.md\n?? review/schedule-insert-change-capsule.md\n?? review/schedule-patch-check.log\n?? review/schedule-schema-reproduction-tests.json\n?? review/schedule-schema-reproduction-tests.log\n?? review/schedule-targeted-tests.json\n?? review/schedule-targeted-tests.log\n?? tests/test_schedule_insert_time.py\n",
+    "refs": "a091646ef172a9be5accabe97d3edd5c6ea87475\n610564654f79229aea4590f5608723458c9b0145\na091646ef172a9be5accabe97d3edd5c6ea87475\n"
+  },
+  "original": {
+    "status": "",
+    "refs": ""
+  }
+}

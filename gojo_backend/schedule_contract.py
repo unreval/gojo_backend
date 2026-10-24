@@ -368,6 +368,17 @@ def normalize_action_intent(value: Any) -> Optional[Dict[str, Any]]:
         new_event = value.get('event') or value.get('next_event')
         if not isinstance(new_event, dict):
             return None
+        if any(key in source for source in (value, new_event)
+               for key in ('sched_date', 'date', 'start_at')):
+            return None
+        start_time = None
+        if 'start_time' in new_event:
+            clock = new_event['start_time']
+            if not isinstance(clock, str) or not re.fullmatch(
+                    r'(?:[01]?[0-9]|2[0-3]):[0-5][0-9]', clock):
+                return None
+            hour, minute = map(int, clock.split(':'))
+            start_time = f'{hour:02d}:{minute:02d}'
         title = str(new_event.get('title') or '').strip()
         try:
             duration = int(new_event.get('duration_minutes'))
@@ -383,6 +394,8 @@ def normalize_action_intent(value: Any) -> Optional[Dict[str, Any]]:
             'category': str(new_event.get('category') or 'routine')[:40],
             'fixedness': str(new_event.get('fixedness') or FLEXIBLE)[:20],
         }
+        if start_time is not None:
+            intent['event']['start_time'] = start_time
         if intent.get('planned_place'):
             intent['event']['planned_place'] = intent['planned_place']
     return intent

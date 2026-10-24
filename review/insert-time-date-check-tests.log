@@ -1,0 +1,13 @@
+source_commit=working-tree
+pytest_argv=["-v", "-p", "no:cacheprovider", "tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end"]
+offline_guard=external-network-and-real-psycopg2-disabled
+git_history=working-tree
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\张三\AppData\Local\GojoAssistant-test-env\python311\python.exe
+rootdir: C:\Users\张三\Documents\GojoAssistant-live\.worktrees\schedule-insert-at-time-20261024
+collecting ... collected 2 items
+
+tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now0-23:30-120-expected_start0] PASSED [ 50%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now1-01:00-60-expected_start1] PASSED [100%]
+
+============================== 2 passed in 4.47s ==============================

@@ -150,6 +150,8 @@ class FutureSchedulePromptTests(unittest.TestCase):
         self.assertIn('库内地点 · 一般区域', text)
         self.assertIn('fixedness=fixed', text)
         self.assertIn('expected_revision', text)
+        self.assertIn('event.start_time 指定今天晚于现在的开始时间，为她预留时段', text)
+        self.assertIn('不写就是立刻开始', text)
         self.assertIn('没有已提交 intent', text)
         self.assertIn('昨天 21:40', text)
         self.assertIn('对话里取消的安排', text)

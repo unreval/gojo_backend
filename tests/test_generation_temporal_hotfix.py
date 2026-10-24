@@ -184,6 +184,29 @@ class GenerationEnvelopeTransportTests(unittest.TestCase):
         self.assertEqual(GENERATION_ENVELOPE_SCHEMA['required'], ['emotion', 'messages'])
         self.assertFalse(GENERATION_ENVELOPE_SCHEMA['additionalProperties'])
 
+    def test_provider_schema_allows_optional_timed_insert_and_round_trips_it(self):
+        from schedule_contract import normalize_action_intent
+
+        model = 'claude-timed-insert-contract-test'
+        route_chat._schema_unavailable_models.discard(model)
+        intent = {'type': 'insert', 'event': {
+            'title': '陪她学日语', 'start_time': '21:00',
+            'duration_minutes': 60, 'reply_state': 'free'}}
+        envelope = json.loads(self.response().content[0].text)
+        envelope['schedule_action_intent'] = intent
+        with mock_provider_create(return_value=self.response(
+                json.dumps(envelope, ensure_ascii=False))) as provider:
+            raw, _ = route_chat._create_json(model, 100, [], [])
+        schema = provider.call_args.kwargs['output_config']['format']['schema']
+        event_schema = schema['properties']['schedule_action_intent']['properties']['event']
+        self.assertEqual(event_schema['properties']['start_time'], {'type': 'string'})
+        self.assertNotIn('start_time', event_schema['required'])
+        self.assertFalse(event_schema['additionalProperties'])
+        self.assertTrue(set(intent['event']) <= set(event_schema['properties']))
+        self.assertEqual(normalize_action_intent(
+            json.loads(raw)['schedule_action_intent'])['event']['start_time'], '21:00')
+        provider.assert_called_once()
+
     def test_unsupported_schema_falls_back_and_caches_capability(self):
         model = 'claude-unsupported-schema-test'
         route_chat._schema_unavailable_models.discard(model)

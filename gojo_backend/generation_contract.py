@@ -62,6 +62,7 @@ GENERATION_ENVELOPE_SCHEMA = _object({
         'planned_place': _PLACE,
         'event': _object({
             'title': _STRING,
+            'start_time': _STRING,
             'duration_minutes': {'type': 'integer'},
             'reply_state': _STRING,
             'category': _STRING,

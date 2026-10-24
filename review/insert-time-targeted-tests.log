@@ -1,0 +1,145 @@
+source_commit=working-tree
+pytest_argv=["-v", "-p", "no:cacheprovider", "tests/test_schedule_insert_time.py", "tests/test_schedule_reflow_transition.py", "tests/test_insert_intent_prompt.py"]
+offline_guard=external-network-and-real-psycopg2-disabled
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\张三\AppData\Local\GojoAssistant-test-env\python311\python.exe
+rootdir: C:\Users\张三\Documents\GojoAssistant-live\.worktrees\schedule-insert-at-time-20261024
+collecting ... collected 53 items
+
+tests/test_schedule_insert_time.py::test_insert_keeps_valid_start_time[21:00-21:00] PASSED [  1%]
+tests/test_schedule_insert_time.py::test_insert_keeps_valid_start_time[9:00-09:00] PASSED [  3%]
+tests/test_schedule_insert_time.py::test_insert_keeps_valid_start_time[00:00-00:00] PASSED [  5%]
+tests/test_schedule_insert_time.py::test_insert_keeps_valid_start_time[23:59-23:59] PASSED [  7%]
+tests/test_schedule_insert_time.py::test_insert_keeps_valid_start_time[9:30-09:30] PASSED [  9%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[25:00] PASSED [ 11%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[\u665a\u4e0a\u4e5d\u70b9] PASSED [ 13%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[21:00:00] PASSED [ 15%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[2100] PASSED [ 16%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[None] PASSED [ 18%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[True] PASSED [ 20%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[clock6] PASSED [ 22%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[clock7] PASSED [ 24%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[] PASSED [ 26%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[24:00] PASSED [ 28%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[21:60] PASSED [ 30%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[-1:00] PASSED [ 32%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[9:0] PASSED [ 33%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[ 21:00] PASSED [ 35%]
+tests/test_schedule_insert_time.py::test_invalid_insert_start_time_rejects_entire_intent[21:00\n] PASSED [ 37%]
+tests/test_schedule_insert_time.py::test_insert_rejects_unsupported_date_fields[intent-sched_date] PASSED [ 39%]
+tests/test_schedule_insert_time.py::test_insert_rejects_unsupported_date_fields[intent-date] PASSED [ 41%]
+tests/test_schedule_insert_time.py::test_insert_rejects_unsupported_date_fields[intent-start_at] PASSED [ 43%]
+tests/test_schedule_insert_time.py::test_insert_rejects_unsupported_date_fields[event-sched_date] PASSED [ 45%]
+tests/test_schedule_insert_time.py::test_insert_rejects_unsupported_date_fields[event-date] PASSED [ 47%]
+tests/test_schedule_insert_time.py::test_insert_rejects_unsupported_date_fields[event-start_at] PASSED [ 49%]
+tests/test_schedule_insert_time.py::test_insert_without_start_time_preserves_complete_legacy_shape PASSED [ 50%]
+tests/test_schedule_insert_time.py::test_free_text_cannot_become_an_insert PASSED [ 52%]
+tests/test_schedule_reflow_transition.py::test_commit_records_only_actual_reflow_and_renders_history[True-insert-30-\u548c\u5979\u804a\u5929\uff1a\u65b0\u589e\u4e86] PASSED [ 54%]
+tests/test_schedule_reflow_transition.py::test_commit_records_only_actual_reflow_and_renders_history[True-extend-15-\u5f53\u524d\u804a\u5929\uff1a\u5ef6\u957f\u4e86] PASSED [ 56%]
+tests/test_schedule_reflow_transition.py::test_commit_records_only_actual_reflow_and_renders_history[False-insert-30-\u548c\u5979\u804a\u5929\uff1a\u65b0\u589e\u4e86] PASSED [ 58%]
+tests/test_schedule_reflow_transition.py::test_commit_records_only_actual_reflow_and_renders_history[False-extend-15-\u5f53\u524d\u804a\u5929\uff1a\u5ef6\u957f\u4e86] PASSED [ 60%]
+tests/test_schedule_reflow_transition.py::test_fixed_future_conflict_rolls_back_events_phases_and_transition[insert] PASSED [ 62%]
+tests/test_schedule_reflow_transition.py::test_fixed_future_conflict_rolls_back_events_phases_and_transition[extend] PASSED [ 64%]
+tests/test_schedule_reflow_transition.py::test_background_reflow_metadata_is_excluded_from_conversation_history PASSED [ 66%]
+tests/test_schedule_reflow_transition.py::test_history_reflow_count_does_not_require_target_events PASSED [ 67%]
+tests/test_schedule_reflow_transition.py::test_normalizer_does_not_accept_storage_owned_reflow_metadata[insert] PASSED [ 69%]
+tests/test_schedule_reflow_transition.py::test_normalizer_does_not_accept_storage_owned_reflow_metadata[extend] PASSED [ 71%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight PASSED [ 73%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_rejects_past_or_equal_start_without_writes[09:00] PASSED [ 75%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_rejects_past_or_equal_start_without_writes[15:30] PASSED [ 77%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_checks_active_actual_or_planned_half_open_window[15:45-None-True] PASSED [ 79%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_checks_active_actual_or_planned_half_open_window[16:00-None-False] PASSED [ 81%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_checks_active_actual_or_planned_half_open_window[16:00-16:30-True] PASSED [ 83%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_checks_active_actual_or_planned_half_open_window[16:30-16:30-False] PASSED [ 84%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_fixed_conflict_rolls_back_all_schedule_tables PASSED [ 86%]
+tests/test_schedule_reflow_transition.py::test_insert_without_start_keeps_active_event_rejection PASSED [ 88%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now0-23:30-120-expected_start0] FAILED [ 90%]
+tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now1-01:00-60-expected_start1] FAILED [ 92%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_insert_example_is_free PASSED [ 94%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_insert_rules_limit_booking_to_later_today SUBPASSED(phrase='start_time 可选') [ 96%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_insert_rules_limit_booking_to_later_today SUBPASSED(phrase='今天的 HH:MM（24 小时制）') [ 96%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_insert_rules_limit_booking_to_later_today SUBPASSED(phrase='必须晚于现在') [ 96%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_insert_rules_limit_booking_to_later_today SUBPASSED(phrase='不写就是立刻开始') [ 96%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_insert_rules_limit_booking_to_later_today SUBPASSED(phrase='不能指定明天或其他日期') [ 96%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_insert_rules_limit_booking_to_later_today SUBPASSED(phrase='sched_date / date / start_at') [ 96%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_insert_rules_limit_booking_to_later_today PASSED [ 96%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_rules_choose_reply_state_and_keep_companionship_free SUBPASSED(phrase='没法看手机→hard_busy') [ 98%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_rules_choose_reply_state_and_keep_companionship_free SUBPASSED(phrase='能瞄一眼→soft_busy') [ 98%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_rules_choose_reply_state_and_keep_companionship_free SUBPASSED(phrase='能正常回→free') [ 98%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_rules_choose_reply_state_and_keep_companionship_free SUBPASSED(phrase='为她空出来陪她的时段一律 free') [ 98%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_rendered_rules_choose_reply_state_and_keep_companionship_free PASSED [ 98%]
+tests/test_insert_intent_prompt.py::InsertIntentPromptTests::test_system_blocks_format_all_schedule_examples_as_valid_json PASSED [100%]
+
+================================== FAILURES ===================================
+_ test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now0-23:30-120-expected_start0] _
+
+schedule_database = <tests.offline_pg.Connection object at 0x0000019622959990>
+now = datetime.datetime(2026, 10, 24, 15, 30, tzinfo=datetime.timezone(datetime.timedelta(seconds=28800)))
+start_time = '23:30', duration = 120
+expected_start = datetime.datetime(2026, 10, 24, 23, 30, tzinfo=datetime.timezone(datetime.timedelta(seconds=28800)))
+
+    @pytest.mark.parametrize('now, start_time, duration, expected_start', [
+        (INSERT_NOW, '23:30', 120, INSERT_NOW.replace(hour=23, minute=30)),
+        (datetime(2026, 10, 23, 16, 30, tzinfo=timezone.utc), '01:00', 60,
+         INSERT_NOW.replace(hour=1, minute=0)),
+    ])
+    def test_timed_insert_anchors_to_local_today_and_preserves_overnight_end(
+            schedule_database, now, start_time, duration, expected_start):
+        result = db_schedule.commit_schedule_transition(
+            'c1', 'u1', _timed_insert(start_time, duration), now=now)
+    
+        assert result['ok'] is True
+        events = _timeline(schedule_database, 'char_schedule', 'id')
+        phases = _timeline(schedule_database, 'char_schedule_phase', 'schedule_id')
+        expected_end = expected_start + timedelta(minutes=duration)
+        assert events[result['event_id']][1:3] == (expected_start, expected_end)
+        assert list(phases.values())[0][1:3] == (expected_start, expected_end)
+        row = schedule_database.query(
+            'SELECT sched_date FROM char_schedule WHERE id=%s', (result['event_id'],))['rows'][0]
+>       assert row['sched_date'] == expected_start.date().isoformat()
+E       AssertionError: assert '2026-10-24T00:00:00.000Z' == '2026-10-24'
+E         
+E         - 2026-10-24
+E         + 2026-10-24T00:00:00.000Z
+
+tests\test_schedule_reflow_transition.py:342: AssertionError
+---------------------------- Captured stdout setup ----------------------------
+[init] 角色日程表已就绪：char_schedule / char_phone_check
+_ test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now1-01:00-60-expected_start1] _
+
+schedule_database = <tests.offline_pg.Connection object at 0x0000019622896A90>
+now = datetime.datetime(2026, 10, 23, 16, 30, tzinfo=datetime.timezone.utc)
+start_time = '01:00', duration = 60
+expected_start = datetime.datetime(2026, 10, 24, 1, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=28800)))
+
+    @pytest.mark.parametrize('now, start_time, duration, expected_start', [
+        (INSERT_NOW, '23:30', 120, INSERT_NOW.replace(hour=23, minute=30)),
+        (datetime(2026, 10, 23, 16, 30, tzinfo=timezone.utc), '01:00', 60,
+         INSERT_NOW.replace(hour=1, minute=0)),
+    ])
+    def test_timed_insert_anchors_to_local_today_and_preserves_overnight_end(
+            schedule_database, now, start_time, duration, expected_start):
+        result = db_schedule.commit_schedule_transition(
+            'c1', 'u1', _timed_insert(start_time, duration), now=now)
+    
+        assert result['ok'] is True
+        events = _timeline(schedule_database, 'char_schedule', 'id')
+        phases = _timeline(schedule_database, 'char_schedule_phase', 'schedule_id')
+        expected_end = expected_start + timedelta(minutes=duration)
+        assert events[result['event_id']][1:3] == (expected_start, expected_end)
+        assert list(phases.values())[0][1:3] == (expected_start, expected_end)
+        row = schedule_database.query(
+            'SELECT sched_date FROM char_schedule WHERE id=%s', (result['event_id'],))['rows'][0]
+>       assert row['sched_date'] == expected_start.date().isoformat()
+E       AssertionError: assert '2026-10-24T00:00:00.000Z' == '2026-10-24'
+E         
+E         - 2026-10-24
+E         + 2026-10-24T00:00:00.000Z
+
+tests\test_schedule_reflow_transition.py:342: AssertionError
+---------------------------- Captured stdout setup ----------------------------
+[init] 角色日程表已就绪：char_schedule / char_phone_check
+=========================== short test summary info ===========================
+FAILED tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now0-23:30-120-expected_start0]
+FAILED tests/test_schedule_reflow_transition.py::test_timed_insert_anchors_to_local_today_and_preserves_overnight_end[now1-01:00-60-expected_start1]
+============== 2 failed, 51 passed, 10 subtests passed in 49.06s ==============

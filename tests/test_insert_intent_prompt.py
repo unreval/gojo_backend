@@ -49,12 +49,20 @@ class InsertIntentPromptTests(unittest.TestCase):
                    if example['schedule_action_intent']['type'] == 'insert']
         self.assertEqual(len(inserts), 1)
         self.assertEqual(inserts[0]['schedule_action_intent']['event']['reply_state'], 'free')
+        self.assertEqual(inserts[0]['schedule_action_intent']['event']['start_time'], '21:00')
         self.assertIn('"reply_state":"free"', self.section)
         self.assertNotIn('"reply_state":"soft_busy"', self.section)
 
     def test_rendered_rules_choose_reply_state_and_keep_companionship_free(self):
         for phrase in ('没法看手机→hard_busy', '能瞄一眼→soft_busy', '能正常回→free',
                        '为她空出来陪她的时段一律 free'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.section)
+
+    def test_rendered_insert_rules_limit_booking_to_later_today(self):
+        for phrase in ('start_time 可选', '今天的 HH:MM（24 小时制）',
+                       '必须晚于现在', '不写就是立刻开始',
+                       '不能指定明天或其他日期', 'sched_date / date / start_at'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.section)
 
