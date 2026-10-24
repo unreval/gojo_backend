@@ -201,10 +201,11 @@ def validate_candidate(cur, user_id, character_id, candidate):
     grounded_text = re.sub(r'她|他|您|五条悟|用户|对方', '', summary)
     time_words = sorted(_TIME_WORDS.keys() | _DAY_WORDS.keys(), key=len, reverse=True)
     grounded_text = re.sub('|'.join(time_words), '', grounded_text)
-    grounded_text = re.sub(
-        r'[-+负]?[0-9０-９零〇一二三四五六七八九十百千万萬亿億兆两,.点]+', '', grounded_text)
-    chars = ''.join(re.findall(r'[\u4e00-\u9fff]', grounded_text))
     q = re.sub(r'\s', '', quote)
+    grounded_text = re.sub(
+        r'[-+负]?[0-9０-９零〇一二三四五六七八九十百千万萬亿億兆两,.点]+',
+        lambda match: match.group() if match.group() in q else '', grounded_text)
+    chars = ''.join(re.findall(r'[\u4e00-\u9fff]', grounded_text))
     covered = [False] * len(chars)
     for i in range(len(chars)):
         for j in range(len(chars), i + 1, -1):
