@@ -497,6 +497,110 @@ class MemoryCandidateGateTests(unittest.TestCase):
         self.assertEqual(self.validate(candidate), (True, None))
         self.assertEqual(len(candidate['perspective']), 40)
 
+    def test_logged_numeral_words_are_not_number_mismatches(self):
+        # 线上原文。数字关不再把词内汉字当成数量。整段校验仍由未改的 G9 拒绝：
+        # 摘要里有原话没有的内容（恋爱八卦、香水、传感器）。
+        cases = (
+            ('我感觉我对这个的敏锐度也不高而且也不感兴趣',
+             '她觉得自己对恋爱八卦的敏锐度不高，也不太感兴趣'),
+            ('之前我买的时候是三百块现在都八百了',
+             '她之前花三百块买了一瓶香水，现在价格涨到八百了'),
+            ('我做了你的等比身长娃娃……',
+             '她想做一个等比身长的娃娃，再加传感器'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote, summary=summary):
+                self.assertTrue(memory_candidate._numbers_match(quote, summary))
+                self.assertEqual(
+                    memory_candidate._has_grounding_negation(quote),
+                    memory_candidate._has_grounding_negation(summary))
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (False, 'summary_not_grounded_in_quote'))
+
+    def test_logged_question_and_bare_mei_are_not_polarity_mismatches(self):
+        # 线上原文。是不是是疑问，没发和没有都是否定。G9 仍拒绝夹带解释的摘要。
+        cases = (
+            ('是我不重要所以你才能一直这样对我吗',
+             '她质问对方是不是因为她不重要才一直这样对她'),
+            ('你没发！',
+             '她指责对方没有按约定主动发消息，认为对方食言'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote, summary=summary):
+                self.assertEqual(
+                    memory_candidate._has_grounding_negation(quote),
+                    memory_candidate._has_grounding_negation(summary))
+                self.assertTrue(memory_candidate._numbers_match(quote, summary))
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (False, 'summary_not_grounded_in_quote'))
+
+    def test_grounded_question_and_bare_mei_pass_the_full_gate(self):
+        cases = (
+            ('你有没有吃饭啊', '她吃饭啊'),
+            ('你没发消息啊', '她没有发消息'),
+            ('村子被淹没了啊', '村子进水了啊'),
+            ('等了十分钟吧', '她等了10分钟吧'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote, summary=summary):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (True, None))
+
+    def test_logged_changed_number_is_still_rejected(self):
+        quote = '亏了69元'
+        summary = '亏了96元'
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (False, 'number_value_mismatch'))
+
+    def test_logged_added_negation_is_still_rejected(self):
+        quote = '显得我像个小丑舔狗'
+        summary = '她不想再主动了'
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (False, 'negation_polarity_mismatch'))
+
+    def test_dropped_bu_zhidao_stays_a_polarity_mismatch(self):
+        # 原话「我不知道」在动词表里，是真否定，不是是不是/没发那种认错。
+        # 摘要删掉了这层否定，只留下后半句。G5 比的是两边有没有否定，
+        # 不是“剩下的从句是否属实”，所以仍然拒绝。
+        quote = '我不知道，我只想要明确的表态'
+        summary = '她说自己只想要对方明确的表态'
+        self.assertTrue(memory_candidate._has_grounding_negation(quote))
+        self.assertFalse(memory_candidate._has_grounding_negation(summary))
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (False, 'negation_polarity_mismatch'))
+
+    def test_indefinite_yi_does_not_swallow_a_real_quantity(self):
+        cases = (
+            ('我买了一百个苹果', '她买了两百个苹果', (False, 'number_value_mismatch')),
+            ('我买了一个苹果呀', '她买了三个苹果呀', (False, 'number_value_mismatch')),
+            ('会议开了三十分钟啊', '她开了四十分钟啊', (False, 'number_value_mismatch')),
+            ('我喜欢八卦内容', '她喜欢8个内容', (False, 'number_value_mismatch')),
+        )
+        for quote, summary, expected in cases:
+            with self.subTest(quote=quote, summary=summary):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    expected)
+
+    def test_non_denial_bu_words_and_a_not_a_are_not_denials(self):
+        for text in ('不过', '不但', '不仅', '不如', '差不多', '是不是', '有没有',
+                     '淹没', '没收'):
+            with self.subTest(text=text):
+                self.assertFalse(memory_candidate._has_grounding_negation(text))
+        for text in ('没发', '没有', '没收到', '不重要', '不想'):
+            with self.subTest(text=text):
+                self.assertTrue(memory_candidate._has_grounding_negation(text))
+
     def test_earlier_gate_failure_precedes_later_failure_without_mutation(self):
         cases = (
             ({'quote': '不存在的引用', 'summary': '', 'predicate': 'invalid'},

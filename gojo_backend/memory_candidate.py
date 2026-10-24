@@ -24,12 +24,38 @@ _NUMBER = re.compile(
 )
 _HELPER_NUMBER = re.compile(r'(?:[0-9]+|[零〇一二三四五六七八九十百千]+)')
 
+# Ordinary words whose characters happen to be numerals. A number token is
+# ignored only when the whole token sits inside one of these words, so 三十分
+# still counts while 十分 (the adverb) does not.
+_NUMBER_WORD_EXEMPTIONS = (
+    '八卦',
+    '一直', '一边', '一起', '一样', '一点', '一些', '一下', '一切',
+    '一定', '一般', '万一', '十分', '第一', '二手',
+)
+# 一 immediately before a measure is an indefinite article (一个 / 一瓶),
+# not a quantity. Larger numerals such as 一百个 stay quantities.
+_INDEFINITE_MEASURES = frozenset('个瓶次张条只台份句天年块杯件本场段种类点')
+
 # Chinese side of utils' translation guards. These are bounded lexical checks,
 # not a general entailment or multi-clause polarity classifier.
+# _NEGATION stays the value-polarity pattern imported by candidate_producer.
+# G5 uses _has_grounding_negation, which strips questions and widens 没.
 _DOUBLE_NEGATION = re.compile(r'不是不|并非不|不能不|不得不|没有不')
 _NEGATION = re.compile(
     r'不(?:是|会|能|想|要|行|可以|可能|应该|对|知道|必|用|需要|愿意|喜欢|爱|亏)'
     r'|没(?:有|什么|啥|吃|睡|去|来|见|说|想|做|听|看|回|能|亏)'
+    r'|别(?:想|说|闹|来|急|忘)|才不|才没|并不|绝不|从不'
+)
+# X不X / X没X with the same single character is a question (是不是 / 有没有),
+# not a denial. Multi-character repeats such as 喜欢不喜欢 are left alone.
+_A_NOT_A = re.compile(r'([\u4e00-\u9fff])(?:不|没)\1')
+# 淹没/埋没/出没/沉没/吞没 put 没 in the second character. 没收 is confiscation,
+# but 没收到/没收下/没收着/没收过 stay denials.
+_MEI_NON_NEGATION = re.compile(r'淹没|埋没|出没|沉没|吞没|没收(?![到下着过])')
+_GROUNDING_NEGATION = re.compile(
+    r'不(?:是|会|能|想|要|行|可以|可能|应该|对|知道|必|用|需要|愿意|喜欢|爱|亏'
+    r'|重要|合适|够|清楚|舒服)'
+    r'|没'
     r'|别(?:想|说|闹|来|急|忘)|才不|才没|并不|绝不|从不'
 )
 _TIME_WORDS = {
@@ -112,14 +138,55 @@ def _same_number(left, right):
     return False
 
 
+def _number_tokens(text):
+    """Explicit quantities, minus numeral characters that are not quantities."""
+    text = unicodedata.normalize('NFKC', text)
+    exempt_spans = []
+    for word in sorted(_NUMBER_WORD_EXEMPTIONS, key=len, reverse=True):
+        start = 0
+        while True:
+            index = text.find(word, start)
+            if index < 0:
+                break
+            end = index + len(word)
+            # 十分钟 / 十分秒 is ten units, not the adverb 十分.
+            if not (word == '十分' and end < len(text) and text[end] in '钟鐘秒'):
+                exempt_spans.append((index, end))
+            start = end
+    tokens = []
+    for match in _NUMBER.finditer(text):
+        start, end = match.span()
+        if any(word_start <= start and end <= word_end
+               for word_start, word_end in exempt_spans):
+            continue
+        token = match.group()
+        if token == '一' and end < len(text) and text[end] in _INDEFINITE_MEASURES:
+            continue
+        tokens.append(token)
+    return tokens
+
+
 def _numbers_match(quote, summary):
-    source_numbers = _NUMBER.findall(unicodedata.normalize('NFKC', quote))
-    summary_numbers = _NUMBER.findall(unicodedata.normalize('NFKC', summary))
+    source_numbers = _number_tokens(quote)
+    summary_numbers = _number_tokens(summary)
     # Compare every summary value separately so a shared value cannot mask an
     # invented one. Clock values are checked too; translation exemptions do not
     # authorize adding numbers to a memory candidate.
     return all(any(_same_number(number, source) for source in source_numbers)
                for number in summary_numbers)
+
+
+def _has_grounding_negation(text):
+    """Whether G5 should treat text as containing a denial.
+
+    Questions of the form X不X / X没X are removed first. 没 is then a general
+    denial except for a short list of non-denial words. 不 stays on a fixed
+    verb list so 不过 / 不但 / 不仅 / 不如 / 差不多 are not denials.
+    """
+    text = _DOUBLE_NEGATION.sub('', text)
+    text = _MEI_NON_NEGATION.sub('', text)
+    text = _A_NOT_A.sub('', text)
+    return _GROUNDING_NEGATION.search(text) is not None
 
 
 def _time_words(text, vocabulary):
@@ -189,8 +256,7 @@ def validate_candidate(cur, user_id, character_id, candidate):
     if isinstance(summary, str):
         if not _numbers_match(quote, summary):
             return False, 'number_value_mismatch'
-        if (bool(_NEGATION.search(_DOUBLE_NEGATION.sub('', quote)))
-                != bool(_NEGATION.search(_DOUBLE_NEGATION.sub('', summary)))):
+        if _has_grounding_negation(quote) != _has_grounding_negation(summary):
             return False, 'negation_polarity_mismatch'
         if not _times_match(quote, summary):
             return False, 'time_word_contradiction'
