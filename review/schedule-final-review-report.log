@@ -1,0 +1,9 @@
+====================================================================
+GOJO REVIEW REPORT
+====================================================================
+Status : NEEDS REVIEW
+Risk   : YELLOW
+Output : review/latest.md
+Files  : 4 production / 31 non-production
+Scope  : no deterministic violation detected
+====================================================================

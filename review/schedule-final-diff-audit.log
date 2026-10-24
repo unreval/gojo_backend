@@ -1,0 +1,64 @@
+========================================================================
+GOJO DIFF AUDIT
+========================================================================
+Repository      : C:/Users/ÕÅÈý/Documents/GojoAssistant-live/.worktrees/schedule-insert-at-time-20261024
+Branch          : feat/schedule-insert-at-time-20261024
+Base            : a091646
+Allowed domains : generation, schedule/proactive
+Status          : PASS
+
+Changed files   : 34
+Production files: 4
+
+Scope audit:
+  - No out-of-scope production file detected.
+
+Authority-sensitive paths:
+  - none
+
+Sensitive added-line signals:
+  - none
+
+Changed files:
+  - [PRODUCTION] [schedule/proactive] gojo_backend/db_schedule.py
+  - [PRODUCTION] [generation] gojo_backend/generation_contract.py
+  - [PRODUCTION] [generation] gojo_backend/prompt.py
+  - [PRODUCTION] [schedule/proactive] gojo_backend/schedule_contract.py
+  - [NON-PRODUCTION] [workflow-governance] review/insert-time-date-check-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/insert-time-date-check-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/insert-time-reproduction-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/insert-time-reproduction-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/insert-time-targeted-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/insert-time-targeted-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/run_schedule_validation.py
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-baseline-full-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-baseline-full-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-completion.md
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-final-classification.log
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-final-diff.patch
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-final-full-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-final-full-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-full-comparison.json
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-full-comparison.md
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-generation-regression-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-generation-regression-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-independent-review.md
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-insert-change-capsule.md
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-patch-check.log
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-schema-reproduction-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-schema-reproduction-tests.log
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-targeted-tests.json
+  - [NON-PRODUCTION] [workflow-governance] review/schedule-targeted-tests.log
+  - [NON-PRODUCTION] [generation] tests/test_generation_temporal_hotfix.py
+  - [NON-PRODUCTION] [other] tests/test_insert_intent_prompt.py
+  - [NON-PRODUCTION] [schedule/proactive] tests/test_schedule_future_prompt.py
+  - [NON-PRODUCTION] [schedule/proactive] tests/test_schedule_insert_time.py
+  - [NON-PRODUCTION] [schedule/proactive] tests/test_schedule_reflow_transition.py
+
+Interpretation:
+  PASS         = no deterministic scope/sensitive signal found.
+  NEEDS_REVIEW = sensitive path or added behavior requires review.
+  BLOCKED      = actual production diff exceeded approved domains.
+
+This audit cannot lower semantic risk determined by gojo-safe-change.
+========================================================================

@@ -1,0 +1,68 @@
+====================================================================
+GOJO CHANGE CLASSIFIER
+====================================================================
+Repository : C:/Users/ÕÅÈý/Documents/GojoAssistant-live/.worktrees/schedule-insert-at-time-20261024
+Branch     : feat/schedule-insert-at-time-20261024
+Base       : a091646
+Risk       : YELLOW
+
+Changed files    : 33
+Production files : 4
+
+Reasons:
+  - Production change crosses multiple subsystems: generation, schedule/proactive
+
+Detected domains:
+  - generation
+  - schedule/proactive
+  - tests
+  - workflow-governance
+
+Candidate architecture invariants:
+  - INV-EVID-001
+  - INV-FAIL-002
+  - INV-GEN-001
+  - INV-STATE-001
+
+Candidate historical regressions:
+  - REG-001
+  - REG-002
+  - REG-009
+
+Files:
+  - [schedule/proactive] gojo_backend/db_schedule.py
+  - [generation] gojo_backend/generation_contract.py
+  - [generation] gojo_backend/prompt.py
+  - [schedule/proactive] gojo_backend/schedule_contract.py
+  - [workflow-governance] review/insert-time-date-check-tests.json
+  - [workflow-governance] review/insert-time-date-check-tests.log
+  - [workflow-governance] review/insert-time-reproduction-tests.json
+  - [workflow-governance] review/insert-time-reproduction-tests.log
+  - [workflow-governance] review/insert-time-targeted-tests.json
+  - [workflow-governance] review/insert-time-targeted-tests.log
+  - [workflow-governance] review/run_schedule_validation.py
+  - [workflow-governance] review/schedule-baseline-full-tests.json
+  - [workflow-governance] review/schedule-baseline-full-tests.log
+  - [workflow-governance] review/schedule-completion.md
+  - [workflow-governance] review/schedule-final-diff.patch
+  - [workflow-governance] review/schedule-final-full-tests.json
+  - [workflow-governance] review/schedule-final-full-tests.log
+  - [workflow-governance] review/schedule-full-comparison.json
+  - [workflow-governance] review/schedule-full-comparison.md
+  - [workflow-governance] review/schedule-generation-regression-tests.json
+  - [workflow-governance] review/schedule-generation-regression-tests.log
+  - [workflow-governance] review/schedule-independent-review.md
+  - [workflow-governance] review/schedule-insert-change-capsule.md
+  - [workflow-governance] review/schedule-patch-check.log
+  - [workflow-governance] review/schedule-schema-reproduction-tests.json
+  - [workflow-governance] review/schedule-schema-reproduction-tests.log
+  - [workflow-governance] review/schedule-targeted-tests.json
+  - [workflow-governance] review/schedule-targeted-tests.log
+  - [generation, tests] tests/test_generation_temporal_hotfix.py
+  - [tests] tests/test_insert_intent_prompt.py
+  - [schedule/proactive, tests] tests/test_schedule_future_prompt.py
+  - [schedule/proactive, tests] tests/test_schedule_insert_time.py
+  - [schedule/proactive, tests] tests/test_schedule_reflow_transition.py
+
+NOTE: This is a deterministic minimum-risk classifier. Semantic review may only raise the risk level, never lower it.
+====================================================================

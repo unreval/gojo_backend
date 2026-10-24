@@ -190,3 +190,154 @@ def test_normalizer_does_not_accept_storage_owned_reflow_metadata(action):
     assert intent == original
     if action == 'insert':
         assert normalized['event']['reply_state'] == 'free'
+
+
+INSERT_NOW = datetime(2026, 10, 24, 15, 30, tzinfo=NOW.tzinfo)
+
+
+def _afternoon_schedule(*, fixed=False):
+    return db_schedule.save_canonical_schedule('c1', 'u1', INSERT_NOW.date(), [
+        {'start_time': '15:00', 'end_time': '16:00', 'title': '当前事务',
+         'fixedness': 'flexible', 'reply_state': 'free'},
+        {'start_time': '18:00', 'end_time': '19:00', 'title': '晚饭',
+         'fixedness': 'flexible'},
+        {'start_time': '21:00', 'end_time': '04:00', 'title': '深夜事务处理',
+         'fixedness': 'fixed' if fixed else 'flexible'},
+    ], now=INSERT_NOW)
+
+
+def _timed_insert(start_time='21:00', duration=60):
+    return {'type': 'insert', 'event': {
+        'title': '教她日语', 'duration_minutes': duration,
+        'reply_state': 'free', 'start_time': start_time}}
+
+
+def _schedule_snapshot(connection):
+    return {table: connection.query(f'SELECT * FROM {table} ORDER BY id')['rows']
+            for table in ('char_schedule', 'char_schedule_phase',
+                          'char_schedule_transition', 'char_phone_check')}
+
+
+def test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight(
+        schedule_database):
+    events = _afternoon_schedule()
+    active_id, dinner_id, overnight_id = [event['id'] for event in events]
+    assert events[0]['status'] == 'active'
+    before_events = _timeline(schedule_database, 'char_schedule', 'id')
+    before_phases = _timeline(schedule_database, 'char_schedule_phase', 'schedule_id')
+    schedule_database.commit()
+    intent = _timed_insert()
+    original = copy.deepcopy(intent)
+
+    result = db_schedule.commit_schedule_transition(
+        'c1', 'u1', intent, now=INSERT_NOW, source_event_id='japanese-lesson')
+
+    assert result['ok'] is True
+    assert result['reflowed_event_ids'] == [overnight_id]
+    assert intent == original
+    after_events = _timeline(schedule_database, 'char_schedule', 'id')
+    after_phases = _timeline(schedule_database, 'char_schedule_phase', 'schedule_id')
+    for before, after in ((before_events, after_events), (before_phases, after_phases)):
+        for row_id, (event_id, start, end, revision) in before.items():
+            delta = timedelta(minutes=60 if event_id == overnight_id else 0)
+            assert after[row_id] == (
+                event_id, start + delta, end + delta,
+                revision + (event_id == overnight_id))
+    start = INSERT_NOW.replace(hour=21, minute=0)
+    assert after_events[result['event_id']][1:3] == (start, start + timedelta(hours=1))
+    assert after_events[overnight_id][1:3] == (
+        start + timedelta(hours=1), start + timedelta(hours=8))
+    rows = schedule_database.query('''SELECT status, reply_state, actual_start_at
+        FROM char_schedule WHERE id=%s''', (result['event_id'],))['rows']
+    assert rows == [{'status': 'planned', 'reply_state': 'free', 'actual_start_at': None}]
+    stored = schedule_database.query(
+        'SELECT intent FROM char_schedule_transition')['rows'][0]['intent']
+    assert stored['event']['start_time'] == '21:00'
+    assert stored['reflowed_event_ids'] == [overnight_id]
+    assert stored['reflowed_minutes'] == 60
+    assert active_id not in stored['reflowed_event_ids']
+    assert dinner_id not in stored['reflowed_event_ids']
+
+
+@pytest.mark.parametrize('start_time', ['09:00', '15:30'])
+def test_timed_insert_rejects_past_or_equal_start_without_writes(
+        schedule_database, start_time):
+    _afternoon_schedule()
+    before = _schedule_snapshot(schedule_database)
+
+    result = db_schedule.commit_schedule_transition(
+        'c1', 'u1', _timed_insert(start_time), now=INSERT_NOW)
+
+    assert result == {'ok': False, 'reason': 'insert_start_not_future'}
+    assert _schedule_snapshot(schedule_database) == before
+
+
+@pytest.mark.parametrize('start_time, actual_end, overlaps', [
+    ('15:45', None, True),
+    ('16:00', None, False),
+    ('16:00', '16:30', True),
+    ('16:30', '16:30', False),
+])
+def test_timed_insert_checks_active_actual_or_planned_half_open_window(
+        schedule_database, start_time, actual_end, overlaps):
+    active = _afternoon_schedule()[0]
+    if actual_end:
+        hour, minute = map(int, actual_end.split(':'))
+        schedule_database.query('UPDATE char_schedule SET actual_end_at=%s WHERE id=%s',
+                                (INSERT_NOW.replace(hour=hour, minute=minute), active['id']))
+        schedule_database.commit()
+    before = _schedule_snapshot(schedule_database)
+
+    result = db_schedule.commit_schedule_transition(
+        'c1', 'u1', _timed_insert(start_time, duration=15), now=INSERT_NOW)
+
+    if overlaps:
+        assert result == {'ok': False, 'reason': 'insert_overlaps_active_event'}
+        assert _schedule_snapshot(schedule_database) == before
+    else:
+        assert result['ok'] is True
+
+
+def test_timed_insert_fixed_conflict_rolls_back_all_schedule_tables(schedule_database):
+    _afternoon_schedule(fixed=True)
+    before = _schedule_snapshot(schedule_database)
+
+    result = db_schedule.commit_schedule_transition(
+        'c1', 'u1', _timed_insert(), now=INSERT_NOW, source_event_id='blocked-lesson')
+
+    assert result == {'ok': False, 'reason': 'fixed_future_event_conflict'}
+    assert _schedule_snapshot(schedule_database) == before
+
+
+def test_insert_without_start_keeps_active_event_rejection(schedule_database):
+    _afternoon_schedule()
+    intent = _timed_insert()
+    del intent['event']['start_time']
+    before = _schedule_snapshot(schedule_database)
+
+    result = db_schedule.commit_schedule_transition('c1', 'u1', intent, now=INSERT_NOW)
+
+    assert result == {'ok': False, 'reason': 'active_event_requires_explicit_transition'}
+    assert _schedule_snapshot(schedule_database) == before
+
+
+@pytest.mark.parametrize('now, start_time, duration, expected_start', [
+    (INSERT_NOW, '23:30', 120, INSERT_NOW.replace(hour=23, minute=30)),
+    (datetime(2026, 10, 23, 16, 30, tzinfo=timezone.utc), '01:00', 60,
+     INSERT_NOW.replace(hour=1, minute=0)),
+])
+def test_timed_insert_anchors_to_local_today_and_preserves_overnight_end(
+        schedule_database, now, start_time, duration, expected_start):
+    result = db_schedule.commit_schedule_transition(
+        'c1', 'u1', _timed_insert(start_time, duration), now=now)
+
+    assert result['ok'] is True
+    events = _timeline(schedule_database, 'char_schedule', 'id')
+    phases = _timeline(schedule_database, 'char_schedule_phase', 'schedule_id')
+    expected_end = expected_start + timedelta(minutes=duration)
+    assert events[result['event_id']][1:3] == (expected_start, expected_end)
+    assert list(phases.values())[0][1:3] == (expected_start, expected_end)
+    row = schedule_database.query(
+        'SELECT sched_date::text AS sched_date FROM char_schedule WHERE id=%s',
+        (result['event_id'],))['rows'][0]
+    assert row['sched_date'] == expected_start.date().isoformat()

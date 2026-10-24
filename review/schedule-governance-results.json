@@ -1,0 +1,68 @@
+{
+  "classification": {
+    "command": [
+      "C:\\Users\\张三\\AppData\\Local\\GojoAssistant-test-env\\python311\\python.exe",
+      "-B",
+      ".codex/skills/gojo-safe-change/scripts/classify_change.py",
+      "--base",
+      "a091646"
+    ],
+    "exit_code": 0,
+    "stdout": "====================================================================\r\nGOJO CHANGE CLASSIFIER\r\n====================================================================\r\nRepository : C:/Users/����/Documents/GojoAssistant-live/.worktrees/schedule-insert-at-time-20261024\r\nBranch     : feat/schedule-insert-at-time-20261024\r\nBase       : a091646\r\nRisk       : YELLOW\r\n\r\nChanged files    : 33\r\nProduction files : 4\r\n\r\nReasons:\r\n  - Production change crosses multiple subsystems: generation, schedule/proactive\r\n\r\nDetected domains:\r\n  - generation\r\n  - schedule/proactive\r\n  - tests\r\n  - workflow-governance\r\n\r\nCandidate architecture invariants:\r\n  - INV-EVID-001\r\n  - INV-FAIL-002\r\n  - INV-GEN-001\r\n  - INV-STATE-001\r\n\r\nCandidate historical regressions:\r\n  - REG-001\r\n  - REG-002\r\n  - REG-009\r\n\r\nFiles:\r\n  - [schedule/proactive] gojo_backend/db_schedule.py\r\n  - [generation] gojo_backend/generation_contract.py\r\n  - [generation] gojo_backend/prompt.py\r\n  - [schedule/proactive] gojo_backend/schedule_contract.py\r\n  - [workflow-governance] review/insert-time-date-check-tests.json\r\n  - [workflow-governance] review/insert-time-date-check-tests.log\r\n  - [workflow-governance] review/insert-time-reproduction-tests.json\r\n  - [workflow-governance] review/insert-time-reproduction-tests.log\r\n  - [workflow-governance] review/insert-time-targeted-tests.json\r\n  - [workflow-governance] review/insert-time-targeted-tests.log\r\n  - [workflow-governance] review/run_schedule_validation.py\r\n  - [workflow-governance] review/schedule-baseline-full-tests.json\r\n  - [workflow-governance] review/schedule-baseline-full-tests.log\r\n  - [workflow-governance] review/schedule-completion.md\r\n  - [workflow-governance] review/schedule-final-diff.patch\r\n  - [workflow-governance] review/schedule-final-full-tests.json\r\n  - [workflow-governance] review/schedule-final-full-tests.log\r\n  - [workflow-governance] review/schedule-full-comparison.json\r\n  - [workflow-governance] review/schedule-full-comparison.md\r\n  - [workflow-governance] review/schedule-generation-regression-tests.json\r\n  - [workflow-governance] review/schedule-generation-regression-tests.log\r\n  - [workflow-governance] review/schedule-independent-review.md\r\n  - [workflow-governance] review/schedule-insert-change-capsule.md\r\n  - [workflow-governance] review/schedule-patch-check.log\r\n  - [workflow-governance] review/schedule-schema-reproduction-tests.json\r\n  - [workflow-governance] review/schedule-schema-reproduction-tests.log\r\n  - [workflow-governance] review/schedule-targeted-tests.json\r\n  - [workflow-governance] review/schedule-targeted-tests.log\r\n  - [generation, tests] tests/test_generation_temporal_hotfix.py\r\n  - [tests] tests/test_insert_intent_prompt.py\r\n  - [schedule/proactive, tests] tests/test_schedule_future_prompt.py\r\n  - [schedule/proactive, tests] tests/test_schedule_insert_time.py\r\n  - [schedule/proactive, tests] tests/test_schedule_reflow_transition.py\r\n\r\nNOTE: This is a deterministic minimum-risk classifier. Semantic review may only raise the risk level, never lower it.\r\n====================================================================\r\n",
+    "stderr": ""
+  },
+  "diff-audit": {
+    "command": [
+      "C:\\Users\\张三\\AppData\\Local\\GojoAssistant-test-env\\python311\\python.exe",
+      "-B",
+      ".codex/skills/gojo-safe-change/scripts/audit_diff.py",
+      "--base",
+      "a091646",
+      "--allow-domain",
+      "schedule/proactive",
+      "--allow-domain",
+      "generation"
+    ],
+    "exit_code": 0,
+    "stdout": "========================================================================\r\nGOJO DIFF AUDIT\r\n========================================================================\r\nRepository      : C:/Users/����/Documents/GojoAssistant-live/.worktrees/schedule-insert-at-time-20261024\r\nBranch          : feat/schedule-insert-at-time-20261024\r\nBase            : a091646\r\nAllowed domains : generation, schedule/proactive\r\nStatus          : PASS\r\n\r\nChanged files   : 34\r\nProduction files: 4\r\n\r\nScope audit:\r\n  - No out-of-scope production file detected.\r\n\r\nAuthority-sensitive paths:\r\n  - none\r\n\r\nSensitive added-line signals:\r\n  - none\r\n\r\nChanged files:\r\n  - [PRODUCTION] [schedule/proactive] gojo_backend/db_schedule.py\r\n  - [PRODUCTION] [generation] gojo_backend/generation_contract.py\r\n  - [PRODUCTION] [generation] gojo_backend/prompt.py\r\n  - [PRODUCTION] [schedule/proactive] gojo_backend/schedule_contract.py\r\n  - [NON-PRODUCTION] [workflow-governance] review/insert-time-date-check-tests.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/insert-time-date-check-tests.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/insert-time-reproduction-tests.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/insert-time-reproduction-tests.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/insert-time-targeted-tests.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/insert-time-targeted-tests.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/run_schedule_validation.py\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-baseline-full-tests.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-baseline-full-tests.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-completion.md\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-final-classification.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-final-diff.patch\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-final-full-tests.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-final-full-tests.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-full-comparison.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-full-comparison.md\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-generation-regression-tests.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-generation-regression-tests.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-independent-review.md\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-insert-change-capsule.md\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-patch-check.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-schema-reproduction-tests.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-schema-reproduction-tests.log\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-targeted-tests.json\r\n  - [NON-PRODUCTION] [workflow-governance] review/schedule-targeted-tests.log\r\n  - [NON-PRODUCTION] [generation] tests/test_generation_temporal_hotfix.py\r\n  - [NON-PRODUCTION] [other] tests/test_insert_intent_prompt.py\r\n  - [NON-PRODUCTION] [schedule/proactive] tests/test_schedule_future_prompt.py\r\n  - [NON-PRODUCTION] [schedule/proactive] tests/test_schedule_insert_time.py\r\n  - [NON-PRODUCTION] [schedule/proactive] tests/test_schedule_reflow_transition.py\r\n\r\nInterpretation:\r\n  PASS         = no deterministic scope/sensitive signal found.\r\n  NEEDS_REVIEW = sensitive path or added behavior requires review.\r\n  BLOCKED      = actual production diff exceeded approved domains.\r\n\r\nThis audit cannot lower semantic risk determined by gojo-safe-change.\r\n========================================================================\r\n",
+    "stderr": ""
+  },
+  "review-report": {
+    "command": [
+      "C:\\Users\\张三\\AppData\\Local\\GojoAssistant-test-env\\python311\\python.exe",
+      "-B",
+      ".codex/skills/gojo-safe-change/scripts/build_review_report.py",
+      "--base",
+      "a091646",
+      "--allow-domain",
+      "schedule/proactive",
+      "--allow-domain",
+      "generation"
+    ],
+    "exit_code": 0,
+    "stdout": "====================================================================\r\nGOJO REVIEW REPORT\r\n====================================================================\r\nStatus : NEEDS REVIEW\r\nRisk   : YELLOW\r\nOutput : review/latest.md\r\nFiles  : 4 production / 31 non-production\r\nScope  : no deterministic violation detected\r\n====================================================================\r\n",
+    "stderr": ""
+  },
+  "whitespace": {
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "patch-check": {
+    "command": [
+      "git",
+      "apply",
+      "--check",
+      "--reverse",
+      "review/schedule-final-diff.patch"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  }
+}

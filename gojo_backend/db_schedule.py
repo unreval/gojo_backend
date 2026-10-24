@@ -2203,6 +2203,9 @@ def _shift_future_flexible_events_tx(cur, character_id, user_id, *,
 def _insert_transition_event_tx(cur, character_id, user_id, now, event_spec):
     timezone_value = _canonical_tz()
     start = now.astimezone(timezone_value).replace(second=0, microsecond=0)
+    if 'start_time' in event_spec:
+        hour, minute = map(int, event_spec['start_time'].split(':'))
+        start = start.replace(hour=hour, minute=minute)
     end = start + timedelta(minutes=int(event_spec['duration_minutes']))
     item = {
         'start_time': start.strftime('%H:%M'),
@@ -2397,13 +2400,32 @@ def commit_schedule_transition(character_id, user_id, intent, *, now=None,
                     'phase_id': active_phase[0] if active_phase else None,
                 })
         elif action == ACTION_INSERT:
-            if _has_active_event_tx(cur, character_id, user_id):
+            event_spec = dict(normalized['event'])
+            start = now
+            if 'start_time' in event_spec:
+                hour, minute = map(int, event_spec['start_time'].split(':'))
+                start = now.astimezone(_canonical_tz()).replace(
+                    hour=hour, minute=minute, second=0, microsecond=0)
+                if start <= now:
+                    conn.rollback()
+                    return {'ok': False, 'reason': 'insert_start_not_future'}
+                end = start + timedelta(minutes=event_spec['duration_minutes'])
+                cur.execute(
+                    '''SELECT 1 FROM char_schedule
+                       WHERE character_id=%s AND user_id=%s AND status=%s
+                         AND COALESCE(actual_start_at, planned_start_at) < %s
+                         AND COALESCE(actual_end_at, planned_end_at) > %s
+                       LIMIT 1 FOR UPDATE''',
+                    (character_id, user_id, EVENT_ACTIVE, end, start))
+                if cur.fetchone():
+                    conn.rollback()
+                    return {'ok': False, 'reason': 'insert_overlaps_active_event'}
+            elif _has_active_event_tx(cur, character_id, user_id):
                 conn.rollback()
                 return {
                     'ok': False,
                     'reason': 'active_event_requires_explicit_transition',
                 }
-            event_spec = dict(normalized['event'])
             reference = event_spec.get('planned_place')
             if reference and reference.get('provider'):
                 place = _lookup_cached_poi_tx(cur, reference)
@@ -2414,9 +2436,8 @@ def commit_schedule_transition(character_id, user_id, intent, *, now=None,
             inserted_id = _insert_transition_event_tx(
                 cur, character_id, user_id, now, event_spec)
             result_event_id = inserted_id
-            future_after = now + timedelta(minutes=event_spec['duration_minutes'])
             reflowed = _shift_future_flexible_events_tx(
-                cur, character_id, user_id, after=now,
+                cur, character_id, user_id, after=start,
                 minutes=event_spec['duration_minutes'], skip_event_id=inserted_id)
             if reflowed is None:
                 conn.rollback()
@@ -2550,6 +2571,7 @@ def format_world_prompt(character_id, user_id, now=None):
             '（cancel / relocate / insert）。',
             'cancel / relocate 的 event_id 必须照抄上面的值，'
             'expected_revision 必须照抄对应的 revision；insert 使用新安排的 event。',
+            'insert 可以用 event.start_time 指定今天晚于现在的开始时间，为她预留时段；不写就是立刻开始。',
             'fixedness=fixed 的改不动，别承诺。没有已提交 intent 时，不能说你已经改了。',
         ])
         sections.append('\n'.join(lines))

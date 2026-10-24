@@ -1,0 +1,38 @@
+source_commit=working-tree
+pytest_argv=["-v", "-p", "no:cacheprovider", "tests/test_schedule_reflow_transition.py::test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight"]
+offline_guard=external-network-and-real-psycopg2-disabled
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\张三\AppData\Local\GojoAssistant-test-env\python311\python.exe
+rootdir: C:\Users\张三\Documents\GojoAssistant-live\.worktrees\schedule-insert-at-time-20261024
+collecting ... collected 1 item
+
+tests/test_schedule_reflow_transition.py::test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight FAILED [100%]
+
+================================== FAILURES ===================================
+_ test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight _
+
+schedule_database = <tests.offline_pg.Connection object at 0x000001D77210E9D0>
+
+    def test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight(
+            schedule_database):
+        events = _afternoon_schedule()
+        active_id, dinner_id, overnight_id = [event['id'] for event in events]
+        assert events[0]['status'] == 'active'
+        before_events = _timeline(schedule_database, 'char_schedule', 'id')
+        before_phases = _timeline(schedule_database, 'char_schedule_phase', 'schedule_id')
+        schedule_database.commit()
+        intent = _timed_insert()
+        original = copy.deepcopy(intent)
+    
+        result = db_schedule.commit_schedule_transition(
+            'c1', 'u1', intent, now=INSERT_NOW, source_event_id='japanese-lesson')
+    
+>       assert result['ok'] is True
+E       assert False is True
+
+tests\test_schedule_reflow_transition.py:235: AssertionError
+---------------------------- Captured stdout setup ----------------------------
+[init] 角色日程表已就绪：char_schedule / char_phone_check
+=========================== short test summary info ===========================
+FAILED tests/test_schedule_reflow_transition.py::test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight
+============================== 1 failed in 4.10s ==============================

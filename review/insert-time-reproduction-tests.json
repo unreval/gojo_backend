@@ -1,0 +1,26 @@
+{
+  "source_commit": "working-tree",
+  "group": "targeted",
+  "argv": [
+    "-v",
+    "-p",
+    "no:cacheprovider",
+    "tests/test_schedule_reflow_transition.py::test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight"
+  ],
+  "exit_code": 1,
+  "passed": 0,
+  "failures": [
+    {
+      "test": "tests/test_schedule_reflow_transition.py::test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight",
+      "phase": "call",
+      "traceback": "schedule_database = <tests.offline_pg.Connection object at 0x000001D77210E9D0>\n\n    def test_timed_insert_reserves_nine_pm_during_active_event_and_reflows_overnight(\n            schedule_database):\n        events = _afternoon_schedule()\n        active_id, dinner_id, overnight_id = [event['id'] for event in events]\n        assert events[0]['status'] == 'active'\n        before_events = _timeline(schedule_database, 'char_schedule', 'id')\n        before_phases = _timeline(schedule_database, 'char_schedule_phase', 'schedule_id')\n        schedule_database.commit()\n        intent = _timed_insert()\n        original = copy.deepcopy(intent)\n    \n        result = db_schedule.commit_schedule_transition(\n            'c1', 'u1', intent, now=INSERT_NOW, source_event_id='japanese-lesson')\n    \n>       assert result['ok'] is True\nE       assert False is True\n\ntests\\test_schedule_reflow_transition.py:235: AssertionError"
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "passed_tests": [],
+  "subtests_passed": 0,
+  "pglite_package": "C:\\Users\\张三\\AppData\\Local\\Temp\\gojo-pglite-test\\node_modules\\@electric-sql\\pglite",
+  "pytest_version": "9.1.1",
+  "offline_guard": "external-network-and-real-psycopg2-disabled"
+}

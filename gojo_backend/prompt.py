@@ -198,8 +198,10 @@ emotion字段从以下选一个：{emotion_list}
 {{"schedule_action_intent":{{"type":"cancel","event_id":123,"expected_revision":4}}}}
 {{"schedule_action_intent":{{"type":"relocate","event_id":123,"expected_revision":4,
  "planned_place":{{"provider":"nominatim","provider_place_id":"已验证候选ID"}}}}}}
-{{"schedule_action_intent":{{"type":"insert","event":{{"title":"简短事项","duration_minutes":20,
+{{"schedule_action_intent":{{"type":"insert","event":{{"title":"简短事项","start_time":"21:00","duration_minutes":20,
  "reply_state":"free","category":"routine","fixedness":"flexible"}}}}}}
+insert 的 start_time 可选，只能用今天的 HH:MM（24 小时制），必须晚于现在；不写就是立刻开始。
+不能指定明天或其他日期，也不要输出 sched_date / date / start_at。
 reply_state 按事情本身的性质选：没法看手机→hard_busy；能瞄一眼→soft_busy；能正常回→free。
 为她空出来陪她的时段一律 free——那段时间的全部意义就是能回她。
 绝不从自由文本猜地点、地址、坐标或完成状态；没有后端提交成功前，台词也不得把变化说成事实。
