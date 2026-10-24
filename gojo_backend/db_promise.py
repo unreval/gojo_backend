@@ -17,7 +17,13 @@
 
 以后可扩展:weekly / monthly / 具体事件驱动等。
 """
+import os
+from datetime import timedelta
+
 from db import get_conn
+
+
+PROMISE_GRACE_MINUTES = int(os.environ.get('PROMISE_GRACE_MINUTES', '120'))
 
 
 def init_promise_table():
@@ -36,8 +42,16 @@ def init_promise_table():
         last_fired_at TIMESTAMP,                 -- 循环: 上次触发的时间
         is_active BOOLEAN DEFAULT TRUE,          -- 用户撤销 = false
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        occurrence_key TEXT
+        occurrence_key TEXT,
+        last_error TEXT
     )''')
+    try:
+        cur.execute('SAVEPOINT promise_last_error')
+        cur.execute('ALTER TABLE proactive_promise ADD COLUMN IF NOT EXISTS last_error TEXT')
+        cur.execute('RELEASE SAVEPOINT promise_last_error')
+    except Exception as e:
+        print(f'[promise] last_error alter skipped:{e}')
+        cur.execute('ROLLBACK TO SAVEPOINT promise_last_error')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_promise_user_active ON proactive_promise(user_id, character_id, is_active)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_promise_due ON proactive_promise(is_active, is_fired, trigger_at)')
     try:
@@ -109,38 +123,58 @@ def add_promise(character_id, user_id, trigger_kind, context,
 def get_due_promises(now):
     """查出所有【该触发但还没触发】的活跃 promise。
 
-    - once: is_fired=false AND trigger_at <= now
-    - daily: 今天还没触发过(last_fired_at 不是今天) AND HH:MM 时刻已经过
+    - once: 未触发且在宽限窗口内; 超窗则停用并记录 expired
+    - daily: 今天未触发且在宽限窗口内; 超窗只跳过今天
 
     返回: [{id, character_id, user_id, trigger_kind, context, ...}, ...]
     """
     conn = get_conn()
     cur = conn.cursor()
+    cutoff = now - timedelta(minutes=PROMISE_GRACE_MINUTES)
 
-    # 一次性:未触发 + 到点
-    cur.execute('''SELECT id, character_id, user_id, trigger_kind, context, origin_text
-                   FROM proactive_promise
-                   WHERE is_active = TRUE AND trigger_kind = 'once'
-                     AND is_fired = FALSE AND trigger_at <= %s
-                   ORDER BY trigger_at ASC''',
-                (now,))
-    once_rows = cur.fetchall()
+    try:
+        # 保持原有数据库时区比较语义; 超窗承诺永久退出重试。
+        cur.execute('''UPDATE proactive_promise
+                       SET is_active = FALSE, last_error = 'expired'
+                       WHERE is_active = TRUE AND trigger_kind = 'once'
+                         AND is_fired = FALSE AND trigger_at < %s::timestamptz
+                       RETURNING id, trigger_at,
+                         EXTRACT(EPOCH FROM (%s::timestamptz - trigger_at)) / 60.0''',
+                    (cutoff, now))
+        expired = cur.fetchall()
 
-    # 每天:今天未触发 + 时刻已经过
-    #   条件:last_fired_at 是 NULL 或不是今天,并且 HH:MM 已经过了
-    hh_mm = now.strftime('%H:%M')
-    today_date = now.date()
-    cur.execute('''SELECT id, character_id, user_id, trigger_kind, context, origin_text, trigger_time
-                   FROM proactive_promise
-                   WHERE is_active = TRUE AND trigger_kind = 'daily'
-                     AND trigger_time <= %s
-                     AND (last_fired_at IS NULL OR DATE(last_fired_at) < %s)
-                   ORDER BY trigger_time ASC''',
-                (hh_mm, today_date))
-    daily_rows = cur.fetchall()
+        # 一次性:未触发 + 到点 + 未超窗(包含边界)
+        cur.execute('''SELECT id, character_id, user_id, trigger_kind, context, origin_text
+                       FROM proactive_promise
+                       WHERE is_active = TRUE AND trigger_kind = 'once'
+                         AND is_fired = FALSE AND trigger_at <= %s::timestamptz
+                         AND trigger_at >= %s::timestamptz
+                       ORDER BY trigger_at ASC''',
+                    (now, cutoff))
+        once_rows = cur.fetchall()
 
-    cur.close()
-    conn.close()
+        # 每天:只评估今天的时刻; 窗口在下方按秒精度过滤。
+        hh_mm = now.strftime('%H:%M')
+        today_date = now.date()
+        cur.execute('''SELECT id, character_id, user_id, trigger_kind, context, origin_text, trigger_time
+                       FROM proactive_promise
+                       WHERE is_active = TRUE AND trigger_kind = 'daily'
+                         AND trigger_time <= %s
+                         AND (last_fired_at IS NULL OR DATE(last_fired_at) < %s)
+                       ORDER BY trigger_time ASC''',
+                    (hh_mm, today_date))
+        daily_rows = cur.fetchall()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+    for promise_id, trigger_at, delay_minutes in expired:
+        print(f'[promise] expired id={promise_id} trigger_at={trigger_at.isoformat()} '
+              f'delay_minutes={float(delay_minutes):.2f}')
 
     result = []
     for r in once_rows:
@@ -149,6 +183,17 @@ def get_due_promises(now):
             'trigger_kind': r[3], 'context': r[4], 'origin_text': r[5],
         })
     for r in daily_rows:
+        try:
+            hour, minute = map(int, r[6].split(':'))
+            trigger_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        except ValueError:
+            print(f'[promise] invalid trigger_time id={r[0]}, skipped')
+            continue
+        delay_minutes = (now - trigger_at).total_seconds() / 60
+        if delay_minutes > PROMISE_GRACE_MINUTES:
+            print(f'[promise] expired id={r[0]} trigger_at={trigger_at.isoformat()} '
+                  f'delay_minutes={delay_minutes:.2f}')
+            continue
         result.append({
             'id': r[0], 'character_id': r[1], 'user_id': r[2],
             'trigger_kind': r[3], 'context': r[4], 'origin_text': r[5],
