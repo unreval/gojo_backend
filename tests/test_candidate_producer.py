@@ -35,7 +35,8 @@ class ProducerPureTests(unittest.TestCase):
         from structured_output import invoke_structured_llm, StructuredParseResult
         candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
                          summary='她今天亏了69元', predicate='reported_fact',
-                         object='交易结果', value='亏了69元')
+                         object='交易结果', value='亏了69元',
+                         interpretation='她这是在报亏损，不是想让我算账')
         invalid_shapes = [({}, 'root_not_array'),
                           ([candidate, None], 'item_1_not_object'),
                           ([0], 'item_0_not_object')]
@@ -56,7 +57,10 @@ class ProducerPureTests(unittest.TestCase):
                 self.assertEqual(error.exception.detail, detail)
                 self.assertEqual(str(error.exception), detail)
         # This validator owns shape only; the existing contract owns content.
-        for value in ([], [candidate], [dict(candidate, predicate='invented',
+        without_reading = {key: value for key, value in candidate.items()
+                           if key != 'interpretation'}
+        for value in ([], [candidate], [without_reading],
+                      [dict(candidate, predicate='invented',
                       source_event_id='outside-batch', quote=None,
                       summary=[], time_scope=123, perspective={})]):
             with self.subTest(value=value):
@@ -167,6 +171,28 @@ class ProducerPureTests(unittest.TestCase):
                 self.assertEqual(result['claim']['value'], value)
                 self.assertEqual(result['claim']['subject'], 'user:u')
 
+    def test_prompt_requests_a_subjective_interpretation(self):
+        prompt = producer._SYSTEM
+        self.assertIn('interpretation是你对这件事的主观理解，必须给出，一句话', prompt)
+        self.assertIn('不要求客观正确', prompt)
+        self.assertIn('不确定就说不确定，不要硬下结论', prompt)
+        self.assertIn('不要复述用户原话，要说你怎么看这件事', prompt)
+        self.assertIn('所有字段值必须是合法JSON字符串', prompt)
+        self.assertNotIn('interpretation?', prompt)
+
+    def test_interpretation_is_optional_and_only_type_checked(self):
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元',
+                         interpretation='她其实是在抱怨室友，不是真的想搬家')
+        self.assertIsNone(producer.candidate_contract_reason(candidate, {'source-0'}))
+        omitted = {key: value for key, value in candidate.items()
+                   if key != 'interpretation'}
+        self.assertIsNone(producer.candidate_contract_reason(omitted, {'source-0'}))
+        self.assertEqual(producer.candidate_contract_reason(
+            dict(candidate, interpretation=12), {'source-0'}),
+            'invalid_candidate_fields')
+
     def test_audit_marks_short_circuited_gates_as_not_evaluated(self):
         gates = producer.gate_results(False, 'quote_not_verbatim', {})
         self.assertEqual(gates['G1']['status'], 'passed')
@@ -220,7 +246,8 @@ class ProducerDatabaseTests(unittest.TestCase):
     def candidate(self, source_id='source-0', **changes):
         value = {'source_event_id': source_id, 'quote': '今天我亏了69元',
                  'summary': '她今天亏了69元', 'predicate': 'reported_fact',
-                 'object': '交易结果', 'value': '亏了69元'}
+                 'object': '交易结果', 'value': '亏了69元',
+                 'interpretation': '她这是在报亏损，不是想让我算账'}
         value.update(changes)
         return value
 
@@ -905,6 +932,64 @@ class ProducerDatabaseTests(unittest.TestCase):
         ]))
         self.assertFalse(any(row['accepted'] for row in self.candidate_logs()))
         self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_interpretation_is_audited_and_omitted_from_projection(self):
+        interpretation = '她把这叫做"亏了"，其实是在抱怨室友，不是真的想搬家，听起来像昨天的100元'
+        self.seed()
+        before = self.non_processing_state()
+        result = self.run_pair(self.model([self.candidate(interpretation=interpretation)]))
+        self.assertEqual((result['status'], result['accepted'], result['rejected']),
+                         ('succeeded', 1, 0))
+        logged = self.candidate_logs()[0]
+        self.assertEqual(logged['interpretation'], interpretation)
+        self.assertEqual(logged['summary'], '她今天亏了69元')
+        for gate in ('G4', 'G5', 'G6', 'G7', 'G9'):
+            self.assertEqual(logged['gates'][gate]['status'], 'passed', gate)
+        self.assertEqual(logged['gates']['G8']['status'], 'not_evaluated')
+        self.assertEqual(self.non_processing_state(), before)
+
+        self.seed(prefix='live', user='live')
+        live = self.run_pair(self.model([
+            self.candidate('live-0', interpretation=interpretation)]),
+            user='live', shadow=False)
+        self.assertEqual((live['status'], live['accepted']), ('succeeded', 1))
+        recalled = self.sql('SELECT content, semantic_payload FROM long_memory WHERE user_id=%s',
+                            ('live',))
+        self.assertEqual([row[0] for row in recalled], ['她今天亏了69元。'])
+        stored = json.dumps({
+            'memory': recalled,
+            'events': self.sql('''SELECT payload, adjudication FROM cognitive_events
+                WHERE user_id=%s''', ('live',)),
+        }, ensure_ascii=False, default=str)
+        self.assertNotIn(interpretation, stored)
+        self.assertNotIn('抱怨室友', stored)
+        self.assertNotIn('interpretation', stored)
+
+    def test_unescaped_quote_in_interpretation_uses_the_existing_solo_skip(self):
+        ids = self.seed(2, age=300)
+        self.set_batch_size(1)
+        raw = ('[{"source_event_id":"%s","quote":"今天我亏了69元",'
+               '"summary":"她今天亏了69元","interpretation":"她说的是"亏了"",'
+               '"predicate":"reported_fact","object":"交易结果","value":"亏了69元"}]'
+               % ids[0])
+        before = self.non_processing_state()
+        failed = self.model(raw=raw)
+        for count, seconds in enumerate((0, 31, 92), start=1):
+            result = self.run_pair(failed, now=self.now + timedelta(seconds=seconds))
+            self.assertEqual((result['status'], result['reason']), ('failed', 'invalid_json'))
+            self.assertEqual(self.control_state().get('solo_failures', {}),
+                             {} if count == 3 else {ids[0]: count})
+        self.assertEqual(self.sql('''SELECT status,last_error FROM event_processing_state
+            WHERE event_id=%s AND processor_type=%s''',
+            (ids[0], producer._processor('u', 'c'))), [('skipped', 'invalid_json')])
+        self.assertEqual(self.candidate_logs(), [])
+        self.assertNotIn('她说的是', json.dumps(self.logs, ensure_ascii=False))
+        self.assertEqual(self.non_processing_state(), before)
+        recovered = self.model(raw='[]')
+        self.assertEqual(self.run_pair(recovered,
+            now=self.now + timedelta(seconds=1893))['status'], 'succeeded')
+        request = json.loads(recovered.call_args.kwargs['messages'][0]['content'])
+        self.assertEqual([item['source_event_id'] for item in request], [ids[1]])
 
     def test_live_mode_projects_only_after_validation_and_is_recallable(self):
         self.seed()
