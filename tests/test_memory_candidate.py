@@ -67,6 +67,19 @@ class MemoryCandidateGateTests(unittest.TestCase):
         self.assertEqual(self.validate(candidate), (True, None))
         self.assertEqual(candidate, original)
 
+    def test_interpretation_is_not_grounded_and_cannot_rescue_a_summary(self):
+        interpretation = '她其实是在抱怨室友，不是真的想搬家，听起来像昨天亏了100元'
+        candidate = self.candidate(interpretation=interpretation)
+        original = copy.deepcopy(candidate)
+        self.assertEqual(self.validate(candidate), (True, None))
+        self.assertEqual(candidate, original)
+
+        laundered = self.candidate(summary='她打算搬去火星和室友分手',
+                                   interpretation='她今天买咖啡亏了69元')
+        self.assertEqual(self.validate(laundered),
+                         (False, 'summary_not_grounded_in_quote'))
+        self.assertEqual(laundered['interpretation'], '她今天买咖啡亏了69元')
+
     def test_absent_quote_is_rejected(self):
         self.assertEqual(self.validate(self.candidate(quote='我今天去打篮球')),
                          (False, 'quote_not_verbatim'))

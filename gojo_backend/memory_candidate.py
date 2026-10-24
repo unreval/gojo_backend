@@ -153,6 +153,10 @@ def validate_candidate(cur, user_id, character_id, candidate):
     G8 alone mutates the input: an unsafe/uncertain perspective is removed and
     (True, 'perspective_dropped') is returned. Earlier rejection leaves the
     candidate untouched. No perspective is persisted by this module.
+
+    interpretation is not an input. G1–G9 compare quote, summary, and the
+    literal predicate fields only. A wrong or ungrounded reading stays on the
+    candidate and cannot accept or reject it.
     """
     source_id = candidate.get('source_event_id') if isinstance(candidate, dict) else None
     if not isinstance(source_id, str) or not source_id.strip():
@@ -197,7 +201,8 @@ def validate_candidate(cur, user_id, character_id, candidate):
                    for key in ('object', 'value'))):
         return False, 'invalid_predicate_or_summary'
 
-    # G9 covers content left after the existing time and number checks.
+    # G9 covers summary residue after the time and number checks.
+    # interpretation is a subjective reading and is not part of this text.
     grounded_text = re.sub(r'她|他|您|五条悟|用户|对方', '', summary)
     time_words = sorted(_TIME_WORDS.keys() | _DAY_WORDS.keys(), key=len, reverse=True)
     grounded_text = re.sub('|'.join(time_words), '', grounded_text)
@@ -234,9 +239,12 @@ def apply_candidate(cur, user_id, character_id, candidate, *, occurred_at,
     The caller supplies canonical ingress and adjudication. A physical projection
     alone never grants recall authority: the unchanged reader gate still checks
     the complete adjudication, stable belief and current source. No perspective
-    text enters the claim, projection, or log. The caller's candidate is unchanged.
+    or interpretation text enters the claim, projection, or log. The caller's
+    candidate is unchanged.
     """
     checked = dict(candidate) if isinstance(candidate, dict) else candidate
+    if isinstance(checked, dict):
+        checked.pop('interpretation', None)
     accepted, reason = validate_candidate(cur, user_id, character_id, checked)
     if not accepted:
         return {'status': 'rejected', 'reason': reason}
