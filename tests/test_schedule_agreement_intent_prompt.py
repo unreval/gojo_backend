@@ -1,4 +1,4 @@
-"""Agreeing to clear a span must require cancel, without a new reply gate."""
+"""Agreeing to clear a span must emit an intent; cancel or insert is the character's call."""
 import os
 import sqlite3
 import sys
@@ -140,13 +140,27 @@ class AgreementRequiresCancelPromptTests(unittest.TestCase):
                     [{'zh': line}], {'event': None, 'now': NOW}, PLANNED, None))
         self.assertIn(CASUAL_AGREEMENT, rules)
         self.assertIn('就必须同时输出 schedule_action_intent', rules)
-        self.assertIn('首选 type=cancel', rules)
+        self.assertIn('用 cancel 还是 insert，看挡路这件事本身', rules)
+        self.assertIn('不重要、可做可不做、本来也没什么要做的，用 cancel', rules)
+        self.assertIn('重要、但什么时候做都行、只要有时间就能做，用 insert', rules)
+        self.assertIn('例如「陪她学习」', rules)
+        self.assertIn('挡路的事会整体往后挪，不会消失', rules)
+        self.assertIn('插入点之后还有 fixedness=fixed 的安排，不要用 insert', rules)
+        self.assertIn('整段会被拒绝', rules)
+        self.assertIn('只插入真正冲突的时段', rules)
+        self.assertIn('18:30–22:00 本来没有安排', rules)
+        self.assertIn('推过午夜', rules)
+        self.assertNotIn('首选 type=cancel', rules)
+        self.assertNotIn('不要用 insert 空出已有安排', rules)
         self.assertIn('答应为她空出一段时间，就是明确行动变化', rules)
         self.assertIn('没有明确行动变化就完全不要输出该字段', rules)
         self.assertIn('event_id=47 revision=3', text)
         self.assertIn('22:00~04:00 深夜事务处理', text)
         self.assertIn('fixedness=flexible', text)
-        self.assertIn('不要用 insert 空出已有安排', rules)
+        self.assertIn('必须输出 schedule_action_intent', text)
+        self.assertIn('插入点之后若还有 fixedness=fixed 的安排', text)
+        self.assertIn('只插入真正冲突的时段', text)
+        self.assertNotIn('不要用 insert 把后面的安排往后推来假装把时间空出来', text)
         self.assertIsNone(change_claim_conflict(
             [{'jp': '途中で寝るなよ。', 'zh': CASUAL_AGREEMENT}],
             {'event': None, 'now': NOW}, PLANNED, None))

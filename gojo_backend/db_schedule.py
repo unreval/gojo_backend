@@ -2141,23 +2141,66 @@ def _reconcile_phone_checks_tx(cur, event_ids, now, *, user_id=None,
     return armed
 
 
-def _fetch_event_for_transition_tx(cur, event_id, character_id, user_id):
+def _lock_clause(lock):
+    return ' FOR UPDATE' if lock else ''
+
+
+def _explicit_insert_start(now, event_spec):
+    """Today's zoned start when the intent names one. None means start now."""
+    if 'start_time' not in event_spec:
+        return None
+    hour, minute = map(int, event_spec['start_time'].split(':'))
+    return now.astimezone(_canonical_tz()).replace(
+        hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _fixed_cancel_block(event):
+    if event['fixedness'] == FIXED:
+        return 'fixed_event_requires_external_override'
+    return None
+
+
+def _fetch_event_for_transition_tx(cur, event_id, character_id, user_id, *, lock=True):
     cur.execute(
         f'''SELECT {_EVENT_COLUMNS}
             FROM char_schedule
-            WHERE id=%s AND character_id=%s AND user_id=%s
-            FOR UPDATE''', (event_id, character_id, user_id))
+            WHERE id=%s AND character_id=%s AND user_id=%s'''
+        + _lock_clause(lock), (event_id, character_id, user_id))
     row = cur.fetchone()
     return _canonical_event_from_row(row) if row else None
 
 
-def _has_active_event_tx(cur, character_id, user_id):
+def _has_active_event_tx(cur, character_id, user_id, *, lock=True):
     cur.execute(
         '''SELECT 1 FROM char_schedule
            WHERE character_id=%s AND user_id=%s AND status=%s
-           LIMIT 1 FOR UPDATE''',
+           LIMIT 1''' + _lock_clause(lock),
         (character_id, user_id, EVENT_ACTIVE))
     return cur.fetchone() is not None
+
+
+def _active_event_overlaps_tx(cur, character_id, user_id, *, start, end, lock=True):
+    cur.execute(
+        '''SELECT 1 FROM char_schedule
+           WHERE character_id=%s AND user_id=%s AND status=%s
+             AND COALESCE(actual_start_at, planned_start_at) < %s
+             AND COALESCE(actual_end_at, planned_end_at) > %s
+           LIMIT 1''' + _lock_clause(lock),
+        (character_id, user_id, EVENT_ACTIVE, end, start))
+    return cur.fetchone() is not None
+
+
+def _planned_events_at_or_after_tx(cur, character_id, user_id, *,
+                                   after, skip_event_id=None, lock=False):
+    """Rows the reflow would move. The write path locks them; preflight does not."""
+    cur.execute(
+        '''SELECT id, fixedness FROM char_schedule
+           WHERE character_id=%s AND user_id=%s
+             AND status=%s AND planned_start_at >= %s
+             AND (%s IS NULL OR id <> %s)
+           ORDER BY planned_start_at ASC''' + _lock_clause(lock),
+        (character_id, user_id, EVENT_PLANNED, after, skip_event_id, skip_event_id))
+    return cur.fetchall() or []
 
 
 def _shift_future_flexible_events_tx(cur, character_id, user_id, *,
@@ -2165,15 +2208,9 @@ def _shift_future_flexible_events_tx(cur, character_id, user_id, *,
     """Deterministically reflow flexible future items after an insertion/extend."""
     if minutes <= 0:
         return []
-    cur.execute(
-        '''SELECT id, fixedness FROM char_schedule
-           WHERE character_id=%s AND user_id=%s
-             AND status=%s AND planned_start_at >= %s
-             AND (%s IS NULL OR id <> %s)
-           ORDER BY planned_start_at ASC
-           FOR UPDATE''',
-        (character_id, user_id, EVENT_PLANNED, after, skip_event_id, skip_event_id))
-    rows = cur.fetchall() or []
+    rows = _planned_events_at_or_after_tx(
+        cur, character_id, user_id, after=after,
+        skip_event_id=skip_event_id, lock=True)
     fixed = [event_id for event_id, fixedness in rows if fixedness == FIXED]
     if fixed:
         return None
@@ -2304,9 +2341,10 @@ def commit_schedule_transition(character_id, user_id, intent, *, now=None,
                 cur, [event['id']], now, user_id=user_id,
                 character_id=character_id)
         elif action == ACTION_CANCEL:
-            if event['fixedness'] == FIXED:
+            blocked = _fixed_cancel_block(event)
+            if blocked:
                 conn.rollback()
-                return {'ok': False, 'reason': 'fixed_event_requires_external_override'}
+                return {'ok': False, 'reason': blocked}
             cur.execute(
                 '''UPDATE char_schedule
                    SET status=%s, actual_end_at=%s, cancel_reason=%s,
@@ -2402,25 +2440,18 @@ def commit_schedule_transition(character_id, user_id, intent, *, now=None,
         elif action == ACTION_INSERT:
             event_spec = dict(normalized['event'])
             start = now
-            if 'start_time' in event_spec:
-                hour, minute = map(int, event_spec['start_time'].split(':'))
-                start = now.astimezone(_canonical_tz()).replace(
-                    hour=hour, minute=minute, second=0, microsecond=0)
+            explicit_start = _explicit_insert_start(now, event_spec)
+            if explicit_start is not None:
+                start = explicit_start
                 if start <= now:
                     conn.rollback()
                     return {'ok': False, 'reason': 'insert_start_not_future'}
                 end = start + timedelta(minutes=event_spec['duration_minutes'])
-                cur.execute(
-                    '''SELECT 1 FROM char_schedule
-                       WHERE character_id=%s AND user_id=%s AND status=%s
-                         AND COALESCE(actual_start_at, planned_start_at) < %s
-                         AND COALESCE(actual_end_at, planned_end_at) > %s
-                       LIMIT 1 FOR UPDATE''',
-                    (character_id, user_id, EVENT_ACTIVE, end, start))
-                if cur.fetchone():
+                if _active_event_overlaps_tx(
+                        cur, character_id, user_id, start=start, end=end, lock=True):
                     conn.rollback()
                     return {'ok': False, 'reason': 'insert_overlaps_active_event'}
-            elif _has_active_event_tx(cur, character_id, user_id):
+            elif _has_active_event_tx(cur, character_id, user_id, lock=True):
                 conn.rollback()
                 return {
                     'ok': False,
@@ -2485,6 +2516,90 @@ def commit_schedule_transition(character_id, user_id, intent, *, now=None,
         'revision': committed_revision,
         'reflowed_event_ids': reflowed,
     }
+
+
+def _predictable_transition_block_tx(cur, character_id, user_id, normalized, now):
+    """Same early refusals as commit, read from the current rows.
+
+    A miss here is not success. Commit still validates after the clock advance
+    and still rolls back on revision races. This function never writes.
+    """
+    action = normalized['type']
+    if action == ACTION_CANCEL:
+        event = _fetch_event_for_transition_tx(
+            cur, normalized['event_id'], character_id, user_id, lock=False)
+        if (not event or event['revision'] != normalized['expected_revision']
+                or event['status'] in EVENT_TERMINAL):
+            return None
+        return _fixed_cancel_block(event)
+    if action == ACTION_EXTEND:
+        event = _fetch_event_for_transition_tx(
+            cur, normalized['event_id'], character_id, user_id, lock=False)
+        if (not event or event['revision'] != normalized['expected_revision']
+                or event['status'] != EVENT_ACTIVE):
+            return None
+        rows = _planned_events_at_or_after_tx(
+            cur, character_id, user_id, after=event['planned_end_at'],
+            skip_event_id=event['id'], lock=False)
+        if any(fixedness == FIXED for _event_id, fixedness in rows):
+            return 'fixed_future_event_conflict'
+        return None
+    if action != ACTION_INSERT:
+        return None
+    event_spec = normalized['event']
+    explicit_start = _explicit_insert_start(now, event_spec)
+    if explicit_start is not None:
+        if explicit_start <= now:
+            return 'insert_start_not_future'
+        end = explicit_start + timedelta(minutes=event_spec['duration_minutes'])
+        if _active_event_overlaps_tx(
+                cur, character_id, user_id, start=explicit_start, end=end,
+                lock=False):
+            return 'insert_overlaps_active_event'
+        after = explicit_start
+    elif _has_active_event_tx(cur, character_id, user_id, lock=False):
+        return 'active_event_requires_explicit_transition'
+    else:
+        after = now
+    rows = _planned_events_at_or_after_tx(
+        cur, character_id, user_id, after=after, lock=False)
+    if any(fixedness == FIXED for _event_id, fixedness in rows):
+        return 'fixed_future_event_conflict'
+    return None
+
+
+def preflight_schedule_transition(character_id, user_id, intent, *, now=None):
+    """Read-only check for failures the reply loop can still correct.
+
+    Does not advance the clock, lock rows, or commit. Passing means nothing:
+    the caller must still commit, and a concurrent revision change still
+    fails closed.
+    """
+    normalized = normalize_action_intent(intent)
+    if not normalized:
+        return {'ok': True, 'skipped': True}
+    now = now or datetime.now(_canonical_tz())
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # First statement of this transaction. A later write would abort here
+        # instead of landing in the schedule.
+        cur.execute('SET TRANSACTION READ ONLY')
+        reason = _predictable_transition_block_tx(
+            cur, character_id, user_id, normalized, now)
+        if reason:
+            return {'ok': False, 'reason': reason}
+        return {'ok': True}
+    except Exception as exc:
+        print(f'[schedule] preflight skipped: {exc}')
+        return {'ok': True, 'skipped': True}
+    finally:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        cur.close()
+        conn.close()
 
 
 def _remaining_planned_events_tx(cur, character_id, user_id, now):
@@ -2570,12 +2685,19 @@ def format_world_prompt(character_id, user_id, now=None):
             '这些还没发生，可以为她调整：要改就输出结构化 schedule_action_intent'
             '（cancel / relocate / insert）。',
             '她要求空出一段时间、而你答应了（包括「行吧」这种随口答应），'
-            '首选 cancel 掉挡路且 fixedness 不是 fixed 的安排；'
-            '不要用 insert 把后面的安排往后推来假装把时间空出来。',
+            '必须输出 schedule_action_intent。',
+            '挡路的事不重要、可做可不做，就 cancel。'
+            '重要但什么时候做都行，就 insert 一段 reply_state=free 的具体陪伴，'
+            'title 写成在陪她做什么；挡路的事会整体往后挪，不会消失。',
+            '插入点之后若还有 fixedness=fixed 的安排，insert 会被整段拒绝，'
+            '写短也过不了。这时改用 cancel，或把陪伴放到那条安排结束之后再 insert。',
+            '只插入真正冲突的时段。本来就空着的时间不用占。'
+            '插得太长会把后面的事推过午夜，可能和次日的日程叠在一起。',
             'cancel / relocate 的 event_id 必须照抄上面的值，'
             'expected_revision 必须照抄对应的 revision；insert 使用新安排的 event。',
             'insert 的 start_time 只表示新事项今天晚于现在的开始时间；不写就是立刻开始。',
-            'fixedness=fixed 的改不动，别承诺。没有已提交 intent 时，不能说你已经改了。',
+            'fixedness=fixed 的改不动，别承诺，也不要输出该字段。'
+            '没有已提交 intent 时，不能说你已经改了。',
         ])
         sections.append('\n'.join(lines))
     if transitions:

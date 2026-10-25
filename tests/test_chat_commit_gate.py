@@ -791,6 +791,91 @@ class ChatCommitGateTests(unittest.TestCase):
         self.route._create_json.assert_not_called()
         self.assert_assistant_commit_skipped()
 
+    def _intent_reply(self, intent, zh='行吧。'):
+        return json.dumps({
+            'emotion': '平静',
+            'messages': [{'jp': 'いいよ。', 'zh': zh}],
+            'schedule_action_intent': intent,
+        }, ensure_ascii=False)
+
+    def _assert_preflight_retries(self, reason, phrase, intent):
+        db_schedule = sys.modules['db_schedule']
+        db_schedule.preflight_schedule_transition = Mock(
+            return_value={'ok': False, 'reason': reason})
+        db_schedule.commit_schedule_transition = Mock(
+            side_effect=AssertionError('preflight retry must not commit'))
+        captured = []
+        queue = [
+            self._intent_reply(intent),
+            chat_reply('この時間は動かせない。', '这个挪不了。'),
+        ]
+
+        def _create(*args, **_kwargs):
+            captured.append('\n'.join(
+                block.get('text', '') for block in args[2]))
+            return queue.pop(0), Mock()
+
+        self.route._create_json = Mock(side_effect=_create)
+        response = asyncio.run(self.route.chat_text({
+            'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
+            'source_event_id': 'evt-preflight',
+        }))
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 200, body)
+        self.assertNotIn('generation_failed', body)
+        self.assertEqual(body['messages'][0]['zh'], '这个挪不了。')
+        self.assertEqual(len(captured), 2)
+        self.assertNotIn(phrase, captured[0])
+        self.assertIn(phrase, captured[1])
+        db_schedule.commit_schedule_transition.assert_not_called()
+        sys.modules['db_generation_receipt'].fail_generation.assert_not_called()
+        self.assertIn(reason, self.route._TRACE_RETRY_REASONS)
+
+    def test_fixed_future_insert_retries_with_a_reason_and_writes_nothing(self):
+        self._assert_preflight_retries(
+            'fixed_future_event_conflict', '整段往后挪会被拒绝',
+            {'type': 'insert', 'event': {
+                'title': '陪她学习', 'start_time': '22:00',
+                'duration_minutes': 180, 'reply_state': 'free'}})
+
+    def test_fixed_cancel_preflight_retries_instead_of_failing(self):
+        self._assert_preflight_retries(
+            'fixed_event_requires_external_override', '动不了',
+            {'type': 'cancel', 'event_id': 47, 'expected_revision': 3})
+
+    def test_insert_start_not_future_preflight_retries(self):
+        self._assert_preflight_retries(
+            'insert_start_not_future', '不是今天晚于现在的时间',
+            {'type': 'insert', 'event': {
+                'title': '陪她学习', 'start_time': '14:00',
+                'duration_minutes': 30, 'reply_state': 'free'}})
+
+    def test_insert_overlap_preflight_retries(self):
+        self._assert_preflight_retries(
+            'insert_overlaps_active_event', '正在进行的安排重叠',
+            {'type': 'insert', 'event': {
+                'title': '陪她学习', 'start_time': '15:40',
+                'duration_minutes': 30, 'reply_state': 'free'}})
+
+    def test_insert_without_start_preflight_retries(self):
+        self._assert_preflight_retries(
+            'active_event_requires_explicit_transition', '没有写 start_time',
+            {'type': 'insert', 'event': {
+                'title': '陪她学习', 'duration_minutes': 30, 'reply_state': 'free'}})
+
+    def test_preflight_pass_still_fail_closes_when_revision_changes(self):
+        secret = '这句答应不该显示给她'
+        db_schedule = sys.modules['db_schedule']
+        db_schedule.preflight_schedule_transition = Mock(return_value={'ok': True})
+        db_schedule.commit_schedule_transition = Mock(
+            return_value={'ok': False, 'reason': 'stale_event_revision'})
+        response, body = self.send([self._intent_reply(
+            {'type': 'cancel', 'event_id': 47, 'expected_revision': 3}, zh=secret)])
+        self.assert_generation_failed(response, body, attempts=1)
+        self.assertNotIn(secret, response.body.decode())
+        db_schedule.preflight_schedule_transition.assert_called_once()
+        db_schedule.commit_schedule_transition.assert_called_once()
+
 
 class FrontendCommitGateGuardTests(unittest.TestCase):
     def setUp(self):
