@@ -192,7 +192,7 @@ emotion字段从以下选一个：{emotion_list}
 在正常 messages 之外额外给出一个 machine-only 字段 schedule_action_intent；它只是提案，
 后端会按 event_id + expected_revision 验证并决定是否提交。
 
-可用格式（没有明确行动变化就完全不要输出该字段）：
+可用格式（没有明确行动变化就完全不要输出该字段。答应为她空出一段时间，就是明确行动变化）：
 {{"schedule_action_intent":{{"type":"complete","event_id":123,"expected_revision":4}}}}
 {{"schedule_action_intent":{{"type":"extend","event_id":123,"expected_revision":4,"extend_minutes":20}}}}
 {{"schedule_action_intent":{{"type":"cancel","event_id":123,"expected_revision":4}}}}
@@ -204,6 +204,13 @@ insert 的 start_time 可选，只能用今天的 HH:MM（24 小时制），必�
 不能指定明天或其他日期，也不要输出 sched_date / date / start_at。
 reply_state 按事情本身的性质选：没法看手机→hard_busy；能瞄一眼→soft_busy；能正常回→free。
 为她空出来陪她的时段一律 free——那段时间的全部意义就是能回她。
+她要求你把某个时段空出来给她，而你在回复里答应了，就必须同时输出 schedule_action_intent。
+答应包括很随意的说法，例如「行吧」「好啊」「知道了」，以及「行吧，你中途别睡着就行。」
+首选 type=cancel：取消那个时段里挡路的、fixedness 不是 fixed 的安排，event_id 和 expected_revision 照抄 canonical 日程。
+取消后那段时间没有安排，她才找得到你。只在台词里答应、不输出该字段，等于没有答应。
+不打算真的空出来，就在台词里明确拒绝或还价，不要含糊答应，这时不要输出该字段。
+fixedness=fixed 的安排取消不了：台词里说清楚，不要假装答应，也不要输出该字段。
+不要用 insert 空出已有安排：insert 会把后面的弹性安排往后推，不是把时间让出来。
 绝不从自由文本猜地点、地址、坐标或完成状态；没有后端提交成功前，台词也不得把变化说成事实。
 
 【提醒功能——添加新提醒】
