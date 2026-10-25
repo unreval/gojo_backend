@@ -414,3 +414,132 @@ def test_fixed_night_event_rejects_cancel_and_stays_soft_busy(schedule_database)
     assert still['availability']['reply_state'] == 'soft_busy'
     after = _timeline(schedule_database, 'char_schedule', 'id')
     assert _bounds(after, night['id']) == _bounds(before, night['id'])
+
+
+def _companionship(start_time='22:00', duration=180):
+    return {'type': 'insert', 'event': {
+        'title': '陪她学习', 'start_time': start_time,
+        'duration_minutes': duration, 'reply_state': 'free'}}
+
+
+def _later_fixed_evening():
+    return db_schedule.save_canonical_schedule('gojo', 'u', AGREEMENT_NOW.date(), [
+        {'start_time': '16:30', 'end_time': '17:30', 'title': '备课',
+         'fixedness': 'flexible', 'reply_state': 'soft_busy'},
+        {'start_time': '22:00', 'end_time': '23:00', 'title': '深夜事务处理',
+         'fixedness': 'flexible', 'reply_state': 'soft_busy'},
+        {'start_time': '23:30', 'end_time': '00:30', 'title': '排死的课',
+         'fixedness': 'fixed', 'reply_state': 'hard_busy'},
+    ], now=AGREEMENT_NOW)
+
+
+def test_free_insert_defers_blocking_event_and_keeps_the_earlier_lesson(
+        schedule_database):
+    events = _evening_schedule()
+    night = next(event for event in events if event['title'] == '深夜事务处理')
+    lesson = next(event for event in events if event['title'] == '备课')
+    schedule_database.commit()
+    before = _timeline(schedule_database, 'char_schedule', 'id')
+
+    result = db_schedule.commit_schedule_transition(
+        'gojo', 'u', _companionship(), now=AGREEMENT_NOW,
+        source_event_id='user-clear-1830-0100')
+
+    assert result['ok'] is True
+    assert result['reflowed_event_ids'] == [night['id']]
+    after = _timeline(schedule_database, 'char_schedule', 'id')
+    assert _bounds(after, lesson['id']) == _bounds(before, lesson['id'])
+    night_start, night_end = _bounds(before, night['id'])
+    shifted = (
+        night_start + timedelta(minutes=180),
+        night_end + timedelta(minutes=180))
+    assert _bounds(after, night['id']) == shifted
+    inserted = schedule_database.query(
+        '''SELECT title, reply_state, start_time, end_time
+           FROM char_schedule WHERE id=%s''', (result['event_id'],))['rows'][0]
+    assert inserted == {
+        'title': '陪她学习', 'reply_state': 'free',
+        'start_time': '22:00', 'end_time': '01:00'}
+    night_row = schedule_database.query(
+        '''SELECT title, sched_date::text AS sched_date, start_time, end_time
+           FROM char_schedule WHERE id=%s''', (night['id'],))['rows'][0]
+    # 跨过午夜后的实测：日期列仍是原日，钟面变成次日 01:00–07:00。
+    # sched_date 不跟着挪，次日生成的日程可能和这段重叠。
+    assert night_row == {
+        'title': '深夜事务处理',
+        'sched_date': '2026-10-25',
+        'start_time': '01:00',
+        'end_time': '07:00',
+    }
+    assert shifted[0].astimezone(AGREEMENT_NOW.tzinfo) == AGREEMENT_NOW.replace(
+        day=26, hour=1, minute=0)
+    assert shifted[1].astimezone(AGREEMENT_NOW.tzinfo) == AGREEMENT_NOW.replace(
+        day=26, hour=7, minute=0)
+    during = db_schedule.get_current_world_state('gojo', 'u', DURING_NIGHT)
+    assert during['event']['id'] == result['event_id']
+    assert during['event']['title'] == '陪她学习'
+    assert during['availability']['reply_state'] == 'free'
+
+
+def test_insert_with_a_later_fixed_event_changes_nothing(schedule_database):
+    _later_fixed_evening()
+    schedule_database.commit()
+    before = _schedule_snapshot(schedule_database)
+
+    result = db_schedule.commit_schedule_transition(
+        'gojo', 'u', _companionship(duration=60), now=AGREEMENT_NOW)
+
+    assert result == {'ok': False, 'reason': 'fixed_future_event_conflict'}
+    assert _schedule_snapshot(schedule_database) == before
+
+
+def _assert_preflight_writes_nothing(schedule_database, intent, now, reason,
+                                    character_id='gojo', user_id='u'):
+    schedule_database.commit()
+    before = _schedule_snapshot(schedule_database)
+    preview = db_schedule.preflight_schedule_transition(
+        character_id, user_id, intent, now=now)
+    assert preview == {'ok': False, 'reason': reason}
+    assert _schedule_snapshot(schedule_database) == before
+
+
+def test_preflight_fixed_future_insert_writes_nothing(schedule_database):
+    _later_fixed_evening()
+    _assert_preflight_writes_nothing(
+        schedule_database, _companionship(duration=60), AGREEMENT_NOW,
+        'fixed_future_event_conflict')
+
+
+def test_preflight_fixed_cancel_writes_nothing(schedule_database):
+    events = _evening_schedule(fixed=True)
+    night = next(event for event in events if event['title'] == '深夜事务处理')
+    _assert_preflight_writes_nothing(
+        schedule_database, {
+            'type': 'cancel', 'event_id': night['id'],
+            'expected_revision': night['revision'],
+        }, AGREEMENT_NOW, 'fixed_event_requires_external_override')
+
+
+def test_preflight_insert_start_not_future_writes_nothing(schedule_database):
+    _evening_schedule()
+    _assert_preflight_writes_nothing(
+        schedule_database, _companionship(start_time='14:00', duration=30),
+        AGREEMENT_NOW, 'insert_start_not_future')
+
+
+def test_preflight_insert_overlap_writes_nothing(schedule_database):
+    _afternoon_schedule()
+    _assert_preflight_writes_nothing(
+        schedule_database, _companionship(start_time='15:40', duration=30),
+        INSERT_NOW, 'insert_overlaps_active_event',
+        character_id='c1', user_id='u1')
+
+
+def test_preflight_active_event_without_start_writes_nothing(schedule_database):
+    _afternoon_schedule()
+    intent = _companionship(duration=30)
+    del intent['event']['start_time']
+    _assert_preflight_writes_nothing(
+        schedule_database, intent, INSERT_NOW,
+        'active_event_requires_explicit_transition',
+        character_id='c1', user_id='u1')

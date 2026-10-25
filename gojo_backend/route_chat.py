@@ -150,6 +150,11 @@ _TRACE_RETRY_REASONS = {
     'past_noon_used_as_future_deadline',
     'active_event_completion_claim_without_intent',
     'schedule_change_claim_without_intent',
+    'fixed_future_event_conflict',
+    'fixed_event_requires_external_override',
+    'insert_start_not_future',
+    'insert_overlaps_active_event',
+    'active_event_requires_explicit_transition',
     'current_clock_phase_conflict',
     'bilingual_numeric_anchor_mismatch',
     'temporal_prompt_marker_echo',
@@ -862,19 +867,70 @@ def _gate_voice_inbound(user_id, character_id, user_text, source_event_id, *, no
         return None, None
 
 
+_PREFLIGHT_FEEDBACK = {
+    'fixed_future_event_conflict': (
+        '上一候选的 schedule_action_intent 无法提交：插入点或延长点之后还有 '
+        'fixedness=fixed 的安排，整段往后挪会被拒绝，把陪伴时段写短也过不了。'
+        '请改用 cancel 取消挡路且不是 fixed 的安排，或把陪伴安排放到那条排死的安排'
+        '结束之后再 insert，或在台词里直接说这个挪不了，并且不要输出该字段。'
+    ),
+    'fixed_event_requires_external_override': (
+        '上一候选要取消的安排是 fixedness=fixed，提交会被拒绝。'
+        '请在台词里说清楚动不了，不要假装答应，也不要输出 schedule_action_intent。'
+    ),
+    'insert_start_not_future': (
+        '上一候选的 insert start_time 不是今天晚于现在的时间，提交会被拒绝。'
+        '请改成更晚的今天时刻，或在台词里说明做不到，不要把没提交的改动说成事实。'
+    ),
+    'insert_overlaps_active_event': (
+        '上一候选的 insert 与当前正在进行的安排重叠，提交会被拒绝。'
+        '请先用 complete / cancel / extend 处理当前安排，或把陪伴时段改到它结束之后。'
+    ),
+    'active_event_requires_explicit_transition': (
+        '上一候选的 insert 没有写 start_time，而现在有正在进行的安排，提交会被拒绝。'
+        '请给陪伴安排一个晚于现在的 start_time，或先处理当前安排。'
+    ),
+}
+
+
+def _preflight_schedule_rejection(character_id, user_id, parsed, *, now=None):
+    raw = ((parsed or {}).get('schedule_action_intent')
+           if isinstance(parsed, dict) else None)
+    if not raw:
+        return None
+    try:
+        from db_schedule import preflight_schedule_transition
+        preview = preflight_schedule_transition(
+            character_id, user_id, raw, now=now)
+    except Exception as exc:
+        print(f'[schedule] preflight skipped: {type(exc).__name__}')
+        return None
+    if not isinstance(preview, dict) or preview.get('ok', True):
+        return None
+    reason = preview.get('reason')
+    if reason not in _PREFLIGHT_FEEDBACK:
+        return None
+    return reason
+
+
 def _reject_schedule_candidate(character_id, user_id, parsed, system_blocks, *, now=None):
     from schedule_transition import validate_generated_schedule_reply
     reason, _world = validate_generated_schedule_reply(character_id, user_id, parsed, now=now)
+    if reason:
+        system_blocks.append({
+            'type': 'text',
+            'text': (
+                '上一候选把 active 日程说成已经结束，但没有匹配 event_id/revision 的'
+                '结构化 schedule_action_intent。文字不能修改现实；请按 canonical world '
+                'state 重新生成。'
+            ),
+        })
+        return reason
+    reason = _preflight_schedule_rejection(
+        character_id, user_id, parsed, now=now)
     if not reason:
         return None
-    system_blocks.append({
-        'type': 'text',
-        'text': (
-            '上一候选把 active 日程说成已经结束，但没有匹配 event_id/revision 的'
-            '结构化 schedule_action_intent。文字不能修改现实；请按 canonical world '
-            'state 重新生成。'
-        ),
-    })
+    system_blocks.append({'type': 'text', 'text': _PREFLIGHT_FEEDBACK[reason]})
     return reason
 
 
