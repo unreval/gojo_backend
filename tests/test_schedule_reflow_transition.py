@@ -341,3 +341,76 @@ def test_timed_insert_anchors_to_local_today_and_preserves_overnight_end(
         'SELECT sched_date::text AS sched_date FROM char_schedule WHERE id=%s',
         (result['event_id'],))['rows'][0]
     assert row['sched_date'] == expected_start.date().isoformat()
+
+
+AGREEMENT_NOW = datetime(2026, 10, 25, 14, 48, tzinfo=NOW.tzinfo)
+DURING_NIGHT = datetime(2026, 10, 25, 22, 30, tzinfo=NOW.tzinfo)
+CASUAL_AGREEMENT = '行吧，你中途别睡着就行。'
+
+
+def _evening_schedule(*, fixed=False):
+    return db_schedule.save_canonical_schedule('gojo', 'u', AGREEMENT_NOW.date(), [
+        {'start_time': '16:30', 'end_time': '17:30', 'title': '备课',
+         'fixedness': 'flexible', 'reply_state': 'soft_busy'},
+        {'start_time': '22:00', 'end_time': '04:00', 'title': '深夜事务处理',
+         'fixedness': 'fixed' if fixed else 'flexible', 'reply_state': 'soft_busy'},
+    ], now=AGREEMENT_NOW)
+
+
+def _bounds(timeline, event_id):
+    return timeline[event_id][1:3]
+
+
+def test_cancel_after_casual_agreement_clears_soft_busy_without_reflow(schedule_database):
+    """2026-10-25：答应空出晚上，cancel 只取消挡路安排，不顺延邻居。"""
+    events = _evening_schedule()
+    night = next(event for event in events if event['title'] == '深夜事务处理')
+    lesson = next(event for event in events if event['title'] == '备课')
+    schedule_database.commit()
+
+    during = db_schedule.get_current_world_state('gojo', 'u', DURING_NIGHT)
+    assert during['event']['id'] == night['id']
+    assert during['availability']['reply_state'] == 'soft_busy'
+    before = _timeline(schedule_database, 'char_schedule', 'id')
+
+    result = db_schedule.commit_schedule_transition(
+        'gojo', 'u', {
+            'type': 'cancel', 'event_id': night['id'],
+            'expected_revision': during['event']['revision'],
+        }, now=DURING_NIGHT, source_event_id='user-clear-1830-0100')
+
+    assert result['ok'] is True
+    assert result['action'] == 'cancel'
+    assert result['reflowed_event_ids'] == []
+    after_world = db_schedule.get_current_world_state('gojo', 'u', DURING_NIGHT)
+    assert after_world['event'] is None
+    assert after_world['availability']['reply_state'] == 'free'
+    assert after_world['availability']['reply_state'] != 'soft_busy'
+    after = _timeline(schedule_database, 'char_schedule', 'id')
+    assert _bounds(after, lesson['id']) == _bounds(before, lesson['id'])
+    assert _bounds(after, night['id']) == _bounds(before, night['id'])
+    stored = schedule_database.query(
+        'SELECT intent FROM char_schedule_transition')['rows'][0]['intent']
+    assert stored['type'] == 'cancel'
+    assert 'reflowed_event_ids' not in stored
+    assert CASUAL_AGREEMENT == '行吧，你中途别睡着就行。'
+
+
+def test_fixed_night_event_rejects_cancel_and_stays_soft_busy(schedule_database):
+    events = _evening_schedule(fixed=True)
+    night = next(event for event in events if event['title'] == '深夜事务处理')
+    schedule_database.commit()
+    during = db_schedule.get_current_world_state('gojo', 'u', DURING_NIGHT)
+    before = _timeline(schedule_database, 'char_schedule', 'id')
+
+    result = db_schedule.commit_schedule_transition(
+        'gojo', 'u', {
+            'type': 'cancel', 'event_id': night['id'],
+            'expected_revision': during['event']['revision'],
+        }, now=DURING_NIGHT, source_event_id='user-clear-fixed')
+
+    assert result == {'ok': False, 'reason': 'fixed_event_requires_external_override'}
+    still = db_schedule.get_current_world_state('gojo', 'u', DURING_NIGHT)
+    assert still['availability']['reply_state'] == 'soft_busy'
+    after = _timeline(schedule_database, 'char_schedule', 'id')
+    assert _bounds(after, night['id']) == _bounds(before, night['id'])

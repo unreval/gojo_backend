@@ -2569,9 +2569,12 @@ def format_world_prompt(character_id, user_id, now=None):
         lines.extend([
             '这些还没发生，可以为她调整：要改就输出结构化 schedule_action_intent'
             '（cancel / relocate / insert）。',
+            '她要求空出一段时间、而你答应了（包括「行吧」这种随口答应），'
+            '首选 cancel 掉挡路且 fixedness 不是 fixed 的安排；'
+            '不要用 insert 把后面的安排往后推来假装把时间空出来。',
             'cancel / relocate 的 event_id 必须照抄上面的值，'
             'expected_revision 必须照抄对应的 revision；insert 使用新安排的 event。',
-            'insert 可以用 event.start_time 指定今天晚于现在的开始时间，为她预留时段；不写就是立刻开始。',
+            'insert 的 start_time 只表示新事项今天晚于现在的开始时间；不写就是立刻开始。',
             'fixedness=fixed 的改不动，别承诺。没有已提交 intent 时，不能说你已经改了。',
         ])
         sections.append('\n'.join(lines))
