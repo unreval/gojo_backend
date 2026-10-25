@@ -663,6 +663,8 @@ def _generate_or_none(
                 'type': 'text',
                 'text': (
                     f'上一候选未满足输出协议（{repair_reason}）。只返回合法 JSON；'
+                    'messages 数组必填且至少一条；'
+                    'schedule_action_intent 等附加字段不能代替 messages。'
                     'messages 数组每项必须有 jp（日语）和 zh（忠实中文翻译）。'
                     '不要解释、不要 Markdown、不要把同一语言复制到两栏。'
                 ),
@@ -724,17 +726,13 @@ def _generate_or_none(
         reason = ('malformed_json' if unusable_stop else _protocol_rejection_reason(
             parsed, raw, min_messages, acceptance_mode))
         if reason:
-            # Malformed transport shape fails immediately. Language and story
+            # Malformed JSON fails immediately. Message shape, language and story
             # length errors get at most one semantic regeneration.
-            short_story = (reason == 'missing_messages'
-                           and isinstance(parsed, dict)
-                           and isinstance(parsed.get('messages'), list)
-                           and 0 < len(parsed['messages']) < min_messages)
-            will_retry = ((reason in (
-                'jp_equals_zh_verbal', 'zh_contains_kana', 'invalid_message_field',
+            will_retry = (reason in (
+                'missing_messages', 'jp_equals_zh_verbal', 'zh_contains_kana',
+                'invalid_message_field',
                 'time_word_contradiction', 'negation_polarity_mismatch',
-                'number_value_mismatch')
-                or short_story) and attempt + 1 < semantic_attempts)
+                'number_value_mismatch') and attempt + 1 < semantic_attempts)
             _emit_generation_trace(
                 model=model, max_tokens=max_tokens, system_blocks=request_system_blocks,
                 messages=messages, attempt=attempt + 1, attempts=semantic_attempts,

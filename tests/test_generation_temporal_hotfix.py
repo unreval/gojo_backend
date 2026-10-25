@@ -75,7 +75,6 @@ class PlaintextContractTests(unittest.TestCase):
 
     def test_invalid_or_protocol_output_fails_without_repeating_generation(self):
         for raw in ('', '?!', 'null', '\x00hello', '{"messages":[',
-                    '{"messages":[],"reminder":{"content":"sleep"}}',
                     'hello\nschedule_action_intent: complete',
                     'JP: hello\nZH: 你好', '<thinking>private</thinking>',
                     'hello <<<OFFLINE_CHARACTER_STATES>>> {"inner":"x"}'):
@@ -85,6 +84,39 @@ class PlaintextContractTests(unittest.TestCase):
                 self.assertIsNone(state)
                 self.assertEqual(calls, 1)
                 self.assertEqual([t['output_contract'] for t in traces], ['retry_invalid'])
+
+    def test_empty_messages_retries_without_salvaging_auxiliary_fields(self):
+        raw = '{"messages":[],"reminder":{"content":"sleep"}}'
+        result, state, calls, traces = self.generate(raw)
+        self.assertIsNone(result)
+        self.assertIsNone(state)
+        self.assertEqual(calls, 2)
+        self.assertEqual([t['parse_invalid_reason'] for t in traces],
+                         ['missing_messages', 'missing_messages'])
+        self.assertEqual([t['will_retry'] for t in traces], [True, False])
+
+    def test_missing_messages_stops_after_two_even_with_five_attempts(self):
+        response = types.SimpleNamespace(stop_reason='end_turn', usage=None)
+        missing = '{"emotion":"秘密候选"}'
+        complete = '{"messages":[{"jp":"そうだね","zh":"是啊"}]}'
+        system_blocks = [{'type': 'text', 'text': '角色设定'}]
+        messages = [{'role': 'user', 'content': '你好'}]
+        with patch.object(route_chat, '_create_json', side_effect=[
+                (missing, response), (missing, response), (complete, response)]) as provider, \
+                patch('builtins.print'):
+            result, state = route_chat._generate_or_none(
+                'offline', 100, system_blocks, messages, attempts=5,
+                log_tag='test', cache_tag='test', salvage=True)
+        self.assertIsNone(result)
+        self.assertIsNone(state)
+        self.assertEqual(provider.call_count, 2)
+        calls = provider.call_args_list
+        self.assertEqual(calls[0].args[2], system_blocks)
+        self.assertEqual(calls[1].args[2][:-1], system_blocks)
+        self.assertEqual(system_blocks, [{'type': 'text', 'text': '角色设定'}])
+        self.assertEqual(messages, [{'role': 'user', 'content': '你好'}])
+        self.assertEqual(calls[1].args[3], messages)
+        self.assertNotIn('秘密候选', json.dumps(calls[1].args[2:], ensure_ascii=False))
 
     def test_incomplete_provider_output_and_required_structure_are_not_salvaged(self):
         for reason in ('max_tokens', 'length', 'tool_use', 'pause_turn', 'refusal', 'content_filter'):
@@ -121,7 +153,7 @@ class PlaintextContractTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 result, _, calls, traces = self.generate(raw)
                 self.assertIsNone(result)
-                expected_calls = 1 if reason in ('missing_messages', 'malformed_json') else 2
+                expected_calls = 1 if reason == 'malformed_json' else 2
                 self.assertEqual(calls, expected_calls)
                 self.assertEqual([t['parse_invalid_reason'] for t in traces],
                                  [reason] * expected_calls)

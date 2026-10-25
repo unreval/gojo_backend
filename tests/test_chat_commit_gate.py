@@ -395,6 +395,73 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertIn('jp_equals_zh_verbal', calls[1].args[2][-1]['text'])
         self.assertNotIn(private_raw, calls[1].args[2][-1]['text'])
 
+    def test_missing_messages_retries_with_repair_prompt_and_commits_once(self):
+        original_blocks = [{'type': 'text', 'text': '角色设定'}]
+        self.route.build_system_blocks.return_value = original_blocks
+        missing = json.dumps({
+            'emotion': '平静',
+            'schedule_action_intent': {'type': 'cancel', 'event_id': 7},
+        }, ensure_ascii=False)
+        response, body = self.send([missing, chat_reply('そうだね', '是啊')])
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('generation_failed', body)
+        self.assertEqual(body['messages'][0]['zh'], '是啊')
+        self.assertEqual(self.route._create_json.call_count, 2)
+        calls = self.route._create_json.call_args_list
+        self.assertEqual(calls[0].args[2], original_blocks)
+        self.assertEqual(calls[1].args[2][:-1], original_blocks)
+        self.assertEqual(original_blocks, [{'type': 'text', 'text': '角色设定'}])
+        self.assertEqual(calls[1].args[3], calls[0].args[3])
+        hint = calls[1].args[2][-1]
+        self.assertEqual(hint['type'], 'text')
+        self.assertIn('missing_messages', hint['text'])
+        self.assertIn('messages 数组必填且至少一条', hint['text'])
+        self.assertIn('schedule_action_intent 等附加字段不能代替 messages', hint['text'])
+        self.assertEqual(
+            [(t['attempt'], t['outcome'], t['will_retry'])
+             for t in self.generation_traces() if 'attempt' in t],
+            [(1, 'parse_invalid', True), (2, 'accepted', False)])
+        self.assertEqual(self.user_memory_roles(), ['user', 'assistant'])
+        self.save_user_once.assert_called_once()
+        self.save_short.assert_called_once()
+        self.record_turn.assert_called_once()
+
+    def test_nonarray_or_empty_messages_retries_and_recovers(self):
+        for index, messages in enumerate(('broken', {'jp': 'こんにちは'}, None, [])):
+            with self.subTest(messages=messages):
+                invalid = json.dumps({'emotion': '平静', 'messages': messages},
+                                     ensure_ascii=False)
+                response, body = self.send(
+                    [invalid, chat_reply('そうだね', '是啊')],
+                    source_event_id=f'invalid-messages-{index}')
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn('generation_failed', body)
+                self.assertEqual(body['messages'][0]['zh'], '是啊')
+                self.assertEqual(self.route._create_json.call_count, 2)
+                calls = self.route._create_json.call_args_list
+                self.assertIn('missing_messages', calls[1].args[2][-1]['text'])
+                self.assertEqual(self.save_user_once.call_count, index + 1)
+                self.assertEqual(self.save_short.call_count, index + 1)
+                self.assertEqual(self.record_turn.call_count, index + 1)
+
+    def test_two_missing_messages_candidates_fail_without_third_attempt(self):
+        response, body = self.send([
+            '{"emotion":"平静"}', '{"emotion":"平静"}',
+            chat_reply('そうだね', '是啊'),
+        ])
+        self.assert_generation_failed(response, body, attempts=2)
+        self.assertEqual(
+            [(t['attempt'], t['parse_invalid_reason'], t['will_retry'])
+             for t in self.generation_traces()],
+            [(1, 'missing_messages', True), (2, 'missing_messages', False)])
+
+    def test_extracted_object_without_messages_retries_but_never_commits(self):
+        raw = '[{"jp":"こんにちは"}'
+        response, body = self.send([raw, raw, chat_reply('そうだね', '是啊')])
+        self.assert_generation_failed(response, body, attempts=2)
+        self.assertEqual([t['parse_invalid_reason'] for t in self.generation_traces()],
+                         ['missing_messages', 'missing_messages'])
+
     def test_retry_prompt_is_transient_protocol_only_and_never_echoes_output(self):
         private_raw = '今日は疲れたよ'
         original_blocks = [{'type': 'text', 'text': '角色设定'}]
@@ -758,7 +825,7 @@ class ChatCommitGateTests(unittest.TestCase):
     def test_malformed_json_and_internal_debris_are_never_salvaged(self):
         for raw in ('{"jp":"こんにちは"', '{"messages":[',
                     '{"unknown"', '["hello",', '[1,', '[true,',
-                    '{unknown: broken}', '[{"jp":"こんにちは"}',
+                    '{unknown: broken}',
                     '[[1, 2]', '说明：{"unknown"', '说明：["hello",', '说明：[1,',
                     '{broken', '[broken', '[[broken]',
                     'jp: こんにちは', '"unknown_field": "秘密"', 'state: thinking',
