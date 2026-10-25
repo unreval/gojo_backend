@@ -38,8 +38,8 @@ _INDEFINITE_MEASURES = frozenset('个瓶次张条只台份句天年块杯件本�
 
 # Chinese side of utils' translation guards. These are bounded lexical checks,
 # not a general entailment or multi-clause polarity classifier.
-# _NEGATION stays the value-polarity pattern imported by candidate_producer.
-# G5 uses _has_grounding_negation, which strips questions and widens 没.
+# _NEGATION has no caller. Value polarity and G5 both use
+# _has_grounding_negation, which strips questions and widens 没.
 _DOUBLE_NEGATION = re.compile(r'不是不|并非不|不能不|不得不|没有不')
 _NEGATION = re.compile(
     r'不(?:是|会|能|想|要|行|可以|可能|应该|对|知道|必|用|需要|愿意|喜欢|爱|亏)'

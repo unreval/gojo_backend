@@ -568,7 +568,7 @@ def adjudicate_and_project(cur, *, user_id, character_id, candidate, event_id,
     from cognitive_revision import _apply_literal_operation
     from cognitive_queue import stable_advisory_lock_key
     from memory_candidate import apply_candidate, validate_candidate
-    from memory_candidate import _NEGATION, _DOUBLE_NEGATION
+    from memory_candidate import _has_grounding_negation
 
     cur.execute('SAVEPOINT candidate_projection')
 
@@ -603,8 +603,7 @@ def adjudicate_and_project(cur, *, user_id, character_id, candidate, event_id,
         if value not in checked['quote']:
             return finish({'status': 'rejected', 'reason': 'candidate_value_not_grounded'},
                           rollback=True)
-        if (bool(_NEGATION.search(_DOUBLE_NEGATION.sub('', checked['quote'])))
-                != bool(_NEGATION.search(_DOUBLE_NEGATION.sub('', value)))):
+        if _has_grounding_negation(checked['quote']) != _has_grounding_negation(value):
             return finish({'status': 'rejected', 'reason': 'candidate_value_polarity_mismatch'},
                           rollback=True)
         if checked['predicate'] == 'reported_preference':
