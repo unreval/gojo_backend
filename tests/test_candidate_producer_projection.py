@@ -184,6 +184,27 @@ class CandidateProducerProjectionTests(unittest.TestCase):
                                  ('rejected', 'candidate_value_polarity_mismatch'))
                 self.assertEqual(self.database_state(), before)
 
+    def test_question_form_and_bare_mei_values_still_project(self):
+        for name, quote, summary, value in (
+                ('question', '你是不是一直这样对我', '她一直这样对我', '一直这样对我'),
+                ('bare-mei', '你没发！', '她没发', '没发'),
+                ('mei-asymmetry', '你没发！你没有回我', '她没发没有回我', '没发')):
+            with self.subTest(name=name):
+                candidate = self.candidate(source_event_id=f'polarity-pass-{name}',
+                    quote=quote, summary=summary, object=name, value=value)
+                self.assertEqual(self.produce(candidate)['status'], 'validated_projection')
+
+    def test_logged_quote_fragment_that_drops_bu_zhongyao_stays_rejected(self):
+        quote = '是我不重要所以你才能一直这样对我吗'
+        candidate = self.candidate(source_event_id='polarity-dropped-denial',
+            quote=quote, summary='她不重要', object='自我评价', value='一直这样对我')
+        self.seed(candidate, adjudicated=False, include_claim=False)
+        before = self.database_state()
+        result = self.produce(candidate)
+        self.assertEqual((result['status'], result['reason']),
+                         ('rejected', 'candidate_value_polarity_mismatch'))
+        self.assertEqual(self.database_state(), before)
+
     def test_stable_operation_replay_is_a_noop_and_two_candidates_share_event(self):
         first = self.candidate()
         self.seed(first, text='今天我亏了69元，今天我买了咖啡。',

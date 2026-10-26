@@ -25,7 +25,7 @@ class FormatExpiryTests(unittest.TestCase):
             self.assertEqual(_format_expiry(exp), '2026-10-25 22:42')
 
     def test_iso_string_and_zulu_parse_without_raising(self):
-        with self.assertLogs('smart_recall', level='WARNING') as captured:
+        with self.assertNoLogs('smart_recall', level='WARNING'):
             self.assertEqual(
                 _format_expiry('2026-10-25T22:42:00+00:00', record_id=7),
                 '2026-10-25 22:42',
@@ -34,8 +34,6 @@ class FormatExpiryTests(unittest.TestCase):
                 _format_expiry('2026-10-25T14:42:00Z', record_id=8),
                 '2026-10-25 14:42',
             )
-        self.assertIn('id=7', captured.output[0])
-        self.assertIn('id=8', captured.output[1])
 
     def test_garbage_string_is_shown_and_does_not_raise(self):
         with self.assertLogs('smart_recall', level='WARNING') as captured:
@@ -44,6 +42,7 @@ class FormatExpiryTests(unittest.TestCase):
                 'not-a-date!!',
             )
         self.assertIn('id=9', captured.output[0])
+        self.assertIn('not-a-date!!', captured.output[0])
 
     def test_non_datetime_object_does_not_raise(self):
         text = _format_expiry(object())
@@ -71,8 +70,8 @@ class FormatExpiryTests(unittest.TestCase):
         self.assertIn('[到期 totally-garbage]', memory_text)
         self.assertEqual(bond_text, '')
         self.assertEqual(told_text, '')
-        self.assertTrue(any('id=11' in line for line in captured.output))
         self.assertTrue(any('id=12' in line for line in captured.output))
+        self.assertFalse(any('id=11' in line for line in captured.output))
 
 
 if __name__ == '__main__':

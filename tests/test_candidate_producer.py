@@ -1002,5 +1002,118 @@ class ProducerDatabaseTests(unittest.TestCase):
                                  ('source-0',))[0][0])
 
 
+class CandidateValuePolarityTests(unittest.TestCase):
+    """Value polarity uses the same denial check as G5.
+
+    validate_candidate is stubbed so these tests reach the quote/value check
+    without a database. The check itself is the production function.
+    """
+
+    def setUp(self):
+        self.now = datetime(2026, 10, 25, tzinfo=timezone.utc)
+
+    def adjudicate(self, quote, value, predicate='reported_fact'):
+        cur = Mock()
+        cur.fetchone.return_value = ({}, {}, self.now)
+        candidate = {
+            'source_event_id': 'source-polarity',
+            'quote': quote,
+            'summary': '她今天提到了这件事',
+            'predicate': predicate,
+            'object': '原话片段',
+            'value': value,
+        }
+        with patch('memory_candidate.validate_candidate', return_value=(True, None)), \
+                patch('cognitive_revision._apply_literal_operation',
+                      return_value={'status': 'applied', 'action': 'reported'}) as writer, \
+                patch('memory_candidate.apply_candidate',
+                      return_value={'status': 'validated_projection'}):
+            result = producer.adjudicate_and_project(
+                cur, user_id='u', character_id='c', candidate=candidate,
+                event_id=1, occurred_at=self.now)
+        return result, writer
+
+    def assert_not_polarity_mismatch(self, quote, value, predicate='reported_fact'):
+        result, writer = self.adjudicate(quote, value, predicate)
+        self.assertNotEqual(result.get('reason'), 'candidate_value_polarity_mismatch')
+        self.assertEqual(result['status'], 'validated_projection')
+        self.assertTrue(writer.called)
+
+    def assert_polarity_mismatch(self, quote, value, predicate='reported_fact'):
+        result, writer = self.adjudicate(quote, value, predicate)
+        self.assertEqual((result['status'], result['reason']),
+                         ('rejected', 'candidate_value_polarity_mismatch'))
+        self.assertFalse(writer.called)
+
+    def test_question_form_does_not_split_a_non_negated_fragment(self):
+        # 是不是 / 有没有 / 能不能 / 要不要 里的「不是」「没有」「不能」「不要」
+        # 是问句，不是否定。value 取原话里不含否定的片段。
+        for quote, value in (
+                ('你是不是一直这样对我', '一直这样对我'),
+                ('你有没有吃饭', '吃饭'),
+                ('你能不能过来', '过来'),
+                ('你要不要咖啡', '咖啡')):
+            with self.subTest(quote=quote, value=value):
+                self.assert_not_polarity_mismatch(quote, value)
+
+    def test_logged_lines_share_polarity_with_the_value_span(self):
+        # 线上原话。旧正则看不见「不重要」和「没发」，但看得见问句里的「不是」
+        # 以及「没有」。value 和原话在 G5 口径下极性一致时不再误杀。
+        for quote, value in (
+                ('是我不重要所以你才能一直这样对我吗', '不重要'),
+                ('是不是我不重要所以你才能一直这样对我吗', '不重要'),
+                ('你没发！', '没发'),
+                ('你是不是没发！', '没发'),
+                ('你没发！你没有回我', '没发')):
+            with self.subTest(quote=quote, value=value):
+                self.assert_not_polarity_mismatch(quote, value)
+
+    def test_dropped_or_flipped_denial_is_still_a_mismatch(self):
+        for quote, value in (
+                ('我不喜欢咖啡这种饮料', '喜欢'),
+                ('我不是不喜欢咖啡', '不喜欢'),
+                ('是我不重要所以你才能一直这样对我吗', '重要'),
+                ('是我不重要所以你才能一直这样对我吗', '一直这样对我'),
+                ('你没发！', '发')):
+            with self.subTest(quote=quote, value=value):
+                self.assert_polarity_mismatch(quote, value)
+
+    def test_conversational_mei_openers_are_not_value_polarity_mismatches(self):
+        for quote, value in (
+                ('没关系啦我明天考离散数学', '明天考离散数学'),
+                ('没事我自己搞定这个报告', '我自己搞定这个报告'),
+                ('没错我买了咖啡', '买了咖啡'),
+                ('你是不是一直这样对我', '一直这样对我')):
+            with self.subTest(quote=quote, value=value):
+                self.assert_not_polarity_mismatch(quote, value)
+
+    def test_real_denial_still_makes_the_value_span_a_polarity_mismatch(self):
+        self.assert_polarity_mismatch('你没发！', '发')
+        self.assert_polarity_mismatch('我不喜欢咖啡这种饮料', '喜欢')
+        self.assert_polarity_mismatch(
+            '是我不重要所以你才能一直这样对我吗', '重要')
+        self.assert_polarity_mismatch('我今天没事做', '今天')
+
+    def test_non_denial_bu_words_are_not_treated_as_negation(self):
+        for quote, value in (
+                ('不过我今天买了咖啡', '买了咖啡'),
+                ('我不但喜欢咖啡', '喜欢'),
+                ('我不仅喜欢咖啡', '喜欢'),
+                ('不如先喝咖啡', '喝咖啡'),
+                ('差不多喜欢咖啡', '喜欢')):
+            with self.subTest(quote=quote, value=value):
+                self.assert_not_polarity_mismatch(quote, value)
+
+    def test_reported_preference_branch_still_rejects_embedded_positive_values(self):
+        self.assert_polarity_mismatch(
+            '我不喜欢咖啡这种饮料', '喜欢', predicate='reported_preference')
+        self.assert_polarity_mismatch(
+            '我不讨厌咖啡这种饮料', '讨厌', predicate='reported_preference')
+        self.assert_not_polarity_mismatch(
+            '我喜欢喝咖啡', '喜欢', predicate='reported_preference')
+        self.assert_not_polarity_mismatch(
+            '我不喜欢喝咖啡', '不喜欢', predicate='reported_preference')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -726,7 +726,7 @@ def _format_expiry(exp, *, record_id=None) -> str:
     if not exp:
         return '未设期限'
     if isinstance(exp, str):
-        _LOGGER.warning(
+        _LOGGER.debug(
             'recall expiry is str id=%s value=%r',
             record_id,
             exp[:80],
@@ -734,6 +734,11 @@ def _format_expiry(exp, *, record_id=None) -> str:
         try:
             exp = datetime.fromisoformat(exp.replace('Z', '+00:00'))
         except ValueError:
+            _LOGGER.warning(
+                'recall expiry is unparseable str id=%s value=%r',
+                record_id,
+                exp[:80],
+            )
             return exp[:16].replace('T', ' ')
     try:
         return exp.strftime('%Y-%m-%d %H:%M')
