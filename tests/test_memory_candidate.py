@@ -154,6 +154,23 @@ class MemoryCandidateGateTests(unittest.TestCase):
                                                raw_text=quote),
                                  (False, 'number_value_mismatch'))
 
+    def test_indefinite_duration_is_not_a_quantity(self):
+        # Shadow batch bdebbb00, candidate 1: 睡了会 -> 睡了一会 adds no number,
+        # the 一 is the same indefinite article already exempted in 一下 / 一点.
+        for text in ('睡了一会', '等一会儿再说', '一会就好'):
+            with self.subTest(text=text):
+                self.assertEqual(memory_candidate._number_tokens(text), [])
+        quote = '太累了我刚刚又去睡了会'
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary='她太累了，刚刚又去睡了一会'),
+                          raw_text=quote), (True, None))
+
+    def test_counted_units_are_still_quantities_after_the_exemption(self):
+        for text, expected in (('一会议室的人', ['一']), ('开了三会', ['三']),
+                               ('十一会场', ['十一'])):
+            with self.subTest(text=text):
+                self.assertEqual(memory_candidate._number_tokens(text), expected)
+
     def test_number_may_be_omitted_from_summary(self):
         self.assertEqual(self.validate(self.candidate(summary='她今天买咖啡亏钱了')),
                          (True, None))
@@ -263,6 +280,33 @@ class MemoryCandidateGateTests(unittest.TestCase):
         self.assertEqual(self.validate(self.candidate(quote=quote, summary='她这次交易没亏钱'),
                                        raw_text=quote), (True, None))
 
+    def test_rhetorical_denial_matches_a_plain_denial_in_the_summary(self):
+        # Shadow batch 89e68370, candidate 3: 哪有钱 and 没钱 deny the same
+        # thing, so G5 must not read the faithful summary as a polarity flip.
+        quote = '我现在可是穷光蛋哪有钱点星巴克'
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary='她说自己现在是穷光蛋，没钱点星巴克'),
+                          raw_text=quote), (True, None))
+
+    def test_interrogative_na_words_are_not_denials(self):
+        for text in ('你在哪里上班', '哪个校区上课', '哪天有空'):
+            with self.subTest(text=text):
+                self.assertFalse(memory_candidate._has_grounding_negation(text))
+
+    def test_leading_answer_particle_does_not_negate_the_following_clause(self):
+        # Shadow batch 15347f2e, candidate 1: the 没有 answers "很疼吗", it does
+        # not deny 疼. The summary carries no denial and must still match.
+        quote = '没有哦，就是有点点疼…要是你在就好了…'
+        self.assertFalse(memory_candidate._has_grounding_negation(quote))
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary='她就是有点点疼'),
+                          raw_text=quote), (True, None))
+
+    def test_answer_particle_is_kept_when_the_rest_still_denies(self):
+        for text in ('没有，不疼', '没有啊，我不去了', '没有哦，没带伞'):
+            with self.subTest(text=text):
+                self.assertTrue(memory_candidate._has_grounding_negation(text))
+
     def test_double_negatives_are_not_treated_as_plain_denial(self):
         for quote, summary in (
                 ('我今天不得不去上班', '她今天去上班'),
@@ -322,6 +366,40 @@ class MemoryCandidateGateTests(unittest.TestCase):
             self.candidate(quote=quote, summary=summary), raw_text=quote)
         self.assertEqual(result, (False, 'number_value_mismatch'))
         self.assertIsNone(coverage)
+
+    def test_referent_from_another_sentence_of_the_same_turn_is_grounded(self):
+        # Shadow batch 89e68370: one user turn yields several quotes. 那个外卖小哥
+        # is introduced in the first sentence and referred to as 他 in the second,
+        # so resolving it in the summary is provenanced, not invented.
+        turn = ('在等车过打算拐弯进楼的时候那个外卖小哥不走外面偏偏往里面来撞，'
+                '一看到他翻的是星巴克瞬间释怀了甚至有点想笑')
+        quote = '一看到他翻的是星巴克瞬间释怀了甚至有点想笑'
+        result, coverage = self.validate_with_grounding_coverage(
+            self.candidate(quote=quote, summary='她看到外卖小哥送的是星巴克后瞬间释怀觉得好笑'),
+            raw_text=turn)
+        self.assertEqual(result, (True, None))
+        self.assertEqual(coverage, (15, 21))
+
+    def test_invented_clause_is_rejected_against_the_whole_turn(self):
+        # The widened base must not weaken G9: 对方还说是她的问题 appears nowhere
+        # in the turn and still has to fail.
+        turn = ('在等车过打算拐弯进楼的时候那个外卖小哥不走外面偏偏往里面来撞，'
+                '一看到他翻的是星巴克瞬间释怀了甚至有点想笑')
+        quote = '在等车过打算拐弯进楼的时候那个外卖小哥不走外面偏偏往里面来撞'
+        self.assertEqual(
+            self.validate(self.candidate(
+                quote=quote, summary='她等车时拐弯进楼被外卖小哥撞了，对方还说是她的问题'),
+                raw_text=turn),
+            (False, 'summary_not_grounded_in_quote'))
+
+    def test_grounding_base_is_the_turn_and_never_generated_text(self):
+        # Text that is not in the canonical turn cannot ground a summary, even
+        # when it would be a plausible reading of it.
+        turn = '我今天很累'
+        self.assertEqual(
+            self.validate(self.candidate(quote=turn, summary='她今天很累需要休息'),
+                          raw_text=turn),
+            (False, 'summary_not_grounded_in_quote'))
 
     def test_synonym_rewrite_still_fails_summary_grounding(self):
         quote = '我今天也要打牌，他们过来我家'

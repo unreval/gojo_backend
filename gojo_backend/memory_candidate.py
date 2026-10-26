@@ -30,7 +30,7 @@ _HELPER_NUMBER = re.compile(r'(?:[0-9]+|[零〇一二三四五六七八九十百
 _NUMBER_WORD_EXEMPTIONS = (
     '八卦',
     '一直', '一边', '一起', '一样', '一点', '一些', '一下', '一切',
-    '一定', '一般', '万一', '十分', '第一', '二手',
+    '一定', '一般', '一会', '万一', '十分', '第一', '二手',
 )
 # 一 immediately before a measure is an indefinite article (一个 / 一瓶),
 # not a quantity. Larger numerals such as 一百个 stay quantities.
@@ -53,7 +53,16 @@ _GROUNDING_NEGATION = re.compile(
     r'|重要|合适|够|清楚|舒服)'
     r'|没'
     r'|别(?:想|说|闹|来|急|忘)|才不|才没|并不|绝不|从不'
+    # Rhetorical denials. 哪有钱 denies having money exactly as 没钱 does, so a
+    # faithful summary that writes 没 must not read as a polarity flip. Kept to
+    # 哪 + a bounded verb list so 哪里 / 哪个 / 哪天 stay interrogatives.
+    r'|哪(?:有|能|会)'
 )
+# A bare 没有 / 没 answering the previous turn ("很疼吗" -> "没有哦，就是有点点疼")
+# denies the question, not the clause that follows it. It is dropped only when
+# nothing else in the text carries a denial, so 没有，不疼 keeps its polarity.
+_ANSWER_PARTICLE_NEGATION = re.compile(r'^(?:没有|没)(?=[哦啊呀吧呢，,。！!？?…\s])')
+_ANY_NEGATION_CHAR = re.compile(r'[不没别无非甭]')
 _TIME_WORDS = {
     '早上': 'morning', '上午': 'morning', '清晨': 'morning', '今早': 'morning',
     '早饭': 'morning', '早餐': 'morning',
@@ -146,7 +155,9 @@ def _number_tokens(text):
                 break
             end = index + len(word)
             # 十分钟 / 十分秒 is ten units, not the adverb 十分.
-            if not (word == '十分' and end < len(text) and text[end] in '钟鐘秒'):
+            # 一会议 is 一 + 会议, not the indefinite duration 一会.
+            if not (word == '十分' and end < len(text) and text[end] in '钟鐘秒') \
+                    and not (word == '一会' and end < len(text) and text[end] == '议'):
                 exempt_spans.append((index, end))
             start = end
     tokens = []
@@ -175,11 +186,16 @@ def _numbers_match(quote, summary):
 def _has_grounding_negation(text):
     """Whether G5 and value polarity should treat text as containing a denial.
 
+    A leading 没有 / 没 that answers the previous turn is dropped first when the
+    rest of the text carries no denial of its own.
     Questions of the form X不X / X没X are removed first. 没 is a denial except
     the words in _MEI_NON_NEGATION, including 没关系 / 没错 / 没事.
     没事做、没事干 and 没事儿 stay denials. 不 stays on a fixed verb list so
     不过 / 不但 / 不仅 / 不如 / 差不多 are not denials.
     """
+    answered = _ANSWER_PARTICLE_NEGATION.sub('', text, count=1)
+    if answered != text and not _ANY_NEGATION_CHAR.search(answered):
+        text = answered
     text = _DOUBLE_NEGATION.sub('', text)
     text = _MEI_NON_NEGATION.sub('', text)
     text = _A_NOT_A.sub('', text)
@@ -266,10 +282,15 @@ def validate_candidate(cur, user_id, character_id, candidate):
 
     # G9 covers summary residue after the time and number checks.
     # interpretation is a subjective reading and is not part of this text.
+    # Grounding reads the whole canonical turn, not just the quoted span: one
+    # user turn is split into several quotes, so a referent introduced in an
+    # earlier sentence of the same turn (那个外卖小哥 ... 一看到他) is already
+    # provenanced. raw_content is the verbatim turn verified above; nothing
+    # outside it, and no generated text, becomes grounding evidence.
     grounded_text = re.sub(r'她|他|您|五条悟|用户|对方', '', summary)
     time_words = sorted(_TIME_WORDS.keys() | _DAY_WORDS.keys(), key=len, reverse=True)
     grounded_text = re.sub('|'.join(time_words), '', grounded_text)
-    q = re.sub(r'\s', '', quote)
+    q = re.sub(r'\s', '', raw_content)
     grounded_text = re.sub(
         r'[-+负]?[0-9０-９零〇一二三四五六七八九十百千万萬亿億兆两,.点]+',
         lambda match: match.group() if match.group() in q else '', grounded_text)
