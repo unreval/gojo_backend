@@ -8,3 +8,4 @@ openai
 groq
 opencc-python-reimplemented
 boto3
+numpy
