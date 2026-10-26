@@ -292,5 +292,197 @@ class PromiseGracePostgresTests(unittest.TestCase):
             FROM proactive_promise WHERE id=%s''', (pid,)), [(CONTEXT, ORIGIN, None)])
 
 
+def _adapt_datetimes_like_psycopg2(sql, params):
+    """Quote datetimes the way psycopg2 does, without changing production SQL.
+
+    Aware values become ``%s::timestamptz``; naive values stay ``%s::timestamp``.
+    The offline adapter otherwise sends an ISO string and PostgreSQL drops the
+    offset on a ``timestamp`` column, which hides the production bug.
+    """
+    params = tuple(params or ())
+    parts = sql.split('%s')
+    if len(parts) - 1 != len(params):
+        return sql, params
+    rewritten = [parts[0]]
+    for tail, value in zip(parts[1:], params):
+        if isinstance(value, datetime) and value.tzinfo is not None:
+            token = '%s::timestamptz'
+        elif isinstance(value, datetime):
+            token = '%s::timestamp'
+        else:
+            token = '%s'
+        rewritten.append(token)
+        rewritten.append(tail)
+    return ''.join(rewritten), params
+
+
+class _PsycopgLikeCursor:
+    def __init__(self, connection):
+        self.inner = connection.cursor()
+
+    def execute(self, sql, params=None):
+        sql, params = _adapt_datetimes_like_psycopg2(sql, params)
+        return self.inner.execute(sql, params)
+
+    def fetchone(self):
+        return self.inner.fetchone()
+
+    def fetchall(self):
+        return self.inner.fetchall()
+
+    def close(self):
+        self.inner.close()
+
+
+class _PsycopgLikeConnection:
+    def __init__(self, connection):
+        self.inner = connection
+
+    def cursor(self):
+        return _PsycopgLikeCursor(self.inner)
+
+    def commit(self):
+        return self.inner.commit()
+
+    def rollback(self):
+        return self.inner.rollback()
+
+    def close(self):
+        return self.inner.close()
+
+
+class LlmPromiseTimezoneTests(unittest.TestCase):
+    def test_string_trigger_is_labeled_china_time_without_shifting(self):
+        import generation_effects
+        from config import CN_TZ
+
+        captured = {}
+
+        def add_promise(**kwargs):
+            captured.update(kwargs)
+            return 7
+
+        saved = generation_effects.apply_proactive_promise({
+            'user_id': 'u',
+            'character_id': 'gojo',
+            'endpoint': 'chat_text',
+            'source_event_id': 'evt-wakeup',
+            'user_text': '明天记得六点叫我起床',
+            'add_promise': add_promise,
+            'proactive_promise': {
+                'trigger_kind': 'once',
+                'trigger_at': '2026-10-26 06:00',
+                'context': '六点叫她起床去考试',
+            },
+        })
+        trigger_at = captured['trigger_at']
+        self.assertEqual(saved['promise_id'], 7)
+        self.assertEqual(trigger_at.tzinfo, CN_TZ)
+        self.assertEqual(trigger_at, datetime(2026, 10, 26, 6, 0, tzinfo=CN_TZ))
+
+    def test_aware_trigger_is_not_relabeled(self):
+        import generation_effects
+
+        captured = {}
+        utc = datetime(2026, 10, 25, 22, 0, tzinfo=timezone.utc)
+
+        def add_promise(**kwargs):
+            captured.update(kwargs)
+            return 8
+
+        generation_effects.apply_proactive_promise({
+            'user_id': 'u',
+            'character_id': 'gojo',
+            'endpoint': 'chat_text',
+            'source_event_id': 'evt-utc',
+            'add_promise': add_promise,
+            'proactive_promise': {
+                'trigger_kind': 'once',
+                'trigger_at': utc,
+                'context': 'already aware',
+            },
+        })
+        self.assertIs(captured['trigger_at'], utc)
+
+
+@unittest.skipUnless(os.getenv('COGNITIVE_TEST_PGLITE'),
+                     'set COGNITIVE_TEST_PGLITE for disposable PostgreSQL')
+class LlmPromiseTimezonePostgresTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from tests.offline_pg import Connection
+        cls.database = Connection()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.database.shutdown()
+
+    def setUp(self):
+        self.database.rollback()
+        self.database.query("SET TIME ZONE 'UTC'")
+        self.database.query('DROP SCHEMA public CASCADE')
+        self.database.query('CREATE SCHEMA public')
+        self.adapted = _PsycopgLikeConnection(self.database)
+        for patcher in (
+                patch.object(db_promise, 'get_conn', return_value=self.adapted),
+                patch.object(db_promise, 'PROMISE_GRACE_MINUTES', 120, create=True)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with redirect_stdout(io.StringIO()):
+            db_promise.init_promise_table()
+
+    def sql(self, query, params=()):
+        cur = self.database.cursor()
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        self.database.commit()
+        return rows
+
+    def save_llm_promise(self, trigger_at='2026-10-26 06:00', source='evt-llm'):
+        import generation_effects
+        with redirect_stdout(io.StringIO()):
+            saved = generation_effects.apply_proactive_promise({
+                'user_id': 'test-user',
+                'character_id': 'gojo',
+                'endpoint': 'chat_text',
+                'source_event_id': source,
+                'user_text': '明天记得六点叫我起床去考试',
+                'proactive_promise': {
+                    'trigger_kind': 'once',
+                    'trigger_at': trigger_at,
+                    'context': CONTEXT,
+                },
+            })
+        return saved['promise_id']
+
+    def due(self, now):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = db_promise.get_due_promises(now)
+        return result, output.getvalue()
+
+    def test_llm_trigger_is_due_at_china_six_when_session_is_utc(self):
+        pid = self.save_llm_promise()
+        six = datetime(2026, 10, 26, 6, 0, tzinfo=ZONE)
+        self.assertEqual([row['id'] for row in self.due(six)[0]], [pid])
+        self.assertEqual(self.sql('''SELECT is_active, is_fired, last_error
+            FROM proactive_promise WHERE id=%s''', (pid,)), [(True, False, None)])
+
+    def test_llm_trigger_is_not_due_eight_hours_later_under_utc(self):
+        pid = self.save_llm_promise(source='evt-late')
+        fourteen = datetime(2026, 10, 26, 14, 0, tzinfo=ZONE)
+        due, output = self.due(fourteen)
+        self.assertEqual(due, [])
+        self.assertIn(f'id={pid}', output)
+        self.assertEqual(self.sql('''SELECT is_active, last_error
+            FROM proactive_promise WHERE id=%s''', (pid,)), [(False, 'expired')])
+
+    def test_same_promise_is_also_due_when_session_matches_china(self):
+        self.database.query("SET TIME ZONE 'Asia/Shanghai'")
+        pid = self.save_llm_promise(source='evt-shanghai')
+        six = datetime(2026, 10, 26, 6, 0, tzinfo=ZONE)
+        self.assertEqual([row['id'] for row in self.due(six)[0]], [pid])
+
+
 if __name__ == '__main__':
     unittest.main()

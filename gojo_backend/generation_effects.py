@@ -585,6 +585,13 @@ def apply_proactive_promise(ctx):
         trigger_at = pp['trigger_at']
         if isinstance(trigger_at, str):
             trigger_at = _dt.strptime(trigger_at, '%Y-%m-%d %H:%M')
+        # OUTPUT_SPEC writes China wall time. A naive value would be stored
+        # and later read as the DB session zone (UTC in production).
+        # Import only on this path: daily promises do not need a timezone,
+        # and some effect tests stub config without CN_TZ.
+        if isinstance(trigger_at, _dt) and trigger_at.tzinfo is None:
+            from config import CN_TZ
+            trigger_at = trigger_at.replace(tzinfo=CN_TZ)
         pid = add_promise(
             character_id=character_id, user_id=user_id,
             trigger_kind='once', trigger_at=trigger_at,

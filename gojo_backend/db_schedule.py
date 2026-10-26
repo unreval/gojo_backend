@@ -1065,8 +1065,33 @@ def iter_due_phone_checks(now, *, limit=20):
         conn.close()
 
 
+def _future_handle_before(handle_before, now):
+    """Keep a deadline only when it is still ahead of now."""
+    if handle_before is None:
+        return None
+    if handle_before.tzinfo is None and getattr(now, 'tzinfo', None) is not None:
+        handle_before = handle_before.replace(tzinfo=now.tzinfo)
+    if handle_before <= now:
+        return None
+    return handle_before
+
+
+def _tighten_phone_check_at(next_at, handle_before):
+    """Move a phone check earlier so a time-bound request is seen by T.
+
+    Never pushes a check later, and never invents a check for hard_busy
+    (that path passes handle_before=None and next_at=None).
+    """
+    if next_at is None or handle_before is None:
+        return next_at
+    if handle_before < next_at:
+        return handle_before
+    return next_at
+
+
 def decide_phone_check(character_id, user_id, now: datetime, activity,
-                       source_event_id='', pending_text='', event_meta=None):
+                       source_event_id='', pending_text='', event_meta=None,
+                       handle_before=None):
     """返回本条消息在当前日程下的 seen / can_reply 判定。
 
     soft_busy:
@@ -1113,6 +1138,16 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
             event_meta_text = json.dumps(event_meta, ensure_ascii=False)[:2000]
         except Exception:
             event_meta_text = ''
+    if reply_state != REPLY_SOFT_BUSY:
+        handle_before = None
+    else:
+        handle_before = _future_handle_before(handle_before, now)
+    if handle_before is not None:
+        marker = json.dumps({
+            'kind': 'time_request',
+            'handle_before': handle_before.isoformat(),
+        }, ensure_ascii=False)
+        event_meta_text = f'{event_meta_text}\n{marker}' if event_meta_text else marker
 
     conn = get_conn()
     cur = conn.cursor()
@@ -1184,7 +1219,8 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
                     prefix = '\n' if merged_meta else ''
                     merged_meta = (merged_meta + prefix + event_meta_text)[:6000]
                 count = (count or 0) + 1
-                # 新消息只更新 inbox，绝不改 next_phone_check_at / seen_watermark
+                # 普通新消息只更新 inbox，不改 next_phone_check_at / seen_watermark。
+                # 未来时间点请求只允许把 next_phone_check_at 提前，本请求仍然不回复。
                 cur.execute(
                     '''UPDATE char_phone_check
                        SET pending_count = pending_count + 1,
@@ -1198,6 +1234,16 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
                 bumped = cur.fetchone()
                 if bumped:
                     count = bumped[0]
+                tightened = _tighten_phone_check_at(next_check_at, handle_before)
+                if tightened != next_check_at:
+                    cur.execute(
+                        '''UPDATE char_phone_check
+                           SET next_phone_check_at=%s,
+                               updated_at=CURRENT_TIMESTAMP
+                           WHERE id=%s
+                             AND check_state IN ('pending', 'deferred')''',
+                        (tightened, oid))
+                    next_check_at = tightened
                 reused = True
         if not row:
             fallback_id = None
@@ -1206,8 +1252,9 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
             watermark = 0
             count = 1
             if reply_state == REPLY_SOFT_BUSY:
-                next_check_at = sample_next_phone_check_at(
-                    now, activity, replied_at=replied_at)
+                next_check_at = _tighten_phone_check_at(
+                    sample_next_phone_check_at(now, activity, replied_at=replied_at),
+                    handle_before)
             cur.execute(
                 '''INSERT INTO char_phone_check
                    (user_id, character_id, schedule_id, sched_date, start_time, end_time,
