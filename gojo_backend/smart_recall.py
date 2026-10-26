@@ -19,6 +19,7 @@
 """
 
 import json
+import logging
 import math
 import time as _time
 from datetime import datetime, timezone
@@ -29,6 +30,8 @@ from role_view import PROJECTION_VERSION, render_role_view
 from told_projection import canonical_told_view, told_display
 from config import CN_TZ, DEFAULT_CHARACTER_ID
 from cognitive_config import COGNITIVE_DIARY_RECALL_LIMIT
+
+_LOGGER = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════
 #  评分参数（可调）
@@ -718,6 +721,26 @@ def link_bond_to_fact(user_id, character_id, bond_content, shared_id='shared'):
 #  Prompt 组装辅助
 # ══════════════════════════════════════════════
 
+def _format_expiry(exp, *, record_id=None) -> str:
+    """把便利贴/承诺期限格式化进 prompt。任何输入都不抛异常。"""
+    if not exp:
+        return '未设期限'
+    if isinstance(exp, str):
+        _LOGGER.warning(
+            'recall expiry is str id=%s value=%r',
+            record_id,
+            exp[:80],
+        )
+        try:
+            exp = datetime.fromisoformat(exp.replace('Z', '+00:00'))
+        except ValueError:
+            return exp[:16].replace('T', ' ')
+    try:
+        return exp.strftime('%Y-%m-%d %H:%M')
+    except (AttributeError, TypeError, ValueError):
+        return str(exp)[:16].replace('T', ' ')
+
+
 def format_recall_for_prompt(recall_result, observer_id=None):
     """把 two_level_recall 的结果格式化成 prompt 文本。
 
@@ -812,7 +835,7 @@ def format_recall_for_prompt(recall_result, observer_id=None):
         sticky_lines = []
         for note in sticky_notes:
             exp = note.get('expires_at')
-            exp_text = exp.strftime('%Y-%m-%d %H:%M') if exp else '未设期限'
+            exp_text = _format_expiry(exp, record_id=note.get('id'))
             sticky_lines.append(f'- [到期 {exp_text}] {visible(note)}')
         block = f'''
 
