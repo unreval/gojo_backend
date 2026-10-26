@@ -592,12 +592,38 @@ class MemoryCandidateGateTests(unittest.TestCase):
                                   raw_text=quote),
                     expected)
 
+    def test_conversational_mei_openers_pass_the_same_negation_gate(self):
+        cases = (
+            ('没关系啦我明天考离散数学', '她明天考离散数学'),
+            ('没错我买了咖啡', '她买了咖啡'),
+            ('没事我自己搞定这个报告', '她自己搞定这个报告'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertFalse(memory_candidate._has_grounding_negation(quote))
+                self.assertFalse(memory_candidate._has_grounding_negation(summary))
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (True, None))
+
+    def test_mei_shi_zuo_stays_a_negation_mismatch(self):
+        quote = '我今天没事做'
+        summary = '她今天做事'
+        self.assertTrue(memory_candidate._has_grounding_negation(quote))
+        self.assertFalse(memory_candidate._has_grounding_negation(summary))
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary),
+                          raw_text=quote),
+            (False, 'negation_polarity_mismatch'))
+
     def test_non_denial_bu_words_and_a_not_a_are_not_denials(self):
         for text in ('不过', '不但', '不仅', '不如', '差不多', '是不是', '有没有',
-                     '淹没', '没收'):
+                     '淹没', '没收', '没关系', '没错', '没事'):
             with self.subTest(text=text):
                 self.assertFalse(memory_candidate._has_grounding_negation(text))
-        for text in ('没发', '没有', '没收到', '不重要', '不想'):
+        for text in ('没发', '没有', '没收到', '不重要', '不想', '没事做', '没事干',
+                     '没事儿'):
             with self.subTest(text=text):
                 self.assertTrue(memory_candidate._has_grounding_negation(text))
 

@@ -38,20 +38,16 @@ _INDEFINITE_MEASURES = frozenset('个瓶次张条只台份句天年块杯件本�
 
 # Chinese side of utils' translation guards. These are bounded lexical checks,
 # not a general entailment or multi-clause polarity classifier.
-# _NEGATION has no caller. Value polarity and G5 both use
-# _has_grounding_negation, which strips questions and widens 没.
 _DOUBLE_NEGATION = re.compile(r'不是不|并非不|不能不|不得不|没有不')
-_NEGATION = re.compile(
-    r'不(?:是|会|能|想|要|行|可以|可能|应该|对|知道|必|用|需要|愿意|喜欢|爱|亏)'
-    r'|没(?:有|什么|啥|吃|睡|去|来|见|说|想|做|听|看|回|能|亏)'
-    r'|别(?:想|说|闹|来|急|忘)|才不|才没|并不|绝不|从不'
-)
 # X不X / X没X with the same single character is a question (是不是 / 有没有),
 # not a denial. Multi-character repeats such as 喜欢不喜欢 are left alone.
 _A_NOT_A = re.compile(r'([\u4e00-\u9fff])(?:不|没)\1')
 # 淹没/埋没/出没/沉没/吞没 put 没 in the second character. 没收 is confiscation,
-# but 没收到/没收下/没收着/没收过 stay denials.
-_MEI_NON_NEGATION = re.compile(r'淹没|埋没|出没|沉没|吞没|没收(?![到下着过])')
+# but 没收到/没收下/没收着/没收过 stay denials. 没关系/没错/没事 are
+# conversational affirmations; 没事做/没事干/没事儿 stay denials.
+_MEI_NON_NEGATION = re.compile(
+    r'淹没|埋没|出没|沉没|吞没|没收(?![到下着过])'
+    r'|没关系|没错|没事(?![做干儿])')
 _GROUNDING_NEGATION = re.compile(
     r'不(?:是|会|能|想|要|行|可以|可能|应该|对|知道|必|用|需要|愿意|喜欢|爱|亏'
     r'|重要|合适|够|清楚|舒服)'
@@ -177,11 +173,12 @@ def _numbers_match(quote, summary):
 
 
 def _has_grounding_negation(text):
-    """Whether G5 should treat text as containing a denial.
+    """Whether G5 and value polarity should treat text as containing a denial.
 
-    Questions of the form X不X / X没X are removed first. 没 is then a general
-    denial except for a short list of non-denial words. 不 stays on a fixed
-    verb list so 不过 / 不但 / 不仅 / 不如 / 差不多 are not denials.
+    Questions of the form X不X / X没X are removed first. 没 is a denial except
+    the words in _MEI_NON_NEGATION, including 没关系 / 没错 / 没事.
+    没事做、没事干 and 没事儿 stay denials. 不 stays on a fixed verb list so
+    不过 / 不但 / 不仅 / 不如 / 差不多 are not denials.
     """
     text = _DOUBLE_NEGATION.sub('', text)
     text = _MEI_NON_NEGATION.sub('', text)

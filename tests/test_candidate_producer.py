@@ -1078,6 +1078,22 @@ class CandidateValuePolarityTests(unittest.TestCase):
             with self.subTest(quote=quote, value=value):
                 self.assert_polarity_mismatch(quote, value)
 
+    def test_conversational_mei_openers_are_not_value_polarity_mismatches(self):
+        for quote, value in (
+                ('没关系啦我明天考离散数学', '明天考离散数学'),
+                ('没事我自己搞定这个报告', '我自己搞定这个报告'),
+                ('没错我买了咖啡', '买了咖啡'),
+                ('你是不是一直这样对我', '一直这样对我')):
+            with self.subTest(quote=quote, value=value):
+                self.assert_not_polarity_mismatch(quote, value)
+
+    def test_real_denial_still_makes_the_value_span_a_polarity_mismatch(self):
+        self.assert_polarity_mismatch('你没发！', '发')
+        self.assert_polarity_mismatch('我不喜欢咖啡这种饮料', '喜欢')
+        self.assert_polarity_mismatch(
+            '是我不重要所以你才能一直这样对我吗', '重要')
+        self.assert_polarity_mismatch('我今天没事做', '今天')
+
     def test_non_denial_bu_words_are_not_treated_as_negation(self):
         for quote, value in (
                 ('不过我今天买了咖啡', '买了咖啡'),
