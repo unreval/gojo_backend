@@ -337,6 +337,45 @@ OPEN
 
 ---
 
+# REG-010 — LLM promise trigger stored without a timezone
+
+## Area
+
+Schedule / Proactive promise
+
+## Historical failure
+
+`apply_proactive_promise` parsed `trigger_at` with `strptime` and stored a
+naive datetime. `proactive_promise.trigger_at` is `timestamp` without time
+zone. On a UTC database session that wall clock was read as UTC, so a China
+06:00 promise became due at 14:00 and could be marked `expired` without a
+message once it fell outside the grace window.
+
+The promise-detector and diary revisit writers already passed timezone-aware
+datetimes. The LLM field path did not.
+
+## Required behavior
+
+- An LLM `trigger_at` string is China wall time.
+- A naive value is labeled with `CN_TZ` and is not shifted by another eight hours.
+- A value that already has `tzinfo` is stored unchanged.
+- Under a UTC session, that promise is due at the China clock time it names.
+- The column type stays `timestamp` without time zone.
+
+## Regression requirement
+
+`tests/test_db_promise.py` must keep:
+
+- `test_llm_trigger_is_due_at_china_six_when_session_is_utc`
+- `test_llm_trigger_is_not_due_eight_hours_later_under_utc`
+- `test_once_comparison_keeps_session_timezone_semantics` (the other insert path)
+
+## Status
+
+TESTED
+
+---
+
 # Regression Rule
 
 任何任务如果修改到上述 Regression 的 Area：
@@ -363,3 +402,4 @@ OPEN
 | REG-007 | Provider / Memory Jobs | OPEN |
 | REG-008 | Derived Memory Authority | NEEDS TEST |
 | REG-009 | Schedule / Online Continuity | OPEN |
+| REG-010 | Promise trigger timezone | TESTED |

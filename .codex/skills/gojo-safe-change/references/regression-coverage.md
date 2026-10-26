@@ -340,6 +340,34 @@ NOT RUN IN COVERAGE AUDIT
 
 ---
 
+# REG-010 — LLM promise trigger timezone
+
+## Owner
+
+gojo_backend
+
+## Coverage
+
+COVERED
+
+## Direct tests
+
+- `tests/test_db_promise.py`
+
+Confirmed behaviors include:
+
+- an LLM `trigger_at` string is labeled as China wall time and is not shifted;
+- an already-aware trigger is left unchanged;
+- with the production UTC session, that promise is due at China 06:00;
+- the same row is expired by China 14:00 rather than becoming due then;
+- the older `%s::timestamptz` comparison test is unchanged and covers a different insert.
+
+## Execution status
+
+NOT RUN IN COVERAGE AUDIT
+
+---
+
 # Current Coverage Matrix
 
 | REG | Owner | Coverage |
@@ -353,6 +381,7 @@ NOT RUN IN COVERAGE AUDIT
 | REG-007 | gojo_backend | PARTIAL |
 | REG-008 | gojo_backend | PARTIAL |
 | REG-009 | gojo_backend | PARTIAL |
+| REG-010 | gojo_backend | COVERED |
 
 ---
 
