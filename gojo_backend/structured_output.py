@@ -399,13 +399,19 @@ def emit_structured_output_telemetry(call: StructuredLLMCall, *, attempt: int,
     """Log shape-only diagnostics; raw model output is deliberately omitted."""
     logger = logger or print
     telemetry = call.telemetry
+    ok = telemetry.get('ok')
+    # The hosted log viewer derives a level by scanning the line for "error", so
+    # a successful call must not carry the word at all. The failure fields are
+    # unchanged; only the no-op error=- reason=- pair is dropped on success.
+    failure = '' if ok else (
+        f'error={telemetry.get("error_code") or "-"} '
+        f'reason={telemetry.get("error_detail") or "-"} ')
     logger(
         '[structured_output] '
-        f'status={"success" if telemetry.get("ok") else "error"} '
+        f'status={"success" if ok else "error"} '
         f'domain={telemetry.get("domain") or "unknown"} '
-        f'attempt={attempt} ok={telemetry.get("ok")} '
-        f'error={telemetry.get("error_code") or "-"} '
-        f'reason={telemetry.get("error_detail") or "-"} '
+        f'attempt={attempt} ok={ok} '
+        f'{failure}'
         f'candidate_count={telemetry.get("candidate_count", 0)} '
         f'distinct_candidate_count={telemetry.get("distinct_candidate_count", 0)} '
         f'extraction_mode={telemetry.get("extraction_mode") or "-"} '
