@@ -5,7 +5,7 @@
     - _accounts_block() 在动态尾里注入当前用户的账户列表(dynamic_tail,不缓存)
     - OUTPUT_SPEC 末尾追加 pending_transaction 字段规范(静态,进缓存头)
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID
 from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock, load_core
@@ -418,6 +418,97 @@ _REPLY_SCOPE_RULES = '''【★ 这一条回复的分寸——最后再确认一�
 3. 严格按最上方规定的单行 JSON 输出，不要有任何多余文字。'''
 
 
+OPEN_PROMISE_DISPLAY_LIMIT = 8
+
+
+def _stored_trigger_as_cn(value):
+    """Naive trigger_at is the UTC wall clock stored by a UTC session.
+
+    psycopg2 sends an aware China time as timestamptz. PostgreSQL then stores
+    the session-local wall clock, and production does not set TimeZone, so
+    that wall clock is UTC. list_active_promises stringifies it without an
+    offset. A value that already carries an offset is converted as given.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text or text.lower() == 'none':
+            return None
+        parsed = datetime.fromisoformat(text.replace(' ', 'T'))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(CN_TZ)
+
+
+def _promise_status(instant, now, grace_minutes):
+    delay = now - instant
+    if delay < timedelta(0):
+        return '未到点'
+    if delay <= timedelta(minutes=grace_minutes):
+        return '已到点未发'
+    return '已过期'
+
+
+def _open_promise_lines(rows, now, grace_minutes, limit=OPEN_PROMISE_DISPLAY_LIMIT):
+    """Display text only. Callers must not treat it as promise authority."""
+    now = now.astimezone(CN_TZ) if now.tzinfo else now.replace(tzinfo=CN_TZ)
+    ranked = []
+    for row in rows or []:
+        context = (row.get('context') or '').strip().replace('\n', ' ')[:80]
+        if not context:
+            continue
+        kind = row.get('trigger_kind')
+        if kind == 'daily':
+            try:
+                hour, minute = str(row.get('trigger_time') or '').split(':', 1)
+                hour, minute = int(hour), int(minute)
+                instant = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            except (TypeError, ValueError):
+                continue
+            label = f'每天 {hour:02d}:{minute:02d}'
+        elif kind == 'once':
+            instant = _stored_trigger_as_cn(row.get('trigger_at'))
+            if instant is None:
+                continue
+            label = instant.strftime('%Y-%m-%d %H:%M')
+        else:
+            continue
+        ranked.append((
+            abs((instant - now).total_seconds()),
+            label,
+            _promise_status(instant, now, grace_minutes),
+            context,
+        ))
+    ranked.sort(key=lambda item: item[0])
+    shown = ranked[:limit]
+    if not shown:
+        return ''
+    lines = [
+        '【你还没兑现的约定——只读展示】',
+        '下面只是已经记下的约定，让你知道自己欠着什么。它不是新的事实，也不能用来判断关系或改写约定状态。',
+    ]
+    for _distance, label, status, context in shown:
+        lines.append(f'- {label}（{status}）{context}')
+    hidden = len(ranked) - len(shown)
+    if hidden:
+        lines.append(f'其余 {hidden} 条未列出，按触发时刻离现在最近的保留。')
+    return '\n' + '\n'.join(lines) + '\n'
+
+
+def _format_open_promises(character_id, user_id, now):
+    try:
+        import db_promise
+        rows = db_promise.list_active_promises(character_id, user_id, limit=20) or []
+        grace = int(db_promise.PROMISE_GRACE_MINUTES)
+    except Exception as exc:
+        print(f'[prompt] 未兑现约定展示跳过：{type(exc).__name__}')
+        return ''
+    return _open_promise_lines(rows, now, grace)
+
+
 def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
                         user_message='', extra_suffix='', temporal_snapshot=None,
                         context_pack=None):
@@ -650,6 +741,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
         print(f'[prompt] 日程注入跳过：{_e}')
     time_ctx = get_time_context(user_message, now=now_local)
     emotion_list = ', '.join(EMOTIONS)
+    open_promises = _format_open_promises(character_id, user_id, now_local)
 
     # ════════════════════════════════════════════════════════
     #  Cache only character/spec text and fixed reply rules. Recall is selected
@@ -663,7 +755,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     query_recall = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 
     dynamic_tail = f"""{query_recall}
-{pinned_block}{summary_block}{episode_block}{stage_text}{temporal_text}{schedule_text}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
+{pinned_block}{summary_block}{episode_block}{stage_text}{temporal_text}{schedule_text}{open_promises}{period_text}{recall_text}{diary_hint_block}{accounts_text}{avoid_text}{no_repeat_text}
 
 {time_ctx}{extra_suffix}
 
