@@ -193,6 +193,70 @@ class ProducerPureTests(unittest.TestCase):
             dict(candidate, interpretation=12), {'source-0'}),
             'invalid_candidate_fields')
 
+    def test_prompt_asks_for_a_retention_tier_as_an_optional_field(self):
+        prompt = producer._SYSTEM
+        self.assertIn('persistence?', prompt)
+        self.assertIn('persistence只能是durable或transient', prompt)
+        self.assertIn('不确定就省略该字段', prompt)
+        self.assertIn('这个字段只用于观测，不影响是否记住', prompt)
+
+    def test_prompt_does_not_exclude_transient_facts_from_extraction(self):
+        # The tier can only be measured on candidates that are produced. An
+        # opening line that asks for 值得长期记住 alone suppresses the transient
+        # ones, so the shadow sample would never contain them.
+        prompt = producer._SYSTEM
+        self.assertIn('也包括当下状态', prompt)
+        self.assertIn('不要因为一件事只是当下状态就不提取', prompt)
+        self.assertNotIn('提取值得长期记住的自述事实', prompt)
+        # Pure filler is still excluded, so the change widens facts only.
+        self.assertIn('纯寒暄、语气词、无法确认的内容和重复候选不提取', prompt)
+
+    def test_persistence_never_rejects_a_candidate_whatever_its_value(self):
+        # Observation only: an absent, misspelled or non-string tier must not
+        # change any gate outcome, so the shadow measurement cannot cost
+        # candidates that would otherwise be accepted.
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元')
+        for tier in ('durable', 'transient', 'maybe', '', 12, None):
+            with self.subTest(persistence=tier):
+                self.assertIsNone(producer.candidate_contract_reason(
+                    dict(candidate, persistence=tier), {'source-0'}))
+                producer._validate_candidate_batch([dict(candidate, persistence=tier)])
+        self.assertIsNone(producer.candidate_contract_reason(candidate, {'source-0'}))
+
+    def test_unknown_fields_other_than_persistence_still_fail_the_batch(self):
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元')
+        with self.assertRaises(producer._CandidateBatchSchemaError) as raised:
+            producer._validate_candidate_batch([dict(candidate, foo='x')])
+        self.assertEqual(raised.exception.detail, 'item_0_unknown_field_foo')
+
+    def test_observed_persistence_folds_everything_unknown_to_none(self):
+        # The schema does not type check this field, so the audit record must
+        # never raise on it. An unhashable value used to raise TypeError inside
+        # _process_candidates, which fails the whole batch without skipping the
+        # sources, so the batch retried until the daily limit was spent.
+        for tier in ('durable', 'transient'):
+            with self.subTest(persistence=tier):
+                self.assertEqual(
+                    producer.observed_persistence({'persistence': tier}), tier)
+        for tier in ('maybe', 'Durable', '', 12, 0, True, None,
+                     {'a': 1}, ['durable'], ('durable',)):
+            with self.subTest(persistence=tier):
+                self.assertIsNone(producer.observed_persistence({'persistence': tier}))
+        self.assertIsNone(producer.observed_persistence({}))
+        self.assertIsNone(producer.observed_persistence(None))
+
+    def test_persistence_does_not_change_the_audited_gate_sequence(self):
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元')
+        self.assertEqual(
+            producer.gate_results(True, None, candidate),
+            producer.gate_results(True, None, dict(candidate, persistence='transient')))
+
     def test_audit_marks_short_circuited_gates_as_not_evaluated(self):
         gates = producer.gate_results(False, 'quote_not_verbatim', {})
         self.assertEqual(gates['G1']['status'], 'passed')
