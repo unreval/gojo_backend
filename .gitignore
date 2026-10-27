@@ -52,3 +52,8 @@ test_output.wav
 
 # Gojo generated review report
 review/latest.md
+.codex-test-env/
+.codex-test-packages/
+_pdf_build/
+GOJO_PERSISTENT_MIND_ARCHITECTURE_*.pdf
+review/latest.md
