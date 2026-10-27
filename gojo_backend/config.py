@@ -16,6 +16,14 @@ MODEL_MID = os.getenv('MODEL_MID', 'claude-sonnet-4-6')
 TRANSLATION_CHECKS_BLOCKING = os.getenv(
     'TRANSLATION_CHECKS_BLOCKING', 'false').strip().lower() in ('1', 'true')
 
+# Schedule claim diagnostics do not veto a reply; true restores strict checks.
+# These guards compare the reply's wording against the canonical world. They
+# carry no authority: commit_schedule_transition is the only path to schedule
+# facts and revalidates in its own transaction, so a lexical miss must not cost
+# the user a reply. Intent preflight stays blocking and is not covered here.
+SCHEDULE_CLAIM_CHECKS_BLOCKING = os.getenv(
+    'SCHEDULE_CLAIM_CHECKS_BLOCKING', 'false').strip().lower() in ('1', 'true')
+
 # 候选产生独立于聊天；默认关闭，启用后也默认只记录影子结果。
 CANDIDATE_PRODUCER_ENABLED = os.getenv(
     'CANDIDATE_PRODUCER_ENABLED', 'false').strip().lower() in ('1', 'true')

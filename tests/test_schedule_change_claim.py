@@ -4,6 +4,7 @@ import sys
 import json
 import types
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
@@ -13,6 +14,7 @@ for path in (os.path.join(ROOT, 'gojo_backend'), os.path.dirname(__file__)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+import config
 import db_schedule
 from schedule_transition import validate_generated_schedule_reply
 from schedule_contract import change_claim_conflict, normalize_action_intent
@@ -135,17 +137,18 @@ class ScheduleChangeClaimContractTests(unittest.TestCase):
 
 
 class ScheduleChangeClaimIntegrationTests(unittest.TestCase):
-    def test_future_event_change_without_intent_is_rejected(self):
+    def test_future_event_change_without_intent_is_reported_not_vetoed(self):
         world = {'event': None, 'now': NOW}
-        conn = Mock()
-        conn.cursor.return_value.fetchall.return_value = [
+        rows = [
             (47, 3, NOW + timedelta(hours=1), NOW + timedelta(hours=2),
              '晚饭', '', 'flexible', 'meal', 'free')]
+        conn = Mock()
+        conn.cursor.return_value.fetchall.return_value = rows
         with patch.object(db_schedule, 'get_current_world_state', return_value=world), \
                 patch.object(db_schedule, 'get_conn', return_value=conn):
             reason, actual_world = validate_generated_schedule_reply(
                 'gojo', 'u', CLAIM, now=NOW)
-        self.assertEqual(reason, REASON)
+        self.assertIsNone(reason)
         self.assertIs(actual_world, world)
         conn.commit.assert_not_called()
         conn.cursor.return_value.close.assert_called_once()
@@ -154,13 +157,35 @@ class ScheduleChangeClaimIntegrationTests(unittest.TestCase):
         self.assertIn('status=%s AND planned_start_at > %s', sql)
         self.assertEqual(params, ('gojo', 'u', 'planned', NOW, NOW.date()))
 
-    def test_active_event_change_without_intent_is_rejected(self):
-        world = {'event': {'id': 7, 'status': 'active', 'revision': 3}, 'now': NOW}
-        with patch.object(db_schedule, 'get_current_world_state', return_value=world):
+        strict_conn = Mock()
+        strict_conn.cursor.return_value.fetchall.return_value = rows
+        with patch.object(config, 'SCHEDULE_CLAIM_CHECKS_BLOCKING', True), \
+                patch.object(db_schedule, 'get_current_world_state', return_value=world), \
+                patch.object(db_schedule, 'get_conn', return_value=strict_conn):
             reason, actual_world = validate_generated_schedule_reply(
                 'gojo', 'u', CLAIM, now=NOW)
         self.assertEqual(reason, REASON)
         self.assertIs(actual_world, world)
+        strict_conn.commit.assert_not_called()
+
+    def test_active_event_change_without_intent_is_reported_not_vetoed(self):
+        world = {'event': {'id': 7, 'status': 'active', 'revision': 3}, 'now': NOW}
+        for blocking, expected in ((False, None), (True, REASON)):
+            with self.subTest(blocking=blocking):
+                flag = (patch.object(config, 'SCHEDULE_CLAIM_CHECKS_BLOCKING', True)
+                        if blocking else nullcontext())
+                with flag, \
+                        patch.object(db_schedule, 'get_current_world_state', return_value=world), \
+                        patch('builtins.print') as logged:
+                    reason, actual_world = validate_generated_schedule_reply(
+                        'gojo', 'u', CLAIM, now=NOW)
+                self.assertEqual(reason, expected)
+                self.assertIs(actual_world, world)
+                logged_text = '\n'.join(
+                    call.args[0] for call in logged.call_args_list
+                    if call.args and isinstance(call.args[0], str))
+                self.assertIn('[schedule_check]', logged_text)
+                self.assertIn(REASON, logged_text)
 
     def test_empty_future_read_allows_ordinary_reply(self):
         conn = Mock()
@@ -172,10 +197,16 @@ class ScheduleChangeClaimIntegrationTests(unittest.TestCase):
         conn.commit.assert_not_called()
 
     def test_completion_conflict_keeps_priority_and_avoids_planned_read(self):
+        payload = {'messages': [{'zh': '会议已经结束了，后面安排也取消了。'}]}
         with patch.object(db_schedule, 'get_current_world_state', return_value=ACTIVE), \
                 patch.object(db_schedule, 'get_conn') as connect:
-            reason, _ = validate_generated_schedule_reply(
-                'gojo', 'u', {'messages': [{'zh': '会议已经结束了，后面安排也取消了。'}]})
+            reason, _ = validate_generated_schedule_reply('gojo', 'u', payload)
+        self.assertIsNone(reason)
+        connect.assert_not_called()
+        with patch.object(config, 'SCHEDULE_CLAIM_CHECKS_BLOCKING', True), \
+                patch.object(db_schedule, 'get_current_world_state', return_value=ACTIVE), \
+                patch.object(db_schedule, 'get_conn') as connect:
+            reason, _ = validate_generated_schedule_reply('gojo', 'u', payload)
         self.assertEqual(reason, 'active_event_completion_claim_without_intent')
         connect.assert_not_called()
 
@@ -193,12 +224,13 @@ class ScheduleChangeClaimIntegrationTests(unittest.TestCase):
 
 
 class ChangeClaimRetryTests(unittest.TestCase):
-    def generate(self, candidates):
+    def generate(self, candidates, blocking=True):
         import route_chat
         response = types.SimpleNamespace(stop_reason='end_turn', usage=None)
         with patch.object(route_chat, '_create_json', side_effect=[
                 (json.dumps(candidate, ensure_ascii=False), response) for candidate in candidates]) as provider, \
                 patch.object(db_schedule, 'get_current_world_state', return_value=ACTIVE), \
+                patch.object(config, 'SCHEDULE_CLAIM_CHECKS_BLOCKING', blocking), \
                 patch('builtins.print') as logged:
             result, _ = route_chat._generate_or_none(
                 'offline', 100, [], [], attempts=5, log_tag='test', cache_tag='test',
@@ -210,7 +242,7 @@ class ChangeClaimRetryTests(unittest.TestCase):
 
     def test_change_claim_uses_existing_single_semantic_retry(self):
         good = {'messages': [{'jp': '今なら話せるよ。', 'zh': '现在可以聊。'}]}
-        result, calls, traces = self.generate([CLAIM, good])
+        result, calls, traces = self.generate([CLAIM, good], blocking=True)
         self.assertEqual(result['messages'], good['messages'])
         self.assertEqual(calls, 2)
         self.assertEqual(traces[0]['retry_reason'], REASON)
@@ -218,19 +250,25 @@ class ChangeClaimRetryTests(unittest.TestCase):
         self.assertFalse(traces[1]['will_retry'])
 
     def test_repeated_claim_is_rejected_after_shared_budget(self):
-        result, calls, traces = self.generate([CLAIM, CLAIM])
+        result, calls, traces = self.generate([CLAIM, CLAIM], blocking=True)
         self.assertIsNone(result)
         self.assertEqual(calls, 2)
         self.assertFalse(traces[-1]['will_retry'])
 
     def test_protocol_repair_and_change_guard_share_total_budget(self):
         invalid = {'messages': [{'jp': '今日は疲れたよ', 'zh': '今日は疲れたよ'}]}
-        result, calls, traces = self.generate([invalid, CLAIM])
+        result, calls, traces = self.generate([invalid, CLAIM], blocking=True)
         self.assertIsNone(result)
         self.assertEqual(calls, 2)
         self.assertEqual(traces[0]['outcome'], 'parse_invalid')
         self.assertEqual(traces[-1]['outcome'], 'candidate_rejected')
         self.assertFalse(traces[-1]['will_retry'])
+
+    def test_claim_is_delivered_by_default_without_spending_a_retry(self):
+        result, calls, traces = self.generate([CLAIM], blocking=False)
+        self.assertEqual(result, CLAIM)
+        self.assertEqual(calls, 1)
+        self.assertEqual(traces[0]['outcome'], 'accepted')
 
 
 class DelayedChangeClaimTests(unittest.TestCase):
@@ -242,7 +280,8 @@ class DelayedChangeClaimTests(unittest.TestCase):
         from tests.test_delayed_reply import HelpersStub, _synthetic_claim
         helpers = HelpersStub(bubbles=CLAIM['messages'])
         bundle = dict(_synthetic_claim(8), reply_state='soft_busy')
-        with patch('characters.get_character', return_value={'name': '五条'}), \
+        with patch.object(config, 'SCHEDULE_CLAIM_CHECKS_BLOCKING', True), \
+                patch('characters.get_character', return_value={'name': '五条'}), \
                 patch('user_memory.save_user_short_memory_once', return_value=True), \
                 patch('temporal_awareness.get_temporal_snapshot', return_value={}), \
                 patch('prompt.build_system_blocks', return_value=[]), \

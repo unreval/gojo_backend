@@ -6,12 +6,33 @@ reach ``db_schedule.commit_schedule_transition``.
 """
 from __future__ import annotations
 
+import json
+
 from typing import Any, Dict, Optional, Tuple
 
 from schedule_contract import (
     EVENT_ACTIVE, change_claim_conflict, completion_claim_conflict,
     normalize_action_intent,
 )
+
+
+def _claim_outcome(reason):
+    """Record a claim-guard hit; veto only when the strict flag is on.
+
+    These guards read wording alone and hold no authority over schedule facts:
+    commit_schedule_transition is the only writer and revalidates in its own
+    transaction, and a claim conflict means no matching intent was proposed, so
+    nothing was going to be committed either way. A lexical miss must therefore
+    not cost the user a reply. This mirrors TRANSLATION_CHECKS_BLOCKING. Intent
+    preflight is a separate check and stays blocking.
+    """
+    if not reason:
+        return None
+    from config import SCHEDULE_CLAIM_CHECKS_BLOCKING
+    print('[schedule_check] ' + json.dumps(
+        {'reason': reason, 'blocking': SCHEDULE_CLAIM_CHECKS_BLOCKING},
+        ensure_ascii=False))
+    return reason if SCHEDULE_CLAIM_CHECKS_BLOCKING else None
 
 
 def validate_generated_schedule_reply(character_id: str, user_id: str,
@@ -33,7 +54,7 @@ def validate_generated_schedule_reply(character_id: str, user_id: str,
     conflict = completion_claim_conflict(
         (parsed or {}).get('messages') or [], world, intent)
     if conflict:
-        return conflict, world
+        return _claim_outcome(conflict), world
     planned = []
     if ((world or {}).get('event') or {}).get('status') != EVENT_ACTIVE:
         try:
@@ -50,8 +71,8 @@ def validate_generated_schedule_reply(character_id: str, user_id: str,
         except Exception as exc:
             # Preserve the existing unavailable-reader behavior for ordinary chat.
             print(f'[schedule] planned truth guard skipped: {exc}')
-    return change_claim_conflict(
-        (parsed or {}).get('messages') or [], world, planned, intent), world
+    return _claim_outcome(change_claim_conflict(
+        (parsed or {}).get('messages') or [], world, planned, intent)), world
 
 
 def commit_generated_schedule_intent(character_id: str, user_id: str,
