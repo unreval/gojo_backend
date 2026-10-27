@@ -110,6 +110,20 @@ def _emit(record):
         ensure_ascii=False, separators=(',', ':')), flush=True)
 
 
+def _audit_candidate_record(record, *, batch_id, occurred_at, module_version, shadow):
+    """Persist one observation after the producer transaction has committed.
+
+    The write opens its own connection. A failure here must not change the
+    batch result or the record handed to emit.
+    """
+    try:
+        from candidate_audit import log_candidate
+        log_candidate(record, batch_id=batch_id, occurred_at=occurred_at,
+                      module_version=module_version, shadow=shadow)
+    except Exception as exc:
+        print(f'[candidate_audit] write skipped:{exc}')
+
+
 def _settings(enabled, shadow):
     if enabled is not None and shadow is not None:
         return enabled, shadow
@@ -429,8 +443,21 @@ def run_pair(user_id, character_id, *, now=None, create_chat_fn=None, conn=None,
         database.commit()
         committing = False
         stage = 'logging'
+        occurred_by_source = {
+            item['source_event_id']: item.get('occurred_at')
+            for item in inputs
+            if isinstance(item, dict) and isinstance(item.get('source_event_id'), str)
+        }
+        batch_id = state.get('batch_id') if isinstance(state, dict) else None
         for record in records:
             emit(record)
+            source_id = record.get('source_event_id') if isinstance(record, dict) else None
+            _audit_candidate_record(
+                record, batch_id=batch_id,
+                occurred_at=(occurred_by_source.get(source_id)
+                             if isinstance(source_id, str) else None),
+                module_version=common.get('module_version'),
+                shadow=common.get('shadow'))
         summary = dict(common, kind='batch', stage='complete', status='succeeded',
             batch_size=len(inputs), candidates_produced=len(candidates),
             accepted=sum(record['accepted'] for record in records),
