@@ -158,7 +158,9 @@ class PlaintextContractTests(unittest.TestCase):
                 self.assertEqual([t['parse_invalid_reason'] for t in traces],
                                  [reason] * expected_calls)
                 self.assertEqual([t['retry_reason'] for t in traces],
-                                 [reason, None] if expected_calls == 2 else [None])
+                                 [reason] * expected_calls)
+                self.assertEqual([t['will_retry'] for t in traces],
+                                 [True] * (expected_calls - 1) + [False])
 
     def test_kana_heavy_zh_is_accepted_on_the_first_attempt(self):
         for raw in (

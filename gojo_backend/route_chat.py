@@ -422,10 +422,10 @@ def _build_generation_trace_payload(
             if normalized_outcome == 'accepted' else None
         ),
         'will_retry': retrying,
-        'retry_reason': (
-            _trace_enum(retry_reason, _TRACE_RETRY_REASONS)
-            if retrying else None
-        ),
+        # The reason is recorded even on the attempt that will not retry: that
+        # is the attempt the user sees fail, so dropping it left the only
+        # user-visible failure with no diagnosis.
+        'retry_reason': _trace_enum(retry_reason, _TRACE_RETRY_REASONS),
         'parse_invalid_reason': (
             _trace_enum(parse_invalid_reason, _TRACE_RETRY_REASONS)
             if normalized_outcome == 'parse_invalid' else None

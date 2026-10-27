@@ -389,7 +389,7 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual([t['parse_invalid_reason'] for t in traces],
                          ['jp_equals_zh_verbal', 'invalid_message_field'])
         self.assertEqual([t['retry_reason'] for t in traces],
-                         ['jp_equals_zh_verbal', None])
+                         ['jp_equals_zh_verbal', 'invalid_message_field'])
         self.assertNotIn(private_raw, json.dumps(traces, ensure_ascii=False))
         calls = self.route._create_json.call_args_list
         self.assertIn('jp_equals_zh_verbal', calls[1].args[2][-1]['text'])
