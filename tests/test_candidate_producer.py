@@ -257,6 +257,51 @@ class ProducerPureTests(unittest.TestCase):
             producer.gate_results(True, None, candidate),
             producer.gate_results(True, None, dict(candidate, persistence='transient')))
 
+    def live_projection_candidate(self, **overrides):
+        """Drive the shadow=False branch without a database.
+
+        Everything the branch touches outside the producer is replaced: the
+        cursor, the gate, the advisory lock helper and the projector. Only the
+        candidate dict handed to the projector is under test.
+        """
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元', **overrides)
+        inputs = [{'event_id': 11, 'source_event_id': 'source-0',
+                   'occurred_at': self.now}]
+        lock = Mock(return_value=1)
+        with patch.dict(sys.modules, {'cognitive_queue': Mock(
+                stable_advisory_lock_key=lock)}), \
+                patch.object(producer, 'validate_candidate',
+                             return_value=(True, None)), \
+                patch.object(producer, 'adjudicate_and_project') as project:
+            project.return_value = {'status': 'validated_projection', 'reason': None}
+            records = producer._process_candidates(
+                Mock(), 'user-1', 'gojo', [candidate], inputs, {}, False)
+        project.assert_called_once()
+        return project.call_args.kwargs['candidate'], records[0]
+
+    def test_persistence_is_stripped_before_the_live_projection(self):
+        # This branch only runs with shadow off, so it is the code that goes
+        # live the moment CANDIDATE_PRODUCER_SHADOW is cleared. The observation
+        # field must not reach the canonical projector, which never agreed to
+        # carry it, and interpretation must keep being stripped beside it.
+        projected, record = self.live_projection_candidate(
+            persistence='transient', interpretation='她在抱怨')
+        self.assertNotIn('persistence', projected)
+        self.assertNotIn('interpretation', projected)
+        self.assertEqual(projected['quote'], '今天我亏了69元')
+        self.assertEqual(projected['predicate'], 'reported_fact')
+        # The audit record still reports the tier the model gave.
+        self.assertEqual(record['persistence'], 'transient')
+        self.assertTrue(record['accepted'])
+
+    def test_live_projection_is_unchanged_when_no_tier_is_offered(self):
+        projected, record = self.live_projection_candidate()
+        self.assertNotIn('persistence', projected)
+        self.assertIsNone(record['persistence'])
+        self.assertEqual(record['projection_status'], 'validated_projection')
+
     def test_audit_marks_short_circuited_gates_as_not_evaluated(self):
         gates = producer.gate_results(False, 'quote_not_verbatim', {})
         self.assertEqual(gates['G1']['status'], 'passed')
