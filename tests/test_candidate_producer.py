@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'gojo_backend'))
+import candidate_audit
 import candidate_producer as producer
 from tests import test_memory_candidate_source as source_fixture
 
@@ -332,6 +333,8 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.database.commit()
         self.now = datetime(2026, 10, 20, 4, tzinfo=timezone.utc)
         self.logs = []
+        self.stack.enter_context(patch.object(
+            candidate_audit, 'CANDIDATE_AUDIT_ENABLED', True))
 
     def seed(self, count=8, *, age=0, character='c', prefix='source', role='user',
              event_type='canonical_user_turn', status='active', user='u'):
@@ -375,9 +378,27 @@ class ProducerDatabaseTests(unittest.TestCase):
     def candidate_logs(self):
         return [row for row in self.logs if row.get('kind') == 'candidate']
 
+    def audit_rows(self):
+        cur = self.database.cursor()
+        cur.execute('''SELECT user_id, character_id, batch_id, source_event_id,
+            candidate_index, quote, summary, interpretation, persistence,
+            gate_accepted, accepted, reason, projection_status, projection_reason,
+            module_version, shadow, occurred_at, created_at
+            FROM candidate_audit_log ORDER BY candidate_index, id''')
+        columns = [item[0] for item in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def assert_aware(self, value):
+        self.assertIsInstance(value, datetime)
+        self.assertIsNotNone(value.tzinfo)
+        self.assertIsNotNone(value.utcoffset())
+
     def non_processing_state(self):
+        # candidate_audit_log is write-only observation. It is not authority,
+        # so these snapshots keep comparing every authoritative table.
+        ignored = {'event_processing_state', 'candidate_audit_log'}
         return {key: value for key, value in self.database_state().items()
-                if key != 'event_processing_state'}
+                if key not in ignored}
 
     def processing_rows(self, *, user='u', shadow=True):
         return self.sql('''SELECT status,retry_count,last_error,consumed_at
@@ -888,8 +909,12 @@ class ProducerDatabaseTests(unittest.TestCase):
         # Count attempted writes as well as comparing the committed table state.
         for call in queries.call_args_list:
             sql = ' '.join(call.args[0].split()).upper()
-            self.assertTrue(sql.startswith(('SELECT ', 'INSERT INTO EVENT_PROCESSING_STATE ',
-                'UPDATE EVENT_PROCESSING_STATE ', 'BEGIN', 'COMMIT', 'ROLLBACK')), sql)
+            self.assertTrue(sql.startswith((
+                'SELECT ', 'INSERT INTO EVENT_PROCESSING_STATE ',
+                'UPDATE EVENT_PROCESSING_STATE ', 'BEGIN', 'COMMIT', 'ROLLBACK',
+                'CREATE TABLE IF NOT EXISTS CANDIDATE_AUDIT_LOG',
+                'CREATE INDEX IF NOT EXISTS IDX_CANDIDATE_AUDIT_',
+                'INSERT INTO CANDIDATE_AUDIT_LOG ')), sql)
         logs = self.candidate_logs()
         self.assertEqual(logs[0]['gates']['G9']['status'], 'passed')
         self.assertEqual(logs[1]['gates']['G4']['status'], 'rejected')
@@ -1109,6 +1134,93 @@ class ProducerDatabaseTests(unittest.TestCase):
                          [('她今天亏了69元。',)])
         self.assertTrue(self.sql('SELECT adjudication FROM cognitive_events WHERE source_event_id=%s',
                                  ('source-0',))[0][0])
+
+    def test_candidate_audit_persists_interpretation(self):
+        interpretation = '她这是在报亏损，不是想让我算账'
+        self.seed()
+        result = self.run_pair(self.model([self.candidate(interpretation=interpretation)]))
+        self.assertEqual((result['status'], result['accepted']), ('succeeded', 1))
+        logged = self.candidate_logs()[0]
+        self.assertEqual(logged['interpretation'], interpretation)
+        self.assertNotIn('occurred_at', logged)
+        rows = self.audit_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len([row for row in self.logs if row.get('kind') == 'batch']), 1)
+        row = rows[0]
+        self.assertEqual(row['interpretation'], interpretation)
+        self.assertEqual(row['summary'], '她今天亏了69元')
+        self.assertEqual(row['quote'], '今天我亏了69元')
+        self.assertEqual(row['source_event_id'], 'source-0')
+        self.assertEqual(row['candidate_index'], 0)
+        self.assertEqual((row['user_id'], row['character_id']), ('u', 'c'))
+        self.assertTrue(row['gate_accepted'])
+        self.assertTrue(row['accepted'])
+        self.assertEqual(row['batch_id'], result['batch_id'])
+        self.assertEqual(producer.MODULE_VERSION, '1.0')
+        self.assertEqual(row['module_version'], '1.0')
+        self.assertIs(row['shadow'], True)
+        self.assertIsNone(row['persistence'])
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_candidate_audit_persists_null_interpretation(self):
+        candidate = self.candidate()
+        del candidate['interpretation']
+        self.seed()
+        result = self.run_pair(self.model([candidate]))
+        self.assertEqual(result['status'], 'succeeded')
+        row = self.audit_rows()[0]
+        self.assertIsNone(row['interpretation'])
+        self.assertEqual(row['summary'], '她今天亏了69元')
+        self.assertTrue(row['gate_accepted'])
+
+    def test_candidate_audit_persists_gate_rejections(self):
+        self.seed()
+        rejected = self.candidate(quote='她住在火星上', interpretation='她大概在开玩笑')
+        missing_time = self.candidate('not-in-this-batch', interpretation='这条来源不在本批')
+        result = self.run_pair(self.model([rejected, missing_time]))
+        self.assertEqual(result['status'], 'succeeded')
+        rows = self.audit_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertFalse(rows[0]['gate_accepted'])
+        self.assertFalse(rows[0]['accepted'])
+        self.assertEqual(rows[0]['reason'], 'quote_not_verbatim')
+        self.assertEqual(rows[0]['interpretation'], '她大概在开玩笑')
+        self.assertEqual(rows[0]['occurred_at'], self.now)
+        self.assertFalse(rows[1]['gate_accepted'])
+        self.assertEqual(rows[1]['reason'], 'source_not_in_batch')
+        self.assertIsNone(rows[1]['occurred_at'])
+        self.assert_aware(rows[1]['created_at'])
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_candidate_audit_failure_keeps_batch_succeeded(self):
+        self.seed()
+        with patch('candidate_audit.log_candidate', side_effect=RuntimeError('audit down')):
+            result = self.run_pair()
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(result['accepted'], 1)
+        self.assertEqual(len(self.candidate_logs()), 1)
+        self.assertEqual(self.processing_rows()[0][0], 'succeeded')
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+        self.assertEqual(self.sql("""SELECT tablename FROM pg_tables
+            WHERE schemaname='public' AND tablename='candidate_audit_log'"""), [])
+
+    def test_candidate_audit_disabled_writes_nothing(self):
+        self.seed()
+        with patch.object(candidate_audit, 'CANDIDATE_AUDIT_ENABLED', False):
+            result = self.run_pair()
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(len(self.candidate_logs()), 1)
+        self.assertEqual(self.sql("""SELECT tablename FROM pg_tables
+            WHERE schemaname='public' AND tablename='candidate_audit_log'"""), [])
+
+    def test_candidate_audit_timestamps_are_timezone_aware(self):
+        self.seed()
+        self.run_pair()
+        row = self.audit_rows()[0]
+        self.assertEqual(row['occurred_at'], self.now)
+        self.assert_aware(row['occurred_at'])
+        self.assert_aware(row['created_at'])
+        self.assertNotEqual(row['created_at'].tzinfo, None)
 
 
 class CandidateValuePolarityTests(unittest.TestCase):
