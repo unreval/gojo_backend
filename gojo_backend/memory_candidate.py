@@ -294,7 +294,11 @@ def validate_candidate(cur, user_id, character_id, candidate):
     grounded_text = re.sub(
         r'[-+负]?[0-9０-９零〇一二三四五六七八九十百千万萬亿億兆两,.点]+',
         lambda match: match.group() if match.group() in q else '', grounded_text)
-    chars = ''.join(re.findall(r'[\u4e00-\u9fff]', grounded_text))
+    # CJK ideographs plus hiragana U+3040–U+309F and katakana U+30A0–U+30FF.
+    # The long-vowel mark ー is inside the katakana block. A Japanese quote has
+    # no ideograph for the old class to match, so coverage was identically zero.
+    chars = ''.join(re.findall(
+        r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', grounded_text))
     covered = [False] * len(chars)
     for i in range(len(chars)):
         for j in range(len(chars), i + 1, -1):

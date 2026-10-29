@@ -705,6 +705,15 @@ class MemoryCandidateGateTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(memory_candidate._has_grounding_negation(text))
 
+    def test_logged_kana_fragment_is_grounded_when_the_summary_quotes_it(self):
+        # Production row: a hiragana quote has no CJK ideograph, so the old
+        # character class left coverage at zero even when the summary quoted it.
+        quote = 'きょはたのし'
+        summary = '她说「きょはたのし」，今天很开心'
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (True, None))
+
     def test_earlier_gate_failure_precedes_later_failure_without_mutation(self):
         cases = (
             ({'quote': '不存在的引用', 'summary': '', 'predicate': 'invalid'},
