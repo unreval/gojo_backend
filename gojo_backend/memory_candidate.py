@@ -57,6 +57,13 @@ _GROUNDING_NEGATION = re.compile(
     # faithful summary that writes 没 must not read as a polarity flip. Kept to
     # 哪 + a bounded verb list so 哪里 / 哪个 / 哪天 stay interrogatives.
     r'|哪(?:有|能|会)'
+    # Japanese denial. Longer forms first. ない also covers 〜たくない.
+    r'|ませんでした|なかった|ません|たくない|ない|ぬ'
+)
+# ない-final words that are not denial. Removed before the denial search,
+# the same way _MEI_NON_NEGATION removes 没关系 / 没错.
+_JA_NON_NEGATION = re.compile(
+    r'もったいない|さりげない|情けない|きたない|汚い|危ない|少ない'
 )
 # A bare 没有 / 没 answering the previous turn ("很疼吗" -> "没有哦，就是有点点疼")
 # denies the question, not the clause that follows it. It is dropped only when
@@ -196,12 +203,14 @@ def _has_grounding_negation(text):
     the words in _MEI_NON_NEGATION, including 没关系 / 没错 / 没事.
     没事做、没事干 and 没事儿 stay denials. 不 stays on a fixed verb list so
     不过 / 不但 / 不仅 / 不如 / 差不多 are not denials.
+    Japanese ない / ません is a denial except the words in _JA_NON_NEGATION.
     """
     answered = _ANSWER_PARTICLE_NEGATION.sub('', text, count=1)
     if answered != text and not _ANY_NEGATION_CHAR.search(answered):
         text = answered
     text = _DOUBLE_NEGATION.sub('', text)
     text = _MEI_NON_NEGATION.sub('', text)
+    text = _JA_NON_NEGATION.sub('', text)
     text = _A_NOT_A.sub('', text)
     return _GROUNDING_NEGATION.search(text) is not None
 

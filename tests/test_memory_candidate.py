@@ -746,6 +746,42 @@ class MemoryCandidateGateTests(unittest.TestCase):
                                   raw_text=quote),
                     (True, None))
 
+    def test_logged_japanese_denial_passes_when_the_summary_keeps_it(self):
+        quote = 'ぼくはつかれたから,ふくしゅうしたくない'
+        summary = '她说「ふくしゅうしたくない」，不想复习'
+        self.assertTrue(memory_candidate._has_grounding_negation(quote))
+        self.assertTrue(memory_candidate._has_grounding_negation(summary))
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (True, None))
+
+    def test_logged_dropped_japanese_denial_is_a_polarity_mismatch(self):
+        # ない used to be invisible. The summary that drops it then looked
+        # consistent with the quote, which is the polarity error G5 must reject.
+        quote = 'ふくしゅうしたくない'
+        summary = '她说想复习'
+        self.assertTrue(memory_candidate._has_grounding_negation(quote))
+        self.assertFalse(memory_candidate._has_grounding_negation(summary))
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (False, 'negation_polarity_mismatch'))
+
+    def test_japanese_denial_forms_are_visible(self):
+        for text in ('ない', 'なかった', 'ません', 'ませんでした', 'ぬ',
+                     'したくない', 'ふくしゅうしたくない'):
+            with self.subTest(text=text):
+                self.assertTrue(memory_candidate._has_grounding_negation(text))
+
+    def test_japanese_nai_words_are_not_denials(self):
+        for text in ('危ない', '少ない', 'もったいない', '汚い', 'きたない',
+                     '情けない', 'さりげない', 'この道は危ない', '水が少ない',
+                     'これはもったいない'):
+            with self.subTest(text=text):
+                self.assertFalse(memory_candidate._has_grounding_negation(text))
+        for text in ('少なくない', '危なくない'):
+            with self.subTest(text=text):
+                self.assertTrue(memory_candidate._has_grounding_negation(text))
+
     def test_logged_kana_fragment_is_grounded_when_the_summary_quotes_it(self):
         # Production row: a hiragana quote has no CJK ideograph, so the old
         # character class left coverage at zero even when the summary quoted it.

@@ -1325,6 +1325,17 @@ class CandidateValuePolarityTests(unittest.TestCase):
             with self.subTest(quote=quote, value=value):
                 self.assert_not_polarity_mismatch(quote, value)
 
+    def test_japanese_false_negation_is_not_a_value_polarity_mismatch(self):
+        # Same function as G5. A ない-final word that is not a denial must not
+        # split the quote from a value span that omits it.
+        self.assert_not_polarity_mismatch('ここは危ない', 'ここは')
+        self.assert_not_polarity_mismatch('水が少ない', '水が')
+        self.assert_not_polarity_mismatch('これはもったいない', 'これは')
+
+    def test_japanese_denial_dropped_from_the_value_span_is_a_mismatch(self):
+        self.assert_polarity_mismatch('ふくしゅうしたくない', 'ふくしゅう')
+        self.assert_not_polarity_mismatch('ふくしゅうしたくない', 'したくない')
+
     def test_reported_preference_branch_still_rejects_embedded_positive_values(self):
         self.assert_polarity_mismatch(
             '我不喜欢咖啡这种饮料', '喜欢', predicate='reported_preference')
