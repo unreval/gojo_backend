@@ -288,6 +288,78 @@ class ProducerPureTests(unittest.TestCase):
         self.assertIsNone(producer.observed_persistence({}))
         self.assertIsNone(producer.observed_persistence(None))
 
+    def test_prompt_records_utterance_mode_without_using_it_to_decide(self):
+        prompt = producer._SYSTEM
+        self.assertIn('utterance_mode?', prompt)
+        self.assertIn('utterance_mode只能是sincere、practice或unsure', prompt)
+        self.assertIn('照着打的', prompt)
+        self.assertIn('不知道什么意思', prompt)
+        self.assertIn('这样说对吗', prompt)
+        self.assertIn('ぼく', prompt)
+        self.assertIn('判断不了就写unsure，不要硬下结论', prompt)
+        self.assertIn('这个字段只用于观测，不影响是否记住', prompt)
+        self.assertEqual(prompt.count('%s'), 1)
+
+    def test_utterance_mode_is_optional_and_never_type_checked(self):
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元')
+        for mode in ('sincere', 'practice', 'unsure', 'maybe', '', 12, None):
+            with self.subTest(utterance_mode=mode):
+                self.assertIsNone(producer.candidate_contract_reason(
+                    dict(candidate, utterance_mode=mode), {'source-0'}))
+                producer._validate_candidate_batch(
+                    [dict(candidate, utterance_mode=mode)])
+        self.assertIsNone(producer.candidate_contract_reason(candidate, {'source-0'}))
+
+    def test_observed_utterance_mode_folds_everything_unknown_to_none(self):
+        for mode in ('sincere', 'practice', 'unsure'):
+            with self.subTest(utterance_mode=mode):
+                self.assertEqual(
+                    producer.observed_utterance_mode({'utterance_mode': mode}), mode)
+        for mode in ('maybe', 'Sincere', '', 12, 0, True, None,
+                     {'a': 1}, ['practice'], ('unsure',)):
+            with self.subTest(utterance_mode=mode):
+                self.assertIsNone(producer.observed_utterance_mode(
+                    {'utterance_mode': mode}))
+        self.assertIsNone(producer.observed_utterance_mode({}))
+        self.assertIsNone(producer.observed_utterance_mode(None))
+
+    def test_utterance_mode_does_not_change_the_audited_gate_sequence(self):
+        passing = dict(source_event_id='source-0', quote='今天我亏了69元',
+                       summary='她今天亏了69元', predicate='reported_fact',
+                       object='交易结果', value='亏了69元')
+        rejected = dict(passing, quote='她住在火星上')
+        self.assertEqual(
+            producer.gate_results(True, None, passing),
+            producer.gate_results(True, None, dict(passing, utterance_mode='practice')))
+        self.assertEqual(
+            producer.gate_results(False, 'quote_not_verbatim', rejected),
+            producer.gate_results(False, 'quote_not_verbatim',
+                                  dict(rejected, utterance_mode='practice')))
+
+    def test_adjudicate_strips_utterance_observation_before_the_gate(self):
+        seen = {}
+
+        def capture(_cur, _user, _character, candidate):
+            seen['candidate'] = dict(candidate)
+            return False, 'quote_not_verbatim'
+
+        cur = Mock()
+        cur.fetchone.return_value = ({'content': '今天我亏了69元'}, {}, self.now)
+        with patch('memory_candidate.validate_candidate', capture):
+            result = producer.adjudicate_and_project(
+                cur, user_id='u', character_id='c', event_id=1, occurred_at=self.now,
+                candidate=dict(source_event_id='source-0', quote='今天我亏了69元',
+                               summary='她今天亏了69元', predicate='reported_fact',
+                               object='交易结果', value='亏了69元',
+                               utterance_mode='practice', context_excerpt='出题'))
+        self.assertEqual(result['status'], 'rejected')
+        self.assertEqual(result['reason'], 'quote_not_verbatim')
+        self.assertNotIn('utterance_mode', seen['candidate'])
+        self.assertNotIn('context_excerpt', seen['candidate'])
+        self.assertNotIn('interpretation', seen['candidate'])
+
     def test_persistence_does_not_change_the_audited_gate_sequence(self):
         candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
                          summary='她今天亏了69元', predicate='reported_fact',
@@ -334,6 +406,22 @@ class ProducerPureTests(unittest.TestCase):
         # The audit record still reports the tier the model gave.
         self.assertEqual(record['persistence'], 'transient')
         self.assertTrue(record['accepted'])
+
+    def test_utterance_observation_is_stripped_before_the_live_projection(self):
+        projected, record = self.live_projection_candidate(
+            utterance_mode='practice', context_excerpt='用这个句型造句')
+        self.assertNotIn('utterance_mode', projected)
+        self.assertNotIn('context_excerpt', projected)
+        self.assertNotIn('interpretation', projected)
+        self.assertEqual(projected['quote'], '今天我亏了69元')
+        self.assertEqual(projected['predicate'], 'reported_fact')
+        self.assertEqual(record['utterance_mode'], 'practice')
+        self.assertNotIn('context_excerpt', record)
+        self.assertTrue(record['accepted'])
+        omitted, omitted_record = self.live_projection_candidate(utterance_mode='maybe')
+        self.assertNotIn('utterance_mode', omitted)
+        self.assertIsNone(omitted_record['utterance_mode'])
+        self.assertTrue(omitted_record['accepted'])
 
     def test_live_projection_is_unchanged_when_no_tier_is_offered(self):
         projected, record = self.live_projection_candidate()
@@ -1285,6 +1373,47 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertTrue(all(item['prior_character_text'] == excerpt for item in payloads))
         self.assertTrue(all(item['content'] == '今天我亏了69元，想和你聊一聊。' for item in payloads))
         self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_utterance_mode_does_not_change_accept_or_reject(self):
+        self.seed(prefix='plain', user='plain')
+        passing = self.candidate('plain-0')
+        rejected = self.candidate('plain-0', quote='她住在火星上')
+        self.logs.clear()
+        plain = self.run_pair(self.model([passing, rejected]), user='plain')
+        plain_logs = list(self.candidate_logs())
+        self.seed()
+        self.logs.clear()
+        marked = self.run_pair(self.model([
+            self.candidate(utterance_mode='practice'),
+            self.candidate(quote='她住在火星上', utterance_mode='practice')]))
+        marked_logs = list(self.candidate_logs())
+
+        def outcome(logs):
+            return [(row['gate_accepted'], row['accepted'], row['reason']) for row in logs]
+
+        self.assertEqual(outcome(plain_logs), outcome(marked_logs))
+        self.assertEqual(plain['accepted'], marked['accepted'])
+        self.assertTrue(marked_logs[0]['gate_accepted'])
+        self.assertFalse(marked_logs[1]['gate_accepted'])
+        self.assertEqual(marked_logs[0]['reason'], None)
+        self.assertEqual(marked_logs[1]['reason'], 'quote_not_verbatim')
+        self.assertEqual(marked_logs[0]['utterance_mode'], 'practice')
+        self.assertEqual(marked_logs[1]['utterance_mode'], 'practice')
+
+    def test_illegal_utterance_mode_does_not_fail_the_batch(self):
+        self.seed()
+        result = self.run_pair(self.model([
+            self.candidate(),
+            dict(self.candidate(), utterance_mode='maybe'),
+            dict(self.candidate(), utterance_mode=12),
+            dict(self.candidate(), utterance_mode=None),
+            dict(self.candidate(), utterance_mode='sincere'),
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(result['accepted'], 5)
+        self.assertEqual(
+            [row['utterance_mode'] for row in self.candidate_logs()],
+            [None, None, None, None, 'sincere'])
 
     def test_first_user_message_has_no_character_context(self):
         self.seed()

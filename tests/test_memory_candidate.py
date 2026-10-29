@@ -833,6 +833,33 @@ class MemoryCandidateGateTests(unittest.TestCase):
                 self.assertEqual(self.validate(candidate), (False, reason))
                 self.assertEqual(candidate, original)
 
+    def test_apply_candidate_strips_utterance_observation_before_the_gate(self):
+        seen = {}
+
+        def capture(_cur, _user, _character, candidate):
+            seen['candidate'] = dict(candidate)
+            return False, 'quote_not_verbatim'
+
+        candidate = self.candidate(utterance_mode='practice', context_excerpt='出题')
+        with patch.object(memory_candidate, 'validate_candidate', capture):
+            result = memory_candidate.apply_candidate(
+                Mock(), 'u', 'c', candidate, occurred_at=None,
+                event_id=1, operation_id='op')
+        self.assertEqual(result['reason'], 'quote_not_verbatim')
+        self.assertNotIn('utterance_mode', seen['candidate'])
+        self.assertNotIn('context_excerpt', seen['candidate'])
+        self.assertEqual(candidate['utterance_mode'], 'practice')
+        self.assertEqual(candidate['context_excerpt'], '出题')
+
+    def test_utterance_mode_does_not_change_gate_results(self):
+        passing = self.candidate(utterance_mode='practice')
+        self.assertEqual(self.validate(passing), (True, None))
+        self.assertEqual(self.validate(self.candidate()), (True, None))
+        rejected = '她住在火星上'
+        self.assertEqual(
+            self.validate(self.candidate(quote=rejected, utterance_mode='practice')),
+            self.validate(self.candidate(quote=rejected)))
+
     def test_character_line_used_as_quote_is_not_verbatim(self):
         # The character line never enters raw_content. G2 still compares the
         # quote with the user turn only.

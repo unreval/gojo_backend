@@ -345,13 +345,15 @@ def apply_candidate(cur, user_id, character_id, candidate, *, occurred_at,
 
     The caller supplies canonical ingress and adjudication. A physical projection
     alone never grants recall authority: the unchanged reader gate still checks
-    the complete adjudication, stable belief and current source. No perspective
-    or interpretation text enters the claim, projection, or log. The caller's
-    candidate is unchanged.
+    the complete adjudication, stable belief and current source. No perspective,
+    interpretation, or utterance observation enters the claim, projection, or
+    log. The caller's candidate is unchanged.
     """
     checked = dict(candidate) if isinstance(candidate, dict) else candidate
     if isinstance(checked, dict):
         checked.pop('interpretation', None)
+        checked.pop('utterance_mode', None)
+        checked.pop('context_excerpt', None)
     accepted, reason = validate_candidate(cur, user_id, character_id, checked)
     if not accepted:
         return {'status': 'rejected', 'reason': reason}
