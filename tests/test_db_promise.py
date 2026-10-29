@@ -104,13 +104,22 @@ class PromiseGracePostgresTests(unittest.TestCase):
         self.assertNotIn(ORIGIN, output)
 
     def test_once_within_grace_returns_original_payload(self):
-        pid = self.promise(trigger_at=NOW - timedelta(minutes=10))
+        expected_at = NOW - timedelta(minutes=10)
+        pid = self.promise(trigger_at=expected_at)
         due, output = self.due()
-        self.assertEqual(due, [{
-            'id': pid, 'character_id': 'gojo', 'user_id': 'test-user',
-            'trigger_kind': 'once', 'context': CONTEXT, 'origin_text': ORIGIN,
-        }])
         self.assertEqual(output, '')
+        self.assertEqual(len(due), 1)
+        row = due[0]
+        self.assertEqual(row['id'], pid)
+        self.assertEqual(row['character_id'], 'gojo')
+        self.assertEqual(row['user_id'], 'test-user')
+        self.assertEqual(row['trigger_kind'], 'once')
+        self.assertEqual(row['context'], CONTEXT)
+        self.assertEqual(row['origin_text'], ORIGIN)
+        got = row['trigger_at']
+        if got.tzinfo is None:
+            got = got.replace(tzinfo=ZONE)
+        self.assertEqual(got.astimezone(ZONE), expected_at)
 
     def test_once_at_exact_grace_boundary_remains_due(self):
         pid = self.promise(trigger_at=NOW - timedelta(minutes=120))
@@ -146,15 +155,16 @@ class PromiseGracePostgresTests(unittest.TestCase):
             FROM proactive_promise WHERE id=%s''', (pid,)), [(True, False)])
 
     def test_fired_and_inactive_once_are_not_reclassified(self):
-        trigger_at = NOW - timedelta(days=3)
-        fired = self.promise(trigger_at=trigger_at)
-        inactive = self.promise(trigger_at=trigger_at)
-        db_promise.mark_fired(fired, trigger_at)
+        fired_at = NOW - timedelta(days=3)
+        inactive_at = fired_at + timedelta(hours=1)
+        fired = self.promise(trigger_at=fired_at)
+        inactive = self.promise(trigger_at=inactive_at)
+        db_promise.mark_fired(fired, fired_at)
         db_promise.deactivate(inactive)
         self.assertEqual(self.due(), ([], ''))
         self.assertEqual(self.sql('''SELECT id, is_active, is_fired, last_error
             FROM proactive_promise ORDER BY id'''),
-            [(fired, True, True, None), (inactive, False, False, None)])
+            [(fired, False, True, None), (inactive, False, False, None)])
 
     def test_once_comparison_keeps_session_timezone_semantics(self):
         self.database.query("SET TIME ZONE 'UTC'")

@@ -20,10 +20,34 @@
 import os
 from datetime import timedelta
 
+from psycopg2.errors import UniqueViolation
+
 from db import get_conn
 
 
 PROMISE_GRACE_MINUTES = int(os.environ.get('PROMISE_GRACE_MINUTES', '120'))
+
+_IDENTITY_INDEX_ONCE = '''CREATE UNIQUE INDEX IF NOT EXISTS idx_promise_identity_once
+  ON proactive_promise (user_id, character_id, trigger_at)
+  WHERE trigger_kind = 'once' AND is_fired = FALSE AND is_active = TRUE'''
+
+_IDENTITY_INDEX_DAILY = '''CREATE UNIQUE INDEX IF NOT EXISTS idx_promise_identity_daily
+  ON proactive_promise (user_id, character_id, trigger_time)
+  WHERE trigger_kind = 'daily' AND is_active = TRUE'''
+
+
+def ensure_promise_identity_indexes(cur):
+    """Partial unique indexes for the promise identity. Caller owns the transaction."""
+    cur.execute(_IDENTITY_INDEX_ONCE)
+    cur.execute(_IDENTITY_INDEX_DAILY)
+
+
+def _is_unique_violation(exc):
+    if isinstance(exc, UniqueViolation):
+        return True
+    # Disposable PGlite raises RuntimeError with the server text, not psycopg2.
+    text = str(exc).lower()
+    return 'duplicate key' in text or 'unique constraint' in text or '23505' in text
 
 
 def init_promise_table():
@@ -65,6 +89,13 @@ def init_promise_table():
     except Exception as e:
         print(f'[promise] occurrence_key alter skipped:{e}')
         cur.execute('ROLLBACK TO SAVEPOINT promise_occ')
+    try:
+        cur.execute('SAVEPOINT promise_identity_idx')
+        ensure_promise_identity_indexes(cur)
+        cur.execute('RELEASE SAVEPOINT promise_identity_idx')
+    except Exception as e:
+        print(f'[promise] identity index skipped:{e}')
+        cur.execute('ROLLBACK TO SAVEPOINT promise_identity_idx')
     conn.commit()
     cur.close()
     conn.close()
@@ -78,6 +109,8 @@ def add_promise(character_id, user_id, trigger_kind, context,
     - once: 必须传 trigger_at(datetime),trigger_time 为 None
     - daily: 必须传 trigger_time('HH:MM' 字符串),trigger_at 为 None
     occurrence_key 存在时按 unique occurrence 幂等，返回已有 id。
+    未完成的 once 以 (user, character, trigger_at) 为身份；
+    daily 以 (user, character, trigger_time) 为身份。文本不参与判重。
     """
     assert trigger_kind in ('once', 'daily'), f'不支持的 trigger_kind: {trigger_kind}'
     if trigger_kind == 'once' and not trigger_at:
@@ -88,6 +121,35 @@ def add_promise(character_id, user_id, trigger_kind, context,
 
     conn = get_conn()
     cur = conn.cursor()
+    try:
+        cur.execute('SAVEPOINT promise_insert')
+        try:
+            pid = _insert_promise_row(
+                cur, character_id, user_id, trigger_kind, trigger_at,
+                trigger_time, context, origin_text, occurrence_key)
+        except Exception as exc:
+            cur.execute('ROLLBACK TO SAVEPOINT promise_insert')
+            if not _is_unique_violation(exc):
+                raise
+            pid = _existing_identity_id(
+                cur, character_id, user_id, trigger_kind, trigger_at, trigger_time)
+            if pid is None:
+                raise
+            print(f'[promise] duplicate suppressed identity_id={pid}')
+        else:
+            cur.execute('RELEASE SAVEPOINT promise_insert')
+        conn.commit()
+        return pid
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _insert_promise_row(cur, character_id, user_id, trigger_kind, trigger_at,
+                        trigger_time, context, origin_text, occurrence_key):
     if occurrence_key:
         cur.execute(
             '''INSERT INTO proactive_promise
@@ -106,18 +168,34 @@ def add_promise(character_id, user_id, trigger_kind, context,
                 'SELECT id FROM proactive_promise WHERE occurrence_key=%s',
                 (occurrence_key,))
             row = cur.fetchone()
-        pid = row[0]
+        return row[0]
+    cur.execute('''INSERT INTO proactive_promise
+        (character_id, user_id, trigger_kind, trigger_at, trigger_time, context, origin_text)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+        (character_id, user_id, trigger_kind, trigger_at, trigger_time, context, origin_text)
+    )
+    return cur.fetchone()[0]
+
+
+def _existing_identity_id(cur, character_id, user_id, trigger_kind,
+                          trigger_at, trigger_time):
+    """Identity is the trigger instant, not the text. See the partial unique indexes."""
+    if trigger_kind == 'once':
+        cur.execute(
+            '''SELECT id FROM proactive_promise
+               WHERE user_id=%s AND character_id=%s AND trigger_kind='once'
+                 AND is_fired=FALSE AND is_active=TRUE AND trigger_at=%s
+               ORDER BY id LIMIT 1''',
+            (user_id, character_id, trigger_at))
     else:
-        cur.execute('''INSERT INTO proactive_promise
-            (character_id, user_id, trigger_kind, trigger_at, trigger_time, context, origin_text)
-            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
-            (character_id, user_id, trigger_kind, trigger_at, trigger_time, context, origin_text)
-        )
-        pid = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return pid
+        cur.execute(
+            '''SELECT id FROM proactive_promise
+               WHERE user_id=%s AND character_id=%s AND trigger_kind='daily'
+                 AND is_active=TRUE AND trigger_time=%s
+               ORDER BY id LIMIT 1''',
+            (user_id, character_id, trigger_time))
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def get_due_promises(now):
@@ -144,7 +222,7 @@ def get_due_promises(now):
         expired = cur.fetchall()
 
         # 一次性:未触发 + 到点 + 未超窗(包含边界)
-        cur.execute('''SELECT id, character_id, user_id, trigger_kind, context, origin_text
+        cur.execute('''SELECT id, character_id, user_id, trigger_kind, context, origin_text, trigger_at
                        FROM proactive_promise
                        WHERE is_active = TRUE AND trigger_kind = 'once'
                          AND is_fired = FALSE AND trigger_at <= %s::timestamptz
@@ -181,6 +259,7 @@ def get_due_promises(now):
         result.append({
             'id': r[0], 'character_id': r[1], 'user_id': r[2],
             'trigger_kind': r[3], 'context': r[4], 'origin_text': r[5],
+            'trigger_at': r[6],
         })
     for r in daily_rows:
         try:
@@ -197,7 +276,7 @@ def get_due_promises(now):
         result.append({
             'id': r[0], 'character_id': r[1], 'user_id': r[2],
             'trigger_kind': r[3], 'context': r[4], 'origin_text': r[5],
-            'trigger_time': r[6],
+            'trigger_time': r[6], 'trigger_at': trigger_at,
         })
     return result
 
@@ -214,7 +293,9 @@ def mark_fired(promise_id, fired_at):
         return
     kind = row[0]
     if kind == 'once':
-        cur.execute('UPDATE proactive_promise SET is_fired = TRUE, last_fired_at = %s WHERE id = %s',
+        cur.execute('''UPDATE proactive_promise
+                       SET is_fired = TRUE, is_active = FALSE, last_fired_at = %s
+                       WHERE id = %s''',
                     (fired_at, promise_id))
     else:  # daily
         cur.execute('UPDATE proactive_promise SET last_fired_at = %s WHERE id = %s',
@@ -228,7 +309,7 @@ def list_active_promises(character_id, user_id, limit=20):
     """列出用户跟某角色之间的活跃约定(给 LLM 或前端展示用)。"""
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('''SELECT id, trigger_kind, trigger_at, trigger_time, context, origin_text, created_at
+    cur.execute('''SELECT id, trigger_kind, trigger_at, trigger_time, context, origin_text, created_at, is_fired
                    FROM proactive_promise
                    WHERE character_id = %s AND user_id = %s AND is_active = TRUE
                    ORDER BY created_at DESC LIMIT %s''',
@@ -241,6 +322,7 @@ def list_active_promises(character_id, user_id, limit=20):
         'trigger_at': str(r[2]) if r[2] else None,
         'trigger_time': r[3], 'context': r[4], 'origin_text': r[5],
         'created_at': str(r[6]) if r[6] else None,
+        'is_fired': r[7],
     } for r in rows]
 
 

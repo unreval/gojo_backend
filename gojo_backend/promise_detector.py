@@ -37,12 +37,33 @@ def _cn_hour(token: str):
     return value if 0 <= value <= 23 else None
 
 
+# 承诺动词要挨着时钟。先看「叫/提醒/发消息」这类，避免「七点前就起来」
+# 抢走后面真正的「六点半叫你」。起来/起床只在没有任何更强动词时才采用。
+# 「主动发/我发/告诉」是定时模式里已经承认的动作，去掉无时钟兜底后仍要能配对。
+_CLOCK_VERB_WINDOW = 8
+_STRONG_PROMISE_VERBS = re.compile(r'主动发|发消息|我发|找你|联系|提醒|告诉|喊|催|叫')
+_WEAK_PROMISE_VERBS = re.compile(r'起床|起来')
+
+
+def _clock_near_verb(text, start, end, verbs):
+    before = text[max(0, start - _CLOCK_VERB_WINDOW):start]
+    after = text[end:end + _CLOCK_VERB_WINDOW]
+    return verbs.search(before) is not None or verbs.search(after) is not None
+
+
 def _extract_clock(text: str):
-    """返回 (hour, minute),取第一个能解析的时钟表达;没有则 (None, None)。"""
-    for match in re.finditer(_CN_CLOCK, text or ''):
+    """返回 (hour, minute)。只采纳承诺动词前后 8 字内的时钟；没有则 (None, None)。"""
+    text = text or ''
+    clocks = []
+    for match in re.finditer(_CN_CLOCK, text):
         hour = _cn_hour(match.group(1))
-        if hour is not None:
-            return hour, 30 if match.group(2) else 0
+        if hour is None:
+            continue
+        clocks.append((match.start(), match.end(), hour, 30 if match.group(2) else 0))
+    for verbs in (_STRONG_PROMISE_VERBS, _WEAK_PROMISE_VERBS):
+        for start, end, hour, minute in clocks:
+            if _clock_near_verb(text, start, end, verbs):
+                return hour, minute
     return None, None
 
 
@@ -128,24 +149,24 @@ def detect_and_save(character_id, user_id, user_text, reply_zh,
                                 occurrence_key=occurrence_key)
 
         elif matched_type == 'timed':
-            # 有具体时间:提取时间,创建一次性承诺
+            # 有具体时间才创建。解析不到承诺时刻就放弃，不造一个 +2 小时的闹钟。
             trigger_kind = 'once'
-            trigger_at = now + timedelta(hours=2)  # 默认 2 小时后
+            hour, minute = _extract_clock(reply_zh)
+            if hour is None:
+                return None
 
-            # 看有没有明天/后天
+            trigger_at = now
             if '明天' in reply_zh:
                 trigger_at = now + timedelta(days=1)
             elif '后天' in reply_zh:
                 trigger_at = now + timedelta(days=2)
 
-            # 看有没有具体小时。「四点半」要保留 30 分,不能抹成整点。
-            hour, minute = _extract_clock(reply_zh)
-            if hour is not None:
-                trigger_at = trigger_at.replace(
-                    hour=hour, minute=minute, second=0, microsecond=0)
-                # 没写明天/后天又已经过点了,说的就是明天那一次。
-                if trigger_at <= now and not ('明天' in reply_zh or '后天' in reply_zh):
-                    trigger_at += timedelta(days=1)
+            # 「四点半」要保留 30 分,不能抹成整点。
+            trigger_at = trigger_at.replace(
+                hour=hour, minute=minute, second=0, microsecond=0)
+            # 没写明天/后天又已经过点了,说的就是明天那一次。
+            if trigger_at <= now and not ('明天' in reply_zh or '后天' in reply_zh):
+                trigger_at += timedelta(days=1)
 
             context = f'角色答应在特定时间联系。原话:「{matched_text}」'
             return _save_promise(character_id, user_id, trigger_kind,
@@ -185,15 +206,8 @@ def detect_and_save(character_id, user_id, user_text, reply_zh,
 def _save_promise(character_id, user_id, trigger_kind,
                   trigger_at=None, trigger_time=None,
                   context='', origin='', occurrence_key=None):
-    """写入 proactive_promise 表。occurrence_key 幂等；无 key 时仍用 context 前缀去重。"""
+    """写入 proactive_promise。同一触发时刻的判重由 db_promise 唯一索引负责。"""
     try:
-        if not occurrence_key:
-            existing = db_promise.get_active_promises(character_id, user_id)
-            for p in existing:
-                if p.get('context', '')[:20] == context[:20]:
-                    print(f'[promise_detect] 跳过重复承诺: {context[:30]}')
-                    return None
-
         pid = db_promise.add_promise(
             character_id=character_id,
             user_id=user_id,
