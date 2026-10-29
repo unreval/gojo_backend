@@ -1345,6 +1345,8 @@ class CandidateValuePolarityTests(unittest.TestCase):
         self.assert_not_polarity_mismatch('ここは危ない', 'ここは')
         self.assert_not_polarity_mismatch('水が少ない', '水が')
         self.assert_not_polarity_mismatch('これはもったいない', 'これは')
+        self.assert_not_polarity_mismatch('今日はつまらない', '今日は')
+        self.assert_not_polarity_mismatch('いぬがすき', 'すき')
 
     def test_japanese_denial_dropped_from_the_value_span_is_a_mismatch(self):
         self.assert_polarity_mismatch('ふくしゅうしたくない', 'ふくしゅう')

@@ -58,12 +58,17 @@ _GROUNDING_NEGATION = re.compile(
     # 哪 + a bounded verb list so 哪里 / 哪个 / 哪天 stay interrogatives.
     r'|哪(?:有|能|会)'
     # Japanese denial. Longer forms first. ない also covers 〜たくない.
-    r'|ませんでした|なかった|ません|たくない|ない|ぬ'
+    # Bare ぬ is not included: it is a classical auxiliary, and it also sits
+    # inside everyday words such as いぬ and ぬるい.
+    r'|ませんでした|なかった|ません|たくない|ない'
 )
 # ない-final words that are not denial. Removed before the denial search,
 # the same way _MEI_NON_NEGATION removes 没关系 / 没错.
+# あんない / しつない are the hiragana spellings of 案内 / 室内. The kanji
+# forms contain no ない, but this speaker types those words in kana.
 _JA_NON_NEGATION = re.compile(
-    r'もったいない|さりげない|情けない|きたない|汚い|危ない|少ない'
+    r'もったいない|さりげない|情けない|しようがない|しょうがない|しかたない'
+    r'|つまらない|くだらない|たまらない|きたない|あんない|しつない|汚い|危ない|少ない'
 )
 # A bare 没有 / 没 answering the previous turn ("很疼吗" -> "没有哦，就是有点点疼")
 # denies the question, not the clause that follows it. It is dropped only when
