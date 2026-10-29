@@ -307,7 +307,8 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                           WHERE b.user_id=cognitive_questions.user_id
                             AND b.character_id=cognitive_questions.character_id
                             AND b.belief_key=cognitive_questions.metadata->'current_judgment'->>'belief_key'
-                            AND b.status='active' AND {current_literal_belief_sql('b')}))
+                            AND b.status='active' AND {current_literal_belief_sql('b')}
+                            AND {fresh_state_report_sql('b')}))
                  AND (metadata->>'updated_by' IS DISTINCT FROM 'explicit_answer_v1'
                       OR {current_answer_question_sql()})
                ORDER BY updated_at DESC, id DESC

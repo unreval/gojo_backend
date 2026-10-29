@@ -253,6 +253,7 @@ def fresh_state_report_sql(alias):
     """
     key_column = {
         'cognitive_beliefs': 'belief_key',
+        'b': 'belief_key',
         'cognitive_hypotheses': 'hypothesis_key',
     }.get(alias)
     if key_column is None:

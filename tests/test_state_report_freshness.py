@@ -53,6 +53,16 @@ class StateReportTtlLiteralTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fresh_state_report_sql('cognitive_questions')
 
+    def test_question_exists_alias_uses_the_same_freshness_predicate(self):
+        sql = fresh_state_report_sql('b')
+        self.assertIn('b.belief_key', sql)
+        self.assertIn("IS DISTINCT FROM 'reported_state'", sql)
+        self.assertIn('ce.occurred_at >', sql)
+        self.assertIn(f"INTERVAL '{STATE_REPORT_TTL_HOURS} hours'", sql)
+        reader = (ROOT / 'gojo_backend' / 'cognitive_reader.py').read_text(encoding='utf-8')
+        self.assertIn("fresh_state_report_sql('b')", reader)
+        self.assertNotRegex(reader, r'\b48\b')
+
 
 @unittest.skipUnless(os.getenv('COGNITIVE_TEST_PGLITE'), 'set COGNITIVE_TEST_PGLITE to the local test-only package')
 class StateReportReadTtlTests(unittest.TestCase):
@@ -150,3 +160,93 @@ class StateReportReadTtlTests(unittest.TestCase):
         self.assertEqual(kept[0], {'reported_preference', 'reported_identity'})
         self.assertEqual(kept[1], {'reported_preference', 'reported_identity'})
         self.assertTrue(kept[2] and kept[3])
+
+    def prompt(self):
+        from cognitive_reader import build_cognitive_prompt_context
+        return build_cognitive_prompt_context('u', 'c', conn=self.database)
+
+    def question_row(self, predicate):
+        return self.sql('''SELECT status,
+                                  metadata ? 'resolution' AS has_resolution
+                           FROM cognitive_questions
+                           WHERE (metadata->'claim_scope')->>'predicate'=%s''',
+                        (predicate,))
+
+    def test_reported_state_question_judgment_follows_event_age(self):
+        self.report('tired', '我的状态是「很累」')
+        self.assertIn('当前问题的已形成判断', self.prompt())
+
+        self.age('reported_state', STATE_REPORT_TTL_HOURS - 1)
+        self.assertIn('当前问题的已形成判断', self.prompt())
+
+        self.age('reported_state', STATE_REPORT_TTL_HOURS + 1)
+        aged = self.prompt()
+        self.assertNotIn('当前问题的已形成判断', aged)
+        self.assertNotIn('当前已明确的结论', aged)
+        self.assertEqual(self.question_row('reported_state'), [('resolved', False)])
+
+    def test_resolution_on_the_same_question_is_blocked_with_the_row(self):
+        self.report('tired', '我的状态是「很累」')
+        self.sql('''UPDATE cognitive_questions
+                    SET metadata = metadata || jsonb_build_object(
+                        'resolution', metadata->'current_judgment')
+                    WHERE (metadata->'claim_scope')->>'predicate'='reported_state' ''')
+        self.database.commit()
+        self.assertIn('当前已明确的结论', self.prompt())
+
+        self.age('reported_state', STATE_REPORT_TTL_HOURS + 1)
+        aged = self.prompt()
+        self.assertNotIn('当前已明确的结论', aged)
+        self.assertNotIn('当前问题的已形成判断', aged)
+        self.assertEqual(self.question_row('reported_state'), [('resolved', True)])
+
+    def test_preference_and_identity_questions_stay_after_the_state_window(self):
+        self.report('coffee', '我喜欢咖啡。')
+        self.report('job', '我的职业是「教师」')
+        self.age('reported_preference', STATE_REPORT_TTL_HOURS + 1)
+        self.age('reported_identity', STATE_REPORT_TTL_HOURS + 1)
+        text = self.prompt()
+        self.assertIn('当前问题的已形成判断', text)
+        self.assertIn('咖啡', text)
+        self.assertIn('教师', text)
+        self.assertEqual(self.question_row('reported_preference'), [('resolved', False)])
+        self.assertEqual(self.question_row('reported_identity'), [('resolved', False)])
+
+    def test_other_updated_by_and_pending_questions_are_unchanged(self):
+        self.source('note', '一条与策略无关的原话')
+        self.source('wait', '还没说清的原话')
+        kept = {
+            'updated_by': 'manual_reviewer',
+            'current_judgment': {
+                'value': '保持',
+                'content': '手工保留的判断正文',
+                'status': 'committed',
+                'belief_key': 'manual-key',
+                'evidence_event_ids': ['note'],
+            },
+        }
+        pending = {
+            'updated_by': 'deterministic_evidence_policy_v1',
+            'current_judgment': None,
+            'pending': {'reason': 'unsupported_or_implicit_semantics'},
+        }
+        self.sql('''INSERT INTO cognitive_questions
+                    (user_id,character_id,question_key,question_text,status,
+                     metadata,source_event_refs)
+                    VALUES ('u','c','manual-q','手工问题','resolved',%s::jsonb,%s::jsonb),
+                           ('u','c','pending-q','待确认原始陈述的含义或纠正范围。','active',
+                            %s::jsonb,%s::jsonb)''',
+                 (json.dumps(kept, ensure_ascii=False),
+                  json.dumps([{'source_id': 'note', 'operation_id': 'main'}]),
+                  json.dumps(pending, ensure_ascii=False),
+                  json.dumps([{'source_id': 'wait', 'operation_id': 'main'}])))
+        self.database.commit()
+        text = self.prompt()
+        self.assertIn('手工保留的判断正文', text)
+        self.assertIn('当前问题的已形成判断', text)
+        self.assertIn('未解决问题', text)
+        self.assertIn('待确认原始陈述的含义或纠正范围。', text)
+        self.assertEqual(
+            self.sql('''SELECT question_key, status FROM cognitive_questions
+                        ORDER BY question_key'''),
+            [('manual-q', 'resolved'), ('pending-q', 'active')])
