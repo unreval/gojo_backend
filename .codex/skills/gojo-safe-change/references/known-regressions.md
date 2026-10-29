@@ -376,6 +376,48 @@ TESTED
 
 ---
 
+# REG-011 — Japanese denial check is an exemption list
+
+## Area
+
+Durable memory candidate gates / G5 and value polarity
+
+## Historical risk
+
+`_has_grounding_negation` treats hiragana `ない` / `なかった` / `ません` /
+`ませんでした` as denial, then subtracts a fixed list of `ない`-final words
+that are not denial. The list is not a morphological analysis. Adjectives
+ending in `ない` are an open class, so an unlisted word is read as denial.
+
+A bare `ぬ` was removed from the pattern. It is a classical auxiliary
+(`知らぬ`) and also a syllable inside everyday words (`いぬ`, `ぬるい`).
+The false hits were real; the classical form is left unrecognized.
+
+## Required behavior
+
+- Listed non-denials, including `つまらない` and the hiragana spellings
+  `あんない` / `しつない`, are not denial.
+- A real denial built on the same stem, such as `つまらなくない`, stays denial.
+- Everyday `ぬ` and classical `知らぬ` are not denial.
+- Katakana denial (`ナイ`, `マセン`) and halfwidth katakana are not recognized.
+- The failure shape is a false rejection: an unlisted `ない` adjective in the
+  quote and no denial in the summary is judged a polarity mismatch. That is
+  the conservative direction. It must not become a pass.
+
+## Regression requirement
+
+`tests/test_memory_candidate.py` must keep:
+
+- `test_bare_nu_is_not_a_denial`
+- `test_japanese_nai_words_are_not_denials`
+- `test_japanese_denial_forms_are_visible`
+
+## Status
+
+TESTED
+
+---
+
 # Regression Rule
 
 任何任务如果修改到上述 Regression 的 Area：
@@ -403,3 +445,4 @@ TESTED
 | REG-008 | Derived Memory Authority | NEEDS TEST |
 | REG-009 | Schedule / Online Continuity | OPEN |
 | REG-010 | Promise trigger timezone | TESTED |
+| REG-011 | Japanese denial exemption list | TESTED |

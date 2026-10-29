@@ -57,6 +57,18 @@ _GROUNDING_NEGATION = re.compile(
     # faithful summary that writes 没 must not read as a polarity flip. Kept to
     # 哪 + a bounded verb list so 哪里 / 哪个 / 哪天 stay interrogatives.
     r'|哪(?:有|能|会)'
+    # Japanese denial. Longer forms first. ない also covers 〜たくない.
+    # Bare ぬ is not included: it is a classical auxiliary, and it also sits
+    # inside everyday words such as いぬ and ぬるい.
+    r'|ませんでした|なかった|ません|たくない|ない'
+)
+# ない-final words that are not denial. Removed before the denial search,
+# the same way _MEI_NON_NEGATION removes 没关系 / 没错.
+# あんない / しつない are the hiragana spellings of 案内 / 室内. The kanji
+# forms contain no ない, but this speaker types those words in kana.
+_JA_NON_NEGATION = re.compile(
+    r'もったいない|さりげない|情けない|しようがない|しょうがない|しかたない'
+    r'|つまらない|くだらない|たまらない|きたない|あんない|しつない|汚い|危ない|少ない'
 )
 # A bare 没有 / 没 answering the previous turn ("很疼吗" -> "没有哦，就是有点点疼")
 # denies the question, not the clause that follows it. It is dropped only when
@@ -88,6 +100,10 @@ _PERSPECTIVE_ASSERTION = re.compile(
     r'|(?:她|他|你|您|用户|对方)[^，。！？；\n]{0,12}'
     r'(?:在意|喜欢|讨厌|爱|想要|希望|害怕|担心|难过|开心|嫉妒|依赖|安全感)'
 )
+# Prompt-shaped report frame. Dropped once from the start of the residue,
+# after pronouns, the same way a leading answer particle is dropped once.
+# A 说 later in the sentence can be what she actually said, so it stays.
+_LEADING_REPORT_FRAME = re.compile(r'^(?:说自己|说)')
 
 
 def _same_number(left, right):
@@ -192,12 +208,14 @@ def _has_grounding_negation(text):
     the words in _MEI_NON_NEGATION, including 没关系 / 没错 / 没事.
     没事做、没事干 and 没事儿 stay denials. 不 stays on a fixed verb list so
     不过 / 不但 / 不仅 / 不如 / 差不多 are not denials.
+    Japanese ない / ません is a denial except the words in _JA_NON_NEGATION.
     """
     answered = _ANSWER_PARTICLE_NEGATION.sub('', text, count=1)
     if answered != text and not _ANY_NEGATION_CHAR.search(answered):
         text = answered
     text = _DOUBLE_NEGATION.sub('', text)
     text = _MEI_NON_NEGATION.sub('', text)
+    text = _JA_NON_NEGATION.sub('', text)
     text = _A_NOT_A.sub('', text)
     return _GROUNDING_NEGATION.search(text) is not None
 
@@ -288,13 +306,18 @@ def validate_candidate(cur, user_id, character_id, candidate):
     # provenanced. raw_content is the verbatim turn verified above; nothing
     # outside it, and no generated text, becomes grounding evidence.
     grounded_text = re.sub(r'她|他|您|五条悟|用户|对方', '', summary)
+    grounded_text = _LEADING_REPORT_FRAME.sub('', grounded_text, count=1)
     time_words = sorted(_TIME_WORDS.keys() | _DAY_WORDS.keys(), key=len, reverse=True)
     grounded_text = re.sub('|'.join(time_words), '', grounded_text)
     q = re.sub(r'\s', '', raw_content)
     grounded_text = re.sub(
         r'[-+负]?[0-9０-９零〇一二三四五六七八九十百千万萬亿億兆两,.点]+',
         lambda match: match.group() if match.group() in q else '', grounded_text)
-    chars = ''.join(re.findall(r'[\u4e00-\u9fff]', grounded_text))
+    # CJK ideographs plus hiragana U+3040–U+309F and katakana U+30A0–U+30FF.
+    # The long-vowel mark ー is inside the katakana block. A Japanese quote has
+    # no ideograph for the old class to match, so coverage was identically zero.
+    chars = ''.join(re.findall(
+        r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', grounded_text))
     covered = [False] * len(chars)
     for i in range(len(chars)):
         for j in range(len(chars), i + 1, -1):

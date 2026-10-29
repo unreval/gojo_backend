@@ -172,6 +172,20 @@ class ProducerPureTests(unittest.TestCase):
                 self.assertEqual(result['claim']['value'], value)
                 self.assertEqual(result['claim']['subject'], 'user:u')
 
+    def test_prompt_keeps_japanese_fragments_and_keeps_inference_out_of_summary(self):
+        prompt = producer._SYSTEM
+        summary, interpretation = prompt.split(
+            'interpretation是你对这件事的主观理解', 1)
+        self.assertIn('原话是日语时，summary必须原样保留日语关键片段', summary)
+        self.assertIn('她说「ふくしゅうしたくない」，不想复习', summary)
+        self.assertIn('不准写你的判断、情绪归因或动机推测', summary)
+        self.assertIn('表示不满', summary)
+        self.assertIn('她自认是初学者', summary)
+        self.assertIn('她觉得之前的内容太难，不适合初学者', summary)
+        self.assertNotIn('ふくしゅうしたくない', interpretation)
+        self.assertNotIn('表示不满', interpretation)
+        self.assertIn('不要求客观正确', interpretation)
+
     def test_prompt_requests_a_subjective_interpretation(self):
         prompt = producer._SYSTEM
         self.assertIn('interpretation是你对这件事的主观理解，必须给出，一句话', prompt)
@@ -1324,6 +1338,19 @@ class CandidateValuePolarityTests(unittest.TestCase):
                 ('差不多喜欢咖啡', '喜欢')):
             with self.subTest(quote=quote, value=value):
                 self.assert_not_polarity_mismatch(quote, value)
+
+    def test_japanese_false_negation_is_not_a_value_polarity_mismatch(self):
+        # Same function as G5. A ない-final word that is not a denial must not
+        # split the quote from a value span that omits it.
+        self.assert_not_polarity_mismatch('ここは危ない', 'ここは')
+        self.assert_not_polarity_mismatch('水が少ない', '水が')
+        self.assert_not_polarity_mismatch('これはもったいない', 'これは')
+        self.assert_not_polarity_mismatch('今日はつまらない', '今日は')
+        self.assert_not_polarity_mismatch('いぬがすき', 'すき')
+
+    def test_japanese_denial_dropped_from_the_value_span_is_a_mismatch(self):
+        self.assert_polarity_mismatch('ふくしゅうしたくない', 'ふくしゅう')
+        self.assert_not_polarity_mismatch('ふくしゅうしたくない', 'したくない')
 
     def test_reported_preference_branch_still_rejects_embedded_positive_values(self):
         self.assert_polarity_mismatch(

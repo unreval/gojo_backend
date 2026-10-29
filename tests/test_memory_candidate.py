@@ -705,6 +705,117 @@ class MemoryCandidateGateTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(memory_candidate._has_grounding_negation(text))
 
+    def test_logged_leading_report_frame_does_not_fail_a_faithful_summary(self):
+        # 说 / 说自己 is the frame the prompt asks for. It is not extra content.
+        cases = (
+            ('我很聪明的', '她说自己很聪明'),
+            ('因为你写了呀，我照着打的，但并不知道是什么意思',
+             '她说之前的日语是照着打的，并不知道意思'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (True, None))
+
+    def test_logged_inference_stays_ungrounded_after_the_frame_strip(self):
+        cases = (
+            ('四点叫我起床', '她被四点叫起床，表示不满'),
+            ('七点叫我的', '她提醒对方说好了七点叫她'),
+            ('不适合初学者', '她自认是初学者'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (False, 'summary_not_grounded_in_quote'))
+
+    def test_logged_faithful_chinese_summaries_still_pass(self):
+        cases = (
+            ('你之前的都太难了不适合初学者', '她觉得之前的内容太难，不适合初学者'),
+            ('明天早八有课', '她明天早上八点有课'),
+            ('书坏了，停止复习', '她说书坏了，所以停止复习'),
+            ('你明天早点叫我起床呗', '她希望明天被早点叫起床'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (True, None))
+
+    def test_logged_japanese_denial_passes_when_the_summary_keeps_it(self):
+        quote = 'ぼくはつかれたから,ふくしゅうしたくない'
+        summary = '她说「ふくしゅうしたくない」，不想复习'
+        self.assertTrue(memory_candidate._has_grounding_negation(quote))
+        self.assertTrue(memory_candidate._has_grounding_negation(summary))
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (True, None))
+
+    def test_logged_dropped_japanese_denial_is_a_polarity_mismatch(self):
+        # ない used to be invisible. The summary that drops it then looked
+        # consistent with the quote, which is the polarity error G5 must reject.
+        quote = 'ふくしゅうしたくない'
+        summary = '她说想复习'
+        self.assertTrue(memory_candidate._has_grounding_negation(quote))
+        self.assertFalse(memory_candidate._has_grounding_negation(summary))
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (False, 'negation_polarity_mismatch'))
+
+    def test_japanese_denial_forms_are_visible(self):
+        for text in ('ない', 'なかった', 'ません', 'ませんでした',
+                     'したくない', 'ふくしゅうしたくない'):
+            with self.subTest(text=text):
+                self.assertTrue(memory_candidate._has_grounding_negation(text))
+
+    def test_bare_nu_is_not_a_denial(self):
+        # ぬ as a classical auxiliary, as in 知らぬ, is intentionally not
+        # recognized. Everyday words that merely contain ぬ are not denials.
+        for text in ('いぬ', 'ぬるい', 'ぬいぐるみ', 'きぬ', '知らぬ'):
+            with self.subTest(text=text):
+                self.assertFalse(memory_candidate._has_grounding_negation(text))
+
+    def test_japanese_nai_words_are_not_denials(self):
+        for text in ('危ない', '少ない', 'もったいない', '汚い', 'きたない',
+                     '情けない', 'さりげない', 'つまらない', 'しかたない',
+                     'しようがない', 'しょうがない', 'くだらない', 'たまらない',
+                     'あんない', 'しつない', 'この道は危ない', '水が少ない',
+                     'これはもったいない', '今日はつまらない'):
+            with self.subTest(text=text):
+                self.assertFalse(memory_candidate._has_grounding_negation(text))
+        for text in ('少なくない', '危なくない', 'つまらなくない',
+                     'あんないしない', 'しつないじゃない'):
+            with self.subTest(text=text):
+                self.assertTrue(memory_candidate._has_grounding_negation(text))
+
+    def test_chinese_grounding_is_unchanged_by_the_japanese_list(self):
+        cases = (
+            ('今天没亏', '她亏了', (False, 'negation_polarity_mismatch')),
+            ('这次交易没亏钱', '她这次交易没亏钱', (True, None)),
+            ('我很聪明的', '她说自己很聪明', (True, None)),
+            ('四点叫我起床', '她被四点叫起床，表示不满',
+             (False, 'summary_not_grounded_in_quote')),
+        )
+        for quote, summary, expected in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    expected)
+
+    def test_logged_kana_fragment_is_grounded_when_the_summary_quotes_it(self):
+        # Production row: a hiragana quote has no CJK ideograph, so the old
+        # character class left coverage at zero even when the summary quoted it.
+        quote = 'きょはたのし'
+        summary = '她说「きょはたのし」，今天很开心'
+        self.assertEqual(
+            self.validate(self.candidate(quote=quote, summary=summary), raw_text=quote),
+            (True, None))
+
     def test_earlier_gate_failure_precedes_later_failure_without_mutation(self):
         cases = (
             ({'quote': '不存在的引用', 'summary': '', 'predicate': 'invalid'},
