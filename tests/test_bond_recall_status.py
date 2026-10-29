@@ -516,5 +516,84 @@ class BondExpiresAtMigrationTests(unittest.TestCase):
         self.assertTrue(bond_sql)
 
 
+class RecallWeightZeroTests(unittest.TestCase):
+    """recall_weight 0 disables a fact. NULL stays the SQL default of 1."""
+
+    def setUp(self):
+        self.store = BondRecallStore()
+        self.patchers = [
+            patch.object(smart_recall, 'get_conn', return_value=self.store),
+            patch('memory_lifecycle.recall_lifecycle_memories', return_value=[]),
+            patch('memory_lifecycle.recall_sticky_notes', return_value=[]),
+            patch('memory_lifecycle.recall_diary_memories', return_value=[]),
+        ]
+        for item in self.patchers:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def _fact(self, fid, weight, category='其他', content='咖啡'):
+        return (fid, content, NOW, category, 1, None, False, 'long_fact', weight, [])
+
+    def _recall(self):
+        return smart_recall.two_level_recall('u1', 'gojo', '咖啡')
+
+    def _by_id(self, result):
+        return {item['id']: item for item in result['facts']}
+
+    def test_zero_weight_ordinary_fact_is_not_recalled(self):
+        self.store.facts = [self._fact(1, 0)]
+        self.assertEqual(self._by_id(self._recall()), {})
+
+    def test_zero_weight_identity_fact_is_not_forced_back(self):
+        facts = [
+            self._fact(index, 1.0)
+            for index in range(1, smart_recall.FACT_TOP_K + 1)
+        ]
+        facts.append(self._fact(99, 0, category='身份'))
+        self.store.facts = facts
+        recalled = self._by_id(self._recall())
+        self.assertNotIn(99, recalled)
+        self.assertEqual(len(recalled), smart_recall.FACT_TOP_K)
+
+    def test_null_weight_scores_like_the_coalesced_default(self):
+        self.store.facts = [self._fact(1, None), self._fact(2, 1.0)]
+        recalled = self._by_id(self._recall())
+        self.assertEqual(set(recalled), {1, 2})
+        self.assertAlmostEqual(recalled[1]['score'], recalled[2]['score'])
+        sql = '\n'.join(item[0] for item in self.store.executed)
+        self.assertIn('COALESCE(recall_weight, 1.0) as recall_weight', sql)
+
+    def test_superseded_weight_still_participates(self):
+        self.store.facts = [self._fact(1, 0.15), self._fact(2, 1.0)]
+        recalled = self._by_id(self._recall())
+        self.assertIn(1, recalled)
+        self.assertAlmostEqual(recalled[1]['score'], recalled[2]['score'] * 0.15)
+
+    def test_positive_weights_keep_descending_score_order(self):
+        weights = (0.35, 0.55, 0.9, 1.0)
+        self.store.facts = [
+            self._fact(index + 1, weight) for index, weight in enumerate(weights)
+        ]
+        recalled = self._recall()['facts']
+        self.assertEqual(
+            [item['recall_weight'] for item in recalled],
+            [1.0, 0.9, 0.55, 0.35],
+        )
+
+    def test_low_positive_identity_weight_is_still_forced_back(self):
+        facts = [
+            self._fact(index, 1.0)
+            for index in range(1, smart_recall.FACT_TOP_K + 1)
+        ]
+        facts.append(self._fact(99, 0.15, category='身份'))
+        self.store.facts = facts
+        self.assertIn(99, self._by_id(self._recall()))
+
+    def test_bounded_weight_keeps_zero_distinct_from_none(self):
+        self.assertEqual(smart_recall._bounded_weight(0), 0.0)
+        self.assertEqual(smart_recall._bounded_weight(None), 1.0)
+        self.assertAlmostEqual(smart_recall._bounded_weight(0.15), 0.15)
+
+
 if __name__ == '__main__':
     unittest.main()

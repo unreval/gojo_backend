@@ -157,6 +157,20 @@ def _bounded_weight(weight, default=1.0):
         return float(default)
 
 
+def _recall_weight_multiplier(weight, default=1.0):
+    """None uses the default. A stored 0 stays 0; do not coerce it with `or`."""
+    if weight is None:
+        return float(default)
+    return float(weight)
+
+
+def _recall_weight_disabled(weight):
+    """Only a real weight at or below 0 turns recall off. None is not off."""
+    if weight is None:
+        return False
+    return float(weight) <= 0
+
+
 def _score_bond_candidate(content, timestamp, user_message,
                           query_embedding=None, memory_embedding=None,
                           recall_weight=1.0):
@@ -354,7 +368,7 @@ def two_level_recall(user_id, character_id, user_message,
                 entry['timestamp'], entry['mention_count'],
                 entry['last_mentioned'], user_message,
                 query_embedding, mem_emb
-            ) * float(entry.get('recall_weight') or 1.0)
+            ) * _recall_weight_multiplier(entry.get('recall_weight'))
 
         # The told bucket is a role-scoped view of these same canonical facts.
         # Their SQL authority and Raw Event checks have already run above.
@@ -367,13 +381,18 @@ def two_level_recall(user_id, character_id, user_message,
                              row.get('timestamp') or datetime.min), reverse=True)
         projected_tolds = projected_tolds[:TOLD_TOP_K]
 
-        # 按分数排序，取 top_k
+        # 按分数排序，取 top_k。权重 <= 0 是停用，不占普通桶名额；
+        # 不另加「分数必须大于 0」的门槛。
         pool.sort(key=lambda x: x['score'], reverse=True)
-        selected_facts = pinned[:PINNED_MAX] + pool[:FACT_TOP_K]
+        eligible_pool = [
+            entry for entry in pool
+            if not _recall_weight_disabled(entry.get('recall_weight'))
+        ]
+        selected_facts = pinned[:PINNED_MAX] + eligible_pool[:FACT_TOP_K]
 
-        # 身份类强制补回（和你原来的逻辑一样）
+        # 身份类强制补回。数量仍无上限；停用权重不补回。
         selected_ids = {f['id'] for f in selected_facts}
-        for entry in pool:
+        for entry in eligible_pool:
             if entry['id'] not in selected_ids and entry['category'] == '身份':
                 selected_facts.append(entry)
                 selected_ids.add(entry['id'])
