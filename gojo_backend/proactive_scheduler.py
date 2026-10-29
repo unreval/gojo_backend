@@ -207,28 +207,39 @@ def _tick():
     if not due:
         return
 
-    # ★ 去重:同一角色同时到期的相似承诺只处理第一条,其余直接 mark_fired
-    seen = {}  # character_id → [已处理的 context 前20字]
+    # 同一角色、同一用户、同一触发时刻只发第一条。文本前缀不参与判重：
+    # 正则承诺的 context 都以「角色答应在特」开头，按文本会吞掉 7:00 和 10:00。
+    seen = set()
     print(f'[promise] tick: 有 {len(due)} 条到期')
     for p in due:
         try:
-            cid = p.get('character_id', '')
-            ctx = (p.get('context') or '')[:20]
-
-            if cid in seen:
-                # 检查有没有相似的已处理过
-                is_dup = any(ctx[:10] == s[:10] for s in seen[cid])
-                if is_dup:
-                    print(f'[promise] #{p["id"]} 与同角色已触发承诺相似,跳过并标记完成')
-                    db_promise.mark_fired(p['id'], now)
-                    continue
-                seen[cid].append(ctx)
-            else:
-                seen[cid] = [ctx]
-
+            bucket = (
+                p.get('character_id', ''),
+                p.get('user_id', ''),
+                _trigger_bucket(p),
+            )
+            if bucket in seen:
+                print(f'[promise] #{p["id"]} 与同角色同一用户的同一触发时刻重复,跳过并标记完成')
+                db_promise.mark_fired(p['id'], now)
+                continue
+            seen.add(bucket)
             generate_from_promise(p, now)
         except Exception as e:
             print(f'[promise] 处理 #{p["id"]} 出错: {e}')
+
+
+def _trigger_bucket(promise):
+    """once 截到 15 分钟桶；daily 用 trigger_time。"""
+    if promise.get('trigger_kind') == 'daily':
+        return promise.get('trigger_time')
+    trigger_at = promise.get('trigger_at')
+    if isinstance(trigger_at, datetime):
+        return trigger_at.replace(
+            minute=(trigger_at.minute // 15) * 15,
+            second=0,
+            microsecond=0,
+        )
+    return trigger_at
 
 
 def _loop():

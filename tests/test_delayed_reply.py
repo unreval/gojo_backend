@@ -1330,10 +1330,11 @@ class PromiseDetectorCoverageTests(unittest.TestCase):
                         for pattern, _ in self._pd._PROMISE_PATTERNS))
 
     def test_cjk_numerals_and_half_hours_parse(self):
-        for text, expected in (('四点半', (4, 30)), ('十二点', (12, 0)),
-                               ('4点半', (4, 30)), ('十一点', (11, 0)),
-                               ('七点半', (7, 30)), ('二十三点', (23, 0)),
-                               ('没有时间', (None, None))):
+        for text, expected in (('四点半叫你', (4, 30)), ('十二点提醒', (12, 0)),
+                               ('4点半叫你', (4, 30)), ('十一点喊你', (11, 0)),
+                               ('七点半叫你', (7, 30)), ('二十三点提醒', (23, 0)),
+                               ('没有时间', (None, None)),
+                               ('两点多了', (None, None))):
             with self.subTest(text=text):
                 self.assertEqual(self._pd._extract_clock(text), expected)
 
