@@ -415,6 +415,10 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
                 occurred_at=source['occurred_at'], module_version=MODULE_VERSION)
         accepted = gate_accepted and (shadow or (projection or {}).get('status') == 'validated_projection')
         interpretation = item.get('interpretation')
+        source_id = (item.get('source_event_id')
+                     if isinstance(item.get('source_event_id'), str) else None)
+        source = by_source.get(source_id) if source_id else None
+        excerpt = source.get('context_excerpt') if isinstance(source, dict) else None
         records.append(dict(common, kind='candidate', candidate_index=index,
             source_event_id=(item.get('source_event_id')
                              if isinstance(item.get('source_event_id'), str) else None),
@@ -423,6 +427,7 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
             interpretation=interpretation if isinstance(interpretation, str) else None,
             persistence=observed_persistence(item),
             utterance_mode=observed_utterance_mode(item),
+            context_excerpt=excerpt if isinstance(excerpt, str) and excerpt else None,
             gates=gates, gate_accepted=gate_accepted, accepted=accepted,
             reason=reason if not gate_accepted or shadow else (projection or {}).get('reason'),
             projection_status=(projection or {}).get('status'),

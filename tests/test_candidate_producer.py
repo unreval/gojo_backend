@@ -416,7 +416,9 @@ class ProducerPureTests(unittest.TestCase):
         self.assertEqual(projected['quote'], '今天我亏了69元')
         self.assertEqual(projected['predicate'], 'reported_fact')
         self.assertEqual(record['utterance_mode'], 'practice')
-        self.assertNotIn('context_excerpt', record)
+        # The model's copy of context_excerpt is not the stored residue.
+        # The input in this test has no preceding character line.
+        self.assertIsNone(record['context_excerpt'])
         self.assertTrue(record['accepted'])
         omitted, omitted_record = self.live_projection_candidate(utterance_mode='maybe')
         self.assertNotIn('utterance_mode', omitted)
@@ -1040,7 +1042,8 @@ class ProducerDatabaseTests(unittest.TestCase):
                 'UPDATE EVENT_PROCESSING_STATE ', 'BEGIN', 'COMMIT', 'ROLLBACK',
                 'CREATE TABLE IF NOT EXISTS CANDIDATE_AUDIT_LOG',
                 'CREATE INDEX IF NOT EXISTS IDX_CANDIDATE_AUDIT_',
-                'INSERT INTO CANDIDATE_AUDIT_LOG ')), sql)
+                'INSERT INTO CANDIDATE_AUDIT_LOG ',
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS ')), sql)
         logs = self.candidate_logs()
         self.assertEqual(logs[0]['gates']['G9']['status'], 'passed')
         self.assertEqual(logs[1]['gates']['G4']['status'], 'rejected')
@@ -1414,6 +1417,108 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertEqual(
             [row['utterance_mode'] for row in self.candidate_logs()],
             [None, None, None, None, 'sincere'])
+
+    def seed_turn(self, text, source_id, *, character_text=None, user='u',
+                  character='c', age=300):
+        created = self.now - timedelta(seconds=age)
+        if character_text is not None:
+            self.sql('''INSERT INTO chat_log
+                (user_id,chat_id,event_id,role,text,created_at,status)
+                VALUES (%s,%s,%s,'gojo',%s,%s,'active')''',
+                (user, character, source_id + '-gojo', character_text,
+                 created - timedelta(seconds=5)))
+        self.sql('''INSERT INTO chat_log
+            (user_id,chat_id,event_id,role,text,created_at,status)
+            VALUES (%s,%s,%s,'user',%s,%s,'active')''',
+            (user, character, source_id, text, created))
+        self.sql('''INSERT INTO cognitive_events
+            (user_id,character_id,source_event_type,source_event_id,source,
+             occurred_at,payload)
+            VALUES (%s,%s,'canonical_user_turn',%s,'chat',%s,%s::jsonb)''',
+            (user, character, source_id, created,
+             json.dumps({'content': text}, ensure_ascii=False)))
+        self.database.commit()
+
+    def observation_rows(self):
+        cur = self.database.cursor()
+        cur.execute('''SELECT source_event_id, utterance_mode, context_excerpt,
+            gate_accepted, reason
+            FROM candidate_audit_log ORDER BY candidate_index, id''')
+        columns = [item[0] for item in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def test_audit_stores_mode_and_context_for_rejected_candidates_too(self):
+        line = '用たくない造个句子' * 16
+        self.seed_turn('ぼくはつかれたから,ふくしゅうしたくない', 'boku',
+                       character_text=line)
+        result = self.run_pair(self.model([
+            self.candidate('boku', quote='ぼくはつかれたから,ふくしゅうしたくない',
+                           summary='她说「ぼくはつかれたから,ふくしゅうしたくない」，不想复习',
+                           value='ふくしゅうしたくない', object='练习',
+                           utterance_mode='practice'),
+            self.candidate('boku', quote='用たくない造个句子',
+                           utterance_mode='practice'),
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        rows = self.observation_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['context_excerpt'], line[:120])
+        self.assertEqual(rows[1]['context_excerpt'], line[:120])
+        self.assertEqual(rows[0]['utterance_mode'], 'practice')
+        self.assertEqual(rows[1]['utterance_mode'], 'practice')
+        self.assertEqual(rows[1]['reason'], 'quote_not_verbatim')
+        self.assertFalse(rows[1]['gate_accepted'])
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_missing_context_and_omitted_mode_store_null(self):
+        self.seed_turn('明天早八有课', 'first')
+        result = self.run_pair(self.model([
+            self.candidate('first', quote='明天早八有课', summary='她明天早八有课',
+                           value='早八有课', object='课表'),
+            dict(self.candidate('first', quote='明天早八有课', summary='她明天早八有课',
+                                value='早八有课', object='课表'),
+                 utterance_mode='maybe'),
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        rows = self.observation_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row['context_excerpt'] is None for row in rows))
+        self.assertTrue(all(row['utterance_mode'] is None for row in rows))
+        self.assertTrue(all(row['gate_accepted'] for row in rows))
+
+    def test_production_quotes_persist_the_supplied_utterance_mode(self):
+        # The fixture supplies the label. This checks the pipe, not whether
+        # that label is the right reading of the sentence.
+        samples = (
+            ('boku', 'ぼくはつかれたから,ふくしゅうしたくない',
+             '她说「ぼくはつかれたから,ふくしゅうしたくない」，不想复习',
+             'ふくしゅうしたくない', 'practice', '用たくない造个句子'),
+            ('kyo', 'きょはたのし', '她说「きょはたのし」，今天很开心',
+             'きょはたのし', 'practice', '把今天很开心写出来'),
+            ('copied', '因为你写了呀，我照着打的，但并不知道是什么意思',
+             '她说因为你写了呀，她照着打的，但并不知道是什么意思',
+             '照着打的', 'unsure', '你把这句打出来'),
+            ('class', '明天早八有课', '她明天早八有课',
+             '早八有课', 'sincere', '明天有什么安排'),
+        )
+        for index, (source_id, text, _summary, _value, _mode, character_text) in enumerate(samples):
+            self.seed_turn(text, source_id, character_text=character_text,
+                           age=400 - index * 40)
+        result = self.run_pair(self.model([
+            self.candidate(source_id, quote=text, summary=summary, value=value,
+                           object='原话', utterance_mode=mode)
+            for source_id, text, summary, value, mode, _character in samples
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        rows = self.observation_rows()
+        self.assertEqual(
+            [(row['source_event_id'], row['utterance_mode'], row['context_excerpt'])
+             for row in rows],
+            [(source_id, mode, character_text)
+             for source_id, _text, _summary, _value, mode, character_text in samples])
+        stored = {row['source_event_id']: row for row in rows}
+        self.assertTrue(stored['class']['gate_accepted'])
+        self.assertEqual(stored['class']['reason'], None)
 
     def test_first_user_message_has_no_character_context(self):
         self.seed()
