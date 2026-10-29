@@ -30,9 +30,14 @@ _THREAD_LOCK = threading.Lock()
 _STOP = threading.Event()
 # interpretation is optional in the schema. Omitting it must not fail the
 # batch, and G1–G9 never read it. The candidate audit record is its only store.
+# prior_character_text and context_excerpt are listed only so a model that
+# mirrors the input keys does not fail the whole batch. They are not writable
+# fields: values for the audit record always come from the producer input, and
+# any same-named values the model returns are discarded before the gates.
 _FIELDS = frozenset({'source_event_id', 'quote', 'summary', 'interpretation',
                      'predicate', 'object', 'value', 'time_scope', 'perspective',
-                     'persistence', 'utterance_mode'})
+                     'persistence', 'utterance_mode',
+                     'prior_character_text', 'context_excerpt'})
 # Observation only. The producer's own reading of how long the fact holds, used
 # to measure whether an LLM can pick the retention tier before any routing is
 # wired. No gate reads it, it never reaches projection, and an absent or
@@ -70,9 +75,9 @@ def observed_utterance_mode(candidate):
 _REQUIRED = frozenset({'source_event_id', 'quote', 'summary', 'predicate', 'object', 'value'})
 _PARSE_FAILURES = frozenset({'invalid_json', 'invalid_batch_shape',
                              'incomplete_response', 'truncated_response'})
-# One preceding character line, kept short. Generated text judges the
-# utterance; it is not a fact source. See INV-EVID-001.
-_CONTEXT_EXCERPT_CHARS = 120
+# One preceding character turn (all bubbles), kept short. Generated text
+# judges the utterance; it is not a fact source. See INV-EVID-001.
+_CONTEXT_EXCERPT_CHARS = 400
 _GATE_ORDER = ('G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7', 'G9', 'G8')
 _REASON_GATE = {
     'source_not_active_or_changed': 'G1', 'source_not_active_or_not_user': 'G1',
@@ -248,19 +253,32 @@ def _save_control(cur, event_id, state):
 
 
 def _context_excerpt(text):
-    """Prefix of a character line. Empty or non-text stays absent."""
+    """Prefix of a character turn. Empty or non-text stays absent."""
     if not isinstance(text, str) or not text:
         return None
     return text[:_CONTEXT_EXCERPT_CHARS]
 
 
-def _previous_character_excerpt(cur, user_id, chat_id, source_id):
-    """The character line immediately before this user turn, or None.
+def _format_character_bubble(text, subtitle):
+    """One chat_log bubble. Empty Japanese text yields nothing."""
+    body = text if isinstance(text, str) else ''
+    if not body:
+        return None
+    gloss = subtitle.strip() if isinstance(subtitle, str) else ''
+    if gloss:
+        return body + '\n中文：' + gloss
+    return body
 
-    chat_log stores the character as role 'gojo'. The text is generated
-    expression. Callers may show it to the extractor so it can judge what
-    kind of utterance the user made. It must not be quoted, summarized, or
-    stored as something the user asserted.
+
+def _previous_character_excerpt(cur, user_id, chat_id, source_id):
+    """The whole character turn immediately before this user turn, or None.
+
+    A character reply is usually several chat_log rows (bubbles). This takes
+    every active role='gojo' row after the previous user row and before the
+    current user row, in time order, joins them with newlines, and keeps the
+    leading prefix. Chinese subtitle, when present, rides with each bubble.
+    The text is generated expression for judging utterance mode only. It must
+    not be quoted, summarized, or stored as something the user asserted.
     """
     cur.execute('''SELECT id, created_at FROM chat_log
         WHERE user_id=%s AND chat_id=%s
@@ -271,22 +289,43 @@ def _previous_character_excerpt(cur, user_id, chat_id, source_id):
     current = cur.fetchone()
     if current is None:
         return None
-    cur.execute('''SELECT text FROM chat_log
-        WHERE user_id=%s AND chat_id=%s AND role='gojo'
+    cur.execute('''SELECT id, created_at FROM chat_log
+        WHERE user_id=%s AND chat_id=%s AND role='user'
           AND COALESCE(status,'active')='active'
           AND (created_at < %s OR (created_at = %s AND id < %s))
         ORDER BY created_at DESC, id DESC
         LIMIT 1''', (user_id, chat_id, current[1], current[1], current[0]))
-    row = cur.fetchone()
-    if row is None:
+    previous = cur.fetchone()
+    if previous is None:
+        cur.execute('''SELECT text, subtitle FROM chat_log
+            WHERE user_id=%s AND chat_id=%s AND role='gojo'
+              AND COALESCE(status,'active')='active'
+              AND (created_at < %s OR (created_at = %s AND id < %s))
+            ORDER BY created_at ASC, id ASC''',
+            (user_id, chat_id, current[1], current[1], current[0]))
+    else:
+        cur.execute('''SELECT text, subtitle FROM chat_log
+            WHERE user_id=%s AND chat_id=%s AND role='gojo'
+              AND COALESCE(status,'active')='active'
+              AND (created_at > %s OR (created_at = %s AND id > %s))
+              AND (created_at < %s OR (created_at = %s AND id < %s))
+            ORDER BY created_at ASC, id ASC''',
+            (user_id, chat_id, previous[1], previous[1], previous[0],
+             current[1], current[1], current[0]))
+    bubbles = []
+    for text, subtitle in cur.fetchall():
+        bubble = _format_character_bubble(text, subtitle)
+        if bubble is not None:
+            bubbles.append(bubble)
+    if not bubbles:
         return None
-    return _context_excerpt(row[0])
+    return _context_excerpt('\n'.join(bubbles))
 
 
 def _model_payload(item):
-    """User turn plus at most one preceding character line.
+    """User turn plus at most one preceding character turn.
 
-    prior_character_text is omitted when there is no such line. It is not
+    prior_character_text is omitted when there is no such turn. It is not
     mixed into content, so quote grounding stays on the user's words.
     """
     payload = {
@@ -387,12 +426,12 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
     records = []
     for index, candidate in enumerate(candidates):
         item = candidate if isinstance(candidate, dict) else {}
-        # context_excerpt is producer context, not a model field. Drop it
-        # before the contract so a leaked copy cannot fail the batch or
-        # reach a gate. utterance_mode stays on the original for the audit
-        # record and is removed before validation.
+        # Echo keys may appear on the model output. Drop them before the
+        # contract and gates so they cannot reach a claim. utterance_mode
+        # stays on the original for the audit record and is removed next.
         screened = dict(item)
         screened.pop('context_excerpt', None)
+        screened.pop('prior_character_text', None)
         contract_reason = candidate_contract_reason(screened, by_source)
         checked = dict(screened)
         checked.pop('utterance_mode', None)
@@ -410,6 +449,7 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
             projected.pop('persistence', None)
             projected.pop('utterance_mode', None)
             projected.pop('context_excerpt', None)
+            projected.pop('prior_character_text', None)
             projection = adjudicate_and_project(cur, user_id=user_id,
                 character_id=character_id, candidate=projected, event_id=source['event_id'],
                 occurred_at=source['occurred_at'], module_version=MODULE_VERSION)
@@ -738,6 +778,7 @@ def adjudicate_and_project(cur, *, user_id, character_id, candidate, event_id,
         checked.pop('interpretation', None)
         checked.pop('utterance_mode', None)
         checked.pop('context_excerpt', None)
+        checked.pop('prior_character_text', None)
         accepted, reason = validate_candidate(cur, user_id, character_id, checked)
         if not accepted:
             return finish({'status': 'rejected', 'reason': reason}, rollback=True)

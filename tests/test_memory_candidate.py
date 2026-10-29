@@ -840,7 +840,8 @@ class MemoryCandidateGateTests(unittest.TestCase):
             seen['candidate'] = dict(candidate)
             return False, 'quote_not_verbatim'
 
-        candidate = self.candidate(utterance_mode='practice', context_excerpt='出题')
+        candidate = self.candidate(utterance_mode='practice', context_excerpt='出题',
+                                   prior_character_text='回声')
         with patch.object(memory_candidate, 'validate_candidate', capture):
             result = memory_candidate.apply_candidate(
                 Mock(), 'u', 'c', candidate, occurred_at=None,
@@ -848,8 +849,10 @@ class MemoryCandidateGateTests(unittest.TestCase):
         self.assertEqual(result['reason'], 'quote_not_verbatim')
         self.assertNotIn('utterance_mode', seen['candidate'])
         self.assertNotIn('context_excerpt', seen['candidate'])
+        self.assertNotIn('prior_character_text', seen['candidate'])
         self.assertEqual(candidate['utterance_mode'], 'practice')
         self.assertEqual(candidate['context_excerpt'], '出题')
+        self.assertEqual(candidate['prior_character_text'], '回声')
 
     def test_utterance_mode_does_not_change_gate_results(self):
         passing = self.candidate(utterance_mode='practice')

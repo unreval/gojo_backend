@@ -354,6 +354,7 @@ def apply_candidate(cur, user_id, character_id, candidate, *, occurred_at,
         checked.pop('interpretation', None)
         checked.pop('utterance_mode', None)
         checked.pop('context_excerpt', None)
+        checked.pop('prior_character_text', None)
     accepted, reason = validate_candidate(cur, user_id, character_id, checked)
     if not accepted:
         return {'status': 'rejected', 'reason': reason}
