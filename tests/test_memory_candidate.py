@@ -705,6 +705,47 @@ class MemoryCandidateGateTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(memory_candidate._has_grounding_negation(text))
 
+    def test_logged_leading_report_frame_does_not_fail_a_faithful_summary(self):
+        # 说 / 说自己 is the frame the prompt asks for. It is not extra content.
+        cases = (
+            ('我很聪明的', '她说自己很聪明'),
+            ('因为你写了呀，我照着打的，但并不知道是什么意思',
+             '她说之前的日语是照着打的，并不知道意思'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (True, None))
+
+    def test_logged_inference_stays_ungrounded_after_the_frame_strip(self):
+        cases = (
+            ('四点叫我起床', '她被四点叫起床，表示不满'),
+            ('七点叫我的', '她提醒对方说好了七点叫她'),
+            ('不适合初学者', '她自认是初学者'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (False, 'summary_not_grounded_in_quote'))
+
+    def test_logged_faithful_chinese_summaries_still_pass(self):
+        cases = (
+            ('你之前的都太难了不适合初学者', '她觉得之前的内容太难，不适合初学者'),
+            ('明天早八有课', '她明天早上八点有课'),
+            ('书坏了，停止复习', '她说书坏了，所以停止复习'),
+            ('你明天早点叫我起床呗', '她希望明天被早点叫起床'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (True, None))
+
     def test_logged_kana_fragment_is_grounded_when_the_summary_quotes_it(self):
         # Production row: a hiragana quote has no CJK ideograph, so the old
         # character class left coverage at zero even when the summary quoted it.

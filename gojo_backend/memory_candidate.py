@@ -88,6 +88,10 @@ _PERSPECTIVE_ASSERTION = re.compile(
     r'|(?:她|他|你|您|用户|对方)[^，。！？；\n]{0,12}'
     r'(?:在意|喜欢|讨厌|爱|想要|希望|害怕|担心|难过|开心|嫉妒|依赖|安全感)'
 )
+# Prompt-shaped report frame. Dropped once from the start of the residue,
+# after pronouns, the same way a leading answer particle is dropped once.
+# A 说 later in the sentence can be what she actually said, so it stays.
+_LEADING_REPORT_FRAME = re.compile(r'^(?:说自己|说)')
 
 
 def _same_number(left, right):
@@ -288,6 +292,7 @@ def validate_candidate(cur, user_id, character_id, candidate):
     # provenanced. raw_content is the verbatim turn verified above; nothing
     # outside it, and no generated text, becomes grounding evidence.
     grounded_text = re.sub(r'她|他|您|五条悟|用户|对方', '', summary)
+    grounded_text = _LEADING_REPORT_FRAME.sub('', grounded_text, count=1)
     time_words = sorted(_TIME_WORDS.keys() | _DAY_WORDS.keys(), key=len, reverse=True)
     grounded_text = re.sub('|'.join(time_words), '', grounded_text)
     q = re.sub(r'\s', '', raw_content)
