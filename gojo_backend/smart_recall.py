@@ -25,7 +25,7 @@ import time as _time
 from datetime import datetime, timezone
 
 from db import get_conn
-from memory_authority import authoritative_memory_sql
+from memory_authority import STATE_REPORT_TTL_HOURS, authoritative_memory_sql
 from role_view import PROJECTION_VERSION, render_role_view
 from told_projection import canonical_told_view, told_display
 from config import CN_TZ, DEFAULT_CHARACTER_ID
@@ -62,8 +62,8 @@ PINNED_MAX = 15         # 钉住的记忆最多注入多少条
 LOOSE_BOND_CANDIDATE_LIMIT = 120
 TOLD_CANDIDATE_LIMIT = 120
 
-# 状态类记忆过期时间（小时）
-STATUS_EXPIRE_HOURS = 48
+# 状态类记忆过期时间（小时）。与事实投影共用 memory_authority 里的同一常量。
+STATUS_EXPIRE_HOURS = STATE_REPORT_TTL_HOURS
 
 # Normal chat recall: superseded / archived / inactive / expired bonds stay out.
 ACTIVE_BOND_SQL = (

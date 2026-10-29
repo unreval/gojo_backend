@@ -3,6 +3,9 @@ import json
 from role_view import PROJECTION_VERSION, render_role_view
 
 AUTHORITY = 'canonical_evidence_v1'
+# One ttl for a reported_state self-report, counted from the canonical
+# event's occurred_at. Fact projection and cognitive reads both use it.
+STATE_REPORT_TTL_HOURS = 48
 MEMORY_AUTHORITY_DDL = tuple(
     statement
     for table in ('long_memory', 'bond_memory')
@@ -241,6 +244,33 @@ def canonical_semantic_payload(*, user_id, character_id, source_id, claim=None,
     return payload
 
 
+def fresh_state_report_sql(alias):
+    """Drop stale reported_state rows. Every other predicate stays readable.
+
+    Age is cognitive_events.occurred_at, not the row's updated_at. This is not
+    part of current_literal_belief_sql: that checks the source is still current,
+    not that a state report is still fresh.
+    """
+    key_column = {
+        'cognitive_beliefs': 'belief_key',
+        'cognitive_hypotheses': 'hypothesis_key',
+    }.get(alias)
+    if key_column is None:
+        raise ValueError('unsupported_state_report_alias')
+    hours = int(STATE_REPORT_TTL_HOURS)
+    return f"""(({alias}.metadata->'claim_scope')->>'predicate' IS DISTINCT FROM 'reported_state'
+        OR EXISTS (
+            SELECT 1 FROM cognitive_events ce
+            CROSS JOIN LATERAL jsonb_each(COALESCE(ce.adjudication->'operations',
+                jsonb_build_object('main', ce.adjudication))) op
+            WHERE ce.user_id={alias}.user_id AND ce.character_id={alias}.character_id
+                AND ce.adjudication->>'status'='applied'
+                AND op.value->>'status'='applied'
+                AND op.value->>'belief_key'={alias}.{key_column}
+                AND ce.occurred_at > CURRENT_TIMESTAMP - INTERVAL '{hours} hours'
+        ))"""
+
+
 def project_canonical_memory(cur, *, user_id, character_id, event_id,
                              source_id, content, claim=None, belief_key=None,
                              occurred_at=None, operation_id='main', dependencies=None,
@@ -261,7 +291,8 @@ def project_canonical_memory(cur, *, user_id, character_id, event_id,
     is_bond = not claim or predicate in ('explicit_boundary', 'explicit_refusal', 'explicit_promise', 'reported_fulfillment')
     table = 'bond_memory' if is_bond else 'long_memory'
     from datetime import timedelta
-    expires_at = occurred_at + timedelta(hours=48) if predicate == 'reported_state' and occurred_at else None
+    expires_at = (occurred_at + timedelta(hours=STATE_REPORT_TTL_HOURS)
+                  if predicate == 'reported_state' and occurred_at else None)
     category = {'reported_preference': '喜好', 'reported_state': '状态',
                 'reported_identity': '身份'}.get(predicate, '其他')
     if table == 'long_memory':

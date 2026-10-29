@@ -10,7 +10,12 @@ from cognitive_config import (
 )
 from cognitive_output import sticky_emotion_tag
 from cognitive_revision import current_belief_display, is_stable_reader_belief
-from memory_authority import current_literal_belief_sql, current_answer_question_sql, answer_question_is_current
+from memory_authority import (
+    answer_question_is_current,
+    current_answer_question_sql,
+    current_literal_belief_sql,
+    fresh_state_report_sql,
+)
 from relationship_semantics import (
     ENGAGEMENT_STYLE_KEY,
     INTERNAL_CONFLICT_KEY,
@@ -329,6 +334,7 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                  AND status = 'active'
                  AND (metadata->>'authority' IS DISTINCT FROM 'literal_self_report_only'
                       OR {current_literal_belief_sql('cognitive_beliefs')})
+                 AND {fresh_state_report_sql('cognitive_beliefs')}
                ORDER BY confidence DESC, updated_at DESC, id DESC
                LIMIT 12''',
             (user_id, character_id),
@@ -359,6 +365,7 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                             AND b.character_id=cognitive_hypotheses.character_id
                             AND b.belief_key=cognitive_hypotheses.hypothesis_key
                             AND b.status='active' AND {current_literal_belief_sql('b')}))
+                 AND {fresh_state_report_sql('cognitive_hypotheses')}
                ORDER BY updated_at DESC, id DESC
                LIMIT 6''',
             (user_id, character_id),
