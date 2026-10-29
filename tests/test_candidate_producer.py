@@ -172,6 +172,20 @@ class ProducerPureTests(unittest.TestCase):
                 self.assertEqual(result['claim']['value'], value)
                 self.assertEqual(result['claim']['subject'], 'user:u')
 
+    def test_prompt_keeps_japanese_fragments_and_keeps_inference_out_of_summary(self):
+        prompt = producer._SYSTEM
+        summary, interpretation = prompt.split(
+            'interpretation是你对这件事的主观理解', 1)
+        self.assertIn('原话是日语时，summary必须原样保留日语关键片段', summary)
+        self.assertIn('她说「ふくしゅうしたくない」，不想复习', summary)
+        self.assertIn('不准写你的判断、情绪归因或动机推测', summary)
+        self.assertIn('表示不满', summary)
+        self.assertIn('她自认是初学者', summary)
+        self.assertIn('她觉得之前的内容太难，不适合初学者', summary)
+        self.assertNotIn('ふくしゅうしたくない', interpretation)
+        self.assertNotIn('表示不满', interpretation)
+        self.assertIn('不要求客观正确', interpretation)
+
     def test_prompt_requests_a_subjective_interpretation(self):
         prompt = producer._SYSTEM
         self.assertIn('interpretation是你对这件事的主观理解，必须给出，一句话', prompt)
