@@ -4,7 +4,11 @@ from config import DATABASE_URL
 
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, connect_timeout=3)
+    # Pin the session at connect time. A later SET can be skipped by a caller
+    # that keeps the raw connection, and a server default other than UTC would
+    # shift naive timestamp comparisons such as proactive_promise.trigger_at.
+    return psycopg2.connect(
+        DATABASE_URL, connect_timeout=3, options='-c TimeZone=UTC')
 
 
 def init_db():

@@ -10,7 +10,8 @@ from unittest.mock import patch
 from tests import test_memory_candidate_source as source_fixture
 import cognitive_revision
 import memory_candidate
-from memory_authority import authoritative_memory_sql, project_canonical_memory
+from memory_authority import (
+    STATE_REPORT_TTL_HOURS, authoritative_memory_sql, project_canonical_memory)
 from role_view import PROJECTION_VERSION, render_role_view
 import user_memory
 
@@ -165,7 +166,7 @@ class CandidateProjectionTests(unittest.TestCase):
                     authority_belief_key FROM long_memory WHERE authority_event_id=%s''',
                     (seeded['event_id'],))[0]
                 self.assertEqual(row[1], category)
-                self.assertEqual(row[2], self.now + timedelta(hours=48)
+                self.assertEqual(row[2], self.now + timedelta(hours=STATE_REPORT_TTL_HOURS)
                                  if predicate == 'reported_state' else None)
                 self.assertEqual(row[3], [{'source_id': source_id}])
                 self.assertEqual(row[4], seeded['belief_key'])
