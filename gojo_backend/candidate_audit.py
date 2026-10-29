@@ -2,7 +2,12 @@
 
 This is not a durable-memory store. Recall, projection, cognition, prompts,
 and relationship code must not read candidate_audit_log. Rows keep a
-subjective interpretation that is allowed to be wrong. A failed write is
+subjective interpretation that is allowed to be wrong.
+
+utterance_mode records whether the user turn looked sincere, like language
+practice, or unclear. context_excerpt is the first 120 characters of the
+preceding character line shown to the extractor. context_excerpt 是观测用的
+上下文留痕，不是证据、不是事实来源，没有任何代码读它。 A failed write is
 discarded and cannot change the producer result.
 """
 import os
@@ -34,6 +39,11 @@ CANDIDATE_AUDIT_DDL = (
        ON candidate_audit_log (user_id, character_id, created_at DESC)''',
     '''CREATE INDEX IF NOT EXISTS idx_candidate_audit_source
        ON candidate_audit_log (source_event_id)''',
+    # context_excerpt is generated-text residue for observation, not evidence.
+    '''ALTER TABLE candidate_audit_log
+       ADD COLUMN IF NOT EXISTS utterance_mode TEXT''',
+    '''ALTER TABLE candidate_audit_log
+       ADD COLUMN IF NOT EXISTS context_excerpt TEXT''',
 )
 
 
@@ -130,10 +140,10 @@ def log_candidate(record, *, batch_id=None, occurred_at=None,
                    candidate_index, quote, summary, interpretation, persistence,
                    gate_accepted, accepted, reason, projection_status,
                    projection_reason, module_version, shadow, occurred_at,
-                   created_at
+                   created_at, utterance_mode, context_excerpt
                ) VALUES (
                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, %s
+                   %s, %s, %s, %s, %s
                ) RETURNING id''',
             (
                 user_id,
@@ -155,6 +165,8 @@ def log_candidate(record, *, batch_id=None, occurred_at=None,
                 _flag(shadow if shadow is not None else record.get('shadow'), True),
                 _timestamptz(occurred_at),
                 _timestamptz(created_at) or datetime.now(timezone.utc),
+                _text(record.get('utterance_mode')),
+                _text(record.get('context_excerpt')),
             ),
         )
         row_id = cur.fetchone()

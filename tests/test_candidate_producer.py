@@ -172,6 +172,55 @@ class ProducerPureTests(unittest.TestCase):
                 self.assertEqual(result['claim']['value'], value)
                 self.assertEqual(result['claim']['subject'], 'user:u')
 
+    def test_prompt_keeps_the_character_line_out_of_quote_and_summary(self):
+        prompt = producer._SYSTEM
+        self.assertIn('prior_character_text', prompt)
+        self.assertIn('只用于判断用户这句话的性质', prompt)
+        self.assertIn('不得引用', prompt)
+        self.assertIn('不得写进 quote 或 summary', prompt)
+        self.assertIn('不得当成用户事实', prompt)
+        self.assertIn('quote 只能从用户的 content 逐字截取', prompt)
+        self.assertEqual(prompt.count('%s'), 1)
+
+    def test_model_payload_omits_context_unless_a_character_line_exists(self):
+        item = {'source_event_id': 'source-0', 'content': '想和你聊一聊',
+                'occurred_at': self.now, 'context_excerpt': None}
+        self.assertNotIn('prior_character_text', producer._model_payload(item))
+        long_line = '请用这个句型造一个完整的句子' * 40
+        self.assertGreater(len(long_line), producer._CONTEXT_EXCERPT_CHARS)
+        excerpt = long_line[:producer._CONTEXT_EXCERPT_CHARS]
+        payload = producer._model_payload(dict(item, context_excerpt=excerpt))
+        self.assertEqual(payload['prior_character_text'], excerpt)
+        self.assertEqual(len(payload['prior_character_text']),
+                         producer._CONTEXT_EXCERPT_CHARS)
+        self.assertEqual(payload['content'], '想和你聊一聊')
+        self.assertIsNone(producer._context_excerpt(''))
+        self.assertIsNone(producer._context_excerpt(None))
+        self.assertEqual(producer._context_excerpt(long_line), excerpt)
+        self.assertEqual(
+            producer._format_character_bubble('練習だ', '这是练习'),
+            '練習だ\n中文：这是练习')
+        self.assertEqual(producer._format_character_bubble('練習だ', ''), '練習だ')
+        self.assertEqual(producer._format_character_bubble('練習だ', None), '練習だ')
+        self.assertIsNone(producer._format_character_bubble('', '译文'))
+
+    def test_echo_context_keys_are_tolerated_without_widening_unknown_fields(self):
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元')
+        for key in ('prior_character_text', 'context_excerpt'):
+            with self.subTest(key=key):
+                echoed = dict(candidate, **{key: '模型回声'})
+                producer._validate_candidate_batch([echoed])
+                self.assertIsNone(producer.candidate_contract_reason(
+                    echoed, {'source-0'}))
+        both = dict(candidate, prior_character_text='回声A', context_excerpt='回声B')
+        producer._validate_candidate_batch([both])
+        self.assertIsNone(producer.candidate_contract_reason(both, {'source-0'}))
+        with self.assertRaises(producer._CandidateBatchSchemaError) as raised:
+            producer._validate_candidate_batch([dict(candidate, foo='x')])
+        self.assertEqual(raised.exception.detail, 'item_0_unknown_field_foo')
+
     def test_prompt_keeps_japanese_fragments_and_keeps_inference_out_of_summary(self):
         prompt = producer._SYSTEM
         summary, interpretation = prompt.split(
@@ -264,6 +313,80 @@ class ProducerPureTests(unittest.TestCase):
         self.assertIsNone(producer.observed_persistence({}))
         self.assertIsNone(producer.observed_persistence(None))
 
+    def test_prompt_records_utterance_mode_without_using_it_to_decide(self):
+        prompt = producer._SYSTEM
+        self.assertIn('utterance_mode?', prompt)
+        self.assertIn('utterance_mode只能是sincere、practice或unsure', prompt)
+        self.assertIn('照着打的', prompt)
+        self.assertIn('不知道什么意思', prompt)
+        self.assertIn('这样说对吗', prompt)
+        self.assertIn('ぼく', prompt)
+        self.assertIn('判断不了就写unsure，不要硬下结论', prompt)
+        self.assertIn('这个字段只用于观测，不影响是否记住', prompt)
+        self.assertEqual(prompt.count('%s'), 1)
+
+    def test_utterance_mode_is_optional_and_never_type_checked(self):
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元')
+        for mode in ('sincere', 'practice', 'unsure', 'maybe', '', 12, None):
+            with self.subTest(utterance_mode=mode):
+                self.assertIsNone(producer.candidate_contract_reason(
+                    dict(candidate, utterance_mode=mode), {'source-0'}))
+                producer._validate_candidate_batch(
+                    [dict(candidate, utterance_mode=mode)])
+        self.assertIsNone(producer.candidate_contract_reason(candidate, {'source-0'}))
+
+    def test_observed_utterance_mode_folds_everything_unknown_to_none(self):
+        for mode in ('sincere', 'practice', 'unsure'):
+            with self.subTest(utterance_mode=mode):
+                self.assertEqual(
+                    producer.observed_utterance_mode({'utterance_mode': mode}), mode)
+        for mode in ('maybe', 'Sincere', '', 12, 0, True, None,
+                     {'a': 1}, ['practice'], ('unsure',)):
+            with self.subTest(utterance_mode=mode):
+                self.assertIsNone(producer.observed_utterance_mode(
+                    {'utterance_mode': mode}))
+        self.assertIsNone(producer.observed_utterance_mode({}))
+        self.assertIsNone(producer.observed_utterance_mode(None))
+
+    def test_utterance_mode_does_not_change_the_audited_gate_sequence(self):
+        passing = dict(source_event_id='source-0', quote='今天我亏了69元',
+                       summary='她今天亏了69元', predicate='reported_fact',
+                       object='交易结果', value='亏了69元')
+        rejected = dict(passing, quote='她住在火星上')
+        self.assertEqual(
+            producer.gate_results(True, None, passing),
+            producer.gate_results(True, None, dict(passing, utterance_mode='practice')))
+        self.assertEqual(
+            producer.gate_results(False, 'quote_not_verbatim', rejected),
+            producer.gate_results(False, 'quote_not_verbatim',
+                                  dict(rejected, utterance_mode='practice')))
+
+    def test_adjudicate_strips_utterance_observation_before_the_gate(self):
+        seen = {}
+
+        def capture(_cur, _user, _character, candidate):
+            seen['candidate'] = dict(candidate)
+            return False, 'quote_not_verbatim'
+
+        cur = Mock()
+        cur.fetchone.return_value = ({'content': '今天我亏了69元'}, {}, self.now)
+        with patch('memory_candidate.validate_candidate', capture):
+            result = producer.adjudicate_and_project(
+                cur, user_id='u', character_id='c', event_id=1, occurred_at=self.now,
+                candidate=dict(source_event_id='source-0', quote='今天我亏了69元',
+                               summary='她今天亏了69元', predicate='reported_fact',
+                               object='交易结果', value='亏了69元',
+                               utterance_mode='practice', context_excerpt='出题',
+                               prior_character_text='回声'))
+        self.assertEqual(result['status'], 'rejected')
+        self.assertEqual(result['reason'], 'quote_not_verbatim')
+        self.assertNotIn('utterance_mode', seen['candidate'])
+        self.assertNotIn('context_excerpt', seen['candidate'])
+        self.assertNotIn('prior_character_text', seen['candidate'])
+        self.assertNotIn('interpretation', seen['candidate'])
+
     def test_persistence_does_not_change_the_audited_gate_sequence(self):
         candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
                          summary='她今天亏了69元', predicate='reported_fact',
@@ -310,6 +433,26 @@ class ProducerPureTests(unittest.TestCase):
         # The audit record still reports the tier the model gave.
         self.assertEqual(record['persistence'], 'transient')
         self.assertTrue(record['accepted'])
+
+    def test_utterance_observation_is_stripped_before_the_live_projection(self):
+        projected, record = self.live_projection_candidate(
+            utterance_mode='practice', context_excerpt='用这个句型造句',
+            prior_character_text='回声')
+        self.assertNotIn('utterance_mode', projected)
+        self.assertNotIn('context_excerpt', projected)
+        self.assertNotIn('prior_character_text', projected)
+        self.assertNotIn('interpretation', projected)
+        self.assertEqual(projected['quote'], '今天我亏了69元')
+        self.assertEqual(projected['predicate'], 'reported_fact')
+        self.assertEqual(record['utterance_mode'], 'practice')
+        # The model's copy of context_excerpt is not the stored residue.
+        # The input in this test has no preceding character line.
+        self.assertIsNone(record['context_excerpt'])
+        self.assertTrue(record['accepted'])
+        omitted, omitted_record = self.live_projection_candidate(utterance_mode='maybe')
+        self.assertNotIn('utterance_mode', omitted)
+        self.assertIsNone(omitted_record['utterance_mode'])
+        self.assertTrue(omitted_record['accepted'])
 
     def test_live_projection_is_unchanged_when_no_tier_is_offered(self):
         projected, record = self.live_projection_candidate()
@@ -928,7 +1071,8 @@ class ProducerDatabaseTests(unittest.TestCase):
                 'UPDATE EVENT_PROCESSING_STATE ', 'BEGIN', 'COMMIT', 'ROLLBACK',
                 'CREATE TABLE IF NOT EXISTS CANDIDATE_AUDIT_LOG',
                 'CREATE INDEX IF NOT EXISTS IDX_CANDIDATE_AUDIT_',
-                'INSERT INTO CANDIDATE_AUDIT_LOG ')), sql)
+                'INSERT INTO CANDIDATE_AUDIT_LOG ',
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS ')), sql)
         logs = self.candidate_logs()
         self.assertEqual(logs[0]['gates']['G9']['status'], 'passed')
         self.assertEqual(logs[1]['gates']['G4']['status'], 'rejected')
@@ -1235,6 +1379,310 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assert_aware(row['occurred_at'])
         self.assert_aware(row['created_at'])
         self.assertNotEqual(row['created_at'].tzinfo, None)
+
+    def insert_chat(self, text, *, role='gojo', age=30, character='c', user='u',
+                    event_id=None, status='active', subtitle=''):
+        created = self.now - timedelta(seconds=age)
+        self.sql('''INSERT INTO chat_log
+            (user_id,chat_id,event_id,role,text,subtitle,created_at,status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
+            (user, character, event_id or f'{role}-{age}', role, text,
+             subtitle, created, status))
+        self.database.commit()
+
+    def request_inputs(self, model):
+        return json.loads(model.call_args.kwargs['messages'][0]['content'])
+
+    def test_preceding_character_turn_is_attached_and_truncated(self):
+        self.seed(1, age=300)
+        line = '请用这个句型造一个完整的句子' * 40
+        self.insert_chat(line, age=310)
+        model = self.model([])
+        result = self.run_pair(model)
+        self.assertEqual(result['status'], 'succeeded')
+        excerpt = line[:400]
+        payloads = self.request_inputs(model)
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]['prior_character_text'], excerpt)
+        self.assertEqual(payloads[0]['content'], '今天我亏了69元，想和你聊一聊。')
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_utterance_mode_does_not_change_accept_or_reject(self):
+        self.seed(prefix='plain', user='plain')
+        passing = self.candidate('plain-0')
+        rejected = self.candidate('plain-0', quote='她住在火星上')
+        self.logs.clear()
+        plain = self.run_pair(self.model([passing, rejected]), user='plain')
+        plain_logs = list(self.candidate_logs())
+        self.seed()
+        self.logs.clear()
+        marked = self.run_pair(self.model([
+            self.candidate(utterance_mode='practice'),
+            self.candidate(quote='她住在火星上', utterance_mode='practice')]))
+        marked_logs = list(self.candidate_logs())
+
+        def outcome(logs):
+            return [(row['gate_accepted'], row['accepted'], row['reason']) for row in logs]
+
+        self.assertEqual(outcome(plain_logs), outcome(marked_logs))
+        self.assertEqual(plain['accepted'], marked['accepted'])
+        self.assertTrue(marked_logs[0]['gate_accepted'])
+        self.assertFalse(marked_logs[1]['gate_accepted'])
+        self.assertEqual(marked_logs[0]['reason'], None)
+        self.assertEqual(marked_logs[1]['reason'], 'quote_not_verbatim')
+        self.assertEqual(marked_logs[0]['utterance_mode'], 'practice')
+        self.assertEqual(marked_logs[1]['utterance_mode'], 'practice')
+
+    def test_illegal_utterance_mode_does_not_fail_the_batch(self):
+        self.seed()
+        result = self.run_pair(self.model([
+            self.candidate(),
+            dict(self.candidate(), utterance_mode='maybe'),
+            dict(self.candidate(), utterance_mode=12),
+            dict(self.candidate(), utterance_mode=None),
+            dict(self.candidate(), utterance_mode='sincere'),
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(result['accepted'], 5)
+        self.assertEqual(
+            [row['utterance_mode'] for row in self.candidate_logs()],
+            [None, None, None, None, 'sincere'])
+
+    def seed_turn(self, text, source_id, *, character_text=None, user='u',
+                  character='c', age=300):
+        created = self.now - timedelta(seconds=age)
+        if character_text is not None:
+            self.sql('''INSERT INTO chat_log
+                (user_id,chat_id,event_id,role,text,created_at,status)
+                VALUES (%s,%s,%s,'gojo',%s,%s,'active')''',
+                (user, character, source_id + '-gojo', character_text,
+                 created - timedelta(seconds=5)))
+        self.sql('''INSERT INTO chat_log
+            (user_id,chat_id,event_id,role,text,created_at,status)
+            VALUES (%s,%s,%s,'user',%s,%s,'active')''',
+            (user, character, source_id, text, created))
+        self.sql('''INSERT INTO cognitive_events
+            (user_id,character_id,source_event_type,source_event_id,source,
+             occurred_at,payload)
+            VALUES (%s,%s,'canonical_user_turn',%s,'chat',%s,%s::jsonb)''',
+            (user, character, source_id, created,
+             json.dumps({'content': text}, ensure_ascii=False)))
+        self.database.commit()
+
+    def observation_rows(self):
+        cur = self.database.cursor()
+        cur.execute('''SELECT source_event_id, utterance_mode, context_excerpt,
+            gate_accepted, reason
+            FROM candidate_audit_log ORDER BY candidate_index, id''')
+        columns = [item[0] for item in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def test_audit_stores_mode_and_context_for_rejected_candidates_too(self):
+        line = '用たくない造个句子' * 50
+        self.seed_turn('ぼくはつかれたから,ふくしゅうしたくない', 'boku',
+                       character_text=line)
+        result = self.run_pair(self.model([
+            self.candidate('boku', quote='ぼくはつかれたから,ふくしゅうしたくない',
+                           summary='她说「ぼくはつかれたから,ふくしゅうしたくない」，不想复习',
+                           value='ふくしゅうしたくない', object='练习',
+                           utterance_mode='practice'),
+            self.candidate('boku', quote='用たくない造个句子',
+                           utterance_mode='practice'),
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        rows = self.observation_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['context_excerpt'], line[:400])
+        self.assertEqual(rows[1]['context_excerpt'], line[:400])
+        self.assertEqual(rows[0]['utterance_mode'], 'practice')
+        self.assertEqual(rows[1]['utterance_mode'], 'practice')
+        self.assertEqual(rows[1]['reason'], 'quote_not_verbatim')
+        self.assertFalse(rows[1]['gate_accepted'])
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_echoed_context_keys_do_not_fail_the_batch_or_overwrite_audit(self):
+        real = '请用这个句型造一个完整的句子'
+        self.seed_turn('想和你聊一聊', 'echo', character_text=real)
+        result = self.run_pair(self.model([
+            dict(self.candidate('echo', quote='想和你聊一聊', summary='她想和你聊一聊',
+                                value='聊一聊', object='闲聊', utterance_mode='practice'),
+                 prior_character_text='模型编的上下文',
+                 context_excerpt='模型编的截断'),
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(result['accepted'], 1)
+        row = self.observation_rows()[0]
+        self.assertEqual(row['context_excerpt'], real)
+        self.assertNotEqual(row['context_excerpt'], '模型编的截断')
+        self.assertEqual(row['utterance_mode'], 'practice')
+        self.assertTrue(row['gate_accepted'])
+
+    def test_missing_context_and_omitted_mode_store_null(self):
+        self.seed_turn('明天早八有课', 'first')
+        result = self.run_pair(self.model([
+            self.candidate('first', quote='明天早八有课', summary='她明天早八有课',
+                           value='早八有课', object='课表'),
+            dict(self.candidate('first', quote='明天早八有课', summary='她明天早八有课',
+                                value='早八有课', object='课表'),
+                 utterance_mode='maybe'),
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        rows = self.observation_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row['context_excerpt'] is None for row in rows))
+        self.assertTrue(all(row['utterance_mode'] is None for row in rows))
+        self.assertTrue(all(row['gate_accepted'] for row in rows))
+
+    def test_production_quotes_persist_the_supplied_utterance_mode(self):
+        # The fixture supplies the label. This checks the pipe, not whether
+        # that label is the right reading of the sentence.
+        samples = (
+            ('boku', 'ぼくはつかれたから,ふくしゅうしたくない',
+             '她说「ぼくはつかれたから,ふくしゅうしたくない」，不想复习',
+             'ふくしゅうしたくない', 'practice', '用たくない造个句子'),
+            ('kyo', 'きょはたのし', '她说「きょはたのし」，今天很开心',
+             'きょはたのし', 'practice', '把今天很开心写出来'),
+            ('copied', '因为你写了呀，我照着打的，但并不知道是什么意思',
+             '她说因为你写了呀，她照着打的，但并不知道是什么意思',
+             '照着打的', 'unsure', '你把这句打出来'),
+            ('class', '明天早八有课', '她明天早八有课',
+             '早八有课', 'sincere', '明天有什么安排'),
+        )
+        for index, (source_id, text, _summary, _value, _mode, character_text) in enumerate(samples):
+            self.seed_turn(text, source_id, character_text=character_text,
+                           age=400 - index * 40)
+        result = self.run_pair(self.model([
+            self.candidate(source_id, quote=text, summary=summary, value=value,
+                           object='原话', utterance_mode=mode)
+            for source_id, text, summary, value, mode, _character in samples
+        ]))
+        self.assertEqual(result['status'], 'succeeded')
+        rows = self.observation_rows()
+        self.assertEqual(
+            [(row['source_event_id'], row['utterance_mode'], row['context_excerpt'])
+             for row in rows],
+            [(source_id, mode, character_text)
+             for source_id, _text, _summary, _value, mode, character_text in samples])
+        stored = {row['source_event_id']: row for row in rows}
+        self.assertTrue(stored['class']['gate_accepted'])
+        self.assertEqual(stored['class']['reason'], None)
+
+    def test_first_user_message_has_no_character_context(self):
+        self.seed(1, age=300)
+        model = self.model([])
+        self.run_pair(model)
+        payloads = self.request_inputs(model)
+        self.assertTrue(payloads)
+        self.assertTrue(all('prior_character_text' not in item for item in payloads))
+
+    def test_character_context_ignores_other_chats_later_rows_and_non_gojo_roles(self):
+        self.seed(1, age=300)
+        self.insert_chat('另一场聊天的出题', character='other', age=310)
+        self.insert_chat('这条在用户之后', age=-60)
+        self.insert_chat('assistant 不是库里的角色', role='assistant', age=320)
+        self.insert_chat('已经删掉的出题', age=305, status='deleted')
+        model = self.model([])
+        self.run_pair(model)
+        payloads = self.request_inputs(model)
+        self.assertTrue(all('prior_character_text' not in item for item in payloads))
+
+    def test_whole_character_turn_includes_every_bubble_and_subtitle(self):
+        self.seed(1, age=300)
+        self.insert_chat('「〜たくない」の練習だ', age=330, event_id='gojo-1',
+                         subtitle='用〜たくない练习')
+        self.insert_chat('何か文を作ってみろ', age=320, event_id='gojo-2',
+                         subtitle='造个句子试试')
+        self.insert_chat('ほら、早く', age=310, event_id='gojo-3', subtitle='')
+        model = self.model([])
+        self.run_pair(model)
+        expected = (
+            '「〜たくない」の練習だ\n中文：用〜たくない练习\n'
+            '何か文を作ってみろ\n中文：造个句子试试\n'
+            'ほら、早く'
+        )
+        payloads = self.request_inputs(model)
+        self.assertEqual(payloads[0]['prior_character_text'], expected)
+
+    def test_character_context_keeps_only_the_latest_turn(self):
+        self.seed_turn('上一轮的回答', 'earlier', character_text='更早的出题，不要用这一条',
+                       age=500)
+        created = self.now - timedelta(seconds=300)
+        self.sql('''INSERT INTO chat_log
+            (user_id,chat_id,event_id,role,text,subtitle,created_at,status)
+            VALUES ('u','c','gojo-near-1','gojo',%s,'请造句',%s,'active')''',
+            ('请用这个句型造一个完整的句子',
+             created - timedelta(seconds=10)))
+        self.sql('''INSERT INTO chat_log
+            (user_id,chat_id,event_id,role,text,subtitle,created_at,status)
+            VALUES ('u','c','gojo-near-2','gojo',%s,'',%s,'active')''',
+            ('ほら、早く', created - timedelta(seconds=5)))
+        self.sql('''INSERT INTO chat_log
+            (user_id,chat_id,event_id,role,text,created_at,status)
+            VALUES ('u','c','later','user',%s,%s,'active')''',
+            ('想和你聊一聊', created))
+        self.sql('''INSERT INTO cognitive_events
+            (user_id,character_id,source_event_type,source_event_id,source,
+             occurred_at,payload)
+            VALUES ('u','c','canonical_user_turn','later','chat',%s,%s::jsonb)''',
+            (created, json.dumps({'content': '想和你聊一聊'}, ensure_ascii=False)))
+        self.database.commit()
+        # Mark the earlier user turn processed so only the later one is pending.
+        self.sql('''INSERT INTO event_processing_state
+            (event_id,processor_type,processor_version,status,retry_count)
+            VALUES (%s,%s,%s,'succeeded',0)''',
+            ('earlier', producer._processor('u', 'c'),
+             producer._receipt_version(True)))
+        self.database.commit()
+        model = self.model([self.candidate(
+            'later', quote='想和你聊一聊', summary='她想和你聊一聊',
+            value='聊一聊', object='闲聊')])
+        result = self.run_pair(model)
+        self.assertEqual(result['status'], 'succeeded')
+        expected = '请用这个句型造一个完整的句子\n中文：请造句\nほら、早く'
+        self.assertEqual(self.request_inputs(model)[0]['prior_character_text'], expected)
+        self.assertEqual(self.observation_rows()[0]['context_excerpt'], expected)
+
+    def test_same_second_rows_order_by_id(self):
+        self.seed(1, age=300)
+        same = self.now - timedelta(seconds=310)
+        self.sql('''INSERT INTO chat_log
+            (user_id,chat_id,event_id,role,text,subtitle,created_at,status)
+            VALUES ('u','c','gojo-same-1','gojo','先出题','',%s,'active')''', (same,))
+        self.sql('''INSERT INTO chat_log
+            (user_id,chat_id,event_id,role,text,subtitle,created_at,status)
+            VALUES ('u','c','gojo-same-2','gojo','再催促','',%s,'active')''', (same,))
+        self.database.commit()
+        model = self.model([])
+        self.run_pair(model)
+        self.assertEqual(
+            self.request_inputs(model)[0]['prior_character_text'],
+            '先出题\n再催促')
+
+    def test_quote_taken_from_the_character_line_is_still_rejected(self):
+        self.seed(1, age=300)
+        line = '请用这个句型造一个完整的句子'
+        self.insert_chat(line, age=310)
+        result = self.run_pair(self.model([self.candidate(
+            'source-0', quote=line)]))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(result['accepted'], 0)
+        row = self.audit_rows()[0]
+        self.assertEqual(row['reason'], 'quote_not_verbatim')
+        self.assertFalse(row['gate_accepted'])
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_summary_taken_from_the_character_line_is_still_ungrounded(self):
+        self.seed(1, age=300)
+        line = '请用这个句型造一个完整的句子'
+        self.insert_chat(line, age=310)
+        result = self.run_pair(self.model([self.candidate(
+            'source-0', quote='想和你聊一聊', summary='她说' + line, value='聊一聊')]))
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(result['accepted'], 0)
+        row = self.audit_rows()[0]
+        self.assertEqual(row['reason'], 'summary_not_grounded_in_quote')
+        self.assertFalse(row['gate_accepted'])
+        self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
 
 
 class CandidateValuePolarityTests(unittest.TestCase):

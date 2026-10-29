@@ -833,6 +833,57 @@ class MemoryCandidateGateTests(unittest.TestCase):
                 self.assertEqual(self.validate(candidate), (False, reason))
                 self.assertEqual(candidate, original)
 
+    def test_apply_candidate_strips_utterance_observation_before_the_gate(self):
+        seen = {}
+
+        def capture(_cur, _user, _character, candidate):
+            seen['candidate'] = dict(candidate)
+            return False, 'quote_not_verbatim'
+
+        candidate = self.candidate(utterance_mode='practice', context_excerpt='出题',
+                                   prior_character_text='回声')
+        with patch.object(memory_candidate, 'validate_candidate', capture):
+            result = memory_candidate.apply_candidate(
+                Mock(), 'u', 'c', candidate, occurred_at=None,
+                event_id=1, operation_id='op')
+        self.assertEqual(result['reason'], 'quote_not_verbatim')
+        self.assertNotIn('utterance_mode', seen['candidate'])
+        self.assertNotIn('context_excerpt', seen['candidate'])
+        self.assertNotIn('prior_character_text', seen['candidate'])
+        self.assertEqual(candidate['utterance_mode'], 'practice')
+        self.assertEqual(candidate['context_excerpt'], '出题')
+        self.assertEqual(candidate['prior_character_text'], '回声')
+
+    def test_utterance_mode_does_not_change_gate_results(self):
+        passing = self.candidate(utterance_mode='practice')
+        self.assertEqual(self.validate(passing), (True, None))
+        self.assertEqual(self.validate(self.candidate()), (True, None))
+        rejected = '她住在火星上'
+        self.assertEqual(
+            self.validate(self.candidate(quote=rejected, utterance_mode='practice')),
+            self.validate(self.candidate(quote=rejected)))
+
+    def test_character_line_used_as_quote_is_not_verbatim(self):
+        # The character line never enters raw_content. G2 still compares the
+        # quote with the user turn only.
+        user = '想和你聊一聊'
+        character = '请用这个句型造一个完整的句子'
+        self.assertNotIn(character, user)
+        self.assertEqual(
+            self.validate(self.candidate(quote=character), raw_text=user),
+            (False, 'quote_not_verbatim'))
+
+    def test_summary_built_from_the_character_line_fails_coverage(self):
+        # G9's denominator is the user turn. Characters that exist only in the
+        # preceding character line cannot be covered.
+        user = '想和你聊一聊'
+        character = '请用这个句型造一个完整的句子'
+        self.assertEqual(
+            self.validate(self.candidate(
+                quote=user, summary='她说' + character, value='聊一聊'),
+                raw_text=user),
+            (False, 'summary_not_grounded_in_quote'))
+
 
 if __name__ == '__main__':
     unittest.main()
