@@ -833,6 +833,27 @@ class MemoryCandidateGateTests(unittest.TestCase):
                 self.assertEqual(self.validate(candidate), (False, reason))
                 self.assertEqual(candidate, original)
 
+    def test_character_line_used_as_quote_is_not_verbatim(self):
+        # The character line never enters raw_content. G2 still compares the
+        # quote with the user turn only.
+        user = '想和你聊一聊'
+        character = '请用这个句型造一个完整的句子'
+        self.assertNotIn(character, user)
+        self.assertEqual(
+            self.validate(self.candidate(quote=character), raw_text=user),
+            (False, 'quote_not_verbatim'))
+
+    def test_summary_built_from_the_character_line_fails_coverage(self):
+        # G9's denominator is the user turn. Characters that exist only in the
+        # preceding character line cannot be covered.
+        user = '想和你聊一聊'
+        character = '请用这个句型造一个完整的句子'
+        self.assertEqual(
+            self.validate(self.candidate(
+                quote=user, summary='她说' + character, value='聊一聊'),
+                raw_text=user),
+            (False, 'summary_not_grounded_in_quote'))
+
 
 if __name__ == '__main__':
     unittest.main()
