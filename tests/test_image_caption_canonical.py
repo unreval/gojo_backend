@@ -380,3 +380,34 @@ class ImageRouteCanonicalTextTests(unittest.TestCase):
         )
         text, _meta = self._saved_text()
         self.assertEqual(text, '🎬 [视频]')
+
+    def test_unhandled_exception_fails_the_receipt_and_returns_502(self):
+        self.save_user.side_effect = RuntimeError('boom')
+        response, body = self._send(text=CAPTION, source_event_id='img-unhandled')
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(body['error'], 'generation_failed')
+        self.assertTrue(body['generation_failed'])
+        self.assertEqual(body['messages'], [])
+        self.assertEqual(body['source_event_id'], 'img-unhandled')
+        self.assertEqual(body['total_days'], 3)
+        self.assertTrue(body['retryable'])
+        self.assertIn('media', body)
+        self.client.messages.create.assert_not_called()
+        receipt = sys.modules['db_generation_receipt']
+        receipt.fail_generation.assert_called()
+        self.assertEqual(
+            receipt.fail_generation.call_args.kwargs['last_error'],
+            'unhandled:RuntimeError',
+        )
+
+    def test_empty_model_output_still_fails_as_generation_failed(self):
+        response, body = self._send(text=CAPTION, source_event_id='img-empty-model')
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(body['error'], 'generation_failed')
+        self.assertIn('media', body)
+        receipt = sys.modules['db_generation_receipt']
+        errors = [
+            call.kwargs.get('last_error')
+            for call in receipt.fail_generation.call_args_list
+        ]
+        self.assertEqual(errors, ['generation_failed'])
