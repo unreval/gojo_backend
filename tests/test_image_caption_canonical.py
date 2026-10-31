@@ -89,6 +89,17 @@ class ImageMarkerTests(unittest.TestCase):
             CAPTION,
         )
 
+    def test_prompt_names_the_history_markers_and_keeps_the_seen_rule(self):
+        text = (BACKEND / 'prompt.py').read_text(encoding='utf-8')
+        self.assertNotIn('上下文里的"📷"标记', text)
+        self.assertIn(
+            '上下文里的"【图片】"、"【图片摘要】"、"【视频】"或"【视频摘要】"'
+            '标记表示她当时发过一张图，紧跟在它后面的你的回复，就是你【当时亲眼看过那张图】之后说的话。',
+            text,
+        )
+        self.assertIn('绝不允许说"我看不到图片"，你看过。', text)
+        self.assertIn('只有当她发来全新图片而你的上下文里确实没有时，才可以说没收到。', text)
+
 
 class ImageCaptionStoreTests(unittest.TestCase):
     from tests import test_private_source_first as fixture
