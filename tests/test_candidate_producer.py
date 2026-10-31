@@ -235,6 +235,38 @@ class ProducerPureTests(unittest.TestCase):
         self.assertNotIn('表示不满', interpretation)
         self.assertIn('不要求客观正确', interpretation)
 
+    def test_prompt_keeps_scene_setting_out_of_summary(self):
+        prompt = producer._SYSTEM
+        summary, interpretation = prompt.split(
+            'interpretation是你对这件事的主观理解', 1)
+        for sentence in (
+            'summary只写她在这条消息里说了什么',
+            '情景、前因、她在回答什么、角色问了什么、之前发生过什么，一律不写进summary，全部放进interpretation',
+            '不准写你的判断、情绪归因或动机推测，也不准写情景交代',
+            '优先原样保留她的原话片段',
+            '原话越短，说明越少',
+            '四五个字的原话就只写她说「原话」，不要补任何背景',
+            '说明只能是翻译、压缩或同义展开，不得引入原话里没有的人、事、数字、时间或否定',
+            '她答对「つくえ」后说自己很厉害',
+            '她说「我可厉害了」',
+            '为全部答对而得意',
+            '她说「我最聪明」',
+            '她完成二十个单词测试全部答对后说「我真棒」',
+            '她说「我真棒」',
+            '漏掉了「ら」',
+            '她说「わかない」',
+            '学生不该打扰老师',
+            '原话「四点叫我起床」不要加「表示不满」',
+            '不要写成「她自认是初学者」',
+            '她觉得之前的内容太难，不适合初学者',
+            '她说「ふくしゅうしたくない」，不想复习',
+        ):
+            self.assertIn(sentence, summary, sentence)
+        self.assertNotIn('答对「つくえ」后', interpretation)
+        self.assertNotIn('为全部答对而得意', interpretation)
+        self.assertNotIn('表示不满', interpretation)
+        self.assertEqual(prompt.count('%s'), 1)
+
     def test_prompt_requests_a_subjective_interpretation(self):
         prompt = producer._SYSTEM
         self.assertIn('interpretation是你对这件事的主观理解，必须给出，一句话', prompt)
