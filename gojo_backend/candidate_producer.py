@@ -14,7 +14,7 @@ from memory_candidate import validate_candidate, _PREDICATES
 from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
 
 
-MODULE_VERSION = '1.0'
+MODULE_VERSION = '1.1'
 BATCH_SIZE = 8
 SOURCE_RETRY_LIMIT = 3
 MAX_TOKENS = 2000
