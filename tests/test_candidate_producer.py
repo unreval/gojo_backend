@@ -235,6 +235,38 @@ class ProducerPureTests(unittest.TestCase):
         self.assertNotIn('表示不满', interpretation)
         self.assertIn('不要求客观正确', interpretation)
 
+    def test_prompt_keeps_scene_setting_out_of_summary(self):
+        prompt = producer._SYSTEM
+        summary, interpretation = prompt.split(
+            'interpretation是你对这件事的主观理解', 1)
+        for sentence in (
+            'summary只写她在这条消息里说了什么',
+            '情景、前因、她在回答什么、角色问了什么、之前发生过什么，一律不写进summary，全部放进interpretation',
+            '不准写你的判断、情绪归因或动机推测，也不准写情景交代',
+            '优先原样保留她的原话片段',
+            '原话越短，说明越少',
+            '四五个字的原话就只写她说「原话」，不要补任何背景',
+            '说明只能是翻译、压缩或同义展开，不得引入原话里没有的人、事或数字，也不得改变原话的肯定/否定；时间可以补全',
+            '她答对「つくえ」后说自己很厉害',
+            '她说「我可厉害了」',
+            '为全部答对而得意',
+            '她说「我最聪明」',
+            '她完成二十个单词测试全部答对后说「我真棒」',
+            '她说「我真棒」',
+            '漏掉了「ら」',
+            '她说「わかない」',
+            '学生不该打扰老师',
+            '原话「四点叫我起床」不要加「表示不满」',
+            '不要写成「她自认是初学者」',
+            '她觉得之前的内容太难，不适合初学者',
+            '她说「ふくしゅうしたくない」，不想复习',
+        ):
+            self.assertIn(sentence, summary, sentence)
+        self.assertNotIn('答对「つくえ」后', interpretation)
+        self.assertNotIn('为全部答对而得意', interpretation)
+        self.assertNotIn('表示不满', interpretation)
+        self.assertEqual(prompt.count('%s'), 1)
+
     def test_prompt_requests_a_subjective_interpretation(self):
         prompt = producer._SYSTEM
         self.assertIn('interpretation是你对这件事的主观理解，必须给出，一句话', prompt)
@@ -296,6 +328,15 @@ class ProducerPureTests(unittest.TestCase):
         with self.assertRaises(producer._CandidateBatchSchemaError) as raised:
             producer._validate_candidate_batch([dict(candidate, foo='x')])
         self.assertEqual(raised.exception.detail, 'item_0_unknown_field_foo')
+
+    def test_model_supplied_raw_content_is_not_a_candidate_field(self):
+        candidate = dict(source_event_id='source-0', quote='今天我亏了69元',
+                         summary='她今天亏了69元', predicate='reported_fact',
+                         object='交易结果', value='亏了69元')
+        with self.assertRaises(producer._CandidateBatchSchemaError) as raised:
+            producer._validate_candidate_batch([
+                dict(candidate, raw_content='模型编的原文')])
+        self.assertEqual(raised.exception.detail, 'item_0_unknown_field_raw_content')
 
     def test_observed_persistence_folds_everything_unknown_to_none(self):
         # The schema does not type check this field, so the audit record must
@@ -540,7 +581,7 @@ class ProducerDatabaseTests(unittest.TestCase):
         cur.execute('''SELECT user_id, character_id, batch_id, source_event_id,
             candidate_index, quote, summary, interpretation, persistence,
             gate_accepted, accepted, reason, projection_status, projection_reason,
-            module_version, shadow, occurred_at, created_at
+            module_version, shadow, occurred_at, created_at, raw_content
             FROM candidate_audit_log ORDER BY candidate_index, id''')
         columns = [item[0] for item in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
@@ -1069,10 +1110,13 @@ class ProducerDatabaseTests(unittest.TestCase):
             self.assertTrue(sql.startswith((
                 'SELECT ', 'INSERT INTO EVENT_PROCESSING_STATE ',
                 'UPDATE EVENT_PROCESSING_STATE ', 'BEGIN', 'COMMIT', 'ROLLBACK',
-                'CREATE TABLE IF NOT EXISTS CANDIDATE_AUDIT_LOG',
-                'CREATE INDEX IF NOT EXISTS IDX_CANDIDATE_AUDIT_',
+                'CREATE TABLE IF NOT EXISTS CANDIDATE_AUDIT_LOG ',
+                'CREATE INDEX IF NOT EXISTS IDX_CANDIDATE_AUDIT_USER ON CANDIDATE_AUDIT_LOG ',
+                'CREATE INDEX IF NOT EXISTS IDX_CANDIDATE_AUDIT_SOURCE ON CANDIDATE_AUDIT_LOG ',
                 'INSERT INTO CANDIDATE_AUDIT_LOG ',
-                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS ')), sql)
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS UTTERANCE_MODE TEXT',
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS CONTEXT_EXCERPT TEXT',
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS RAW_CONTENT TEXT')), sql)
         logs = self.candidate_logs()
         self.assertEqual(logs[0]['gates']['G9']['status'], 'passed')
         self.assertEqual(logs[1]['gates']['G4']['status'], 'rejected')
@@ -1308,14 +1352,15 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertEqual(row['interpretation'], interpretation)
         self.assertEqual(row['summary'], '她今天亏了69元')
         self.assertEqual(row['quote'], '今天我亏了69元')
+        self.assertEqual(row['raw_content'], '今天我亏了69元，想和你聊一聊。')
         self.assertEqual(row['source_event_id'], 'source-0')
         self.assertEqual(row['candidate_index'], 0)
         self.assertEqual((row['user_id'], row['character_id']), ('u', 'c'))
         self.assertTrue(row['gate_accepted'])
         self.assertTrue(row['accepted'])
         self.assertEqual(row['batch_id'], result['batch_id'])
-        self.assertEqual(producer.MODULE_VERSION, '1.0')
-        self.assertEqual(row['module_version'], '1.0')
+        self.assertEqual(producer.MODULE_VERSION, '1.1')
+        self.assertEqual(row['module_version'], '1.1')
         self.assertIs(row['shadow'], True)
         self.assertIsNone(row['persistence'])
         self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
@@ -1342,10 +1387,12 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertFalse(rows[0]['gate_accepted'])
         self.assertFalse(rows[0]['accepted'])
         self.assertEqual(rows[0]['reason'], 'quote_not_verbatim')
+        self.assertEqual(rows[0]['raw_content'], '今天我亏了69元，想和你聊一聊。')
         self.assertEqual(rows[0]['interpretation'], '她大概在开玩笑')
         self.assertEqual(rows[0]['occurred_at'], self.now)
         self.assertFalse(rows[1]['gate_accepted'])
         self.assertEqual(rows[1]['reason'], 'source_not_in_batch')
+        self.assertIsNone(rows[1]['raw_content'])
         self.assertIsNone(rows[1]['occurred_at'])
         self.assert_aware(rows[1]['created_at'])
         self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])

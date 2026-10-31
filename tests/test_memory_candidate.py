@@ -884,6 +884,77 @@ class MemoryCandidateGateTests(unittest.TestCase):
                 raw_text=user),
             (False, 'summary_not_grounded_in_quote'))
 
+    def test_summary_scope_replay_accepts_verbatim_originals(self):
+        # Logged rows that failed because the summary spent the gloss budget
+        # on scene-setting. The intended summary is the original plus, at most,
+        # a translation. Gates are unchanged; these shapes have to pass them.
+        cases = (
+            ('我可厉害了', '她说「我可厉害了」'),
+            ('我最聪明！', '她说「我最聪明」'),
+            ('我真棒！', '她说「我真棒」'),
+            ('我们到底是什么关系', '她说「我们到底是什么关系」'),
+            ('おれ,わからない!', '她说「おれ,わからない」'),
+            ('先不要了啦，陪我聊聊天', '她说「先不要了啦，陪我聊聊天」'),
+            ('不是说教我名词吗！明明说简单的开始！',
+             '她说「不是说教我名词吗！明明说简单的开始！」'),
+            ('わかない', '她说「わかない」'),
+            ('がくせい怎么能大晚上的打扰せんせい呢',
+             '她说「がくせい怎么能大晚上的打扰せんせい呢」，学生不该打扰老师'),
+            ('わかったわかった,寝ろ,おやしみ',
+             '她说「わかったわかった,寝ろ,おやしみ」，叫他睡吧'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    memory_candidate._has_grounding_negation(quote),
+                    memory_candidate._has_grounding_negation(summary))
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (True, None))
+        self.assertEqual(memory_candidate._number_tokens('她说「我真棒」'), [])
+        self.assertEqual(
+            memory_candidate._number_tokens('她说「我们到底是什么关系」'), [])
+
+    def test_summary_scope_replay_still_rejects_ungrounded_glosses(self):
+        cases = (
+            ('不适合初学者', '她自认是初学者', 'summary_not_grounded_in_quote'),
+            ('四点叫我起床', '她被四点叫起床，表示不满',
+             'summary_not_grounded_in_quote'),
+            ('ふくしゅうしたくない', '她说想复习', 'negation_polarity_mismatch'),
+            ('我可厉害了', '她说「我可厉害了」，她觉得自己比老师强',
+             'summary_not_grounded_in_quote'),
+        )
+        for quote, summary, reason in cases:
+            with self.subTest(quote=quote, summary=summary):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (False, reason))
+
+    def test_summary_scope_replay_keeps_the_gloss_budget_cases(self):
+        # These three Chinese rows are copied from the existing faithful-summary
+        # tests. The hiragana row is the case the 60% budget exists to allow.
+        cases = (
+            ('ふくしゅうしたくない', '她说「ふくしゅうしたくない」，不想复习'),
+            ('你之前的都太难了不适合初学者', '她觉得之前的内容太难，不适合初学者'),
+            ('我很聪明的', '她说自己很聪明'),
+            ('你明天早点叫我起床呗', '她希望明天被早点叫起床'),
+        )
+        for quote, summary in cases:
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.validate(self.candidate(quote=quote, summary=summary),
+                                  raw_text=quote),
+                    (True, None))
+
+    def test_summary_scope_replay_keeps_japanese_false_denials(self):
+        for text in ('危ない', '少ない', 'もったいない', 'つまらない', 'しかたない',
+                     'あんない', 'しつない'):
+            with self.subTest(text=text):
+                self.assertFalse(memory_candidate._has_grounding_negation(text))
+        self.assertTrue(memory_candidate._has_grounding_negation('つまらなくない'))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -5,10 +5,13 @@ and relationship code must not read candidate_audit_log. Rows keep a
 subjective interpretation that is allowed to be wrong.
 
 utterance_mode records whether the user turn looked sincere, like language
-practice, or unclear. context_excerpt is the first 120 characters of the
+practice, or unclear. context_excerpt is the first 400 characters of the
 preceding character line shown to the extractor. context_excerpt 是观测用的
-上下文留痕，不是证据、不是事实来源，没有任何代码读它。 A failed write is
-discarded and cannot change the producer result.
+上下文留痕，不是证据、不是事实来源，没有任何代码读它。 raw_content is the
+canonical user turn the gates compared, so a later audit can replay that
+comparison. It is write-only observation, not evidence, and nothing reads it
+back into a judgment. A failed write is discarded and cannot change the
+producer result.
 """
 import os
 from datetime import datetime, timezone
@@ -44,6 +47,9 @@ CANDIDATE_AUDIT_DDL = (
        ADD COLUMN IF NOT EXISTS utterance_mode TEXT''',
     '''ALTER TABLE candidate_audit_log
        ADD COLUMN IF NOT EXISTS context_excerpt TEXT''',
+    # raw_content is the user turn G9 compared. Observation only; nothing reads it.
+    '''ALTER TABLE candidate_audit_log
+       ADD COLUMN IF NOT EXISTS raw_content TEXT''',
 )
 
 
@@ -140,10 +146,10 @@ def log_candidate(record, *, batch_id=None, occurred_at=None,
                    candidate_index, quote, summary, interpretation, persistence,
                    gate_accepted, accepted, reason, projection_status,
                    projection_reason, module_version, shadow, occurred_at,
-                   created_at, utterance_mode, context_excerpt
+                   created_at, utterance_mode, context_excerpt, raw_content
                ) VALUES (
                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, %s, %s, %s
+                   %s, %s, %s, %s, %s, %s
                ) RETURNING id''',
             (
                 user_id,
@@ -167,6 +173,7 @@ def log_candidate(record, *, batch_id=None, occurred_at=None,
                 _timestamptz(created_at) or datetime.now(timezone.utc),
                 _text(record.get('utterance_mode')),
                 _text(record.get('context_excerpt')),
+                _text(record.get('raw_content')),
             ),
         )
         row_id = cur.fetchone()

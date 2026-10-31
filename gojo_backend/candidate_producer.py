@@ -14,7 +14,7 @@ from memory_candidate import validate_candidate, _PREDICATES
 from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
 
 
-MODULE_VERSION = '1.0'
+MODULE_VERSION = '1.1'
 BATCH_SIZE = 8
 SOURCE_RETRY_LIMIT = 3
 MAX_TOKENS = 2000
@@ -95,9 +95,17 @@ source_event_id必须来自输入。quote必须从该消息逐字截取连续片
 输入里如果有 prior_character_text，那是同一聊天里紧挨在这条用户消息前面的角色原话，只用于判断用户这句话的性质。它不是可提取的内容：不得引用，不得写进 quote 或 summary，不得当成用户事实。quote 只能从用户的 content 逐字截取。
 summary用角色视角写中文短句，以“她”代指用户，最多60字，忠于原文的数字、否定和时间。
 summary尽量复用原文词语，不要同义替换：原文「他们」就写「他们」，不要写「朋友」；原文「我家」就写「我家」，不要写「在家里」；允许压缩与补全时间。
-summary只写她说了什么，不准写你的判断、情绪归因或动机推测；那些全部放进interpretation，错了也没关系。
+summary只写她在这条消息里说了什么。情景、前因、她在回答什么、角色问了什么、之前发生过什么，一律不写进summary，全部放进interpretation。
+summary不准写你的判断、情绪归因或动机推测，也不准写情景交代；那些全部放进interpretation，错了也没关系。
+优先原样保留她的原话片段，用「」括起，再补最少的必要中文说明。原话越短，说明越少：四五个字的原话就只写她说「原话」，不要补任何背景。
+说明只能是翻译、压缩或同义展开，不得引入原话里没有的人、事或数字，也不得改变原话的肯定/否定；时间可以补全。
 原话「四点叫我起床」不要加「表示不满」；原话「不适合初学者」不要写成「她自认是初学者」。她确实说了太难、不适合初学者时，才写「她觉得之前的内容太难，不适合初学者」。
 原话是日语时，summary必须原样保留日语关键片段，再写中文说明。例如原话「ふくしゅうしたくない」，摘要写：她说「ふくしゅうしたくない」，不想复习。
+原话「我可厉害了」不要写成「她答对「つくえ」后说自己很厉害」（“答对つくえ后”是情景，属interpretation），要写成「她说「我可厉害了」」。
+原话「我最聪明！」不要写成「她说自己最聪明，为全部答对而得意」（“为全部答对”是情景，“得意”是情绪归因），要写成「她说「我最聪明」」。
+原话「我真棒！」不要写成「她完成二十个单词测试全部答对后说「我真棒」」，要写成「她说「我真棒」」。
+原话「わかない」不要写成「她想说「わからない」但写成了「わかない」，漏掉了「ら」」（拼写分析属interpretation），要写成「她说「わかない」」。
+原话「がくせい怎么能大晚上的打扰せんせい呢」要写成「她说「がくせい怎么能大晚上的打扰せんせい呢」，学生不该打扰老师」。
 interpretation是你对这件事的主观理解，必须给出，一句话。这是解释，不是复述 summary，也不要求客观正确；不确定就说不确定，不要硬下结论。不要复述用户原话，要说你怎么看这件事。
 predicate只能是：%s。object是事实主题，value是事实值。
 time_scope是时间范围，不明确可省略。
@@ -459,6 +467,9 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
                      if isinstance(item.get('source_event_id'), str) else None)
         source = by_source.get(source_id) if source_id else None
         excerpt = source.get('context_excerpt') if isinstance(source, dict) else None
+        # The gates compared this turn, not the quote span. Keep it on the
+        # observation record only. A model field of the same name is not accepted.
+        raw_content = source.get('content') if isinstance(source, dict) else None
         records.append(dict(common, kind='candidate', candidate_index=index,
             source_event_id=(item.get('source_event_id')
                              if isinstance(item.get('source_event_id'), str) else None),
@@ -468,6 +479,7 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
             persistence=observed_persistence(item),
             utterance_mode=observed_utterance_mode(item),
             context_excerpt=excerpt if isinstance(excerpt, str) and excerpt else None,
+            raw_content=raw_content if isinstance(raw_content, str) else None,
             gates=gates, gate_accepted=gate_accepted, accepted=accepted,
             reason=reason if not gate_accepted or shadow else (projection or {}).get('reason'),
             projection_status=(projection or {}).get('status'),
