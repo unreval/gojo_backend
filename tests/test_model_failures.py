@@ -208,7 +208,7 @@ class ImageFailureTests(unittest.TestCase):
         self.memory.save_user_short_memory_once.assert_called()
         args, kwargs = self.memory.save_user_short_memory_once.call_args
         self.assertEqual(kwargs['source_event_id'], 'img-evt-1')
-        self.assertEqual(args[1], '📷 看这张图')
+        self.assertEqual(args[1], '看这张图')
         self.assertNotIn('【图片摘要】', args[1])
 
     def test_visual_summary_and_event_meta_are_returned_for_chatlog_linkage(self):

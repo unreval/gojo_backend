@@ -1143,7 +1143,7 @@ class ShortMemoryPromptIsolationTests(unittest.TestCase):
         src = Path(BACKEND, 'route_chat.py').read_text(encoding='utf-8')
         self.assertIn('get_short_memory_for_prompt', src)
         img_src = Path(BACKEND, 'route_image.py').read_text(encoding='utf-8')
-        self.assertIn('user_id, display_text, character_id', img_src)
+        self.assertIn('user_id, canonical_text, character_id', img_src)
         self.assertNotIn('format_media_short_memory(', img_src)
 
     def test_route_chat_prompt_prefers_short_memory_not_chatlog(self):
