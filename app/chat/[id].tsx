@@ -150,6 +150,9 @@ function isGenerationInProgressPayload(data: any): boolean {
   return data.generation_in_progress === true;
 }
 
+// Automatic 202 retries for one image source_event_id. A new id starts over.
+const IMAGE_PROGRESS_RETRY_LIMIT = 8;
+
 function assistantSegmentId(
   seg: { event_id?: string } | undefined,
   assistantTurnId: string | undefined,
@@ -301,6 +304,7 @@ export default function ChatRoom() {
   const [loading, setLoading]     = useState(false);
   const [generationFailed, setGenerationFailed] = useState(false);
   const [generationInProgress, setGenerationInProgress] = useState(false);
+  const imageProgressRetryRef = useRef<Record<string, number>>({});
   const lastFailedSendRef = useRef<null | {
     kind: 'text';
     text: string;
@@ -1513,6 +1517,13 @@ export default function ChatRoom() {
           }
           setGenerationInProgress(true);
           setGenerationFailed(false);
+          const counts = imageProgressRetryRef.current;
+          const next = (counts[sourceEventId] || 0) + 1;
+          counts[sourceEventId] = next;
+          if (next > IMAGE_PROGRESS_RETRY_LIMIT) {
+            noteGenerationFailure();
+            return;
+          }
           const keepId = sourceEventId;
           setTimeout(() => {
             if (lastFailedSendRef.current?.kind === 'image'
