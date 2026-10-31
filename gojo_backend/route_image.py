@@ -441,6 +441,10 @@ async def chat_image(data: dict):
         user_content.append({'type': 'text', 'text': _with_reply_context(NO_TEXT_HINT, reply_to)})
         display_text = '📷 [图片]'
 
+    # chat_log.text must match the client bubble. display_text keeps the prefix
+    # for metadata and availability; it is not the canonical utterance.
+    canonical_text = user_text or display_text
+
     kind = 'video' if is_video else 'image'
     base_event_meta = _event_meta_base(
         kind, source_event_id, display_text, images, reply_to=reply_to)
@@ -470,7 +474,7 @@ async def chat_image(data: dict):
             act = availability.get('activity') or {}
             if availability.get('seen'):
                 save_user_short_memory_once(
-                    user_id, display_text, character_id,
+                    user_id, canonical_text, character_id,
                     source_event_id=source_event_id,
                     event_meta=base_event_meta,
                 )
@@ -529,7 +533,7 @@ async def chat_image(data: dict):
     messages = append_current_user_turn(messages, user_content)
 
     save_user_short_memory_once(
-        user_id, display_text, character_id, source_event_id=source_event_id,
+        user_id, canonical_text, character_id, source_event_id=source_event_id,
         event_meta=base_event_meta,
     )
     if availability and availability.get('can_reply'):
