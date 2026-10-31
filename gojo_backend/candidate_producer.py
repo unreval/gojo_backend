@@ -467,6 +467,9 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
                      if isinstance(item.get('source_event_id'), str) else None)
         source = by_source.get(source_id) if source_id else None
         excerpt = source.get('context_excerpt') if isinstance(source, dict) else None
+        # The gates compared this turn, not the quote span. Keep it on the
+        # observation record only. A model field of the same name is not accepted.
+        raw_content = source.get('content') if isinstance(source, dict) else None
         records.append(dict(common, kind='candidate', candidate_index=index,
             source_event_id=(item.get('source_event_id')
                              if isinstance(item.get('source_event_id'), str) else None),
@@ -476,6 +479,7 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
             persistence=observed_persistence(item),
             utterance_mode=observed_utterance_mode(item),
             context_excerpt=excerpt if isinstance(excerpt, str) and excerpt else None,
+            raw_content=raw_content if isinstance(raw_content, str) else None,
             gates=gates, gate_accepted=gate_accepted, accepted=accepted,
             reason=reason if not gate_accepted or shadow else (projection or {}).get('reason'),
             projection_status=(projection or {}).get('status'),

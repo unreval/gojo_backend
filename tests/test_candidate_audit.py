@@ -113,6 +113,7 @@ class CandidateAuditWriteTests(unittest.TestCase):
         self.assertEqual(params[17], NOW)
         self.assertIsNone(params[18])
         self.assertIsNone(params[19])
+        self.assertIsNone(params[20])
         self.assertIsNotNone(params[16].tzinfo)
         self.assertIsNotNone(params[17].tzinfo)
         self.conn.commit.assert_called_once()
@@ -138,10 +139,20 @@ class CandidateAuditWriteTests(unittest.TestCase):
         self.assertEqual(params[17], NOW)
         self.assertEqual(params[18], 'practice')
         self.assertEqual(params[19], '出题')
+        self.assertIsNone(params[20])
         candidate_audit.log_candidate(record(utterance_mode=12, context_excerpt=None))
         folded = self.insert_params()
         self.assertIsNone(folded[18])
         self.assertIsNone(folded[19])
+        self.assertIsNone(folded[20])
+
+    def test_raw_content_is_stored_only_when_it_is_text(self):
+        self.assertEqual(candidate_audit.log_candidate(record(
+            raw_content='今天我亏了69元，想和你聊一聊。'),
+            occurred_at=NOW, created_at=NOW), 7)
+        self.assertEqual(self.insert_params()[20], '今天我亏了69元，想和你聊一聊。')
+        candidate_audit.log_candidate(record(raw_content={'content': '模型编的'}))
+        self.assertIsNone(self.insert_params()[20])
 
     def test_rejected_candidate_keeps_gate_reason(self):
         candidate_audit.log_candidate(record(
@@ -178,7 +189,10 @@ class CandidateAuditSchemaTests(unittest.TestCase):
         self.assertIn('CREATED_AT DESC', joined)
         self.assertIn('ADD COLUMN IF NOT EXISTS UTTERANCE_MODE TEXT', joined)
         self.assertIn('ADD COLUMN IF NOT EXISTS CONTEXT_EXCERPT TEXT', joined)
+        self.assertIn('ADD COLUMN IF NOT EXISTS RAW_CONTENT TEXT', joined)
         source = Path(candidate_audit.__file__).read_text(encoding='utf-8')
+        self.assertIn('first 400 characters', source)
+        self.assertNotIn('first 120', source)
         self.assertIn('不是证据', source)
         self.assertIn('不是事实来源', source)
         self.assertIn('没有任何代码读它', source)
