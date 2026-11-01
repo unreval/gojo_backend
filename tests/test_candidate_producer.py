@@ -113,9 +113,23 @@ class ProducerPureTests(unittest.TestCase):
                         os.environ.pop(key, None)
                     else:
                         os.environ[key] = value
+                os.environ.pop('CANDIDATE_PRODUCER_LOOKBACK_DAYS', None)
                 config = runpy.run_path(str(ROOT / 'gojo_backend/config.py'))
                 self.assertEqual((config['CANDIDATE_PRODUCER_ENABLED'],
                                   config['CANDIDATE_PRODUCER_SHADOW']), expected)
+                self.assertEqual(config['CANDIDATE_PRODUCER_LOOKBACK_DAYS'], 7)
+
+    def test_lookback_days_fall_back_to_seven_when_the_setting_is_unusable(self):
+        cases = ((None, 7), ('', 7), ('7', 7), ('0', 0), ('-3', -3),
+                 ('abc', 7), ('7.5', 7))
+        for raw, expected in cases:
+            with self.subTest(raw=raw), patch.dict(os.environ):
+                if raw is None:
+                    os.environ.pop('CANDIDATE_PRODUCER_LOOKBACK_DAYS', None)
+                else:
+                    os.environ['CANDIDATE_PRODUCER_LOOKBACK_DAYS'] = raw
+                config = runpy.run_path(str(ROOT / 'gojo_backend/config.py'))
+                self.assertEqual(config['CANDIDATE_PRODUCER_LOOKBACK_DAYS'], expected)
 
     def test_disabled_entry_points_do_not_open_database_model_or_thread(self):
         model = Mock(side_effect=AssertionError('disabled producer called provider'))
@@ -739,7 +753,8 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertNotIn('今天我亏了69元', json.dumps(self.logs, ensure_ascii=False))
         self.assertEqual(self.non_processing_state(), before)
         pending = producer._pending_inputs(self.database.cursor(), 'u', 'c',
-                                           producer._receipt_version(True))
+                                           producer._receipt_version(True),
+                                           producer._lookback_cutoff(self.now))
         self.assertEqual([item['source_event_id'] for item in pending], ids[1:])
         self.database.rollback()
         recovered = self.model(raw='[]')
@@ -749,7 +764,8 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertEqual([item['source_event_id'] for item in request], ids[1:2])
         self.assertEqual(self.control_state()['batch_size'], 2)
         reprocessable = producer._pending_inputs(self.database.cursor(), 'u', 'c',
-                                                 'next-processor-version.shadow')
+                                                 'next-processor-version.shadow',
+                                                 producer._lookback_cutoff(self.now))
         self.assertEqual([item['source_event_id'] for item in reprocessable], ids)
         self.assertEqual(self.non_processing_state(), before)
 
@@ -1744,6 +1760,44 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertEqual(row['reason'], 'summary_not_grounded_in_quote')
         self.assertFalse(row['gate_accepted'])
         self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])
+
+    def test_lookback_window_keeps_only_the_recent_event_in_the_batch(self):
+        stale = self.seed(1, age=30 * 24 * 3600, prefix='stale')
+        recent = self.seed(1, age=3600, prefix='recent')
+        pending = producer._pending_inputs(
+            self.database.cursor(), 'u', 'c', producer._receipt_version(True),
+            producer._lookback_cutoff(self.now))
+        self.assertEqual([item['source_event_id'] for item in pending], recent)
+        model = self.model(raw='[]')
+        result = self.run_pair(model)
+        self.assertEqual(result['status'], 'succeeded')
+        request = json.loads(model.call_args.kwargs['messages'][0]['content'])
+        self.assertEqual([item['source_event_id'] for item in request], recent)
+        self.assertNotIn(stale[0], [item['source_event_id'] for item in request])
+
+    def test_non_positive_lookback_restores_the_unbounded_selection(self):
+        stale = self.seed(1, age=30 * 24 * 3600, prefix='stale')
+        recent = self.seed(1, age=3600, prefix='recent')
+        for days in (0, -1):
+            with self.subTest(days=days):
+                self.database.rollback()
+                with patch('config.CANDIDATE_PRODUCER_LOOKBACK_DAYS', days):
+                    pending = producer._pending_inputs(
+                        self.database.cursor(), 'u', 'c',
+                        producer._receipt_version(True),
+                        producer._lookback_cutoff(self.now))
+                self.assertEqual([item['source_event_id'] for item in pending],
+                                 stale + recent)
+
+    def test_worker_pair_query_skips_pairs_that_have_only_old_events(self):
+        self.seed(1, age=30 * 24 * 3600, user='stale', prefix='stale')
+        self.seed(1, age=3600, user='recent', prefix='recent')
+        self.seed(1, age=30 * 24 * 3600, user='mixed', prefix='mixed-old')
+        self.seed(1, age=3600, user='mixed', prefix='mixed-new')
+        with patch.object(producer, 'run_pair', return_value={'status': 'waiting'}) as run:
+            producer.run_worker_once(enabled=True, shadow=True, now=self.now)
+        self.assertEqual([call.args[0] for call in run.call_args_list],
+                         ['mixed', 'recent'])
 
 
 class CandidateValuePolarityTests(unittest.TestCase):

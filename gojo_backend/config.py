@@ -29,6 +29,12 @@ CANDIDATE_PRODUCER_ENABLED = os.getenv(
     'CANDIDATE_PRODUCER_ENABLED', 'false').strip().lower() in ('1', 'true')
 CANDIDATE_PRODUCER_SHADOW = os.getenv(
     'CANDIDATE_PRODUCER_SHADOW', 'true').strip().lower() not in ('0', 'false')
+# 候选只回溯最近若干天；<=0 表示不设窗口（恢复旧行为，用于回滚）。
+try:
+    CANDIDATE_PRODUCER_LOOKBACK_DAYS = int(
+        os.getenv('CANDIDATE_PRODUCER_LOOKBACK_DAYS', '7') or 7)
+except (TypeError, ValueError):
+    CANDIDATE_PRODUCER_LOOKBACK_DAYS = 7
 
 # MODEL_CN_AUX: 中文辅助任务(记忆提取/日记生成/纠错)—— DeepSeek 便宜、中文好
 MODEL_CN_AUX = os.getenv('MODEL_CN_AUX', 'deepseek-v4-flash')

@@ -352,11 +352,19 @@ def _model_payload(item):
     return payload
 
 
-def _pending_inputs(cur, user_id, character_id, version):
+def _lookback_cutoff(current):
+    from config import CANDIDATE_PRODUCER_LOOKBACK_DAYS
+    if CANDIDATE_PRODUCER_LOOKBACK_DAYS <= 0:
+        return None
+    return current - timedelta(days=CANDIDATE_PRODUCER_LOOKBACK_DAYS)
+
+
+def _pending_inputs(cur, user_id, character_id, version, cutoff):
     query = '''SELECT e.id,e.source_event_id,e.payload,e.occurred_at
         FROM cognitive_events e
         WHERE e.user_id=%s AND e.character_id=%s
           AND e.source_event_type='canonical_user_turn'
+          AND (%s IS NULL OR e.occurred_at >= %s)
           AND EXISTS (SELECT 1 FROM chat_log c WHERE c.user_id=e.user_id
             AND c.chat_id=COALESCE(NULLIF(e.payload->>'source_chat_id',''),e.character_id)
             AND COALESCE(NULLIF(c.event_id,''),c.client_msg_id)=e.source_event_id
@@ -368,7 +376,8 @@ def _pending_inputs(cur, user_id, character_id, version):
         ORDER BY e.occurred_at,e.id LIMIT %s OFFSET %s'''
     inputs, offset = [], 0
     while len(inputs) < BATCH_SIZE:
-        cur.execute(query, (user_id, character_id, _processor(user_id, character_id),
+        cur.execute(query, (user_id, character_id, cutoff, cutoff,
+                            _processor(user_id, character_id),
                             version, BATCH_SIZE, offset))
         rows = cur.fetchall()
         if not rows:
@@ -528,7 +537,8 @@ def run_pair(user_id, character_id, *, now=None, create_chat_fn=None, conn=None,
         if state.get('retry_at') and current < datetime.fromisoformat(state['retry_at']):
             database.rollback()
             return {'status': 'cooldown', 'retry_at': state['retry_at']}
-        pending = _pending_inputs(cur, user_id, character_id, version)
+        pending = _pending_inputs(cur, user_id, character_id, version,
+                                  _lookback_cutoff(current))
         if not batch_ready(pending, current):
             database.rollback()
             return {'status': 'waiting', 'input_count': len(pending)}
@@ -675,15 +685,19 @@ def run_worker_once(*, enabled=None, shadow=None, now=None, create_chat_fn=None,
 
     database = get_conn()
     cur = database.cursor()
+    current = now or _now()
+    cutoff = _lookback_cutoff(current)
     try:
         cur.execute('''SELECT DISTINCT e.user_id,e.character_id FROM cognitive_events e
             WHERE e.source_event_type='canonical_user_turn'
+              AND (%s IS NULL OR e.occurred_at >= %s)
               AND NOT EXISTS (SELECT 1 FROM event_processing_state p
                 WHERE p.event_id=e.source_event_id AND p.processor_version=%s
                   AND p.processor_type='candidate_producer:' || length(e.user_id)::text
                       || ':' || e.user_id || ':' || e.character_id
                   AND p.status IN ('succeeded','done','skipped'))
-            ORDER BY e.user_id,e.character_id''', (_receipt_version(shadow),))
+            ORDER BY e.user_id,e.character_id''',
+            (cutoff, cutoff, _receipt_version(shadow)))
         pairs = cur.fetchall()
     finally:
         cur.close()
