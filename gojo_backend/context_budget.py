@@ -74,6 +74,9 @@ ITEM_TYPE_CHANNEL = {
     'relationship_state': 'relationship',
     'cognitive_state': 'cognitive',
     'diary': 'diary',
+    # Subjective and non-factual, same family as diary. Kept out of recall so
+    # it does not compete with sourced facts for that budget.
+    'legacy_recollection': 'diary',
     'temporal': 'aux',
     'schedule': 'aux',
     'character_lore': 'aux',

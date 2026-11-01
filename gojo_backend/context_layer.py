@@ -1154,8 +1154,14 @@ def _items_from_recall(recall_result) -> List[ContextItem]:
                 (ref.get('event_id') if isinstance(ref, dict) else ref)
                 for ref in row.get('source_event_refs') or []
             ])
-        item_type = 'episodic_memory' if kind == 'episode' else (
-            'recalled_memory' if kind != 'diary' else 'diary')
+        if kind == 'episode':
+            item_type = 'episodic_memory'
+        elif kind == 'diary':
+            item_type = 'diary'
+        elif kind == 'legacy':
+            item_type = 'legacy_recollection'
+        else:
+            item_type = 'recalled_memory'
         items.append(ContextItem(
             item_id=f'{kind}:{row.get("id") or row.get("diary_key") or len(items)}',
             item_type=item_type,
@@ -1184,6 +1190,8 @@ def _items_from_recall(recall_result) -> List[ContextItem]:
         _add('sticky', row, 30)
     for row in recall_result.get('diary_memories') or []:
         _add('diary', row, 20)
+    for row in recall_result.get('legacy_recollections') or []:
+        _add('legacy', row, 18)
     return items
 
 
@@ -1197,7 +1205,8 @@ def _recall_result_from_items(items: Sequence[ContextItem], original):
             kept_ids.add(id(raw))
     out = dict(original)
     for key in ('facts', 'loose_bonds', 'tolds', 'lifecycle_memories',
-                'episodes', 'sticky_notes', 'diary_memories'):
+                'episodes', 'sticky_notes', 'diary_memories',
+                'legacy_recollections'):
         rows = []
         for row in (original.get(key) or []):
             if id(row) in kept_ids:
@@ -1895,7 +1904,8 @@ def assemble_from_events(
             from memory_authority import filter_recall_authority
             trimmed = filter_recall_authority(trimmed, user_id, character_id)
             pack.recall_result = trimmed
-            memory_text, bond_text, told_text = format_recall_for_prompt(trimmed)
+            memory_text, bond_text, told_text = format_recall_for_prompt(
+                trimmed, include_legacy=True)
         except Exception:
             memory_text, bond_text, told_text = '', '', ''
         pack.memory_text = memory_text
