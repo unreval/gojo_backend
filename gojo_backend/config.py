@@ -36,6 +36,18 @@ try:
 except (TypeError, ValueError):
     CANDIDATE_PRODUCER_LOOKBACK_DAYS = 7
 
+# 表情包冷却是快环确定性规则,不调模型。非正整数回落到默认。
+def _sticker_window(name, default):
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+STICKER_COOLDOWN_TURNS = _sticker_window('STICKER_COOLDOWN_TURNS', 3)
+STICKER_REPEAT_WINDOW = _sticker_window('STICKER_REPEAT_WINDOW', 10)
+
 # MODEL_CN_AUX: 中文辅助任务(记忆提取/日记生成/纠错)—— DeepSeek 便宜、中文好
 MODEL_CN_AUX = os.getenv('MODEL_CN_AUX', 'deepseek-v4-flash')
 

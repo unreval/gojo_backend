@@ -418,6 +418,41 @@ TESTED
 
 ---
 
+# REG-012 — Sticker must not enter messages[]
+
+## Area
+
+Generation / visible reply / generation receipt
+
+## Historical failure
+
+A sticker is a shared picture, not a speech bubble. If it is appended to
+`messages[]`, `full_jp = ' '.join(m['jp'] for m in msgs)` breaks every
+downstream reader that assumes each element has `jp`: promise detection,
+behavior evidence, assistant short memory, bilingual checks, and TTS.
+A signed sticker URL stored on the generation receipt also dies when the
+signature expires, so replay and reconnect return a dead link.
+
+## Required behavior
+
+- A sticker is a sibling of `messages`, like `pending_transaction`.
+- `messages` length and content stay the same whether or not `sticker_id` is present.
+- `full_jp` contains only the speech text.
+- An unknown id, a disabled catalog, or a failed signature drops the sticker and still returns the text reply.
+- The receipt stores `id` and `desc` only. Replay mints a new URL, or removes `sticker` entirely if signing fails.
+- The cooldown that drops a repeated sticker is deterministic and does not call a model.
+
+## Regression requirement
+
+`tests/test_sticker_chat.py` must keep the messages isolation, receipt URL
+stripping, replay hydration, cooldown, and fail-safe text reply.
+
+## Status
+
+TESTED
+
+---
+
 # Regression Rule
 
 任何任务如果修改到上述 Regression 的 Area：
@@ -446,3 +481,4 @@ TESTED
 | REG-009 | Schedule / Online Continuity | OPEN |
 | REG-010 | Promise trigger timezone | TESTED |
 | REG-011 | Japanese denial exemption list | TESTED |
+| REG-012 | Sticker outside messages[] | TESTED |

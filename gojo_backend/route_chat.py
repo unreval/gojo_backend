@@ -1448,6 +1448,124 @@ def _stamp_text_reply(msgs, source_event_id):
     return turn_id, stamp_assistant_messages(msgs, turn_id)
 
 
+def _sticker_windows():
+    try:
+        import config
+        cooldown = int(getattr(config, 'STICKER_COOLDOWN_TURNS', 3) or 3)
+        repeat = int(getattr(config, 'STICKER_REPEAT_WINDOW', 10) or 10)
+    except Exception:
+        cooldown, repeat = 3, 10
+    if cooldown < 1:
+        cooldown = 3
+    if repeat < 1:
+        repeat = 10
+    return cooldown, repeat
+
+
+def _message_extra(msg):
+    extra = (msg or {}).get('extra')
+    if isinstance(extra, dict):
+        return extra
+    if isinstance(extra, str) and extra.strip():
+        try:
+            parsed = json.loads(extra)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _assistant_turns(messages):
+    turns = []
+    current = []
+    for msg in messages or []:
+        if (msg or {}).get('role') in ('assistant', 'gojo'):
+            current.append(msg)
+        elif current:
+            turns.append(current)
+            current = []
+    if current:
+        turns.append(current)
+    return turns
+
+
+def _turn_sticker_ids(turn):
+    found = []
+    sent = False
+    for msg in turn or []:
+        extra = _message_extra(msg)
+        sticker_id = str(extra.get('sticker_id') or '').strip()
+        if (msg or {}).get('kind') == 'sticker' or sticker_id:
+            sent = True
+        if sticker_id:
+            found.append(sticker_id)
+    return sent, found
+
+
+def _sticker_allowed(user_id, character_id, sticker_id):
+    """Deterministic cooldown. A read failure drops the sticker, not the reply."""
+    cooldown, repeat = _sticker_windows()
+    try:
+        import db_chatlog
+        messages, _has_more = db_chatlog.get_messages(
+            user_id, character_id, limit=200)
+    except Exception as exc:
+        print(f'[sticker] history read failed:{type(exc).__name__}')
+        return False
+    turns = _assistant_turns(messages)
+    recent = turns[-repeat:]
+    if any(_turn_sticker_ids(turn)[0] for turn in recent[-cooldown:]):
+        print(f'[sticker] dropped id={sticker_id} reason=cooldown')
+        return False
+    if any(sticker_id in _turn_sticker_ids(turn)[1] for turn in recent):
+        print(f'[sticker] dropped id={sticker_id} reason=repeat')
+        return False
+    return True
+
+
+def _resolve_sticker(user_id, character_id, sticker_id):
+    """Sibling of messages. Failure returns None and never fails the text reply."""
+    try:
+        sticker_id = str(sticker_id or '').strip()
+        if not sticker_id:
+            return None
+        import sticker_registry
+        if not sticker_registry.is_enabled():
+            return None
+        item = sticker_registry.get(sticker_id)
+        if not item:
+            print(f'[sticker] unknown id={sticker_id}')
+            return None
+        if not _sticker_allowed(user_id, character_id, sticker_id):
+            return None
+        url = sticker_registry.signed_url(sticker_id)
+        if not url:
+            return None
+        return {
+            'id': item.get('id') or sticker_id,
+            'url': url,
+            'desc': item.get('desc') or '',
+        }
+    except Exception as exc:
+        print(f'[sticker] resolve skipped:{type(exc).__name__}')
+        return None
+
+
+@router.get('/sticker/url')
+async def sticker_url(id: str = ''):
+    """Re-sign one shared sticker. History stores the id, not this URL."""
+    try:
+        import sticker_registry
+        url = sticker_registry.signed_url(id) if str(id or '').strip() else None
+        item = sticker_registry.get(id) if url else None
+    except Exception as exc:
+        print(f'[sticker] url endpoint skipped:{type(exc).__name__}')
+        url, item = None, None
+    if not url:
+        return JSONResponse({'error': 'sticker_unavailable'}, status_code=404)
+    return {'id': id, 'url': url, 'desc': (item or {}).get('desc') or ''}
+
+
 @router.post('/chat/text')
 async def chat_text(data: dict):
     from latency_telemetry import LatencyTrace, bind_trace, reset_trace
@@ -1731,6 +1849,9 @@ async def chat_text(data: dict):
         resp['_cancel_reminder'] = result.get('cancel_reminder')
     if pending_tx:
         resp['pending_transaction'] = pending_tx
+    sticker = _resolve_sticker(user_id, character_id, result.get('sticker_id'))
+    if sticker:
+        resp['sticker'] = sticker
     if result.get('proactive_promise'):
         resp['_proactive_promise'] = result.get('proactive_promise')
     if not transition.get('noop'):
