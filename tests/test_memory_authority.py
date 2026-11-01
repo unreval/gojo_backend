@@ -456,7 +456,15 @@ class MemoryAuthorityTests(unittest.TestCase):
             result=smart_recall.two_level_recall('u','c','咖啡')
         self.assertIsNotNone(result)
         self.assertEqual(len(result['facts']),1)
-        self.assertNotIn('火星',self.prompt_memory(result))
+        self.assertNotIn('火星', ' '.join(row['content'] for row in result['facts']))
+        self.assertTrue(any('火星' in row['content'] for row in result['legacy_recollections']))
+        # The labeled bypass may quote the old row. The sourced-fact section may not.
+        prompted = self.prompt_memory(result)
+        sourced, marker, fuzzy = prompted.partition('【很久以前的模糊印象')
+        self.assertTrue(marker)
+        self.assertNotIn('火星', sourced)
+        self.assertIn('火星', fuzzy)
+        self.assertIn('不能说成"你说过"', fuzzy)
 
     def test_memory_page_keeps_legacy_history_separate_from_recallable_fact(self):
         self.report('raw', '我喜欢咖啡')
