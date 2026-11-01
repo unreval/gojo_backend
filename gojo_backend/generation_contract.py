@@ -69,6 +69,7 @@ GENERATION_ENVELOPE_SCHEMA = _object({
             'fixedness': _STRING,
         }, ('title', 'duration_minutes')),
     }, ('type',)),
+    'sticker_id': _STRING,
 }, ('emotion', 'messages'))
 
 

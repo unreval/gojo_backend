@@ -368,6 +368,34 @@ NOT RUN IN COVERAGE AUDIT
 
 ---
 
+# REG-012 — Sticker must not enter messages[]
+
+## Owner
+
+gojo_backend
+
+## Coverage
+
+COVERED
+
+## Direct tests
+
+- `tests/test_sticker_chat.py`
+
+Confirmed behaviors include:
+
+- `sticker_id` does not change `messages` or `full_jp`;
+- the receipt keeps `id` and `desc` and drops `url`;
+- replay fills a fresh URL, or deletes `sticker` when signing fails;
+- only the first of three consecutive sticker replies is returned;
+- a missing catalog, unconfigured storage, or an unknown id still returns the text reply.
+
+## Execution status
+
+NOT RUN IN COVERAGE AUDIT
+
+---
+
 # Current Coverage Matrix
 
 | REG | Owner | Coverage |
@@ -382,6 +410,7 @@ NOT RUN IN COVERAGE AUDIT
 | REG-008 | gojo_backend | PARTIAL |
 | REG-009 | gojo_backend | PARTIAL |
 | REG-010 | gojo_backend | COVERED |
+| REG-012 | gojo_backend | COVERED |
 
 ---
 

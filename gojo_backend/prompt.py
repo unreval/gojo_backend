@@ -4,6 +4,7 @@
 ★ 记账升级新增：
     - _accounts_block() 在动态尾里注入当前用户的账户列表(dynamic_tail,不缓存)
     - OUTPUT_SPEC 末尾追加 pending_transaction 字段规范(静态,进缓存头)
+    - 表情包目录同样是静态规范,进缓存头;未启用时整节不出现
 """
 from datetime import datetime, timedelta, timezone
 from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID
@@ -404,7 +405,54 @@ context 里写清楚为什么触发,让【触发那一刻的你】知道要说�
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-★ 记账、提醒、取消、承诺可以并存，该有的字段都给。绝不能因为加了 pending_transaction 就漏 reminder。'''
+★ 记账、提醒、取消、承诺可以并存，该有的字段都给。绝不能因为加了 pending_transaction 就漏 reminder。
+
+【表情包——可选，不是每条都发】
+可用表情包只有下面目录里这些。sticker_id 必须逐字抄目录里的 id，不得自创，不得改写。
+不是每条回复都要发。只在情绪上确实比文字更到位的时候发——玩笑、打招呼、懒得多说、被调侃。
+正经事、她在难过、在求助、在问具体问题时不要发。
+发了表情包不代表少说话，messages 照常给。
+不确定就不发。
+目录：
+{sticker_catalog}
+示例：
+{{"emotion":"调皮","messages":[{{"jp":"...","zh":"..."}}],"sticker_id":"happy_01"}}
+【表情包段落结束】'''
+
+
+_STICKER_SECTION_START = '【表情包——可选，不是每条都发】'
+_STICKER_SECTION_END = '【表情包段落结束】'
+
+
+def _strip_sticker_section(text):
+    start = text.find(_STICKER_SECTION_START)
+    end = text.find(_STICKER_SECTION_END)
+    if start < 0 or end < start:
+        return text
+    end += len(_STICKER_SECTION_END)
+    while start > 0 and text[start - 1] in '\r\n':
+        start -= 1
+    return text[:start] + text[end:]
+
+
+def render_output_spec(emotion_list):
+    """Static reply spec. The sticker section is omitted entirely when unused.
+
+    An instruction block without a catalog would make the model invent ids.
+    The catalog itself stays in this cached head; it is not per-turn state.
+    """
+    catalog = ''
+    try:
+        import sticker_registry
+        if sticker_registry.is_enabled():
+            catalog = sticker_registry.catalog_for_prompt() or ''
+    except Exception as exc:
+        print(f'[prompt] sticker catalog skipped:{type(exc).__name__}')
+        catalog = ''
+    text = OUTPUT_SPEC.format(emotion_list=emotion_list, sticker_catalog=catalog)
+    if not catalog:
+        text = _strip_sticker_section(text)
+    return text
 
 
 _REPLY_SCOPE_RULES = '''【★ 这一条回复的分寸——最后再确认一遍】
@@ -750,7 +798,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     static_head = f"""{core_prompt}
 {canon_lock}
 
-""" + OUTPUT_SPEC.format(emotion_list=emotion_list)
+""" + render_output_spec(emotion_list)
 
     query_recall = f"""{memory_text}{bond_text}{told_text}""".strip() or '（还没有关于她的记忆）'
 

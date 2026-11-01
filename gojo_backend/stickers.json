@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "prefix": "stickers/v1/",
+  "items": [
+    {
+      "id": "happy_01",
+      "file": "happy_01.png",
+      "mime": "image/png",
+      "emotion": "开心",
+      "desc": "笑着比耶"
+    },
+    {
+      "id": "happy_02",
+      "file": "happy_02.png",
+      "mime": "image/png",
+      "emotion": "开心",
+      "desc": "得意挑眉"
+    },
+    {
+      "id": "flat_01",
+      "file": "flat_01.png",
+      "mime": "image/png",
+      "emotion": "无语",
+      "desc": "面无表情"
+    },
+    {
+      "id": "flat_02",
+      "file": "flat_02.png",
+      "mime": "image/png",
+      "emotion": "无语",
+      "desc": "翻白眼"
+    }
+  ]
+}

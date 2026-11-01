@@ -85,6 +85,11 @@ def canonical_payload(body):
         media = dict(media)
         media.pop('url', None)
         payload['media'] = media
+    sticker = payload.get('sticker')
+    if isinstance(sticker, dict):
+        sticker = dict(sticker)
+        sticker.pop('url', None)
+        payload['sticker'] = sticker
     return payload
 
 
@@ -1006,4 +1011,19 @@ def hydrate_replay(body, character_id, user_id=None, chat_id=None,
                 payload['media'] = media
         except Exception as e:
             print(f'[generation_receipt] replay media skipped:{e}')
+    sticker = payload.get('sticker')
+    if isinstance(sticker, dict) and sticker.get('id'):
+        url = None
+        try:
+            import sticker_registry
+            url = sticker_registry.signed_url(sticker.get('id'))
+        except Exception as e:
+            print(f'[generation_receipt] replay sticker skipped:{e}')
+            url = None
+        if url:
+            sticker = dict(sticker)
+            sticker['url'] = url
+            payload['sticker'] = sticker
+        else:
+            payload.pop('sticker', None)
     return payload

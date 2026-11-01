@@ -27,4 +27,7 @@ export interface Message {
   // ★ 记账升级：LLM 检测到消费/收入时用这两个字段承载确认卡数据
   pendingTx?: PendingTransaction;
   pendingStatus?: 'pending' | 'saved' | 'dismissed';
+  stickerId?: string;
+  stickerDesc?: string;
+  stickerUrl?: string;
 }
