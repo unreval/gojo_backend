@@ -132,6 +132,63 @@ class StickerRegistryTests(unittest.TestCase):
             self.assertFalse(sticker_registry.is_enabled())
             self.assertEqual(sticker_registry.catalog_for_prompt(), '')
 
+    def test_audience_splits_prompt_catalog_from_the_user_list(self):
+        self._use({
+            'version': 1,
+            'prefix': 'stickers/v1/',
+            'items': [
+                {'id': 'char_01', 'file': 'char_01.png', 'emotion': '开心',
+                 'desc': '角色笑', 'for': 'character'},
+                {'id': 'user_01', 'file': 'user_01.png', 'emotion': '开心',
+                 'desc': '我的笑', 'for': 'user'},
+                {'id': 'both_01', 'file': 'both_01.png', 'emotion': '无语',
+                 'desc': '两边翻', 'for': 'both'},
+                {'id': 'plain_01', 'file': 'plain_01.png', 'emotion': '无语',
+                 'desc': '没写for'},
+            ],
+        })
+        with patch.object(media_storage, 'is_configured', return_value=True):
+            catalog = sticker_registry.catalog_for_prompt()
+        self.assertIn('char_01=角色笑', catalog)
+        self.assertIn('both_01=两边翻', catalog)
+        self.assertIn('plain_01=没写for', catalog)
+        self.assertNotIn('user_01', catalog)
+        self.assertNotIn('我的笑', catalog)
+        user_ids = [item['id'] for item in sticker_registry.list_for_user()]
+        self.assertEqual(user_ids, ['user_01', 'both_01', 'plain_01'])
+        self.assertNotIn('char_01', user_ids)
+        self.assertTrue(sticker_registry.usable_by('plain_01', 'character'))
+        self.assertTrue(sticker_registry.usable_by('plain_01', 'user'))
+        self.assertTrue(sticker_registry.usable_by('char_01', 'character'))
+        self.assertFalse(sticker_registry.usable_by('char_01', 'user'))
+        self.assertFalse(sticker_registry.usable_by('user_01', 'character'))
+        self.assertTrue(sticker_registry.usable_by('user_01', 'user'))
+
+    def test_illegal_for_stays_in_the_manifest_as_both(self):
+        self._use({
+            'version': 1,
+            'prefix': 'stickers/v1/',
+            'items': [
+                {'id': 'weird_01', 'file': 'weird_01.png', 'emotion': '开心',
+                 'desc': '乱标', 'for': 'everyone'},
+                {'id': 'flat_01', 'file': 'flat_01.png', 'emotion': '无语',
+                 'desc': '面无表情'},
+            ],
+        })
+        with patch('builtins.print') as log:
+            manifest = sticker_registry.load_manifest()
+        self.assertEqual(
+            [item['id'] for item in manifest['items']],
+            ['weird_01', 'flat_01'],
+        )
+        self.assertEqual(sticker_registry.get('weird_01')['for'], 'both')
+        self.assertTrue(sticker_registry.usable_by('weird_01', 'character'))
+        self.assertTrue(sticker_registry.usable_by('weird_01', 'user'))
+        printed = ' '.join(
+            str(call.args[0]) for call in log.call_args_list if call.args)
+        self.assertIn("illegal for='everyone'", printed)
+        self.assertIn('id=weird_01', printed)
+
 
 if __name__ == '__main__':
     unittest.main()
