@@ -55,6 +55,8 @@ BOND_PER_FACT = 2       # 第二级：每条事实最多带几条关联 bond
 LOOSE_BOND_K = 6        # 兜底池：独立 bond 取几条
 TOLD_TOP_K = 5          # told 桶单独取几条
 PINNED_MAX = 15         # 钉住的记忆最多注入多少条
+LEGACY_RECOLLECTION_MAX = 3   # 模糊旧印象最多注入多少条
+LEGACY_AUTHORITY = 'generated_recollection'
 
 # 先取一个足够覆盖周级对话、但始终有上界的候选池，再按相关性排序。
 # 不能直接按 Top-K 的最近记录截断，否则一周前仍高度相关的记忆永远没有
@@ -222,6 +224,14 @@ def score_fact(content, category, timestamp, mention_count, last_mentioned,
     return relevance * strength * decay * cat_w
 
 
+def _score_legacy_recollection(content, category, timestamp, user_message,
+                               now, query_embedding=None, memory_embedding=None):
+    """模糊旧印象的排序分。不含 mention_count 项，避免被 reinforce 自我强化。"""
+    return (_relevance_score(content, user_message, query_embedding, memory_embedding)
+            * _category_weight(category)
+            * _time_decay(timestamp, now))
+
+
 def _cosine_sim(a, b):
     """余弦相似度（纯 Python，向量已归一化时等于点积）"""
     if not a or not b or len(a) != len(b):
@@ -259,6 +269,10 @@ def two_level_recall(user_id, character_id, user_message,
         ],
         'tolds': [  # 她告诉角色的事
             {'id': int, 'content': str, 'timestamp': datetime}
+        ],
+        'legacy_recollections': [  # 无证据链的模糊旧印象，不是事实
+            {'id': int, 'content': str, 'timestamp': datetime,
+             'category': str, 'score': float, 'authority': str}
         ]
       }
 
@@ -293,6 +307,21 @@ def two_level_recall(user_id, character_id, user_message,
         if not all_facts:
             all_facts = []
 
+        # 模糊旧印象旁路：刻意不走 authoritative_memory_sql。
+        # 这些行保持 generated_recollection，不得进入 facts / bonds / tolds。
+        cur.execute(
+            f'''SELECT id, content, timestamp, category
+               FROM long_memory
+               WHERE user_id = %s AND character_id IN (%s, %s)
+                 AND authority = '{LEGACY_AUTHORITY}'
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                 AND category IS DISTINCT FROM '状态'
+               ORDER BY timestamp DESC''',
+            (user_id, character_id, shared_id)
+        )
+        legacy_source_rows = cur.fetchall()
+
         # ── 向量缓存（如果 RAG 开着的话）──
         fact_embeddings = {}
         if query_embedding is not None:
@@ -303,6 +332,24 @@ def two_level_recall(user_id, character_id, user_message,
                     fact_embeddings = memory_search._CACHE.get('long_memory', {})
             except Exception:
                 pass
+
+        now_ts = _time.time()
+        scored_legacy = []
+        for row in legacy_source_rows:
+            fid, content, ts, category = row[:4]
+            category = category or '其他'
+            scored_legacy.append({
+                'id': fid,
+                'content': content,
+                'timestamp': ts,
+                'category': category,
+                'score': _score_legacy_recollection(
+                    content, category, ts, user_message, now_ts,
+                    query_embedding, fact_embeddings.get(fid)),
+                'authority': LEGACY_AUTHORITY,
+            })
+        scored_legacy.sort(key=lambda item: item['score'], reverse=True)
+        legacy_recollections = scored_legacy[:LEGACY_RECOLLECTION_MAX]
 
         # ── 2. 分离 pinned 和普通记忆 ──
         pinned = []
@@ -605,12 +652,14 @@ def two_level_recall(user_id, character_id, user_message,
         _trace_selected_items('loose_bonds', loose_bonds, 'bond')
         _trace_selected_items('tolds', tolds, 'told')
         _trace_selected_items('lifecycle', lifecycle_memories, 'lifecycle')
+        _trace_selected_items('legacy', legacy_recollections, 'legacy')
 
         elapsed = (_time.time() - t0) * 1000
         total_injected = (
             len(selected_facts) + sum(len(f['bonds']) for f in selected_facts)
             + len(loose_bonds) + len(tolds)
             + len(lifecycle_memories) + len(sticky_notes) + len(diary_memories)
+            + len(legacy_recollections)
         )
         print(f'[recall] 两级召回完成：{len(selected_facts)} 条事实'
               f'（{len(pinned)} pinned + {len(selected_facts) - len(pinned)} scored）'
@@ -620,6 +669,7 @@ def two_level_recall(user_id, character_id, user_message,
               f' + {len(lifecycle_memories)} 条生命周期'
               f' + {len(sticky_notes)} 条便利贴'
               f' + {len(diary_memories)} 条日记/反思'
+              f' + {len(legacy_recollections)} 条模糊旧印象'
               f' = 共 {total_injected} 条'
               f'，耗时 {elapsed:.0f}ms')
 
@@ -631,6 +681,7 @@ def two_level_recall(user_id, character_id, user_message,
             'lifecycle_memories': lifecycle_memories,
             'sticky_notes': sticky_notes,
             'diary_memories': diary_memories,
+            'legacy_recollections': legacy_recollections,
             'exclude_event_ids': [
                 str(item).strip() for item in (exclude_event_ids or [])
                 if str(item).strip()
