@@ -55,6 +55,8 @@ BOND_PER_FACT = 2       # 第二级：每条事实最多带几条关联 bond
 LOOSE_BOND_K = 6        # 兜底池：独立 bond 取几条
 TOLD_TOP_K = 5          # told 桶单独取几条
 PINNED_MAX = 15         # 钉住的记忆最多注入多少条
+LEGACY_RECOLLECTION_MAX = 3   # 模糊旧印象最多注入多少条
+LEGACY_AUTHORITY = 'generated_recollection'
 
 # 先取一个足够覆盖周级对话、但始终有上界的候选池，再按相关性排序。
 # 不能直接按 Top-K 的最近记录截断，否则一周前仍高度相关的记忆永远没有
@@ -222,6 +224,14 @@ def score_fact(content, category, timestamp, mention_count, last_mentioned,
     return relevance * strength * decay * cat_w
 
 
+def _score_legacy_recollection(content, category, timestamp, user_message,
+                               now, query_embedding=None, memory_embedding=None):
+    """模糊旧印象的排序分。不含 mention_count 项，避免被 reinforce 自我强化。"""
+    return (_relevance_score(content, user_message, query_embedding, memory_embedding)
+            * _category_weight(category)
+            * _time_decay(timestamp, now))
+
+
 def _cosine_sim(a, b):
     """余弦相似度（纯 Python，向量已归一化时等于点积）"""
     if not a or not b or len(a) != len(b):
@@ -259,6 +269,10 @@ def two_level_recall(user_id, character_id, user_message,
         ],
         'tolds': [  # 她告诉角色的事
             {'id': int, 'content': str, 'timestamp': datetime}
+        ],
+        'legacy_recollections': [  # 无证据链的模糊旧印象，不是事实
+            {'id': int, 'content': str, 'timestamp': datetime,
+             'category': str, 'score': float, 'authority': str}
         ]
       }
 
@@ -293,6 +307,21 @@ def two_level_recall(user_id, character_id, user_message,
         if not all_facts:
             all_facts = []
 
+        # 模糊旧印象旁路：刻意不走 authoritative_memory_sql。
+        # 这些行保持 generated_recollection，不得进入 facts / bonds / tolds。
+        cur.execute(
+            f'''SELECT id, content, timestamp, category
+               FROM long_memory
+               WHERE user_id = %s AND character_id IN (%s, %s)
+                 AND authority = '{LEGACY_AUTHORITY}'
+                 AND COALESCE(recall_status, 'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                 AND category IS DISTINCT FROM '状态'
+               ORDER BY timestamp DESC''',
+            (user_id, character_id, shared_id)
+        )
+        legacy_source_rows = cur.fetchall()
+
         # ── 向量缓存（如果 RAG 开着的话）──
         fact_embeddings = {}
         if query_embedding is not None:
@@ -303,6 +332,24 @@ def two_level_recall(user_id, character_id, user_message,
                     fact_embeddings = memory_search._CACHE.get('long_memory', {})
             except Exception:
                 pass
+
+        now_ts = _time.time()
+        scored_legacy = []
+        for row in legacy_source_rows:
+            fid, content, ts, category = row[:4]
+            category = category or '其他'
+            scored_legacy.append({
+                'id': fid,
+                'content': content,
+                'timestamp': ts,
+                'category': category,
+                'score': _score_legacy_recollection(
+                    content, category, ts, user_message, now_ts,
+                    query_embedding, fact_embeddings.get(fid)),
+                'authority': LEGACY_AUTHORITY,
+            })
+        scored_legacy.sort(key=lambda item: item['score'], reverse=True)
+        legacy_recollections = scored_legacy[:LEGACY_RECOLLECTION_MAX]
 
         # ── 2. 分离 pinned 和普通记忆 ──
         pinned = []
@@ -605,12 +652,14 @@ def two_level_recall(user_id, character_id, user_message,
         _trace_selected_items('loose_bonds', loose_bonds, 'bond')
         _trace_selected_items('tolds', tolds, 'told')
         _trace_selected_items('lifecycle', lifecycle_memories, 'lifecycle')
+        _trace_selected_items('legacy', legacy_recollections, 'legacy')
 
         elapsed = (_time.time() - t0) * 1000
         total_injected = (
             len(selected_facts) + sum(len(f['bonds']) for f in selected_facts)
             + len(loose_bonds) + len(tolds)
             + len(lifecycle_memories) + len(sticky_notes) + len(diary_memories)
+            + len(legacy_recollections)
         )
         print(f'[recall] 两级召回完成：{len(selected_facts)} 条事实'
               f'（{len(pinned)} pinned + {len(selected_facts) - len(pinned)} scored）'
@@ -620,6 +669,7 @@ def two_level_recall(user_id, character_id, user_message,
               f' + {len(lifecycle_memories)} 条生命周期'
               f' + {len(sticky_notes)} 条便利贴'
               f' + {len(diary_memories)} 条日记/反思'
+              f' + {len(legacy_recollections)} 条模糊旧印象'
               f' = 共 {total_injected} 条'
               f'，耗时 {elapsed:.0f}ms')
 
@@ -631,6 +681,7 @@ def two_level_recall(user_id, character_id, user_message,
             'lifecycle_memories': lifecycle_memories,
             'sticky_notes': sticky_notes,
             'diary_memories': diary_memories,
+            'legacy_recollections': legacy_recollections,
             'exclude_event_ids': [
                 str(item).strip() for item in (exclude_event_ids or [])
                 if str(item).strip()
@@ -765,7 +816,7 @@ def _format_expiry(exp, *, record_id=None) -> str:
         return str(exp)[:16].replace('T', ' ')
 
 
-def format_recall_for_prompt(recall_result, observer_id=None):
+def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=False):
     """把 two_level_recall 的结果格式化成 prompt 文本。
 
     返回 (memory_text, bond_text, told_text) 三个字符串，
@@ -796,10 +847,12 @@ def format_recall_for_prompt(recall_result, observer_id=None):
     episodes = recall_result.get('episodes', [])
     sticky_notes = recall_result.get('sticky_notes', [])
     diary_memories = recall_result.get('diary_memories', [])
+    legacy_rows = recall_result.get('legacy_recollections') or []
 
     has_any = bool(
         facts or loose_bonds or tolds or lifecycle_memories or episodes
         or sticky_notes or diary_memories
+        or (include_legacy and legacy_rows)
     )
     memory_text = RECALL_EVIDENCE_PRIORITY if has_any else ''
     if facts:
@@ -907,6 +960,27 @@ def format_recall_for_prompt(recall_result, observer_id=None):
 6. 再次召回旧日记不构成新证据，不得强化 hypothesis/confidence 或 relationship state，禁止 self-proof。
 7. 若要更新关系判断，必须有新的独立外部 evidence，并经过原有 evidence pipeline / rule engine。
 {chr(10).join(diary_lines)}'''
+
+    if include_legacy and legacy_rows:
+        legacy_lines = []
+        for item in legacy_rows[:LEGACY_RECOLLECTION_MAX]:
+            ts = item.get('timestamp')
+            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
+            legacy_lines.append(f'- [{date_str}] {visible(item)}')
+        block = f'''
+
+【很久以前的模糊印象——没有保留原始出处，可能记错，不是她说过的原话】
+{chr(10).join(legacy_lines)}
+
+使用规则：
+1. 这些是更早时期留下的回忆，没有保留原始对话出处，可能已经失真或记错。
+2. 只能用猜测或询问的语气提起（"我记得好像……是不是？""我印象里是这样，我记岔了吗？"），
+   绝对不能说成"你说过""你告诉过我""你跟我讲过"。
+3. 不得作为任何判断、关系变化、承诺或日记内容的依据，也不得进入证据管线。
+4. 她否认或纠正时，立刻以她当下的说法为准，不要争辩、不要坚持。
+5. 与上面任何有出处的条目冲突时，一律以有出处的为准。
+6. 优先级最低：当前消息 > 有出处的明确自述 > lifecycle/bond > 日记反思 > 这些模糊印象。'''
+        memory_text = f'{memory_text}{block}' if memory_text else block
 
     # ── 独立羁绊（没有关联事实的）──
     bond_text = ''
