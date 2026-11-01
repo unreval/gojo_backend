@@ -1505,6 +1505,9 @@ def _resolve_sticker(user_id, character_id, sticker_id):
         if not item:
             print(f'[sticker] unknown id={sticker_id}')
             return None
+        if not sticker_registry.usable_by(sticker_id, 'character'):
+            print(f'[sticker] dropped id={sticker_id} reason=not_for_character')
+            return None
         if not _sticker_allowed(user_id, character_id, sticker_id):
             return None
         url = sticker_registry.signed_url(sticker_id)
@@ -1533,6 +1536,37 @@ async def sticker_url(id: str = ''):
     if not url:
         return JSONResponse({'error': 'sticker_unavailable'}, status_code=404)
     return {'id': id, 'url': url, 'desc': (item or {}).get('desc') or ''}
+
+
+def _sticker_list_response():
+    """User picker. Disabled or any failure is an empty 200, not an error."""
+    try:
+        import sticker_registry
+        if not sticker_registry.is_enabled():
+            return JSONResponse([])
+        rows = []
+        for item in sticker_registry.list_for_user() or []:
+            sticker_id = str((item or {}).get('id') or '').strip()
+            if not sticker_id:
+                continue
+            url = sticker_registry.signed_url(sticker_id)
+            if not url:
+                continue
+            rows.append({
+                'id': sticker_id,
+                'desc': item.get('desc') or '',
+                'emotion': item.get('emotion') or '',
+                'url': url,
+            })
+        return JSONResponse(rows)
+    except Exception as exc:
+        print(f'[sticker] list endpoint skipped:{type(exc).__name__}')
+        return JSONResponse([])
+
+
+@router.get('/sticker/list')
+async def sticker_list():
+    return _sticker_list_response()
 
 
 @router.post('/chat/text')
