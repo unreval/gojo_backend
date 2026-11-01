@@ -12,6 +12,7 @@ import re
 _ID_RE = re.compile(r'^[a-z0-9_]{1,32}$')
 _FILE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$')
 _DESC_MAX = 12
+_AUDIENCES = ('character', 'user', 'both')
 
 MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stickers.json')
 _CACHE = None
@@ -24,6 +25,30 @@ def _empty():
 def _fail(reason):
     print(f'[sticker] {reason}')
     return _empty()
+
+
+def _audience(raw, sticker_id):
+    """Missing `for` is both. An illegal value is both plus one log line."""
+    if not isinstance(raw, dict) or 'for' not in raw:
+        return 'both'
+    value = raw.get('for')
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in _AUDIENCES:
+            return cleaned
+    print(f'[sticker] illegal for={value!r} id={sticker_id}; treating as both')
+    return 'both'
+
+
+def _serves(item, actor):
+    audience = item.get('for') if isinstance(item, dict) else None
+    if audience not in _AUDIENCES:
+        audience = 'both'
+    if actor == 'character':
+        return audience in ('character', 'both')
+    if actor == 'user':
+        return audience in ('user', 'both')
+    return False
 
 
 def _load_uncached():
@@ -75,6 +100,7 @@ def _load_uncached():
             'emotion': emotion,
             'desc': desc,
             'prefix': prefix,
+            'for': _audience(raw, sticker_id),
         })
     return {
         'version': data.get('version') or 1,
@@ -120,6 +146,8 @@ def catalog_for_prompt():
         groups = []
         index = {}
         for item in load_manifest().get('items') or []:
+            if not _serves(item, 'character'):
+                continue
             emotion = item.get('emotion') or '其他'
             if emotion not in index:
                 index[emotion] = len(groups)
@@ -131,6 +159,30 @@ def catalog_for_prompt():
     except Exception as exc:
         print(f'[sticker] catalog failed:{type(exc).__name__}')
         return ''
+
+
+def list_for_user():
+    """Entries the user picker can send. User-only rows stay out of the prompt."""
+    try:
+        items = load_manifest().get('items') or []
+        return [dict(item) for item in items if _serves(item, 'user')]
+    except Exception as exc:
+        print(f'[sticker] user list failed:{type(exc).__name__}')
+        return []
+
+
+def usable_by(sticker_id, actor):
+    """True when this id may be sent by 'character' or 'user'."""
+    try:
+        if actor not in ('character', 'user'):
+            return False
+        item = get(sticker_id)
+        if not item:
+            return False
+        return _serves(item, actor)
+    except Exception as exc:
+        print(f'[sticker] usable_by failed:{type(exc).__name__}')
+        return False
 
 
 def get(sticker_id):
