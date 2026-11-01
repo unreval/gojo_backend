@@ -12,6 +12,7 @@ if BACKEND not in sys.path:
 if os.path.dirname(__file__) not in sys.path:
     sys.path.insert(0, os.path.dirname(__file__))
 
+import db_chatlog  # noqa: E402
 import db_generation_receipt as receipt  # noqa: E402
 import sticker_registry  # noqa: E402
 
@@ -165,6 +166,17 @@ class StickerReceiptTests(unittest.TestCase):
                 patch('sticker_registry.signed_url', side_effect=RuntimeError('r2')):
             failed = receipt.hydrate_replay(stored, 'gojo')
         self.assertNotIn('sticker', failed)
+
+
+class StickerHistoryTests(unittest.TestCase):
+    def test_history_renders_desc_without_reading_the_catalog(self):
+        self.assertEqual(
+            db_chatlog._history_content(
+                'gojo', '', '', 'sticker', {'sticker_desc': '笑着比耶'}),
+            '【表情】笑着比耶')
+        self.assertEqual(
+            db_chatlog._history_content('gojo', '', '', 'sticker', {}),
+            '【表情】')
 
 
 if __name__ == '__main__':
