@@ -267,6 +267,20 @@ class ProducerPureTests(unittest.TestCase):
         self.assertNotIn('表示不满', interpretation)
         self.assertEqual(prompt.count('%s'), 1)
 
+    def test_prompt_states_value_and_time_scope_contract(self):
+        prompt = producer._SYSTEM
+        self.assertIn('value必须是quote里的逐字连续片段', prompt)
+        self.assertIn(
+            'value要选能表达这条事实的最小完整片段，不要为了满足逐字要求去截没有意义的碎片：'
+            '原话「我最近不太想碰日语」，value写「不太想碰日语」，不要只写「日语」；'
+            '原话「我昨天打工到十一点」，value写「打工到十一点」，不要只写「打工」',
+            prompt)
+        self.assertIn('value的肯定/否定必须与原话一致', prompt)
+        self.assertIn('不要打reported_preference，改用reported_fact', prompt)
+        self.assertIn('就必须是quote里的逐字连续片段', prompt)
+        self.assertIn('summary和value里的「她」只能指用户本人', prompt)
+        self.assertEqual(prompt.count('%s'), 1)
+
     def test_prompt_requests_a_subjective_interpretation(self):
         prompt = producer._SYSTEM
         self.assertIn('interpretation是你对这件事的主观理解，必须给出，一句话', prompt)
@@ -1359,8 +1373,8 @@ class ProducerDatabaseTests(unittest.TestCase):
         self.assertTrue(row['gate_accepted'])
         self.assertTrue(row['accepted'])
         self.assertEqual(row['batch_id'], result['batch_id'])
-        self.assertEqual(producer.MODULE_VERSION, '1.1')
-        self.assertEqual(row['module_version'], '1.1')
+        self.assertEqual(producer.MODULE_VERSION, '1.2')
+        self.assertEqual(row['module_version'], '1.2')
         self.assertIs(row['shadow'], True)
         self.assertIsNone(row['persistence'])
         self.assertEqual(self.sql('SELECT count(*) FROM long_memory'), [(0,)])

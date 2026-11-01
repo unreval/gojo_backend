@@ -14,7 +14,7 @@ from memory_candidate import validate_candidate, _PREDICATES
 from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
 
 
-MODULE_VERSION = '1.1'
+MODULE_VERSION = '1.2'
 BATCH_SIZE = 8
 SOURCE_RETRY_LIMIT = 3
 MAX_TOKENS = 2000
@@ -108,7 +108,12 @@ summary不准写你的判断、情绪归因或动机推测，也不准写情景�
 原话「がくせい怎么能大晚上的打扰せんせい呢」要写成「她说「がくせい怎么能大晚上的打扰せんせい呢」，学生不该打扰老师」。
 interpretation是你对这件事的主观理解，必须给出，一句话。这是解释，不是复述 summary，也不要求客观正确；不确定就说不确定，不要硬下结论。不要复述用户原话，要说你怎么看这件事。
 predicate只能是：%s。object是事实主题，value是事实值。
-time_scope是时间范围，不明确可省略。
+value必须是quote里的逐字连续片段，一个字都不能改写或归一化：原话「我看不懂日文」，value写「看不懂日文」，不要写「不懂日语」。
+value要选能表达这条事实的最小完整片段，不要为了满足逐字要求去截没有意义的碎片：原话「我最近不太想碰日语」，value写「不太想碰日语」，不要只写「日语」；原话「我昨天打工到十一点」，value写「打工到十一点」，不要只写「打工」。
+value的肯定/否定必须与原话一致：原话带否定就连否定词一起截进来，不要把否定截掉。原话「我不喜欢咖啡」，value写「不喜欢」，不要写「喜欢」。
+predicate为reported_preference时，value只能是「喜欢」「不喜欢」「讨厌」三者之一，并且该词必须逐字出现在原话里。原话用的是别的说法（超爱、受不了、烦死了、蛮中意、无所谓），不要打reported_preference，改用reported_fact。
+time_scope是时间范围，不明确就省略该字段；一旦写了，就必须是quote里的逐字连续片段，不能自己概括成原话里没有的词。原话「我昨天打工到十一点」可以写time_scope为「昨天」；原话没有时间词时直接省略，不要写「最近」「今天」。
+summary和value里的「她」只能指用户本人。原话说的是别人（我朋友、我妈、他们、同学）时，必须把那个人写出来，不要让人以为是用户自己：原话「我朋友不喜欢咖啡」，写「她朋友不喜欢咖啡」，不要写「她不喜欢咖啡」。
 persistence只能是durable或transient，不确定就省略该字段：durable是过几个月仍然成立的事（身份、长期偏好、稳定习惯、重要经历）；transient是当下状态、过几天就不再成立的事（现在累、现在饿、今天的临时安排）。这个字段只用于观测，不影响是否记住。
 utterance_mode只能是sincere、practice或unsure，不确定就省略或写unsure。sincere是她在说自己的真实情况；practice是她在造句、练习日语、照抄或模仿，这句不是对现实的陈述；unsure是判断不了。上一轮角色在出题、要求造句或纠正语法，或者她说了照着打的、不知道什么意思、这样说对吗，或者人称和她不符（例如她写ぼく），或者是教科书式的完整句型、和当前话题无关，都倾向practice。判断不了就写unsure，不要硬下结论。这个字段只用于观测，不影响是否记住。
 perspective是角色自己的感受，最多40字，以“我”开头，没把握时省略该字段，不要输出空字符串；它不是用户事实。
