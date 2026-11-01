@@ -398,6 +398,20 @@ class StickerHistoryTests(unittest.TestCase):
             db_chatlog._history_content('gojo', '', '', 'sticker', {}),
             '【表情】')
 
+    def test_sticker_history_emits_the_marker_once(self):
+        user = db_chatlog._history_content(
+            'user', '【表情】得意挑眉', '', 'sticker', {'sticker_desc': '得意挑眉'})
+        character = db_chatlog._history_content(
+            'gojo', '【表情】得意挑眉', '', 'sticker', {'sticker_desc': '得意挑眉'})
+        missing = db_chatlog._history_content(
+            'user', '【表情】', '', 'sticker', {})
+        self.assertEqual(user, '【表情】得意挑眉')
+        self.assertEqual(character, '【表情】得意挑眉')
+        self.assertEqual(missing, '【表情】')
+        self.assertEqual(user.count('【表情】'), 1)
+        self.assertEqual(character.count('【表情】'), 1)
+        self.assertEqual(missing.count('【表情】'), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

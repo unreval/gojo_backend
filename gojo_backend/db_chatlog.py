@@ -490,8 +490,7 @@ def _history_content(role, text, subtitle, kind, extra):
     if kind == 'sticker':
         desc = str((extra or {}).get('sticker_desc') or '').strip()
         bits.append(f'【表情】{desc}' if desc else '【表情】')
-
-    if text:
+    elif text:
         bits.append(text)
     if role != 'user' and subtitle:
         bits.append(f'（中文：{subtitle}）')
