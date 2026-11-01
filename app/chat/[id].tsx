@@ -98,6 +98,7 @@ function messageImageSrc(msg: any): string | undefined {
 }
 
 function messageKind(m: any): string {
+  if (m.stickerId) return 'sticker';
   if (m.eventMeta?.kind === 'video' || m.mediaKind === 'video') return 'video';
   if (m.eventMeta?.kind === 'image' || m.mediaKind === 'image' || m.mediaId || m.mediaUrl || m.imageUri) {
     return 'image';
@@ -117,6 +118,8 @@ function toServerMsg(m: any) {
   if (m.sourceEventId) extra.source_event_id = m.sourceEventId;
   if (m.replyToSourceEventId) extra.reply_to_source_event_id = m.replyToSourceEventId;
   if (m.visualSummary) extra.visual_summary = m.visualSummary;
+  if (m.stickerId) extra.sticker_id = m.stickerId;
+  if (m.stickerDesc) extra.sticker_desc = m.stickerDesc;
   if (m.eventMeta) extra.event_meta = m.eventMeta;
   if (m.eventMeta?.assistant_turn_id) extra.assistant_turn_id = m.eventMeta.assistant_turn_id;
   if (m.eventMeta && m.eventMeta.segment_index != null) extra.segment_index = m.eventMeta.segment_index;
@@ -131,7 +134,7 @@ function toServerMsg(m: any) {
     emotion: m.emotion || '',
     kind: messageKind(m),
     extra: Object.keys(extra).length > 0 ? JSON.stringify(extra) : '',
-    has_audio: !!m.audioB64 || !!m.hasAudio,
+    has_audio: messageKind(m) === 'sticker' ? false : (!!m.audioB64 || !!m.hasAudio),
   };
 }
 
@@ -192,10 +195,42 @@ function fromServerMsg(m: any): any {
     replyToSourceEventId: extra.reply_to_source_event_id,
     visualSummary: extra.visual_summary,
     eventMeta: extra.event_meta,
+    stickerId: extra.sticker_id || undefined,
+    stickerDesc: extra.sticker_desc || undefined,
     time: `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
     timestamp: d.getTime(),
     hasAudio: !!m.has_audio,
   };
+}
+
+/** 历史里的表情包只存 id。签名 URL 按 id 现签，过期后重进聊天会重新要。 */
+async function hydrateStickerUrls(msgs: any[]): Promise<any[]> {
+  try {
+    const ids = Array.from(new Set(
+      (msgs || []).map(m => String(m?.stickerId || '').trim()).filter(Boolean),
+    ));
+    if (ids.length === 0) return msgs;
+    const urls: Record<string, string> = {};
+    await Promise.all(ids.map(async (id) => {
+      try {
+        const res = await axios.get(`${SERVER_URL}/sticker/url`, {
+          params: { id }, timeout: 8000,
+        });
+        const url = String(res.data?.url || '').trim();
+        if (url) urls[id] = url;
+      } catch (e: any) {
+        console.warn('[sticker] url failed', id, e?.message);
+      }
+    }));
+    return (msgs || []).map(m => {
+      const id = String(m?.stickerId || '').trim();
+      if (!id || !urls[id]) return m;
+      return { ...m, stickerUrl: urls[id] };
+    });
+  } catch (e: any) {
+    console.warn('[sticker] hydrate skipped', e?.message);
+    return msgs;
+  }
 }
 
 /** 追加到服务器。失败不阻断 UI —— 本地还有,下次进聊天页会补传。 */
@@ -494,7 +529,7 @@ export default function ChatRoom() {
               params: { user_id: FIXED_USER_ID, chat_id: chatId, limit: 500 },  // ★ 200→500,覆盖几个月的日常聊天
               timeout: 15000,
             });
-            const srv = (logRes.data?.messages || []).map(fromServerMsg);
+            const srv = await hydrateStickerUrls((logRes.data?.messages || []).map(fromServerMsg));
             if (srv.length > 0) {
               // 从服务器来的都算已同步,别再传回去
               srv.forEach((m: any) => syncedIdsRef.current.add(String(m.id)));
@@ -514,7 +549,7 @@ export default function ChatRoom() {
             // 服务器没有(第一次用)或拉取失败 → 用本地缓存
             const saved = await AsyncStorage.getItem(STORAGE_KEY);
             if (saved) {
-              const localMsgs = JSON.parse(saved).map(sanitizeStoredMessage);
+              const localMsgs = await hydrateStickerUrls(JSON.parse(saved).map(sanitizeStoredMessage));
               const withRead = await applyReadStatusFromStorage(localMsgs);
               setMessages(withRead);
               recoverLegacyImages(withRead);
@@ -852,7 +887,7 @@ export default function ChatRoom() {
         },
         timeout: 15000,
       });
-      const older = (res.data?.messages || []).map(fromServerMsg);
+      const older = await hydrateStickerUrls((res.data?.messages || []).map(fromServerMsg));
       if (older.length > 0) {
         // ★ 已读状态从 sidecar 合并
         const olderWithRead = await applyReadStatusFromStorage(older);
@@ -1245,6 +1280,30 @@ export default function ChatRoom() {
       }
       if (audioUri && focusedRef.current) await playAudioAndWait(audioUri);
       if (i < segments.length - 1 && focusedRef.current) await sleep(MSG_DELAY_MS);
+    }
+  };
+
+  const appendSticker = async (sticker: { id?: string; url?: string; desc?: string }) => {
+    const stickerId = String(sticker?.id || '').trim();
+    const stickerUrl = String(sticker?.url || '').trim();
+    if (!stickerId || !stickerUrl) return;
+    const msg: Message = {
+      id: `stk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      role: 'gojo',
+      text: '',
+      stickerId,
+      stickerDesc: sticker?.desc || '',
+      stickerUrl,
+      time: nowTime(),
+      timestamp: Date.now(),
+    };
+    const alreadyHas = (list: Message[]) => list.some(item => item.id === msg.id);
+    if (focusedRef.current) {
+      setMessages(prev => alreadyHas(prev) ? prev : [...prev, msg]);
+      scrollRef.current?.scrollToEnd({ animated: true });
+    } else if (!alreadyHas(messagesRef.current)) {
+      messagesRef.current = [...messagesRef.current, msg];
+      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messagesRef.current)).catch(() => {});
     }
   };
 
@@ -1717,6 +1776,7 @@ export default function ChatRoom() {
           replyTo: lastFailedSendRef.current?.kind === 'text' ? lastFailedSendRef.current.replyTo : undefined,
           assistantTurnId: res.data?.assistant_turn_id,
         });
+        if (res.data?.sticker) await appendSticker(res.data.sticker);
         // ★ 记账:LLM 检测到消费就插确认卡(放在气泡之后)
         if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
       }
@@ -2050,9 +2110,56 @@ export default function ChatRoom() {
             );
           }
 
+          if (messageKind(msg) === 'sticker') {
+            const stickerName = msg.senderName || character?.name || (isGroup ? '?' : (chatId === 'gojo' ? '五条悟' : chatId));
+            const stickerAvatar = isGroup
+              ? (group?.members.find(x => x.id === msg.senderId)?.avatar_url || null)
+              : (character?.avatar_url || null);
+            return (
+              <React.Fragment key={msg.id}>
+                {showSep && msg.timestamp && (
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => setShowFullTime(v => !v)}
+                    style={s.timeSepWrap}
+                  >
+                    <Text style={s.timeSepText}>
+                      {formatSeparatorTime(msg.timestamp, showFullTime)}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                <View style={[s.msgRow, s.msgRowGojo]}>
+                  <View style={[s.msgAvatar, { overflow: 'hidden' }]}>
+                    {stickerAvatar ? (
+                      <Image source={{ uri: stickerAvatar }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                    ) : (
+                      <Text style={s.msgAvatarText}>{stickerName?.[0] || '?'}</Text>
+                    )}
+                  </View>
+                  <View style={s.msgMain}>
+                    <Text style={s.msgSender}>{stickerName}</Text>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onLongPress={() => onBubbleLongPress(msg)}
+                      delayLongPress={400}
+                    >
+                      {msg.stickerUrl ? (
+                        <Image source={{ uri: msg.stickerUrl }} style={s.stickerImage} resizeMode="contain" />
+                      ) : (
+                        <Text style={s.stickerMissing}>{msg.stickerDesc ? `【表情】${msg.stickerDesc}` : '【表情】'}</Text>
+                      )}
+                    </TouchableOpacity>
+                    <Text style={s.msgTime}>{msg.time}</Text>
+                  </View>
+                </View>
+              </React.Fragment>
+            );
+          }
+
           // ── 下面是原来的普通消息渲染 ──
           // ★ 角色消息一律可重播：有本地音频直接放，没有就点了现场重合成
-          const hasAudio = msg.role !== 'user' && !!msg.text;
+          // 表情包没有 jp，不进语音。
+          const hasAudio = messageKind(msg) !== 'sticker' && msg.role !== 'user' && !!msg.text;
           const isHighlighted = searchMode && searchQuery.trim() &&
             (msg.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
              (msg.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase()));
@@ -2350,6 +2457,8 @@ const s = StyleSheet.create({
   timeSepText:     { color: C.textMute, fontSize: 11 },
 
   bubbleImage:     { width: width * 0.55, height: width * 0.42, borderRadius: 10, marginBottom: 6, backgroundColor: C.bg },
+  stickerImage:    { width: 140, height: 140 },
+  stickerMissing:  { color: C.textMute, fontSize: 13, marginVertical: 4 },
 
   pendingBar:      { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, paddingHorizontal: 12, paddingTop: 10, paddingBottom: 4, gap: 10, borderTopWidth: 1, borderTopColor: C.border },
   pendingThumb:    { width: 48, height: 48, borderRadius: 8, backgroundColor: C.bg, borderWidth: 1, borderColor: C.border },
