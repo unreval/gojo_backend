@@ -26,6 +26,9 @@ from assistant_turn import (
 )
 from db import get_conn
 
+# kind='sticker' but extra has no sticker_id. Not a catalog id.
+UNKNOWN_STICKER = object()
+
 ASSISTANT_IDENTITY_SQL = (
     '''SELECT event_id, client_msg_id, role, extra,
               COALESCE(status, 'active')
@@ -310,6 +313,70 @@ def get_messages(user_id, chat_id, limit=200, before_id=None):
     out.reverse()
     _attach_chat_media(user_id, chat_id, out)
     return out, has_more
+
+
+def recent_assistant_sticker_turns(user_id, chat_id, max_rows):
+    """Newest-first sticker marks for recent assistant turns.
+
+    One indexed read. Rows that share extra.assistant_turn_id are one turn;
+    a row without that field is its own turn. Aggregate and segment rows stay
+    in the same turn. This does not hide aggregates, sign media, or page.
+
+    Role matches ASSISTANT_IDENTITY_SQL in this file: stored assistant rows
+    are 'gojo', and legacy 'assistant' rows still count.
+
+    Returns a list of sets. A set holds sticker ids seen on kind='sticker'
+    rows. UNKNOWN_STICKER means a sticker bubble had no id. An empty set
+    means that turn sent no sticker.
+    """
+    try:
+        limit = int(max_rows)
+    except (TypeError, ValueError):
+        limit = 1
+    limit = min(120, max(1, limit))
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT id, kind, extra
+               FROM chat_log
+               WHERE user_id=%s AND chat_id=%s
+                 AND role IN ('gojo', 'assistant')
+                 AND COALESCE(status, 'active') = 'active'
+               ORDER BY id DESC
+               LIMIT %s''',
+            (user_id, chat_id, limit))
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+    turns = []
+    grouped = {}
+    for row in rows:
+        kind = row[1] or ''
+        raw_extra = row[2]
+        extra = raw_extra if isinstance(raw_extra, dict) else _parse_extra(raw_extra or '')
+        mark = _sticker_mark(kind, extra)
+        turn_id = str(extra.get('assistant_turn_id') or '').strip()
+        if not turn_id:
+            turns.append(set(mark))
+            continue
+        bucket = grouped.get(turn_id)
+        if bucket is None:
+            bucket = set()
+            grouped[turn_id] = bucket
+            turns.append(bucket)
+        bucket.update(mark)
+    return turns
+
+
+def _sticker_mark(kind, extra):
+    if kind != 'sticker':
+        return set()
+    sticker_id = str((extra or {}).get('sticker_id') or '').strip()
+    if not sticker_id:
+        return {UNKNOWN_STICKER}
+    return {sticker_id}
 
 
 def _attach_chat_media(user_id, chat_id, msgs):

@@ -1462,62 +1462,31 @@ def _sticker_windows():
     return cooldown, repeat
 
 
-def _message_extra(msg):
-    extra = (msg or {}).get('extra')
-    if isinstance(extra, dict):
-        return extra
-    if isinstance(extra, str) and extra.strip():
-        try:
-            parsed = json.loads(extra)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
-    return {}
-
-
-def _assistant_turns(messages):
-    turns = []
-    current = []
-    for msg in messages or []:
-        if (msg or {}).get('role') in ('assistant', 'gojo'):
-            current.append(msg)
-        elif current:
-            turns.append(current)
-            current = []
-    if current:
-        turns.append(current)
-    return turns
-
-
-def _turn_sticker_ids(turn):
-    found = []
-    sent = False
-    for msg in turn or []:
-        extra = _message_extra(msg)
-        sticker_id = str(extra.get('sticker_id') or '').strip()
-        if (msg or {}).get('kind') == 'sticker' or sticker_id:
-            sent = True
-        if sticker_id:
-            found.append(sticker_id)
-    return sent, found
+def _sticker_history_rows(cooldown, repeat):
+    """Rows to fetch, not turns. One reply is a few bubbles plus a sticker."""
+    return min(120, max(cooldown, repeat) * 6)
 
 
 def _sticker_allowed(user_id, character_id, sticker_id):
-    """Deterministic cooldown. A read failure drops the sticker, not the reply."""
+    """Deterministic cooldown. A read failure drops the sticker, not the reply.
+
+    Drop, rather than allow, when history cannot be read. Otherwise one failed
+    read would send a sticker on every following turn. The exception stops
+    here and does not fail the text reply.
+    """
     cooldown, repeat = _sticker_windows()
     try:
         import db_chatlog
-        messages, _has_more = db_chatlog.get_messages(
-            user_id, character_id, limit=200)
+        turns = db_chatlog.recent_assistant_sticker_turns(
+            user_id, character_id, _sticker_history_rows(cooldown, repeat))
     except Exception as exc:
         print(f'[sticker] history read failed:{type(exc).__name__}')
         return False
-    turns = _assistant_turns(messages)
-    recent = turns[-repeat:]
-    if any(_turn_sticker_ids(turn)[0] for turn in recent[-cooldown:]):
+    recent = list(turns or [])[:repeat]
+    if any(recent[:cooldown]):
         print(f'[sticker] dropped id={sticker_id} reason=cooldown')
         return False
-    if any(sticker_id in _turn_sticker_ids(turn)[1] for turn in recent):
+    if any(sticker_id in marks for marks in recent):
         print(f'[sticker] dropped id={sticker_id} reason=repeat')
         return False
     return True
