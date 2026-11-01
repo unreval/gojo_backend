@@ -816,7 +816,7 @@ def _format_expiry(exp, *, record_id=None) -> str:
         return str(exp)[:16].replace('T', ' ')
 
 
-def format_recall_for_prompt(recall_result, observer_id=None):
+def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=False):
     """把 two_level_recall 的结果格式化成 prompt 文本。
 
     返回 (memory_text, bond_text, told_text) 三个字符串，
@@ -847,10 +847,12 @@ def format_recall_for_prompt(recall_result, observer_id=None):
     episodes = recall_result.get('episodes', [])
     sticky_notes = recall_result.get('sticky_notes', [])
     diary_memories = recall_result.get('diary_memories', [])
+    legacy_rows = recall_result.get('legacy_recollections') or []
 
     has_any = bool(
         facts or loose_bonds or tolds or lifecycle_memories or episodes
         or sticky_notes or diary_memories
+        or (include_legacy and legacy_rows)
     )
     memory_text = RECALL_EVIDENCE_PRIORITY if has_any else ''
     if facts:
@@ -958,6 +960,27 @@ def format_recall_for_prompt(recall_result, observer_id=None):
 6. 再次召回旧日记不构成新证据，不得强化 hypothesis/confidence 或 relationship state，禁止 self-proof。
 7. 若要更新关系判断，必须有新的独立外部 evidence，并经过原有 evidence pipeline / rule engine。
 {chr(10).join(diary_lines)}'''
+
+    if include_legacy and legacy_rows:
+        legacy_lines = []
+        for item in legacy_rows[:LEGACY_RECOLLECTION_MAX]:
+            ts = item.get('timestamp')
+            date_str = ts.strftime('%Y-%m-%d') if ts else '?'
+            legacy_lines.append(f'- [{date_str}] {visible(item)}')
+        block = f'''
+
+【很久以前的模糊印象——没有保留原始出处，可能记错，不是她说过的原话】
+{chr(10).join(legacy_lines)}
+
+使用规则：
+1. 这些是更早时期留下的回忆，没有保留原始对话出处，可能已经失真或记错。
+2. 只能用猜测或询问的语气提起（"我记得好像……是不是？""我印象里是这样，我记岔了吗？"），
+   绝对不能说成"你说过""你告诉过我""你跟我讲过"。
+3. 不得作为任何判断、关系变化、承诺或日记内容的依据，也不得进入证据管线。
+4. 她否认或纠正时，立刻以她当下的说法为准，不要争辩、不要坚持。
+5. 与上面任何有出处的条目冲突时，一律以有出处的为准。
+6. 优先级最低：当前消息 > 有出处的明确自述 > lifecycle/bond > 日记反思 > 这些模糊印象。'''
+        memory_text = f'{memory_text}{block}' if memory_text else block
 
     # ── 独立羁绊（没有关联事实的）──
     bond_text = ''
