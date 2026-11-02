@@ -41,6 +41,7 @@ import {
 } from 'react-native';
 import PendingTransactionCard, { Account as AcctType } from '../../components/PendingTransactionCard'; // ★ 记账确认卡
 import VoiceCallModal from '../../components/VoiceCallModal';
+import StickerPicker, { loadUserStickers, UserSticker } from '../../components/StickerPicker';
 import { C, SERVER_URL, nowTime } from '../../constants/theme';
 import type { Message } from '../../types/message';
 import { mergeReadReceipts, unreadSourceEventIds } from '../../utils/readReceipts';
@@ -340,11 +341,15 @@ export default function ChatRoom() {
   const [generationFailed, setGenerationFailed] = useState(false);
   const [generationInProgress, setGenerationInProgress] = useState(false);
   const imageProgressRetryRef = useRef<Record<string, number>>({});
+  const [userStickers, setUserStickers] = useState<UserSticker[]>([]);
+  const [showStickerPicker, setShowStickerPicker] = useState(false);
+  const stickerListRefreshedRef = useRef(false);
   const lastFailedSendRef = useRef<null | {
     kind: 'text';
     text: string;
     sourceEventId: string;
     replyTo?: Message['replyTo'];
+    sticker?: { id: string; desc: string; url: string };
   } | {
     kind: 'image';
     base64: string;
@@ -462,6 +467,7 @@ export default function ChatRoom() {
 
   // ── 拉对话对象信息 + 历史消息 ──
   useEffect(() => {
+    let alive = true;
     (async () => {
       try {
         await Audio.setAudioModeAsync({
@@ -513,6 +519,11 @@ export default function ChatRoom() {
             } catch {}
           } catch (e) { console.warn('load group error', e); }
         } else {
+          if (!isGroup) {
+            loadUserStickers()
+              .then(items => { if (alive) setUserStickers(items); })
+              .catch(() => {});
+          }
           try {
             const res = await axios.get(`${SERVER_URL}/characters/${chatId}`);
             setCharacter(res.data);
@@ -572,7 +583,10 @@ export default function ChatRoom() {
       } catch (e) { console.warn('init error', e); }
       setReady(true);
     })();
-    return () => { currentSoundRef.current?.unloadAsync().catch(() => {}); };
+    return () => {
+      alive = false;
+      currentSoundRef.current?.unloadAsync().catch(() => {});
+    };
   }, [chatId]);
 
   // ★ 手动监听键盘——比 KeyboardAvoidingView 在 Android 上靠谱得多
@@ -1283,6 +1297,34 @@ export default function ChatRoom() {
     }
   };
 
+  const refreshBrokenStickers = async () => {
+    if (stickerListRefreshedRef.current) return;
+    stickerListRefreshedRef.current = true;
+    const items = await loadUserStickers(true);
+    setUserStickers(items);
+    const hydrated = await hydrateStickerUrls(
+      messagesRef.current.map(m => ({ ...m, stickerUrl: undefined })),
+    );
+    const fresh: Record<string, string> = {};
+    hydrated.forEach(m => {
+      if (m?.id && m.stickerUrl) fresh[String(m.id)] = m.stickerUrl;
+    });
+    items.forEach(item => { fresh[`sticker:${item.id}`] = item.url; });
+    setMessages(prev => prev.map(m => {
+      const next = (m.stickerId && fresh[`sticker:${m.stickerId}`]) || fresh[String(m.id)];
+      if (!next || next === m.stickerUrl) return m;
+      return { ...m, stickerUrl: next };
+    }));
+  };
+
+  const sendUserSticker = (item: UserSticker) => {
+    const desc = item.desc || '';
+    setShowStickerPicker(false);
+    sendText(`【表情】${desc}`, {
+      sticker: { id: item.id, desc, url: item.url },
+    });
+  };
+
   const appendSticker = async (sticker: { id?: string; url?: string; desc?: string }) => {
     const stickerId = String(sticker?.id || '').trim();
     const stickerUrl = String(sticker?.url || '').trim();
@@ -1647,7 +1689,10 @@ export default function ChatRoom() {
     }
   };
 
-  const sendText = async (textOverride?: string, opts?: { retry?: boolean }) => {
+  const sendText = async (
+    textOverride?: string,
+    opts?: { retry?: boolean; sticker?: { id: string; desc: string; url: string } },
+  ) => {
     const text = (textOverride ?? inputText).trim();
     if (!text) return;
     // ★ 防抖：2秒内同样内容不重复发（挡网络卡顿/重试导致的双发，也省一次 API+TTS）
@@ -1674,12 +1719,14 @@ export default function ChatRoom() {
         ? lastFailedSendRef.current.sourceEventId
         : Date.now().toString();
     } else {
-      setInputText('');
-      inputTextRef.current = '';   // ★ 顺手清 ref
-      setShowMention(false);
-      if (searchMode) { setSearchMode(false); setSearchQuery(''); }
+      if (!opts?.sticker) {
+        setInputText('');
+        inputTextRef.current = '';   // ★ 顺手清 ref
+        setShowMention(false);
+        if (searchMode) { setSearchMode(false); setSearchQuery(''); }
+      }
 
-      const replyToPayload: Message['replyTo'] = replyingTo ? {
+      const replyToPayload: Message['replyTo'] = (!opts?.sticker && replyingTo) ? {
         id: replyingTo.id,
         text: replyingTo.subtitle || replyingTo.text || '',
         name: replyingTo.senderName || (replyingTo.role === 'user' ? '你' : (character?.name || '')),
@@ -1688,11 +1735,16 @@ export default function ChatRoom() {
       const userMsg: Message = { id: Date.now().toString(), role: 'user', text, time: nowTime(), timestamp: Date.now(),
         sourceEventId: '',
         replyTo: replyToPayload,
+        stickerId: opts?.sticker?.id,
+        stickerDesc: opts?.sticker ? (opts.sticker.desc || '') : undefined,
+        stickerUrl: opts?.sticker?.url,
       };
       sourceEventId = userMsg.id;
       userMsg.sourceEventId = sourceEventId;
-      lastFailedSendRef.current = { kind: 'text', text, sourceEventId, replyTo: replyToPayload };
-      setReplyingTo(null);   // ★ 发送后清掉引用
+      lastFailedSendRef.current = {
+        kind: 'text', text, sourceEventId, replyTo: replyToPayload, sticker: opts?.sticker,
+      };
+      if (!opts?.sticker) setReplyingTo(null);   // ★ 发送后清掉引用
       setMessages(prev => [...prev, userMsg]);
       if (isGroup) bumpRead(1);
     }
@@ -1801,7 +1853,7 @@ export default function ChatRoom() {
     if (!last) return;
     setGenerationFailed(false);
     if (last.kind === 'text') {
-      sendText(last.text, { retry: true });
+      sendText(last.text, { retry: true, sticker: last.sticker });
     } else {
       sendImage(last.base64, last.mediaType, last.localUri, last.caption, last.video, { retry: true });
     }
@@ -2111,6 +2163,7 @@ export default function ChatRoom() {
           }
 
           if (messageKind(msg) === 'sticker') {
+            const isUserSticker = msg.role === 'user';
             const stickerName = msg.senderName || character?.name || (isGroup ? '?' : (chatId === 'gojo' ? '五条悟' : chatId));
             const stickerAvatar = isGroup
               ? (group?.members.find(x => x.id === msg.senderId)?.avatar_url || null)
@@ -2128,28 +2181,40 @@ export default function ChatRoom() {
                     </Text>
                   </TouchableOpacity>
                 )}
-                <View style={[s.msgRow, s.msgRowGojo]}>
-                  <View style={[s.msgAvatar, { overflow: 'hidden' }]}>
-                    {stickerAvatar ? (
-                      <Image source={{ uri: stickerAvatar }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
-                    ) : (
-                      <Text style={s.msgAvatarText}>{stickerName?.[0] || '?'}</Text>
-                    )}
-                  </View>
-                  <View style={s.msgMain}>
-                    <Text style={s.msgSender}>{stickerName}</Text>
+                <View style={[s.msgRow, isUserSticker ? s.msgRowUser : s.msgRowGojo]}>
+                  {!isUserSticker && (
+                    <View style={[s.msgAvatar, { overflow: 'hidden' }]}>
+                      {stickerAvatar ? (
+                        <Image source={{ uri: stickerAvatar }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                      ) : (
+                        <Text style={s.msgAvatarText}>{stickerName?.[0] || '?'}</Text>
+                      )}
+                    </View>
+                  )}
+                  <View style={[s.msgMain, isUserSticker && { alignItems: 'flex-end' }]}>
+                    {!isUserSticker && <Text style={s.msgSender}>{stickerName}</Text>}
                     <TouchableOpacity
                       activeOpacity={0.85}
                       onLongPress={() => onBubbleLongPress(msg)}
                       delayLongPress={400}
                     >
                       {msg.stickerUrl ? (
-                        <Image source={{ uri: msg.stickerUrl }} style={s.stickerImage} resizeMode="contain" />
+                        <Image
+                          source={{ uri: msg.stickerUrl }}
+                          style={s.stickerImage}
+                          resizeMode="contain"
+                          onError={() => { void refreshBrokenStickers(); }}
+                        />
                       ) : (
                         <Text style={s.stickerMissing}>{msg.stickerDesc ? `【表情】${msg.stickerDesc}` : '【表情】'}</Text>
                       )}
                     </TouchableOpacity>
-                    <Text style={s.msgTime}>{msg.time}</Text>
+                    <View style={s.msgBottom}>
+                      <Text style={s.msgTime}>{msg.time}</Text>
+                      {isUserSticker && msg.readAt && (
+                        <Text style={s.msgReadMark}>已读</Text>
+                      )}
+                    </View>
                   </View>
                 </View>
               </React.Fragment>
@@ -2356,10 +2421,28 @@ export default function ChatRoom() {
         </View>
       )}
 
+      {showStickerPicker && !isGroup && userStickers.length > 0 && (
+        <StickerPicker
+          items={userStickers}
+          onClose={() => setShowStickerPicker(false)}
+          onPick={sendUserSticker}
+          onImageError={() => { void refreshBrokenStickers(); }}
+        />
+      )}
+
       <View style={[s.inputBar, { marginBottom: keyboardHeight }]}>
         <TouchableOpacity style={s.attachBtn} onPress={showImagePicker} disabled={loading}>
           <Text style={s.attachBtnText}>📎</Text>
         </TouchableOpacity>
+        {!isGroup && userStickers.length > 0 && (
+          <TouchableOpacity
+            style={s.attachBtn}
+            onPress={() => setShowStickerPicker(open => !open)}
+            disabled={loading}
+          >
+            <Text style={s.attachBtnText}>🙂</Text>
+          </TouchableOpacity>
+        )}
 
         <TextInput
           style={s.input}

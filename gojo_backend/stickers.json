@@ -3,32 +3,95 @@
   "prefix": "stickers/v1/",
   "items": [
     {
-      "id": "happy_01",
-      "file": "happy_01.png",
-      "mime": "image/png",
+      "id": "doubt_01",
+      "file": "doubt_01.webp",
+      "mime": "image/webp",
+      "emotion": "疑惑",
+      "desc": "皱眉满脸不认同"
+    },
+    {
+      "id": "dumb_01",
+      "file": "dumb_01.webp",
+      "mime": "image/webp",
+      "emotion": "调皮",
+      "desc": "顶着笨蛋牌子卖萌"
+    },
+    {
+      "id": "fond_01",
+      "file": "fond_01.webp",
+      "mime": "image/webp",
+      "emotion": "温柔",
+      "desc": "冒粉心黏人撒娇"
+    },
+    {
+      "id": "hungry_01",
+      "file": "hungry_01.webp",
+      "mime": "image/webp",
+      "emotion": "饥饿",
+      "desc": "对着空碗喊饿"
+    },
+    {
+      "id": "hyped_01",
+      "file": "hyped_01.webp",
+      "mime": "image/webp",
+      "emotion": "生气",
+      "desc": "生气到背后冒火"
+    },
+    {
+      "id": "mad_01",
+      "file": "mad_01.webp",
+      "mime": "image/webp",
+      "emotion": "愤怒",
+      "desc": "举拳头假装发火"
+    },
+    {
+      "id": "poked_01",
+      "file": "poked_01.webp",
+      "mime": "image/webp",
+      "emotion": "疑惑",
+      "desc": "被戳头一脸发懵"
+    },
+    {
+      "id": "praise_01",
+      "file": "praise_01.webp",
+      "mime": "image/webp",
       "emotion": "开心",
-      "desc": "笑着比耶"
+      "desc": "举爪比大拇指夸人"
     },
     {
-      "id": "happy_02",
-      "file": "happy_02.png",
-      "mime": "image/png",
-      "emotion": "开心",
-      "desc": "得意挑眉"
+      "id": "ransom_01",
+      "file": "ransom_01.webp",
+      "mime": "image/webp",
+      "emotion": "调皮",
+      "desc": "裹在面包里要赎金"
     },
     {
-      "id": "flat_01",
-      "file": "flat_01.png",
-      "mime": "image/png",
-      "emotion": "无语",
-      "desc": "面无表情"
+      "id": "sly_01",
+      "file": "sly_01.webp",
+      "mime": "image/webp",
+      "emotion": "自信",
+      "desc": "眯眼坏笑有主意"
     },
     {
-      "id": "flat_02",
-      "file": "flat_02.png",
-      "mime": "image/png",
-      "emotion": "无语",
-      "desc": "翻白眼"
+      "id": "smug_01",
+      "file": "smug_01.webp",
+      "mime": "image/webp",
+      "emotion": "调皮",
+      "desc": "眯眼吐舌不服气"
+    },
+    {
+      "id": "sneak_01",
+      "file": "sneak_01.webp",
+      "mime": "image/webp",
+      "emotion": "自信",
+      "desc": "探头偷看搞小动作"
+    },
+    {
+      "id": "sulk_01",
+      "file": "sulk_01.webp",
+      "mime": "image/webp",
+      "emotion": "悲伤",
+      "desc": "黑着脸生闷气"
     }
   ]
 }

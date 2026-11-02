@@ -172,6 +172,38 @@ class StickerIsolationTests(unittest.TestCase):
             sticker_registry.MANIFEST_PATH = previous_path
             sticker_registry._CACHE = previous_cache
 
+    def test_user_only_id_drops_the_sticker_and_keeps_the_text_reply(self):
+        with self._enabled(), \
+                patch.object(sticker_registry, 'get', return_value={
+                    'id': 'user_01', 'desc': '我的', 'for': 'user',
+                    'file': 'user_01.png', 'prefix': 'stickers/v1/',
+                }), \
+                patch.object(sticker_registry, 'signed_url', return_value='https://example/sticker'):
+            response, body = self.gate.send(
+                [_reply('user_01')], source_event_id='sticker-user-only')
+        self.assertEqual(response.status_code, 200, body)
+        self.assertEqual(len(body['messages']), 1)
+        self.assertEqual(body['messages'][0]['jp'], 'やあ。')
+        self.assertEqual(body['messages'][0]['zh'], '嘿')
+        self.assertNotIn('sticker', body)
+        self.assertNotIn('user_01', ' '.join(
+            item.get('jp') or '' for item in body['messages']))
+        printed = ' '.join(
+            str(call.args[0]) for call in self.gate.log.call_args_list if call.args)
+        self.assertIn(
+            '[sticker] dropped id=user_01 reason=not_for_character', printed)
+
+    def test_list_endpoint_is_empty_200_when_disabled_or_broken(self):
+        with patch.object(sticker_registry, 'is_enabled', return_value=False):
+            disabled = self.gate.route._sticker_list_response()
+        self.assertEqual(disabled.status_code, 200)
+        self.assertEqual(json.loads(disabled.body), [])
+
+        with patch.object(sticker_registry, 'is_enabled', side_effect=RuntimeError('boom')):
+            broken = self.gate.route._sticker_list_response()
+        self.assertEqual(broken.status_code, 200)
+        self.assertEqual(json.loads(broken.body), [])
+
 
 class StickerReceiptTests(unittest.TestCase):
     def test_canonical_payload_keeps_id_and_desc_only(self):
@@ -365,6 +397,20 @@ class StickerHistoryTests(unittest.TestCase):
         self.assertEqual(
             db_chatlog._history_content('gojo', '', '', 'sticker', {}),
             '【表情】')
+
+    def test_sticker_history_emits_the_marker_once(self):
+        user = db_chatlog._history_content(
+            'user', '【表情】得意挑眉', '', 'sticker', {'sticker_desc': '得意挑眉'})
+        character = db_chatlog._history_content(
+            'gojo', '【表情】得意挑眉', '', 'sticker', {'sticker_desc': '得意挑眉'})
+        missing = db_chatlog._history_content(
+            'user', '【表情】', '', 'sticker', {})
+        self.assertEqual(user, '【表情】得意挑眉')
+        self.assertEqual(character, '【表情】得意挑眉')
+        self.assertEqual(missing, '【表情】')
+        self.assertEqual(user.count('【表情】'), 1)
+        self.assertEqual(character.count('【表情】'), 1)
+        self.assertEqual(missing.count('【表情】'), 1)
 
 
 if __name__ == '__main__':
