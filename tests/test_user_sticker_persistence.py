@@ -230,3 +230,18 @@ class UserStickerPersistenceTests(unittest.TestCase):
         turns = db_chatlog.recent_assistant_sticker_turns('u', 'gojo', 1)
         self.assertEqual(turns, [{'old_asst'}])
         self.assertNotIn('user_5', {item for marks in turns for item in marks})
+
+
+class UserStickerFrontendTests(unittest.TestCase):
+    def test_chat_text_payload_sends_sticker_id_and_retry_without_url(self):
+        src = (ROOT / 'app' / 'chat' / '[id].tsx').read_text(encoding='utf-8')
+        start = src.index('axios.post(`${SERVER_URL}/chat/text`')
+        end = src.index('});', start)
+        block = src[start:end]
+        self.assertIn(
+            "sticker: opts?.sticker ? { id: opts.sticker.id, desc: opts.sticker.desc || '' } : undefined",
+            block,
+        )
+        self.assertNotIn('url', block)
+        self.assertIn('sendText(text, { retry: true, sticker: pending.sticker })', src)
+        self.assertIn('sendText(last.text, { retry: true, sticker: last.sticker })', src)
