@@ -201,7 +201,7 @@ def append_raw_event(
     if reply_to_event_id:
         extra.setdefault('reply_to_event_id', reply_to_event_id)
     extra.setdefault('content_type', content_type)
-    kind = content_type if content_type in ('text', 'image', 'video', 'call_log', 'system') else 'text'
+    kind = content_type if content_type in ('text', 'image', 'video', 'call_log', 'system', 'sticker') else 'text'
     if content_type == 'voice':
         kind = 'text'
         extra['channel'] = 'voice_stream'
