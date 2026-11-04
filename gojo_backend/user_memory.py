@@ -283,7 +283,7 @@ def save_user_short_memory_once(user_id, content, character_id=DEFAULT_CHARACTER
     kind = meta.get('kind')
     _persist_raw_event(
         user_id, character_id, role='user', content=content, event_id=event_id,
-        content_type=kind if kind in ('image', 'video', 'voice') else 'text',
+        content_type=kind if kind in ('image', 'video', 'voice', 'sticker') else 'text',
         metadata=meta,
     )
     inserted = False

@@ -396,6 +396,35 @@ NOT RUN IN COVERAGE AUDIT
 
 ---
 
+# REG-013 — User sticker canonical row must stay kind=sticker
+
+## Owner
+
+gojo_backend
+
+## Coverage
+
+COVERED
+
+## Direct tests
+
+- `tests/test_user_sticker_persistence.py`
+
+Confirmed behaviors include:
+
+- `/chat/text` with `sticker` writes `chat_log.kind='sticker'` and the submitted `sticker_id`;
+- the same text without `sticker` keeps `kind='text'` and `extra={"content_type": "text"}`;
+- `append_raw_event(content_type='sticker')` is not downgraded to `text`;
+- `_history_content` renders the persisted row as `【表情】<desc>` once;
+- `recent_assistant_sticker_turns` does not count user sticker rows;
+- an unknown id is stored, and a signed `url` on the request is not.
+
+## Execution status
+
+NOT RUN IN COVERAGE AUDIT
+
+---
+
 # Current Coverage Matrix
 
 | REG | Owner | Coverage |
@@ -411,6 +440,7 @@ NOT RUN IN COVERAGE AUDIT
 | REG-009 | gojo_backend | PARTIAL |
 | REG-010 | gojo_backend | COVERED |
 | REG-012 | gojo_backend | COVERED |
+| REG-013 | gojo_backend | COVERED |
 
 ---
 

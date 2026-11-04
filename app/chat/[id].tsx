@@ -1793,6 +1793,7 @@ export default function ChatRoom() {
           text, user_id: FIXED_USER_ID, character_id: chatId,
           source_event_id: sourceEventId,
           reply_to: lastFailedSendRef.current?.kind === 'text' ? lastFailedSendRef.current.replyTo : undefined,
+          sticker: opts?.sticker ? { id: opts.sticker.id, desc: opts.sticker.desc || '' } : undefined,
         });
         if (isGenerationFailedPayload(res.data)) {
           noteGenerationFailure();
@@ -1803,9 +1804,9 @@ export default function ChatRoom() {
           setGenerationFailed(false);
           const keepId = sourceEventId;
           setTimeout(() => {
-            if (lastFailedSendRef.current?.kind === 'text'
-                && lastFailedSendRef.current.sourceEventId === keepId) {
-              sendText(text, { retry: true });
+            const pending = lastFailedSendRef.current;
+            if (pending?.kind === 'text' && pending.sourceEventId === keepId) {
+              sendText(text, { retry: true, sticker: pending.sticker });
             }
           }, 800);
           return;
