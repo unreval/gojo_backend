@@ -1,0 +1,22 @@
+# SITE_DOMAIN is the caddy process environment. Do not write a domain here.
+# Gzip stays off for /chat/voice_stream so a long NDJSON response is not held.
+# flush_interval -1 forwards bytes as the app produces them.
+# 300s covers one voice turn. 32MB covers a base64 body on /chat/image.
+
+{$SITE_DOMAIN} {
+	request_body {
+		max_size 32MB
+	}
+
+	@compressible not path /chat/voice_stream
+	encode @compressible gzip
+
+	reverse_proxy app:8080 {
+		flush_interval -1
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+			response_header_timeout 300s
+		}
+	}
+}
