@@ -1569,6 +1569,26 @@ async def sticker_list():
     return _sticker_list_response()
 
 
+def _user_sticker_event_meta(sticker):
+    """Canonical metadata for a user sticker. None leaves the text path unchanged.
+
+    The id is stored as submitted. Catalog membership is checked only when a
+    sticker is later shown, so a delisted id does not make this row illegal.
+    Signed URLs are omitted; they expire and must not be written.
+    """
+    if not isinstance(sticker, dict):
+        return None
+    sticker_id = str(sticker.get('id') or '').strip()
+    if not sticker_id:
+        return None
+    desc = sticker.get('desc')
+    return {
+        'kind': 'sticker',
+        'sticker_id': sticker_id,
+        'sticker_desc': '' if desc is None else str(desc),
+    }
+
+
 @router.post('/chat/text')
 async def chat_text(data: dict):
     from latency_telemetry import LatencyTrace, bind_trace, reset_trace
@@ -1599,9 +1619,15 @@ async def chat_text(data: dict):
         _latency_emit()
         return JSONResponse({'error': f'character {character_id} not found'}, status_code=404)
 
+    sticker_meta = _user_sticker_event_meta(data.get('sticker'))
     try:
-        save_user_short_memory_once(
-            user_id, user_text, character_id, source_event_id=source_event_id)
+        if sticker_meta is None:
+            save_user_short_memory_once(
+                user_id, user_text, character_id, source_event_id=source_event_id)
+        else:
+            save_user_short_memory_once(
+                user_id, user_text, character_id,
+                source_event_id=source_event_id, event_meta=sticker_meta)
     except Exception:
         _latency_emit()
         return JSONResponse(

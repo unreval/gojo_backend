@@ -453,6 +453,48 @@ TESTED
 
 ---
 
+# REG-013 — User sticker canonical row must stay kind=sticker
+
+## Area
+
+Raw Event / chat_log / user text ingress
+
+## Historical failure
+
+A user sticker is written twice under one client_msg_id. The frontend
+`/chatlog/append` path stores `kind='sticker'` and `extra.sticker_id`.
+`/chat/text` calls `save_user_short_memory_once` with no sticker metadata,
+so that canonical write is `kind='text'` and the sticker fields are absent.
+`append_messages` is `ON CONFLICT DO NOTHING`, and the backend write happens
+first, so it wins. Reload shows the text bubble 「【表情】<desc>」 and the
+picture is gone. Both writes use the same text, so the source-validity
+readback does not raise.
+
+## Required behavior
+
+- `/chat/text` with a sticker persists one `chat_log` row whose `kind` is
+  `sticker` and whose `extra.sticker_id` is the submitted id.
+- A text request without `sticker` writes the same `kind`, `text`, and
+  `extra` as before this fix.
+- `append_raw_event(content_type='sticker')` stores `kind='sticker'`.
+- Prompt history renders that row as `【表情】<desc>` once.
+- `recent_assistant_sticker_turns` counts assistant rows only. A user
+  sticker row does not enter the cooldown window.
+- An id that is not in the catalog is still stored. It is not validated
+  or rejected here.
+- The sticker does not change `user_text` or `messages[]`.
+
+## Regression requirement
+
+`tests/test_user_sticker_persistence.py` must keep the persistence,
+unchanged text row, kind whitelist, history, cooldown, and unknown-id cases.
+
+## Status
+
+TESTED
+
+---
+
 # Regression Rule
 
 任何任务如果修改到上述 Regression 的 Area：
@@ -482,3 +524,4 @@ TESTED
 | REG-010 | Promise trigger timezone | TESTED |
 | REG-011 | Japanese denial exemption list | TESTED |
 | REG-012 | Sticker outside messages[] | TESTED |
+| REG-013 | User sticker canonical kind | TESTED |
