@@ -3,14 +3,16 @@ import hashlib
 import json
 import sys
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'gojo_backend'))
 
+import candidate_producer as producer  # noqa: E402
 import memory_lifecycle  # noqa: E402
 from config import CN_TZ  # noqa: E402
 from memory_lifecycle import (  # noqa: E402
@@ -228,6 +230,135 @@ class CandidateStickyTests(unittest.TestCase):
         self.assertEqual(
             self.cursor.rows[0]['note_key'],
             'memory_lifecycle.raw.' + hashlib.sha1(b'evt-1').hexdigest()[:20])
+
+
+class RecordingCursor:
+    def __init__(self):
+        self.statements = []
+        self._returning = None
+
+    def execute(self, sql, params=None):
+        compact = ' '.join(sql.split())
+        self.statements.append((compact, params))
+        if 'INSERT INTO cognitive_sticky_notes' in compact:
+            self._returning = (1,)
+        else:
+            self._returning = None
+
+    def fetchone(self):
+        row = self._returning
+        self._returning = None
+        return row
+
+    def sql_text(self):
+        return '\n'.join(sql for sql, _params in self.statements)
+
+
+class ProcessCandidateStickyTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 11, 6, 15, 0, tzinfo=CN_TZ)
+
+    def drive(self, *, shadow, accepted_gate=True, sticky=None):
+        candidate = {
+            'source_event_id': 'source-0',
+            'quote': '我明天考试',
+            'summary': '她明天考试',
+            'predicate': 'reported_fact',
+            'object': '考试',
+            'value': '考试',
+            'interpretation': '她其实很紧张',
+            'utterance_mode': 'sincere',
+            'persistence': 'transient',
+            'time_scope': '明天',
+        }
+        inputs = [{
+            'event_id': 11,
+            'source_event_id': 'source-0',
+            'occurred_at': self.now,
+            'content': '我明天考试',
+        }]
+        cursor = RecordingCursor()
+        contexts = [
+            patch.dict(sys.modules, {'cognitive_queue': Mock(
+                stable_advisory_lock_key=Mock(return_value=1))}),
+            patch.object(
+                producer, 'validate_candidate',
+                return_value=(accepted_gate, None if accepted_gate else 'quote_not_verbatim')),
+            patch.object(
+                producer, 'adjudicate_and_project',
+                return_value={'status': 'validated_projection', 'reason': None}),
+        ]
+        if sticky is not None:
+            contexts.append(patch(
+                'memory_lifecycle.project_candidate_sticky', side_effect=sticky))
+        with ExitStack() as stack:
+            for context in contexts:
+                stack.enter_context(context)
+            project = producer.adjudicate_and_project
+            records = producer._process_candidates(
+                cursor, 'user-1', 'gojo', [candidate], inputs,
+                {'user_id': 'user-1', 'character_id': 'gojo', 'shadow': shadow},
+                shadow)
+        return cursor, records, project
+
+    def test_shadow_does_not_write_a_sticky(self):
+        cursor, records, project = self.drive(shadow=True)
+        self.assertTrue(records[0]['accepted'])
+        self.assertNotIn('cognitive_sticky_notes', cursor.sql_text())
+        self.assertNotIn('SAVEPOINT candidate_sticky', cursor.sql_text())
+        project.assert_not_called()
+
+    def test_rejected_candidate_does_not_write_a_sticky(self):
+        cursor, records, project = self.drive(shadow=False, accepted_gate=False)
+        self.assertFalse(records[0]['accepted'])
+        self.assertNotIn('cognitive_sticky_notes', cursor.sql_text())
+        project.assert_not_called()
+
+    def test_accepted_live_candidate_writes_the_unstripped_summary(self):
+        cursor, records, project = self.drive(shadow=False)
+        self.assertTrue(records[0]['accepted'])
+        projected = project.call_args.kwargs['candidate']
+        self.assertNotIn('persistence', projected)
+        self.assertNotIn('utterance_mode', projected)
+        self.assertNotIn('interpretation', projected)
+        inserts = [
+            params for sql, params in cursor.statements
+            if 'INSERT INTO cognitive_sticky_notes' in sql
+        ]
+        self.assertEqual(len(inserts), 1)
+        _user, _character, _note_key, content, source, _refs, _expires, metadata = inserts[0]
+        self.assertEqual(content, '她明天考试')
+        self.assertNotIn('紧张', content)
+        self.assertEqual(source, 'memory_lifecycle_fast_loop')
+        stored = json.loads(metadata)
+        self.assertEqual(stored['projection_version'], 'sticky_candidate_v1')
+        self.assertEqual(stored['time_scope'], '明天')
+        self.assertNotIn('interpretation', stored)
+
+    def test_sticky_exception_still_returns_the_audit_record(self):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError('sticky down')
+
+        cursor, records, _project = self.drive(shadow=False, sticky=boom)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record['kind'], 'candidate')
+        self.assertTrue(record['accepted'])
+        self.assertEqual(record['source_event_id'], 'source-0')
+        self.assertEqual(record['summary'], '她明天考试')
+        self.assertIn('ROLLBACK TO SAVEPOINT candidate_sticky', cursor.sql_text())
+        seen = {}
+
+        def capture(logged, **_kwargs):
+            seen['record'] = logged
+            return 4
+
+        with patch('candidate_audit.log_candidate', capture):
+            producer._audit_candidate_record(
+                record, batch_id='batch-1', occurred_at=self.now,
+                module_version='1.2', shadow=False)
+        self.assertIs(seen['record'], record)
+        self.assertTrue(seen['record']['accepted'])
 
 
 if __name__ == '__main__':

@@ -2,16 +2,21 @@
 
 Only processor accounting is owned here. Live candidates enter the existing
 canonical adjudication/projector; shadow candidates never write cognitive truth.
+An accepted live candidate may also project a derived sticky note. That note
+is not a claim, belief, or memory authority, and shadow mode does not write it.
 """
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import threading
 import uuid
 
 from memory_candidate import validate_candidate, _PREDICATES
 from raw_events import get_active_events_by_ids, cognitive_source_matches_scope
+
+_LOGGER = logging.getLogger(__name__)
 
 
 MODULE_VERSION = '1.2'
@@ -438,6 +443,28 @@ def _failure_delay(count):
     return PAUSE_SECONDS if count >= 3 else 30 * (2 ** (count - 1))
 
 
+def _project_accepted_sticky(cur, user_id, character_id, source, source_id, candidate):
+    """Derived sticky. A failure here must not abort the candidate transaction."""
+    try:
+        cur.execute('SAVEPOINT candidate_sticky')
+        from memory_lifecycle import project_candidate_sticky
+        from config import CN_TZ
+        event_id = source.get('event_id') if isinstance(source, dict) else None
+        project_candidate_sticky(
+            cur, user_id=user_id, character_id=character_id, event_id=event_id,
+            source_id=source_id, candidate=candidate, now=datetime.now(CN_TZ))
+        cur.execute('RELEASE SAVEPOINT candidate_sticky')
+    except Exception:
+        _LOGGER.exception(
+            '[sticky] candidate projection failed source_event_id=%s', source_id)
+        try:
+            cur.execute('ROLLBACK TO SAVEPOINT candidate_sticky')
+            cur.execute('RELEASE SAVEPOINT candidate_sticky')
+        except Exception:
+            _LOGGER.exception(
+                '[sticky] savepoint recovery failed source_event_id=%s', source_id)
+
+
 def _process_candidates(cur, user_id, character_id, candidates, inputs, common, shadow):
     from cognitive_queue import stable_advisory_lock_key
     # Validation itself takes source read locks. Match the canonical writer's
@@ -480,6 +507,11 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
         source_id = (item.get('source_event_id')
                      if isinstance(item.get('source_event_id'), str) else None)
         source = by_source.get(source_id) if source_id else None
+        # Sticky fields stay on item. Projection above already stripped them
+        # so they cannot enter a claim. Shadow mode must not write.
+        if accepted and not shadow:
+            _project_accepted_sticky(
+                cur, user_id, character_id, source, source_id, item)
         excerpt = source.get('context_excerpt') if isinstance(source, dict) else None
         # The gates compared this turn, not the quote span. Keep it on the
         # observation record only. A model field of the same name is not accepted.
