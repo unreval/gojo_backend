@@ -495,6 +495,42 @@ TESTED
 
 ---
 
+# REG-014 — Sticky note from candidate pipeline
+
+## Area
+
+Memory lifecycle / candidate producer / user-facing sticky notes
+
+## Historical failure
+
+User-facing sticky notes stopped arriving because the only writer required a
+narrow keyword conjunction. A second writer now projects an accepted live
+candidate. The two writers must stay one note per user message.
+
+便利贴有两条写入路径（`project_pending_sticky` 走裁决失败路径、`project_candidate_sticky` 走候选管线），两者共用同一个 `note_key` 构造方式来去重。任何一方改了 `note_key` 的算法都会导致同一条用户消息产生两张便利贴。`shadow=True` 时不得写入。
+
+## Required behavior
+
+- `project_pending_sticky` writes from the pending-adjudication path.
+- `project_candidate_sticky` writes from an accepted live candidate.
+- Both build `note_key` as `memory_lifecycle.raw.` plus the first 20 hex
+  characters of `sha1(str(source_id))`.
+- Changing either algorithm yields two stickies for one user message.
+- `shadow=True` must not write.
+- A sticky projection failure must not drop the candidate record or its audit row.
+- The note stays a derived projection. It does not enter a claim, belief, or prompt authority.
+
+## Regression requirement
+
+`tests/test_sticky_from_candidates.py` must keep the shared `note_key` dedupe,
+the shadow refusal, and the projection failure that still returns the audit record.
+
+## Status
+
+TESTED
+
+---
+
 # Regression Rule
 
 任何任务如果修改到上述 Regression 的 Area：
@@ -525,3 +561,4 @@ TESTED
 | REG-011 | Japanese denial exemption list | TESTED |
 | REG-012 | Sticker outside messages[] | TESTED |
 | REG-013 | User sticker canonical kind | TESTED |
+| REG-014 | Sticky note from candidate pipeline | TESTED |
