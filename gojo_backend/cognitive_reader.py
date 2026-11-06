@@ -664,7 +664,7 @@ def _sticky_where(user_id, character_id=None, *, include_inactive=False,
         params.append(source)
     if source == USER_FACING_STICKY_SOURCE:
         clauses.extend((
-            "metadata->>'projection_version' = 'sticky_evidence_v1'",
+            "metadata->>'projection_version' IN ('sticky_evidence_v1','sticky_candidate_v1')",
             "(CASE WHEN jsonb_typeof(source_event_refs) = 'array' "
             "THEN jsonb_array_length(source_event_refs) ELSE 0 END) = 1",
             "source_event_refs->0->>'source_type' = 'raw_event'",

@@ -203,7 +203,10 @@ class UserFacingStickyQueryTests(unittest.TestCase):
         self.assertNotIn('character_id = %s', sql)
         self.assertEqual(params[0], 'u1')
         self.assertIn(USER_FACING_STICKY_SOURCE, params)
-        self.assertIn("projection_version' = 'sticky_evidence_v1'", sql)
+        self.assertIn(
+            "metadata->>'projection_version' IN ('sticky_evidence_v1','sticky_candidate_v1')",
+            sql)
+        self.assertIn("raw.text = metadata->>'source_text'", sql)
         self.assertIn("COALESCE(raw.status, 'active') = 'active'", sql)
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0]['source'], USER_FACING_STICKY_SOURCE)

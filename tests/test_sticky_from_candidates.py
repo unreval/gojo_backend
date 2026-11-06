@@ -1,6 +1,7 @@
 """Sticky notes projected from candidate time_scope, not keyword classification."""
 import hashlib
 import json
+import os
 import sys
 import unittest
 from contextlib import ExitStack
@@ -145,10 +146,11 @@ class CandidateStickyTests(unittest.TestCase):
         value.update(overrides)
         return value
 
-    def project(self, candidate, source_id='evt-1'):
+    def project(self, candidate, source_id='evt-1', source_text='我明天考试'):
         return project_candidate_sticky(
             self.cursor, user_id='u1', character_id='gojo', event_id=11,
-            source_id=source_id, candidate=candidate, now=self.now)
+            source_id=source_id, candidate=candidate, now=self.now,
+            source_text=source_text)
 
     def test_practice_and_unsure_do_not_write(self):
         for mode in ('practice', 'unsure'):
@@ -189,6 +191,7 @@ class CandidateStickyTests(unittest.TestCase):
         self.assertEqual(row['content'], '她' * 120)
         self.assertNotIn('紧张', json.dumps(row, ensure_ascii=False, default=str))
         self.assertEqual(row['metadata']['projection_version'], 'sticky_candidate_v1')
+        self.assertEqual(row['metadata']['source_text'], '我明天考试')
         self.assertEqual(row['metadata']['time_scope'], '明天')
         self.assertEqual(row['note_key'], 'memory_lifecycle.raw.' + hashlib.sha1(
             b'evt-1').hexdigest()[:20])
@@ -206,6 +209,27 @@ class CandidateStickyTests(unittest.TestCase):
             f'[sticky] created from candidate source_event_id=evt-1 '
             f'ttl_seconds={ttl} time_scope=明天',
             message)
+
+    def test_blank_source_text_does_not_write(self):
+        for value in ('', None):
+            with self.subTest(source_text=value):
+                cursor = StickyCursor()
+                self.cursor = cursor
+                self.assertIsNone(self.project(self.candidate(), source_text=value))
+                self.assertEqual(cursor.rows, [])
+                self.assertFalse(any(
+                    'INSERT INTO cognitive_sticky_notes' in sql
+                    for sql, _params in cursor.executed))
+
+    def test_source_text_is_stored_verbatim(self):
+        raw = '  我明天要刷段  '
+        with patch('builtins.print'):
+            row_id = self.project(self.candidate(), source_text=raw)
+        self.assertEqual(row_id, 1)
+        metadata = self.cursor.rows[0]['metadata']
+        self.assertEqual(metadata['source_text'], raw)
+        self.assertEqual(metadata['projection_version'], 'sticky_candidate_v1')
+        self.assertEqual(metadata['time_scope'], '明天')
 
     def test_same_source_id_inserts_once(self):
         with patch('builtins.print'):
@@ -258,7 +282,8 @@ class ProcessCandidateStickyTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 11, 6, 15, 0, tzinfo=CN_TZ)
 
-    def drive(self, *, shadow, accepted_gate=True, sticky=None):
+    def drive(self, *, shadow, accepted_gate=True, sticky=None,
+              content='我明天要刷段'):
         candidate = {
             'source_event_id': 'source-0',
             'quote': '我明天考试',
@@ -275,7 +300,7 @@ class ProcessCandidateStickyTests(unittest.TestCase):
             'event_id': 11,
             'source_event_id': 'source-0',
             'occurred_at': self.now,
-            'content': '我明天考试',
+            'content': content,
         }]
         cursor = RecordingCursor()
         contexts = [
@@ -332,6 +357,8 @@ class ProcessCandidateStickyTests(unittest.TestCase):
         self.assertEqual(source, 'memory_lifecycle_fast_loop')
         stored = json.loads(metadata)
         self.assertEqual(stored['projection_version'], 'sticky_candidate_v1')
+        self.assertEqual(stored['source_text'], '我明天要刷段')
+        self.assertNotEqual(stored['source_text'], '我明天考试')
         self.assertEqual(stored['time_scope'], '明天')
         self.assertNotIn('interpretation', stored)
 
@@ -359,6 +386,109 @@ class ProcessCandidateStickyTests(unittest.TestCase):
                 module_version='1.2', shadow=False)
         self.assertIs(seen['record'], record)
         self.assertTrue(seen['record']['accepted'])
+
+
+@unittest.skipUnless(
+    os.getenv('COGNITIVE_TEST_PGLITE'),
+    'set COGNITIVE_TEST_PGLITE to the local test-only package')
+class CandidateStickyVisibilityTests(unittest.TestCase):
+    """Reader whitelist plus chat_log provenance for both sticky writers."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.offline_pg import Connection
+        cls.database = Connection()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.database.shutdown()
+
+    def setUp(self):
+        import cognitive_db
+        self.database.rollback()
+        self.database.query('DROP SCHEMA public CASCADE')
+        self.database.query('CREATE SCHEMA public')
+        cur = self.database.cursor()
+        for ddl in cognitive_db.ddl_statements():
+            cur.execute(ddl)
+        cur.execute('''CREATE TABLE chat_log (
+            id BIGSERIAL PRIMARY KEY, user_id TEXT, chat_id TEXT,
+            event_id TEXT, client_msg_id TEXT, role TEXT, text TEXT,
+            kind TEXT DEFAULT 'text', extra TEXT DEFAULT '{}',
+            created_at TIMESTAMPTZ, subtitle TEXT DEFAULT '',
+            status TEXT DEFAULT 'active', reply_to_event_id TEXT)''')
+        self.database.commit()
+        self.now = datetime.now(CN_TZ)
+
+    def sql(self, statement, params=()):
+        cur = self.database.cursor()
+        cur.execute(statement, params)
+        return cur.fetchall()
+
+    def insert_chat(self, source_id, text):
+        self.sql(
+            '''INSERT INTO chat_log(user_id, chat_id, event_id, role, text)
+               VALUES (%s, %s, %s, 'user', %s)''',
+            ('u1', 'gojo', source_id, text))
+
+    def visible(self):
+        from cognitive_reader import list_user_facing_sticky_notes
+        return list_user_facing_sticky_notes('u1', 'gojo', conn=self.database)
+
+    def test_candidate_sticky_is_listed_until_the_source_changes(self):
+        raw = '我明天要刷段'
+        self.insert_chat('evt-raw', raw)
+        cur = self.database.cursor()
+        with patch('builtins.print'):
+            row_id = project_candidate_sticky(
+                cur, user_id='u1', character_id='gojo', event_id=11,
+                source_id='evt-raw', now=self.now, source_text=raw,
+                candidate={
+                    'utterance_mode': 'sincere',
+                    'persistence': 'transient',
+                    'time_scope': '明天',
+                    'summary': '她明天要刷段',
+                })
+        self.assertIsNotNone(row_id)
+        self.assertEqual(
+            self.sql("SELECT metadata->>'source_text' FROM cognitive_sticky_notes")[0][0],
+            raw)
+        notes = self.visible()
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]['id'], row_id)
+        self.assertEqual(notes[0]['content'], '她明天要刷段')
+        self.assertEqual(notes[0]['metadata']['projection_version'], 'sticky_candidate_v1')
+        self.assertEqual(notes[0]['metadata']['source_text'], raw)
+
+        self.sql("UPDATE chat_log SET text=%s WHERE event_id='evt-raw'", ('我明天要刷题',))
+        self.assertEqual(self.visible(), [])
+        self.assertEqual(self.sql('SELECT count(*) FROM cognitive_sticky_notes')[0][0], 1)
+
+        self.sql("UPDATE chat_log SET text=%s WHERE event_id='evt-raw'", (raw,))
+        self.assertEqual(len(self.visible()), 1)
+
+        self.sql("UPDATE chat_log SET status='deleted' WHERE event_id='evt-raw'")
+        self.assertEqual(self.visible(), [])
+
+        self.sql("UPDATE chat_log SET status='active' WHERE event_id='evt-raw'")
+        restored = self.visible()
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0]['metadata']['source_text'], raw)
+
+    def test_evidence_v1_sticky_stays_visible(self):
+        raw = '我明天考试。'
+        self.insert_chat('evt-old', raw)
+        cur = self.database.cursor()
+        row_id = project_pending_sticky(
+            cur, user_id='u1', character_id='gojo', event_id=12,
+            source_id='evt-old', source_text=raw, now=self.now)
+        self.assertIsNotNone(row_id)
+        notes = self.visible()
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]['id'], row_id)
+        self.assertEqual(notes[0]['metadata']['projection_version'], 'sticky_evidence_v1')
+        self.assertEqual(notes[0]['metadata']['source_text'], raw)
+        self.assertIn(raw, notes[0]['content'])
 
 
 if __name__ == '__main__':

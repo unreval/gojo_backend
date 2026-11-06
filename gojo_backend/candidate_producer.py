@@ -450,9 +450,11 @@ def _project_accepted_sticky(cur, user_id, character_id, source, source_id, cand
         from memory_lifecycle import project_candidate_sticky
         from config import CN_TZ
         event_id = source.get('event_id') if isinstance(source, dict) else None
+        source_text = source['content'] if isinstance(source, dict) else None
         project_candidate_sticky(
             cur, user_id=user_id, character_id=character_id, event_id=event_id,
-            source_id=source_id, candidate=candidate, now=datetime.now(CN_TZ))
+            source_id=source_id, candidate=candidate, now=datetime.now(CN_TZ),
+            source_text=source_text)
         cur.execute('RELEASE SAVEPOINT candidate_sticky')
     except Exception:
         _LOGGER.exception(
