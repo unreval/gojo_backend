@@ -3,95 +3,214 @@
   "prefix": "stickers/v1/",
   "items": [
     {
-      "id": "doubt_01",
-      "file": "doubt_01.webp",
+      "id": "praise_01",
+      "file": "praise_01.webp",
       "mime": "image/webp",
-      "emotion": "疑惑",
-      "desc": "皱眉满脸不认同"
+      "emotion": "开心",
+      "desc": "眼睛冒星星竖起大拇指。夸对方、认可对方做得好的时候"
     },
     {
-      "id": "dumb_01",
-      "file": "dumb_01.webp",
+      "id": "sparkle_01",
+      "file": "sparkle_01.webp",
       "mime": "image/webp",
-      "emotion": "调皮",
-      "desc": "顶着笨蛋牌子卖萌"
+      "emotion": "期待",
+      "desc": "周围一圈金色闪光，捧着爪子眼睛发亮。期待的时候"
     },
     {
       "id": "fond_01",
       "file": "fond_01.webp",
       "mime": "image/webp",
       "emotion": "温柔",
-      "desc": "冒粉心黏人撒娇"
+      "desc": "周围飘粉红爱心，眼睛水汪汪。喜欢、心软、想黏着对方的时候"
     },
     {
-      "id": "hungry_01",
-      "file": "hungry_01.webp",
+      "id": "shy_01",
+      "file": "shy_01.webp",
       "mime": "image/webp",
-      "emotion": "饥饿",
-      "desc": "对着空碗喊饿"
-    },
-    {
-      "id": "hyped_01",
-      "file": "hyped_01.webp",
-      "mime": "image/webp",
-      "emotion": "生气",
-      "desc": "生气到背后冒火"
-    },
-    {
-      "id": "mad_01",
-      "file": "mad_01.webp",
-      "mime": "image/webp",
-      "emotion": "愤怒",
-      "desc": "举拳头假装发火"
-    },
-    {
-      "id": "poked_01",
-      "file": "poked_01.webp",
-      "mime": "image/webp",
-      "emotion": "疑惑",
-      "desc": "被戳头一脸发懵"
-    },
-    {
-      "id": "praise_01",
-      "file": "praise_01.webp",
-      "mime": "image/webp",
-      "emotion": "开心",
-      "desc": "举爪比大拇指夸人"
-    },
-    {
-      "id": "ransom_01",
-      "file": "ransom_01.webp",
-      "mime": "image/webp",
-      "emotion": "调皮",
-      "desc": "裹在面包里要赎金"
+      "emotion": "心虚",
+      "desc": "低头戳着爪子，眼睛很大。不敢看你只敢往旁边撇心虚的时候"
     },
     {
       "id": "sly_01",
       "file": "sly_01.webp",
       "mime": "image/webp",
       "emotion": "自信",
-      "desc": "眯眼坏笑有主意"
+      "desc": "眯眼坏笑，旁边冒一颗光。心里有主意、准备捉弄人的时候、也有觉得这东西很美味或者很妙的时候"
     },
     {
       "id": "smug_01",
       "file": "smug_01.webp",
       "mime": "image/webp",
-      "emotion": "调皮",
-      "desc": "眯眼吐舌不服气"
+      "emotion": "嫌弃",
+      "desc": "眯成缝的眼睛配一点小舌头。不服气、也有嫌弃的意思"
     },
     {
       "id": "sneak_01",
       "file": "sneak_01.webp",
       "mime": "image/webp",
-      "emotion": "自信",
-      "desc": "探头偷看搞小动作"
+      "emotion": "观察",
+      "desc": "从墙角探出半个身子偷看。偷偷观察、做小动作不想被发现的时候"
+    },
+    {
+      "id": "peek_01",
+      "file": "peek_01.webp",
+      "mime": "image/webp",
+      "emotion": "无聊",
+      "desc": "趴在桌沿只露出头和眼睛。没事做趴在桌子等待"
+    },
+    {
+      "id": "ransom_01",
+      "file": "ransom_01.webp",
+      "mime": "image/webp",
+      "emotion": "调皮",
+      "desc": "整只被裹在面包里，写着「要赎金」。耍赖、撒娇式地提条件的时候"
+    },
+    {
+      "id": "doubt_01",
+      "file": "doubt_01.webp",
+      "mime": "image/webp",
+      "emotion": "生气",
+      "desc": "瞪着眼抿嘴，头顶两个空对话泡。生闷气、有点气乎乎的感觉"
+    },
+    {
+      "id": "question_01",
+      "file": "question_01.webp",
+      "mime": "image/webp",
+      "emotion": "疑惑",
+      "desc": "旁边两个大问号。完全没跟上、需要对方解释的时候"
+    },
+    {
+      "id": "suspicious_01",
+      "file": "suspicious_01.webp",
+      "mime": "image/webp",
+      "emotion": "疑惑",
+      "desc": "大脸怼近写着「不对劲」。察觉哪里不对、起疑心的时候"
+    },
+    {
+      "id": "speechless_01",
+      "file": "speechless_01.webp",
+      "mime": "image/webp",
+      "emotion": "无语",
+      "desc": "低头看手机，头顶一排省略号。无语、不知道该回什么的时候、也有沉默的意思"
+    },
+    {
+      "id": "dumb_01",
+      "file": "dumb_01.webp",
+      "mime": "image/webp",
+      "emotion": "调皮",
+      "desc": "头顶贴着「100% 笨蛋」。自嘲犯傻、承认自己笨的时候"
+    },
+    {
+      "id": "poked_01",
+      "file": "poked_01.webp",
+      "mime": "image/webp",
+      "emotion": "说你笨",
+      "desc": "被一根手指戳头，旁边写着「笨…笨」。说你笨的时候"
+    },
+    {
+      "id": "angry_01",
+      "file": "angry_01.webp",
+      "mime": "image/webp",
+      "emotion": "愤怒",
+      "desc": "额头红色怒气符号，眯眼甩尾巴。是真的不高兴了、在生闷气的时候"
+    },
+    {
+      "id": "hyped_01",
+      "file": "hyped_01.webp",
+      "mime": "image/webp",
+      "emotion": "愤怒",
+      "desc": "背后整片爆炸火光。气炸了、情绪彻底上头的时候,有种这傻逼世界毁灭吧的感觉"
+    },
+    {
+      "id": "bite_01",
+      "file": "bite_01.webp",
+      "mime": "image/webp",
+      "emotion": "生气",
+      "desc": "张嘴咬住一只手，写着「咬」。想要你留下来陪我、不想你走的时候"
     },
     {
       "id": "sulk_01",
       "file": "sulk_01.webp",
       "mime": "image/webp",
+      "emotion": "怨气",
+      "desc": "头顶一团黑乎乎的阴云，板着脸。怨气很重的时候、很有怨念的感觉"
+    },
+    {
+      "id": "teary_01",
+      "file": "teary_01.webp",
+      "mime": "image/webp",
+      "emotion": "委屈",
+      "desc": "大眼睛里挂着一滴泪。委屈、快要哭出来的时候"
+    },
+    {
+      "id": "wail_01",
+      "file": "wail_01.webp",
+      "mime": "image/webp",
       "emotion": "悲伤",
-      "desc": "黑着脸生闷气"
+      "desc": "闭眼大哭，周围放射状线条。崩溃大哭、夸张地诉苦的时候"
+    },
+    {
+      "id": "hurt_01",
+      "file": "hurt_01.webp",
+      "mime": "image/webp",
+      "emotion": "悲伤",
+      "desc": "头上肿个包，闭眼掉眼泪。被弄疼了、受了委屈喊痛的时候"
+    },
+    {
+      "id": "fakecry_01",
+      "file": "fakecry_01.webp",
+      "mime": "image/webp",
+      "emotion": "生气",
+      "desc": "很委屈很生气，小猫尾巴炸毛气呼呼的样子"
+    },
+    {
+      "id": "awkward_01",
+      "file": "awkward_01.webp",
+      "mime": "image/webp",
+      "emotion": "尴尬",
+      "desc": "头上冒几滴汗，勉强笑着。尴尬、心虚、不好意思接话的时候"
+    },
+    {
+      "id": "hungry_01",
+      "file": "hungry_01.webp",
+      "mime": "image/webp",
+      "emotion": "饥饿",
+      "desc": "对着空碗喊「饿」。饿到崩溃了、想吃东西的时候"
+    },
+    {
+      "id": "typing_01",
+      "file": "typing_01.webp",
+      "mime": "image/webp",
+      "emotion": "生气",
+      "desc": "生气到跺脚、生气到想要发泄的时候"
+    },
+    {
+      "id": "bear_hyped_01",
+      "file": "bear_hyped_01.webp",
+      "mime": "image/webp",
+      "emotion": "崩溃",
+      "desc": "举着两只手呐喊，有种灵魂出窍崩溃的样子"
+    },
+    {
+      "id": "bear_fond_01",
+      "file": "bear_fond_01.webp",
+      "mime": "image/webp",
+      "emotion": "喜欢",
+      "desc": "挥手向你投射爱心"
+    },
+    {
+      "id": "bear_sulk_01",
+      "file": "bear_sulk_01.webp",
+      "mime": "image/webp",
+      "emotion": "生气",
+      "desc": "抱着手臂鼓起脸，头顶两团气。闹别扭、生闷气但不明说的时候"
+    },
+    {
+      "id": "bear_nervous_01",
+      "file": "bear_nervous_01.webp",
+      "mime": "image/webp",
+      "emotion": "委屈",
+      "desc": "抖得厉害、感到委屈想落泪但是要仰着头不让眼泪掉下来的样子"
     }
   ]
 }
