@@ -9,6 +9,7 @@ Canonical raw-event reminders are projected here for both chat and the
 """
 import hashlib
 import json
+import logging
 import math
 import re
 from datetime import datetime, timedelta, timezone
@@ -17,12 +18,24 @@ from config import CN_TZ
 from cognitive_config import (
     COGNITIVE_DIARY_RECALL_ENTRY_CHARS,
     COGNITIVE_DIARY_RECALL_LIMIT,
+    COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS,
+    COGNITIVE_STICKY_NOTE_MIN_TTL_SECONDS,
     USER_FACING_STICKY_SOURCE,
 )
 from db import get_conn
 
 
 MEMORY_LIFECYCLE_SOURCE = USER_FACING_STICKY_SOURCE
+_LOGGER = logging.getLogger(__name__)
+
+# Candidate time_scope only. These do not feed classify_memory_lifecycle.
+_STICKY_PAST_TERMS = ('昨天', '前天', '上周', '刚才', '刚刚', '之前')
+_STICKY_DAY_OFFSETS = (
+    (2, ('后天',)),
+    (1, ('明天', '明早', '明晚')),
+    (8, ('下周', '周一', '周二', '周三', '周四', '周五', '周六', '周日')),
+    (0, ('今晚', '今天', '晚上', '下午', '上午', '早上')),
+)
 
 EPHEMERAL_TTL_SECONDS = 2 * 3600
 CANDIDATE_TTL_SECONDS = 14 * 86400
@@ -395,6 +408,100 @@ def project_pending_sticky(cur, *, user_id, character_id, event_id,
     )
     row = cur.fetchone()
     return row[0] if row else None
+
+
+def sticky_ttl_from_time_scope(time_scope, now):
+    """Seconds until the local end of the day named by a candidate time_scope.
+
+    `time_scope` is a verbatim fragment, not a parsed date. Past wording and
+    anything outside the relative table return None so no sticky is written.
+    The result is clamped to the configured sticky TTL bounds.
+    """
+    if not isinstance(time_scope, str):
+        return None
+    text = time_scope.strip()
+    if not text or _contains_any(text, _STICKY_PAST_TERMS):
+        return None
+    target_days = None
+    for offset, terms in _STICKY_DAY_OFFSETS:
+        if _contains_any(text, terms):
+            target_days = offset
+            break
+    if target_days is None:
+        return None
+    if now is None:
+        local_now = datetime.now(CN_TZ)
+    elif now.tzinfo is None or now.utcoffset() is None:
+        local_now = now.replace(tzinfo=CN_TZ)
+    else:
+        local_now = now.astimezone(CN_TZ)
+    end_local = (local_now + timedelta(days=target_days)).replace(
+        hour=23, minute=59, second=59, microsecond=0)
+    seconds = int((end_local - local_now).total_seconds())
+    low = COGNITIVE_STICKY_NOTE_MIN_TTL_SECONDS
+    high = COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS
+    if seconds < low:
+        seconds = low
+    if seconds > high:
+        seconds = high
+    return seconds
+
+
+def project_candidate_sticky(cur, *, user_id, character_id, event_id,
+                             source_id, candidate, now):
+    """Project one derived sticky from an accepted candidate.
+
+    Content is the candidate summary. Interpretation is not a user fact and
+    is not stored. The note_key matches project_pending_sticky, so the two
+    writers leave one note per source.
+    """
+    candidate = candidate if isinstance(candidate, dict) else {}
+    time_scope = candidate.get('time_scope')
+    time_scope_text = time_scope.strip() if isinstance(time_scope, str) else ''
+
+    def skip():
+        if time_scope_text:
+            _LOGGER.debug(
+                '[sticky] candidate skipped source_event_id=%s time_scope=%s',
+                source_id, time_scope)
+        return None
+
+    summary = candidate.get('summary')
+    if (candidate.get('utterance_mode') != 'sincere'
+            or candidate.get('persistence') != 'transient'
+            or not time_scope_text
+            or not isinstance(summary, str)
+            or not summary.strip()
+            or len(summary) > 120):
+        return skip()
+    ttl = sticky_ttl_from_time_scope(time_scope, now)
+    if ttl is None:
+        return skip()
+    note_key = 'memory_lifecycle.raw.' + hashlib.sha1(
+        str(source_id).encode('utf-8')).hexdigest()[:20]
+    refs = [{'event_id': event_id, 'source_type': 'raw_event',
+             'source_id': str(source_id), 'user_id': user_id,
+             'character_id': character_id}]
+    metadata = {'projection_version': 'sticky_candidate_v1',
+                'time_scope': time_scope}
+    cur.execute(
+        '''INSERT INTO cognitive_sticky_notes (
+               user_id, character_id, note_key, content, status, source,
+               source_event_refs, expires_at, metadata)
+           VALUES (%s, %s, %s, %s, 'active', %s, %s::jsonb, %s, %s::jsonb)
+           ON CONFLICT (user_id, character_id, note_key) DO NOTHING
+           RETURNING id''',
+        (user_id, character_id, note_key, summary, MEMORY_LIFECYCLE_SOURCE,
+         _json(refs), now + timedelta(seconds=ttl), _json(metadata)),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    print(
+        f'[sticky] created from candidate source_event_id={source_id} '
+        f'ttl_seconds={ttl} time_scope={time_scope}',
+        flush=True)
+    return row[0]
 
 
 def build_consolidated_summary(topic_key, evidence_contents):
