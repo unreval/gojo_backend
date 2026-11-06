@@ -448,13 +448,16 @@ def sticky_ttl_from_time_scope(time_scope, now):
 
 
 def project_candidate_sticky(cur, *, user_id, character_id, event_id,
-                             source_id, candidate, now):
+                             source_id, candidate, now, source_text):
     """Project one derived sticky from an accepted candidate.
 
     Content is the candidate summary. Interpretation is not a user fact and
     is not stored. The note_key matches project_pending_sticky, so the two
-    writers leave one note per source.
+    writers leave one note per source. source_text is the verbatim chat_log
+    row; an empty value does not write.
     """
+    if not isinstance(source_text, str) or source_text == '':
+        return None
     candidate = candidate if isinstance(candidate, dict) else {}
     time_scope = candidate.get('time_scope')
     time_scope_text = time_scope.strip() if isinstance(time_scope, str) else ''
@@ -483,6 +486,7 @@ def project_candidate_sticky(cur, *, user_id, character_id, event_id,
              'source_id': str(source_id), 'user_id': user_id,
              'character_id': character_id}]
     metadata = {'projection_version': 'sticky_candidate_v1',
+                'source_text': source_text,
                 'time_scope': time_scope}
     cur.execute(
         '''INSERT INTO cognitive_sticky_notes (
