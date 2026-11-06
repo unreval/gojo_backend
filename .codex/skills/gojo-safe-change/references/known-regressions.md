@@ -509,6 +509,8 @@ candidate. The two writers must stay one note per user message.
 
 便利贴有两条写入路径（`project_pending_sticky` 走裁决失败路径、`project_candidate_sticky` 走候选管线），两者共用同一个 `note_key` 构造方式来去重。任何一方改了 `note_key` 的算法都会导致同一条用户消息产生两张便利贴。`shadow=True` 时不得写入。
 
+用户可见便利贴的读取侧 `_sticky_where` 对 `projection_version` 做白名单，并用 `EXISTS` 子句校验 `metadata.source_text` 与 `chat_log` 原文逐字一致且消息仍 active。**任何新增的便利贴写入路径都必须同时做到两件事**：把自己的 `projection_version` 加进那个白名单，并写入真实的 `source_text`。只写入不改白名单，便利贴会静默不可见 —— 日志显示写入成功、页面永远是空的。
+
 ## Required behavior
 
 - `project_pending_sticky` writes from the pending-adjudication path.
@@ -523,7 +525,9 @@ candidate. The two writers must stay one note per user message.
 ## Regression requirement
 
 `tests/test_sticky_from_candidates.py` must keep the shared `note_key` dedupe,
-the shadow refusal, and the projection failure that still returns the audit record.
+the shadow refusal, the projection failure that still returns the audit record,
+and the reader checks: a candidate note is listed only while `source_text`
+matches the active `chat_log` row, and a `sticky_evidence_v1` note stays visible.
 
 ## Status
 
