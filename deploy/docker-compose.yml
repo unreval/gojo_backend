@@ -4,6 +4,14 @@
 
 name: gojo
 
+# Docker 默认不给 json 日志设上限。这台盘是 40G，Caddy 每天还要吃一堆
+# 扫描机器人的请求，不限制的话几个月就会被日志填满。每个服务最多 3 个 10MB 分片。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   app:
     build:
@@ -15,6 +23,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       PYTHONUNBUFFERED: "1"
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
@@ -26,8 +35,13 @@ services:
       - .env
     environment:
       TZ: Asia/Shanghai
+    # PostgreSQL 18 的官方镜像把数据放进 /var/lib/postgresql/<主版本>/docker，
+    # 所以挂载点必须是 /var/lib/postgresql。挂到 .../data 会启动失败并无限重启，
+    # 日志里是 "in 18+, these Docker images are configured to store database data
+    # in a format which is compatible with pg_ctlcluster"。不要改回 /data。
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
@@ -48,6 +62,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    logging: *default-logging
     depends_on:
       - app
 

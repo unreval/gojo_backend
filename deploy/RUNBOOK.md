@@ -4,7 +4,7 @@
 
 目标是把现有数据库原样搬到一台一直开着的机器上，先对上数字，再改手机里的服务器地址。这次不改列类型，不改业务代码，不停掉还在服务的 Zeabur，除非新机器已经核对通过并稳定跑过一段时间。
 
-代码侧没有 Zeabur 专用耦合：进程听 `0.0.0.0` 和 `PORT`，配置都在环境变量里，手机设置页可以改服务器地址，所以换机器不需要重新打包 APK。必须一直开机。`gojo_server.py` 在启动时拉起后台线程，不能用会缩到零的托管。数据库用普通 PostgreSQL 16，不需要 pgvector。
+代码侧没有 Zeabur 专用耦合：进程听 `0.0.0.0` 和 `PORT`，配置都在环境变量里，手机设置页可以改服务器地址，所以换机器不需要重新打包 APK。必须一直开机。`gojo_server.py` 在启动时拉起后台线程，不能用会缩到零的托管。数据库用普通 PostgreSQL 18，不需要 pgvector。
 
 ## 0. 现在就做，不要等新服务器
 
@@ -96,7 +96,7 @@ chmod 600 .env
 
 在你自己的电脑上做，不必等新服务器。下面这段用 bash（Windows 用 Git Bash）。连接串从 Zeabur 面板复制到当前 shell，不要写进仓库，也不要放进命令行参数，避免留在历史记录里。
 
-需要 Docker。客户端使用 `postgres:16`，与新库大版本一致。导出整个库，不要手挑表。序列、`cognitive_worker_migrations` 和表结构都要在这份 dump 里。
+需要 Docker。客户端使用 `postgres:18`，与新库大版本一致。源库在 Zeabur 上已经是 18.6。导出整个库，不要手挑表。序列、`cognitive_worker_migrations` 和表结构都要在这份 dump 里。
 
 ```bash
 mkdir -p "$HOME/gojo-migrate"
@@ -109,12 +109,12 @@ export ZEABUR_DATABASE_URL
 docker run --rm \
   -e ZEABUR_DATABASE_URL \
   -v "$HOME/gojo-migrate:/backup" \
-  postgres:16-alpine \
+  postgres:18-alpine \
   sh -c 'pg_dump --format=custom --no-owner --no-acl --verbose --file=/backup/gojo.dump "$ZEABUR_DATABASE_URL"'
 docker run --rm \
   -e ZEABUR_DATABASE_URL \
   -v "$HOME/gojo-migrate:/backup" \
-  postgres:16-alpine \
+  postgres:18-alpine \
   sh -c 'pg_dump --format=plain --no-owner --no-acl "$ZEABUR_DATABASE_URL" | gzip > /backup/gojo.sql.gz'
 chmod 600 gojo.dump gojo.sql.gz
 unset ZEABUR_DATABASE_URL
@@ -129,6 +129,8 @@ dump 是全部聊天和记忆。放在仓库目录外面。不要 `git add`。
 导出之后、导入之前，对 Zeabur 跑一遍第 5 节的 SQL，把结果存下来。新库导入后逐项对比。
 
 ## 5. 导入新库
+
+PostgreSQL 18 的官方镜像改了数据目录规则：挂载点必须是 `/var/lib/postgresql`，不是 `/var/lib/postgresql/data`。挂错会在启动时反复重启，日志里是 `in 18+, these Docker images are configured to store database data in a format which is compatible with "pg_ctlcluster"`。compose 文件已经按 18 写好，不要改回 `/data`。
 
 先只启动数据库，不要启动 app。app 一启动就会跑现有的建表和启动逻辑。空库上的导入应该发生在那之前。
 
