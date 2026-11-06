@@ -17,12 +17,23 @@ from config import CN_TZ
 from cognitive_config import (
     COGNITIVE_DIARY_RECALL_ENTRY_CHARS,
     COGNITIVE_DIARY_RECALL_LIMIT,
+    COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS,
+    COGNITIVE_STICKY_NOTE_MIN_TTL_SECONDS,
     USER_FACING_STICKY_SOURCE,
 )
 from db import get_conn
 
 
 MEMORY_LIFECYCLE_SOURCE = USER_FACING_STICKY_SOURCE
+
+# Candidate time_scope only. These do not feed classify_memory_lifecycle.
+_STICKY_PAST_TERMS = ('昨天', '前天', '上周', '刚才', '刚刚', '之前')
+_STICKY_DAY_OFFSETS = (
+    (2, ('后天',)),
+    (1, ('明天', '明早', '明晚')),
+    (8, ('下周', '周一', '周二', '周三', '周四', '周五', '周六', '周日')),
+    (0, ('今晚', '今天', '晚上', '下午', '上午', '早上')),
+)
 
 EPHEMERAL_TTL_SECONDS = 2 * 3600
 CANDIDATE_TTL_SECONDS = 14 * 86400
@@ -395,6 +406,43 @@ def project_pending_sticky(cur, *, user_id, character_id, event_id,
     )
     row = cur.fetchone()
     return row[0] if row else None
+
+
+def sticky_ttl_from_time_scope(time_scope, now):
+    """Seconds until the local end of the day named by a candidate time_scope.
+
+    `time_scope` is a verbatim fragment, not a parsed date. Past wording and
+    anything outside the relative table return None so no sticky is written.
+    The result is clamped to the configured sticky TTL bounds.
+    """
+    if not isinstance(time_scope, str):
+        return None
+    text = time_scope.strip()
+    if not text or _contains_any(text, _STICKY_PAST_TERMS):
+        return None
+    target_days = None
+    for offset, terms in _STICKY_DAY_OFFSETS:
+        if _contains_any(text, terms):
+            target_days = offset
+            break
+    if target_days is None:
+        return None
+    if now is None:
+        local_now = datetime.now(CN_TZ)
+    elif now.tzinfo is None or now.utcoffset() is None:
+        local_now = now.replace(tzinfo=CN_TZ)
+    else:
+        local_now = now.astimezone(CN_TZ)
+    end_local = (local_now + timedelta(days=target_days)).replace(
+        hour=23, minute=59, second=59, microsecond=0)
+    seconds = int((end_local - local_now).total_seconds())
+    low = COGNITIVE_STICKY_NOTE_MIN_TTL_SECONDS
+    high = COGNITIVE_STICKY_NOTE_MAX_TTL_SECONDS
+    if seconds < low:
+        seconds = low
+    if seconds > high:
+        seconds = high
+    return seconds
 
 
 def build_consolidated_summary(topic_key, evidence_contents):
