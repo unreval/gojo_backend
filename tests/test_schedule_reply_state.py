@@ -355,6 +355,7 @@ class FakeCursor:
                     row.get('event_revision'), row.get('occurrence_id'),
                     row.get('seen_at'),
                     row.get('fail_count', 0),
+                    row.get('inbox_reason'),
                 )
                 return
 
@@ -391,6 +392,24 @@ class FakeCursor:
             return
 
         if compact.startswith('SELECT id FROM char_phone_check'):
+            if "inbox_reason='batching'" in compact:
+                user_id, character_id = params
+                found = []
+                for row in list(self.store.rows.values()) + self.store.extra_rows:
+                    if row.get('user_id') != user_id or row.get('character_id') != character_id:
+                        continue
+                    if row.get('inbox_reason') != 'batching':
+                        continue
+                    if row.get('resolved_at'):
+                        continue
+                    if (row.get('pending_count') or 0) <= 0:
+                        continue
+                    if (row.get('check_state') or 'pending') not in ('pending', 'deferred'):
+                        continue
+                    found.append(row['id'])
+                found.sort()
+                self._one = (found[0],) if found else None
+                return
             now_retry, now_stale, now_due, today, _today2, hhmm, limit = params
             ids = []
             for row in self.store.rows.values():
@@ -474,6 +493,7 @@ class FakeCursor:
                 'schedule_event_id': params[20] if len(params) > 20 else None,
                 'phase_id': params[21] if len(params) > 21 else None,
                 'event_revision': params[22] if len(params) > 22 else None,
+                'inbox_reason': params[23] if len(params) > 23 else None,
                 'claimed_at': None,
                 'claim_token': None,
                 'claim_owner': None,

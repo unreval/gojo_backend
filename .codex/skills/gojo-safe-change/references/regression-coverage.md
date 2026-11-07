@@ -425,6 +425,32 @@ NOT RUN IN COVERAGE AUDIT
 
 ---
 
+# REG-015 — Flush must not use the delayed-reply hourly quota
+
+## Owner
+
+gojo_backend
+
+## Coverage
+
+COVERED
+
+## Direct tests
+
+- `tests/test_message_batching.py`
+
+Confirmed behaviors include:
+
+- `DELAYED_REPLY_MAX_PER_HOUR=0` makes `_generation_allowed()` false and `process_due_phone_checks` return no work;
+- `/chat/flush` still generates once for an open batching inbox;
+- flush does not call `_push_delayed_reply`.
+
+## Execution status
+
+NOT RUN IN COVERAGE AUDIT
+
+---
+
 # Current Coverage Matrix
 
 | REG | Owner | Coverage |
@@ -441,6 +467,7 @@ NOT RUN IN COVERAGE AUDIT
 | REG-010 | gojo_backend | COVERED |
 | REG-012 | gojo_backend | COVERED |
 | REG-013 | gojo_backend | COVERED |
+| REG-015 | gojo_backend | COVERED |
 
 ---
 

@@ -1609,6 +1609,7 @@ async def chat_text(data: dict):
     from db_generation_receipt import assign_source_event_id
     source_event_id, _legacy = assign_source_event_id(data.get('source_event_id'))
     reply_to = _safe_reply_to(data)
+    defer = data.get('defer') is True
 
     if not user_text:
         _latency_emit()
@@ -1652,7 +1653,16 @@ async def chat_text(data: dict):
                 'reply_to': reply_to,
                 'source_event_id': source_event_id,
             },
+            **({'batching': True} if defer else {}),
         )
+        if defer:
+            _trace.mark('availability', (_time.perf_counter() - _tmark) * 1000.0)
+            _latency_emit()
+            return JSONResponse({
+                'deferred': True,
+                'source_event_id': source_event_id,
+                'pending_count': availability.get('pending_count') or 0,
+            }, status_code=202)
         if not availability.get('can_reply'):
             act = availability.get('activity') or {}
             if availability.get('seen'):
@@ -1691,6 +1701,13 @@ async def chat_text(data: dict):
             })
     except Exception as _e:
         print(f'[{user_id}] 日程检查跳过(不影响聊天):{_e}')
+    if defer:
+        _latency_emit()
+        return JSONResponse({
+            'error': 'inbox_unavailable',
+            'retryable': True,
+            'source_event_id': source_event_id,
+        }, status_code=503)
     if availability and availability.get('can_reply'):
         try:
             from db_read_receipt import mark_immediate_seen
@@ -1924,6 +1941,36 @@ async def chat_text(data: dict):
     print(f'[TTS:{TTS_PROVIDER}] {character_id} emotion={emotion} segs={len(msgs)} days={total_days}')
     _latency_emit()
     return JSONResponse(live)
+
+
+@router.post('/chat/flush')
+async def chat_flush(data: dict):
+    """Claim the open batching inbox and return one normal chat reply.
+
+    Does not go through the delayed-reply hourly quota. A missed flush is
+    left for the worker, which arms the same row at next_phone_check_at.
+    """
+    user_id = data.get('user_id', 'default')
+    character_id = data.get('character_id', DEFAULT_CHARACTER_ID)
+    from delayed_reply import flush_batching_reply
+    result = flush_batching_reply(user_id, character_id)
+    if result.get('ok'):
+        return JSONResponse({
+            'emotion': result.get('emotion'),
+            'messages': result.get('messages') or [],
+            'assistant_turn_id': result.get('turn_id'),
+            'source_event_id': result.get('source_event_id'),
+            'full_jp': result.get('full_jp') or '',
+            'already_delivered': bool(result.get('already_delivered')),
+        })
+    reason = result.get('reason') or 'nothing_pending'
+    if reason in ('nothing_pending', 'skip', 'defer', 'postpone'):
+        return JSONResponse({
+            'flushed': False,
+            'reason': reason,
+            'messages': [],
+        })
+    return _generation_failed_response(user_id, character_id, attempts=1)
 
 
 # ─────────────────── 长故事模式（文本）───────────────────

@@ -535,6 +535,37 @@ TESTED
 
 ---
 
+# REG-015 — Flush must not use the delayed-reply hourly quota
+
+## Area
+
+Schedule / delayed reply / chat flush
+
+## Historical failure
+
+`process_due_phone_checks` starts with `_generation_allowed()`, which enforces
+`DELAYED_REPLY_MAX_PER_HOUR` and a provider pause. A live `/chat/flush` that
+reused that function would stop normal chat after the worker quota, default 20
+replies an hour.
+
+## Required behavior
+
+- `/chat/flush` claims through `evaluate_due_phone_check` / `claim_due_phone_check` and calls `generate_delayed_chat_reply` directly.
+- Flush still runs `_precheck_pending_bundle_sources`, then `complete_delayed_reply` or `abort_delayed_reply`.
+- Flush does not call `_generation_allowed()` and does not open the worker pause.
+- Setting `DELAYED_REPLY_MAX_PER_HOUR` to 0 still lets flush generate.
+- The worker path keeps the quota.
+
+## Regression requirement
+
+`tests/test_message_batching.py` must keep the quota-bypass case.
+
+## Status
+
+TESTED
+
+---
+
 # Regression Rule
 
 任何任务如果修改到上述 Regression 的 Area：
@@ -566,3 +597,4 @@ TESTED
 | REG-012 | Sticker outside messages[] | TESTED |
 | REG-013 | User sticker canonical kind | TESTED |
 | REG-014 | Sticky note from candidate pipeline | TESTED |
+| REG-015 | Flush bypasses delayed-reply hourly quota | TESTED |
