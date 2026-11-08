@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from config import (
     EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX,
     PROVIDER_TRANSPORT_ATTEMPTS, PROVIDER_TRANSPORT_BACKOFF_SECONDS,
+    GENERATION_JSON_SCHEMA,
 )
 from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
@@ -102,7 +103,7 @@ def _create_json(model, max_tokens, system_blocks, messages):
         system=system_blocks,
         messages=messages,
     )
-    if model not in _schema_unavailable_models:
+    if GENERATION_JSON_SCHEMA and model not in _schema_unavailable_models:
         try:
             response = _provider_create(
                 **kwargs,
