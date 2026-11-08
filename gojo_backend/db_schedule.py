@@ -1235,11 +1235,13 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
                   AND sched_date=%s
                   AND start_time=%s
                   AND end_time=%s
+                  AND COALESCE(inbox_reason, '') = %s
                 ORDER BY id DESC
                 LIMIT 1
                 FOR UPDATE''',
             (user_id, character_id, now.date(),
-             activity['start_time'], activity['end_time']))
+             activity['start_time'], activity['end_time'],
+             'batching' if batching else ''))
         row = cur.fetchone()
         reused = False
         watermark = 0

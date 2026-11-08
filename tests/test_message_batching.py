@@ -141,6 +141,34 @@ class MessageBatchingTests(unittest.TestCase):
         self.assertEqual(fresh['successor_of_id'], finished_id)
         self.assertNotEqual(fresh['id'], finished_id)
 
+    def test_all_day_busy_row_does_not_merge_with_batching(self):
+        store = PhoneCheckStore()
+        self._batch(store, '连发', 'b1')
+        activity = dict(BUSY, start_time='00:00', end_time='23:59', title='外出')
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+                patch.object(db_schedule, 'sample_next_phone_check_at',
+                             return_value=NOW + timedelta(minutes=5)):
+            db_schedule.decide_phone_check(
+                'gojo', 'u', NOW, activity,
+                source_event_id='busy-1', pending_text='忙里')
+            self._batch(store, '又一条', 'b2', NOW + timedelta(minutes=1))
+            db_schedule.decide_phone_check(
+                'gojo', 'u', NOW + timedelta(minutes=2), activity,
+                source_event_id='busy-2', pending_text='还在忙')
+        rows = list(store.rows.values())
+        self.assertEqual(len(rows), 2)
+        batching = next(row for row in rows if row.get('inbox_reason') == 'batching')
+        busy = next(row for row in rows if not row.get('inbox_reason'))
+        self.assertEqual(batching['pending_count'], 2)
+        self.assertEqual(batching['pending_text'], '连发\n又一条')
+        self.assertEqual(busy['pending_count'], 2)
+        self.assertEqual(busy['pending_text'], '忙里\n还在忙')
+        self.assertEqual(busy['reply_state'], 'soft_busy')
+        self.assertIn('连着发了几条', delayed_reply._delayed_trigger(batching))
+        self.assertNotIn('有空看手机', delayed_reply._delayed_trigger(batching))
+        self.assertIn('有空看手机', delayed_reply._delayed_trigger(busy))
+        self.assertNotIn('连着发了几条', delayed_reply._delayed_trigger(busy))
+
     def test_identical_texts_both_enter_the_inbox(self):
         store = PhoneCheckStore()
         self._batch(store, '【表情】皱眉', 's1')
@@ -466,6 +494,152 @@ class DeferredStickerPersistenceTests(unittest.TestCase):
             extra = json.loads(extra or '{}')
         self.assertEqual(kind, 'sticker')
         self.assertEqual(extra['sticker_id'], 'frown_01')
+
+
+class _FlushHelpers:
+    def __init__(self, sticker_id):
+        self.sticker_id = sticker_id
+
+    def _turn_context(self, *_args, **_kwargs):
+        return {}, []
+
+    def _history_plus_current(self, messages, _trigger):
+        return messages
+
+    def _generate_or_none(self, *_args, **_kwargs):
+        return {
+            'emotion': '平静',
+            'sticker_id': self.sticker_id,
+            'messages': [{'jp': '見た', 'zh': '看到了'}],
+        }, None
+
+    def _finalize_committed(self, result):
+        return '平静', list(result.get('messages') or [])
+
+    def _commit_offline_state(self, *_args, **_kwargs):
+        return None
+
+
+def _flush_bundle():
+    return {
+        'id': 9, 'user_id': 'u', 'character_id': 'gojo',
+        'pending_text': '在吗', 'last_source_event_id': 'e1',
+        'reply_state': 'free', 'inbox_reason': 'batching', 'fail_count': 0,
+    }
+
+
+class FlushStickerTests(unittest.TestCase):
+    def _generate(self, sticker_id='smile_01', **patches):
+        import sticker_registry
+        helpers = _FlushHelpers(sticker_id)
+        stack = [
+            patch.object(delayed_reply, 'assistant_already_committed', return_value=False),
+            patch.object(delayed_reply, '_persist_pending_user_messages'),
+            patch.object(delayed_reply, 'format_pending_bundle_context', return_value='ctx'),
+            patch.object(delayed_reply, '_apply_promise_effects'),
+            patch('characters.get_character', return_value={'voice_id': 'v', 'name': '五条'}),
+            patch('temporal_awareness.get_temporal_snapshot', return_value={}),
+            patch('temporal_awareness.record_turn'),
+            patch('prompt.build_system_blocks', return_value=[]),
+            patch('schedule_transition.validate_generated_schedule_reply',
+                  return_value=(None, {})),
+            patch('schedule_transition.commit_generated_schedule_intent',
+                  return_value={'ok': True, 'noop': True}),
+            patch('tts.tts_to_b64', return_value=''),
+            patch('user_memory.get_short_memory', return_value=[]),
+            patch('user_memory.commit_visible_assistant_message'),
+            patch('user_memory.update_chat_days', return_value=1),
+            patch('proactive_msg.add_proactive_msg'),
+            patch('behavior_evidence.record_reply_cycle'),
+            patch.object(sticker_registry, 'get',
+                         side_effect=patches.get('get', lambda sid: {
+                             'id': sid, 'desc': '微笑'} if sid == 'smile_01' else None)),
+            patch.object(sticker_registry, 'usable_by',
+                         side_effect=patches.get('usable_by', lambda sid, actor: (
+                             sid == 'smile_01' and actor == 'character'))),
+            patch.object(sticker_registry, 'signed_url',
+                         side_effect=patches.get('signed_url', lambda sid: f'https://signed.example/{sid}')),
+            patch('db_chatlog.recent_assistant_sticker_turns',
+                  side_effect=patches.get('history', lambda *_a, **_k: [])),
+        ]
+        if not patches.get('use_real_enabled'):
+            stack.append(patch.object(
+                sticker_registry, 'is_enabled',
+                return_value=patches.get('enabled', True)))
+        if 'load_manifest' in patches:
+            stack.append(patch.object(
+                sticker_registry, 'load_manifest', return_value=patches['load_manifest']))
+        for item in stack:
+            item.start()
+            self.addCleanup(item.stop)
+        return delayed_reply.generate_delayed_chat_reply(
+            _flush_bundle(), helpers=helpers, push=False)
+
+    def test_flush_generation_returns_a_signed_sticker(self):
+        result = self._generate()
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['messages'][0]['zh'], '看到了')
+        self.assertEqual(result['sticker'], {
+            'id': 'smile_01', 'desc': '微笑', 'url': 'https://signed.example/smile_01',
+        })
+
+    def test_second_flush_is_inside_the_sticker_cooldown(self):
+        turns = iter(([], [{'smile_01'}]))
+        first = self._generate(history=lambda *_a, **_k: next(turns))
+        second = self._generate(history=lambda *_a, **_k: next(turns))
+        self.assertIn('sticker', first)
+        self.assertNotIn('sticker', second)
+        self.assertTrue(second['ok'])
+        self.assertEqual(second['messages'][0]['jp'], '見た')
+
+    def test_character_cannot_send_a_user_only_sticker(self):
+        result = self._generate(usable_by=lambda _sid, _actor: False)
+        self.assertTrue(result['ok'])
+        self.assertNotIn('sticker', result)
+        self.assertEqual(result['full_jp'], '見た')
+
+    def test_missing_catalog_or_signed_url_keeps_the_text(self):
+        empty = {'version': 0, 'prefix': '', 'items': [], 'by_id': {}}
+        missing = self._generate(use_real_enabled=True, load_manifest=empty)
+        self.assertTrue(missing['ok'])
+        self.assertNotIn('sticker', missing)
+        self.assertEqual(missing['full_jp'], '見た')
+        broken = self._generate(signed_url=Mock(side_effect=RuntimeError('r2 down')))
+        self.assertTrue(broken['ok'])
+        self.assertEqual(broken['messages'][0]['zh'], '看到了')
+        self.assertNotIn('sticker', broken)
+
+    def test_stickers_disabled_omits_the_key(self):
+        catalog = {
+            'version': 1, 'prefix': 'stickers',
+            'items': [{'id': 'smile_01', 'desc': '微笑'}],
+            'by_id': {'smile_01': {'id': 'smile_01', 'desc': '微笑'}},
+        }
+        with patch.dict(os.environ, {'STICKERS_ENABLED': 'false'}), \
+                patch('media_storage.is_configured', return_value=True):
+            result = self._generate(use_real_enabled=True, load_manifest=catalog)
+        self.assertTrue(result['ok'])
+        self.assertNotIn('sticker', result)
+        self.assertEqual(result['messages'][0]['jp'], '見た')
+
+    def test_flush_http_passes_sticker_and_omits_the_key_when_absent(self):
+        import route_chat
+        sticker = {'id': 'smile_01', 'desc': '微笑', 'url': 'https://signed.example/smile_01'}
+        with patch('delayed_reply.flush_batching_reply', return_value={
+                'ok': True, 'emotion': '平静',
+                'messages': [{'jp': '見た', 'zh': '看到了'}],
+                'turn_id': 't1', 'source_event_id': 'e1', 'full_jp': '見た',
+                'sticker': sticker}):
+            present = asyncio.run(route_chat.chat_flush(
+                {'user_id': 'u', 'character_id': 'gojo'}))
+        with patch('delayed_reply.flush_batching_reply', return_value={
+                'ok': True, 'emotion': '平静',
+                'messages': [{'jp': '見た', 'zh': '看到了'}],
+                'turn_id': 't1', 'full_jp': '見た'}):
+            absent = asyncio.run(route_chat.chat_flush(
+                {'user_id': 'u', 'character_id': 'gojo'}))
+        self.assertEqual(json.loads(present.body)['sticker'], sticker)
+        self.assertNotIn('sticker', json.loads(absent.body))
 
 
 if __name__ == '__main__':

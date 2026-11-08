@@ -442,9 +442,17 @@ class FakeCursor:
             return
 
         if compact.startswith('SELECT id, seen, can_reply'):
-            user_id, character_id, sched_date, start_time, end_time = params
-            row = self.store.rows.get(
-                (user_id, character_id, sched_date, start_time, end_time))
+            user_id, character_id, sched_date, start_time, end_time = params[:5]
+            reason = params[5] if len(params) > 5 else ''
+            reason = reason or ''
+            found = []
+            for key, candidate in self.store.rows.items():
+                if key[:5] != (user_id, character_id, sched_date, start_time, end_time):
+                    continue
+                if (candidate.get('inbox_reason') or '') != reason:
+                    continue
+                found.append(candidate)
+            row = max(found, key=lambda item: item.get('id') or 0) if found else None
             if row:
                 self._one = (
                     row['id'], row['seen'], row['can_reply'],
@@ -501,7 +509,8 @@ class FakeCursor:
             }
             self.store.next_id += 1
             self.store.rows[
-                (user_id, character_id, sched_date, start_time, end_time)
+                (user_id, character_id, sched_date, start_time, end_time,
+                 row.get('inbox_reason') or '')
             ] = row
             self._one = (row['id'],)
             self.rowcount = 1

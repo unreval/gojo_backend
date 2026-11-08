@@ -1959,14 +1959,17 @@ async def chat_flush(data: dict):
     from delayed_reply import flush_batching_reply
     result = flush_batching_reply(user_id, character_id)
     if result.get('ok'):
-        return JSONResponse({
+        body = {
             'emotion': result.get('emotion'),
             'messages': result.get('messages') or [],
             'assistant_turn_id': result.get('turn_id'),
             'source_event_id': result.get('source_event_id'),
             'full_jp': result.get('full_jp') or '',
             'already_delivered': bool(result.get('already_delivered')),
-        })
+        }
+        if result.get('sticker'):
+            body['sticker'] = result['sticker']
+        return JSONResponse(body)
     reason = result.get('reason') or 'nothing_pending'
     if reason in ('nothing_pending', 'skip', 'defer', 'postpone'):
         return JSONResponse({

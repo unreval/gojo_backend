@@ -427,13 +427,25 @@ def generate_delayed_chat_reply(bundle, *, helpers=None, push=True):
     if push:
         _push_delayed_reply(user_id, character_id, char.get('name') or character_id, msgs)
     update_chat_days(user_id)
-    return {
+    payload = {
         'ok': True,
         'emotion': emotion,
         'messages': msgs,
         'full_jp': full_jp,
         'turn_id': turn_id,
     }
+    # 函数体内再取 route_chat，避免模块顶层和 delayed_reply 对向 import。
+    # _resolve_sticker 自己吞掉清单、签名和冷却失败；这里再挡一层，
+    # 避免解析异常把已经写好的文字回复带进 abort。
+    try:
+        sticker = route_chat._resolve_sticker(
+            user_id, character_id, (result or {}).get('sticker_id'))
+    except Exception as exc:
+        print(f'[delayed_reply] sticker skipped: {type(exc).__name__}')
+        sticker = None
+    if sticker:
+        payload['sticker'] = sticker
+    return payload
 
 
 def _settle_flushed_reply(oid, claimed, generated, now):
