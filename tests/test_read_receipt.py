@@ -326,7 +326,8 @@ class ReadReceiptPostgresTests(unittest.TestCase):
             claim_expires_at TIMESTAMPTZ, seen BOOLEAN DEFAULT FALSE,
             seen_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
             fail_count INTEGER NOT NULL DEFAULT 0, retry_not_before TIMESTAMPTZ,
-            last_fail_reason TEXT, last_fail_at TIMESTAMPTZ
+            last_fail_reason TEXT, last_fail_at TIMESTAMPTZ,
+            inbox_reason TEXT
         )''')
         with patch.object(db_read_receipt, 'get_conn', return_value=conn):
             db_read_receipt.init_read_receipt_table()

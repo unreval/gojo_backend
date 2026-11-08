@@ -246,6 +246,19 @@ def _persist_pending_user_messages(bundle):
                 user_id, line, character_id, source_event_id=event_id)
 
 
+def _delayed_trigger(bundle):
+    """Busy catch-up and live batching must not share the same excuse."""
+    if (bundle or {}).get('inbox_reason') == 'batching':
+        return (
+            '【系统内部】她刚刚连着发了几条消息。请根据 INTERNAL CONTEXT 里'
+            '这几条，用正常聊天回复。这不是忙碌后的补回，也不是主动搭讪。'
+        )
+    return (
+        '【系统内部】你现在有空看手机了。请根据 INTERNAL CONTEXT 里忙碌期间'
+        '积压的消息，用正常聊天回复。这不是用户此刻新发的一条，也不是主动搭讪。'
+    )
+
+
 def _push_delayed_reply(user_id, character_id, char_name, msgs):
     try:
         import push_notify
@@ -261,7 +274,7 @@ def _push_delayed_reply(user_id, character_id, char_name, msgs):
         print(f'[delayed_reply] push skipped: {exc}')
 
 
-def generate_delayed_chat_reply(bundle, *, helpers=None):
+def generate_delayed_chat_reply(bundle, *, helpers=None, push=True):
     """Read pending bundle → INTERNAL CONTEXT → normal chat generator → commit.
 
     Resolve is the caller's job after this returns ok=True.
@@ -299,10 +312,7 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
     pending_ids = _pending_source_event_ids(bundle)
     _persist_pending_user_messages(bundle)
     extra_suffix = '\n\n' + format_pending_bundle_context(bundle)
-    trigger = (
-        '【系统内部】你现在有空看手机了。请根据 INTERNAL CONTEXT 里忙碌期间'
-        '积压的消息，用正常聊天回复。这不是用户此刻新发的一条，也不是主动搭讪。'
-    )
+    trigger = _delayed_trigger(bundle)
     temporal_snapshot = get_temporal_snapshot(user_id, character_id)
     pack, messages = helpers._turn_context(
         user_id, character_id, pending_text, profile='text',
@@ -414,15 +424,130 @@ def generate_delayed_chat_reply(bundle, *, helpers=None):
         user_id, character_id, result, msgs,
         user_text=pending_text, turn_id=turn_id)
 
-    _push_delayed_reply(user_id, character_id, char.get('name') or character_id, msgs)
+    if push:
+        _push_delayed_reply(user_id, character_id, char.get('name') or character_id, msgs)
     update_chat_days(user_id)
-    return {
+    payload = {
         'ok': True,
         'emotion': emotion,
         'messages': msgs,
         'full_jp': full_jp,
         'turn_id': turn_id,
     }
+    # 函数体内再取 route_chat，避免模块顶层和 delayed_reply 对向 import。
+    # _resolve_sticker 自己吞掉清单、签名和冷却失败；这里再挡一层，
+    # 避免解析异常把已经写好的文字回复带进 abort。
+    try:
+        sticker = route_chat._resolve_sticker(
+            user_id, character_id, (result or {}).get('sticker_id'))
+    except Exception as exc:
+        print(f'[delayed_reply] sticker skipped: {type(exc).__name__}')
+        sticker = None
+    if sticker:
+        payload['sticker'] = sticker
+    return payload
+
+
+def _settle_flushed_reply(oid, claimed, generated, now):
+    """Complete or abort one claimed bundle. No hourly quota and no circuit."""
+    import db_schedule
+
+    if generated and generated.get('ok'):
+        resolved = False
+        for _attempt in range(3):
+            try:
+                n = db_schedule.complete_delayed_reply(
+                    oid, claimed['claim_token'], now)
+                if n:
+                    resolved = True
+                    break
+            except Exception as exc:
+                print(f'[delayed_reply] flush resolve #{oid} retry failed: {exc}')
+        if resolved:
+            db_schedule.log_phone_check_action('consumed', claimed)
+        else:
+            print(f'[delayed_reply] flush finish #{oid} did not win watermark CAS; '
+                  'successor remains pending')
+        return dict(
+            generated,
+            id=oid,
+            action='replied',
+            resolved=resolved,
+            source_event_id=claimed.get('last_source_event_id'),
+        )
+
+    reason = (generated or {}).get('reason') or 'generation_failed'
+    try:
+        auth_failed = reason == 'provider_auth_failed'
+        retry_delay = (generated or {}).get('retry_delay_seconds')
+        retry_at = (now + timedelta(minutes=15) if auth_failed else
+                    now + timedelta(seconds=retry_delay) if retry_delay else None)
+        released = db_schedule.abort_delayed_reply(
+            oid, claimed['claim_token'], retry_at=retry_at,
+            reason=reason, now=now)
+        if released and reason != 'source_invalid':
+            db_schedule.log_phone_check_action(
+                'released', dict(claimed, fail_count=claimed.get('fail_count', 0) + 1))
+    except Exception as exc:
+        print(f'[delayed_reply] flush abort #{oid} failed: {exc}')
+    if reason != 'source_invalid':
+        db_schedule.log_phone_check_action('generation_failed', claimed, reason=reason)
+    return {
+        'ok': False,
+        'id': oid,
+        'action': 'expired' if reason == 'source_invalid' else 'failed',
+        'reason': reason,
+    }
+
+
+def flush_batching_reply(user_id, character_id, *, now=None, generate_fn=None):
+    """Arm and claim the open batching inbox, then generate once.
+
+    The worker's _generation_allowed() quota and provider pause are not
+    consulted. A second consumer that loses the claim gets nothing_pending.
+    """
+    import db_schedule
+
+    now = now or _now()
+    generate_fn = generate_fn or (
+        lambda bundle, push=True: generate_delayed_chat_reply(bundle, push=push))
+    oid = db_schedule.find_open_batching_phone_check(user_id, character_id)
+    if oid is None:
+        return {'ok': False, 'reason': 'nothing_pending'}
+    db_schedule.arm_open_phone_check(oid, now)
+    try:
+        decision = db_schedule.evaluate_due_phone_check(oid, now)
+    except Exception as exc:
+        print(f'[delayed_reply] flush evaluate #{oid} failed: {exc}')
+        return {'ok': False, 'reason': 'nothing_pending'}
+    action = (decision or {}).get('action')
+    claimed = (decision or {}).get('claimed')
+    if action != 'reply' or not claimed:
+        return {'ok': False, 'reason': action or 'nothing_pending', 'action': action}
+
+    generated = None
+    try:
+        checked = _precheck_pending_bundle_sources(claimed)
+        if checked is None:
+            print(f'[delayed_reply] flush phone_check_id={oid} '
+                  'source_invalid no_active_canonical_user_sources')
+            generated = {'ok': False, 'reason': 'source_invalid'}
+        else:
+            generated = generate_fn(checked, push=False)
+    except Exception as exc:
+        from provider_error import is_auth_error, retry_delay_seconds
+        from raw_events import SourceValidityError
+        print(f'[delayed_reply] flush generate #{oid} failed: {type(exc).__name__} '
+              f'message={str(exc)[:300]}')
+        source_invalid = isinstance(exc, SourceValidityError)
+        retry_delay = None if source_invalid else retry_delay_seconds(exc)
+        generated = {'ok': False, 'reason': (
+            'source_invalid' if source_invalid else
+            'provider_auth_failed' if is_auth_error(exc) else
+            'provider_retryable' if retry_delay else 'generation_failed')}
+        if retry_delay:
+            generated['retry_delay_seconds'] = retry_delay
+    return _settle_flushed_reply(oid, claimed, generated, now)
 
 
 def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):

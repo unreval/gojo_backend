@@ -239,7 +239,8 @@ def format_pending_bundle_context(bundle, now=None):
 
 
 def check_reply_availability(character_id, user_id, source_event_id='',
-                             pending_text='', event_meta=None, now=None):
+                             pending_text='', event_meta=None, now=None,
+                             batching=False):
     """Return a decision dict for the current message.
 
     Callers should proceed with normal generation only when can_reply is true.
@@ -264,7 +265,8 @@ def check_reply_availability(character_id, user_id, source_event_id='',
     activity = world.get('activity')
     availability = world.get('availability') or {}
     reply_state = availability.get('reply_state') or 'free'
-    if not activity or availability.get('can_reply', reply_state == 'free'):
+    if not batching and (
+            not activity or availability.get('can_reply', reply_state == 'free')):
         return {
             'reply_state': 'free',
             'seen': True,
@@ -287,10 +289,11 @@ def check_reply_availability(character_id, user_id, source_event_id='',
         pending_text=pending_text,
         event_meta=event_meta,
         handle_before=handle_before,
+        batching=batching,
     )
     decision['world'] = world
     decision['source_event_id'] = source_event_id
     decision['free_at'] = db_schedule.get_next_free_time(
         character_id, user_id, now, world=world) \
-        or activity.get('end_time')
+        or (activity or {}).get('end_time')
     return decision

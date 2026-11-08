@@ -355,6 +355,7 @@ class FakeCursor:
                     row.get('event_revision'), row.get('occurrence_id'),
                     row.get('seen_at'),
                     row.get('fail_count', 0),
+                    row.get('inbox_reason'),
                 )
                 return
 
@@ -391,6 +392,24 @@ class FakeCursor:
             return
 
         if compact.startswith('SELECT id FROM char_phone_check'):
+            if "inbox_reason='batching'" in compact:
+                user_id, character_id = params
+                found = []
+                for row in list(self.store.rows.values()) + self.store.extra_rows:
+                    if row.get('user_id') != user_id or row.get('character_id') != character_id:
+                        continue
+                    if row.get('inbox_reason') != 'batching':
+                        continue
+                    if row.get('resolved_at'):
+                        continue
+                    if (row.get('pending_count') or 0) <= 0:
+                        continue
+                    if (row.get('check_state') or 'pending') not in ('pending', 'deferred'):
+                        continue
+                    found.append(row['id'])
+                found.sort()
+                self._one = (found[0],) if found else None
+                return
             now_retry, now_stale, now_due, today, _today2, hhmm, limit = params
             ids = []
             for row in self.store.rows.values():
@@ -423,9 +442,17 @@ class FakeCursor:
             return
 
         if compact.startswith('SELECT id, seen, can_reply'):
-            user_id, character_id, sched_date, start_time, end_time = params
-            row = self.store.rows.get(
-                (user_id, character_id, sched_date, start_time, end_time))
+            user_id, character_id, sched_date, start_time, end_time = params[:5]
+            reason = params[5] if len(params) > 5 else ''
+            reason = reason or ''
+            found = []
+            for key, candidate in self.store.rows.items():
+                if key[:5] != (user_id, character_id, sched_date, start_time, end_time):
+                    continue
+                if (candidate.get('inbox_reason') or '') != reason:
+                    continue
+                found.append(candidate)
+            row = max(found, key=lambda item: item.get('id') or 0) if found else None
             if row:
                 self._one = (
                     row['id'], row['seen'], row['can_reply'],
@@ -474,6 +501,7 @@ class FakeCursor:
                 'schedule_event_id': params[20] if len(params) > 20 else None,
                 'phase_id': params[21] if len(params) > 21 else None,
                 'event_revision': params[22] if len(params) > 22 else None,
+                'inbox_reason': params[23] if len(params) > 23 else None,
                 'claimed_at': None,
                 'claim_token': None,
                 'claim_owner': None,
@@ -481,7 +509,8 @@ class FakeCursor:
             }
             self.store.next_id += 1
             self.store.rows[
-                (user_id, character_id, sched_date, start_time, end_time)
+                (user_id, character_id, sched_date, start_time, end_time,
+                 row.get('inbox_reason') or '')
             ] = row
             self._one = (row['id'],)
             self.rowcount = 1

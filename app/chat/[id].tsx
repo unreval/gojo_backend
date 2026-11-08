@@ -156,6 +156,8 @@ function isGenerationInProgressPayload(data: any): boolean {
 
 // Automatic 202 retries for one image source_event_id. A new id starts over.
 const IMAGE_PROGRESS_RETRY_LIMIT = 8;
+const BATCH_FLUSH_MS = 5000;
+const DUP_SEND_GUARD_MS = 400;
 
 function assistantSegmentId(
   seg: { event_id?: string } | undefined,
@@ -392,6 +394,10 @@ export default function ChatRoom() {
   const justLoadedEarlierRef = useRef(false);   // ★ 加载历史时禁止滚到底
   const messagesRef = useRef<Message[]>([]);  // ★ 消息镜像（离开后仍能落盘）
   const lastSentRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });  // ★ 防抖：挡网络卡顿导致的重复发送
+  const batchFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushInFlightRef = useRef(false);
+  const flushAgainRef = useRef(false);
+  const flushFailedRef = useRef(false);
 
   // ── 语音文件工具 ──
   const ensureAudioDir = async () => {
@@ -464,6 +470,22 @@ export default function ChatRoom() {
       }
     }
   }, [chatId, isGroup]);
+
+  useEffect(() => {
+    const clearTimer = () => {
+      if (batchFlushTimerRef.current) {
+        clearTimeout(batchFlushTimerRef.current);
+        batchFlushTimerRef.current = null;
+      }
+    };
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') clearTimer();
+    });
+    return () => {
+      sub.remove();
+      clearTimer();
+    };
+  }, []);
 
   // ── 拉对话对象信息 + 历史消息 ──
   useEffect(() => {
@@ -1278,12 +1300,14 @@ export default function ChatRoom() {
         },
       };
       const alreadyHas = (list: Message[]) => list.some(item => item.id === msgId);
+      const withMsg = (list: Message[]) => [...list, msg].sort(
+        (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
       if (focusedRef.current) {
-        setMessages(prev => alreadyHas(prev) ? prev : [...prev, msg]);
+        setMessages(prev => alreadyHas(prev) ? prev : withMsg(prev));
         scrollRef.current?.scrollToEnd({ animated: true });
       } else {
         if (!alreadyHas(messagesRef.current)) {
-          messagesRef.current = [...messagesRef.current, msg];
+          messagesRef.current = withMsg(messagesRef.current);
           AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messagesRef.current)).catch(() => {});
           try {
             const k = `char_unread_${chatId}`;
@@ -1340,11 +1364,13 @@ export default function ChatRoom() {
       timestamp: Date.now(),
     };
     const alreadyHas = (list: Message[]) => list.some(item => item.id === msg.id);
+    const withMsg = (list: Message[]) => [...list, msg].sort(
+      (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
     if (focusedRef.current) {
-      setMessages(prev => alreadyHas(prev) ? prev : [...prev, msg]);
+      setMessages(prev => alreadyHas(prev) ? prev : withMsg(prev));
       scrollRef.current?.scrollToEnd({ animated: true });
     } else if (!alreadyHas(messagesRef.current)) {
-      messagesRef.current = [...messagesRef.current, msg];
+      messagesRef.current = withMsg(messagesRef.current);
       AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messagesRef.current)).catch(() => {});
     }
   };
@@ -1689,15 +1715,87 @@ export default function ChatRoom() {
     }
   };
 
+  const clearBatchFlushTimer = () => {
+    if (batchFlushTimerRef.current) {
+      clearTimeout(batchFlushTimerRef.current);
+      batchFlushTimerRef.current = null;
+    }
+  };
+
+  const scheduleBatchFlush = () => {
+    clearBatchFlushTimer();
+    batchFlushTimerRef.current = setTimeout(() => {
+      batchFlushTimerRef.current = null;
+      void flushBatch();
+    }, BATCH_FLUSH_MS);
+  };
+
+  const flushBatch = async () => {
+    if (isGroup) return;
+    if (flushInFlightRef.current) {
+      flushAgainRef.current = true;
+      return;
+    }
+    flushInFlightRef.current = true;
+    setLoading(true);
+    setGenerationFailed(false);
+    try {
+      const res = await axios.post(`${SERVER_URL}/chat/flush`, {
+        user_id: FIXED_USER_ID,
+        character_id: chatId,
+      });
+      if (res.data?.flushed === false || res.data?.already_delivered) return;
+      if (isGenerationFailedPayload(res.data)) {
+        flushFailedRef.current = true;
+        noteGenerationFailure();
+        return;
+      }
+      await processResponseExtras(res.data);
+      let segments: Segment[] = [];
+      if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
+        segments = res.data.messages;
+      } else if (res.data?.jp) {
+        segments = [{ jp: res.data.jp, zh: res.data.zh ?? '', audio_b64: res.data.audio_b64 ?? '' }];
+      }
+      if (segments.length === 0) return;
+      flushFailedRef.current = false;
+      setGenerationFailed(false);
+      await appendSegments(segments, '', {
+        sourceEventId: res.data?.source_event_id,
+        assistantTurnId: res.data?.assistant_turn_id,
+      });
+      if (res.data?.sticker) await appendSticker(res.data.sticker);
+      if (res.data?.pending_transaction) insertPendingCard(res.data.pending_transaction);
+      pruneAudioFiles();
+    } catch (e: any) {
+      const data = e?.response?.data;
+      if (isGenerationFailedPayload(data)) {
+        console.warn('[flush] generation_failed');
+      } else {
+        console.warn('[flush] failed:', e?.message);
+      }
+      flushFailedRef.current = true;
+      noteGenerationFailure();
+    } finally {
+      flushInFlightRef.current = false;
+      if (!isGroup) void refreshReadReceipts();
+      setLoading(false);
+      if (flushAgainRef.current) {
+        flushAgainRef.current = false;
+        scheduleBatchFlush();
+      }
+    }
+  };
+
   const sendText = async (
     textOverride?: string,
     opts?: { retry?: boolean; sticker?: { id: string; desc: string; url: string } },
   ) => {
     const text = (textOverride ?? inputText).trim();
     if (!text) return;
-    // ★ 防抖：2秒内同样内容不重复发（挡网络卡顿/重试导致的双发，也省一次 API+TTS）
+    // ★ 防抖：400ms 内同样内容不重复发（挡网络卡顿导致的程序性重发）
     const now = Date.now();
-    if (!opts?.retry && text === lastSentRef.current.text && now - lastSentRef.current.at < 2000) {
+    if (!opts?.retry && text === lastSentRef.current.text && now - lastSentRef.current.at < DUP_SEND_GUARD_MS) {
       console.log('[防抖] 拦截重复发送：', text);
       return;
     }
@@ -1710,7 +1808,7 @@ export default function ChatRoom() {
       setThinkingName(null);
       await sleep(100);
     }
-    if (loading) return;
+    if (loading && isGroup) return;
     setGenerationFailed(false);
 
     let sourceEventId: string;
@@ -1745,10 +1843,12 @@ export default function ChatRoom() {
         kind: 'text', text, sourceEventId, replyTo: replyToPayload, sticker: opts?.sticker,
       };
       if (!opts?.sticker) setReplyingTo(null);   // ★ 发送后清掉引用
-      setMessages(prev => [...prev, userMsg]);
+      setMessages(prev => [...prev, userMsg].sort(
+        (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0)));
       if (isGroup) bumpRead(1);
     }
-    setLoading(true);
+    const deferSend = !isGroup && !opts?.retry;
+    if (!deferSend) setLoading(true);
 
     try {
       if (isGroup) {
@@ -1794,7 +1894,16 @@ export default function ChatRoom() {
           source_event_id: sourceEventId,
           reply_to: lastFailedSendRef.current?.kind === 'text' ? lastFailedSendRef.current.replyTo : undefined,
           sticker: opts?.sticker ? { id: opts.sticker.id, desc: opts.sticker.desc || '' } : undefined,
+          ...(deferSend ? { defer: true } : {}),
         });
+        if (res.data?.busy) {
+          await processResponseExtras(res.data);
+          return;
+        }
+        if (deferSend && (res.status === 202 || res.data?.deferred)) {
+          scheduleBatchFlush();
+          return;
+        }
         if (isGenerationFailedPayload(res.data)) {
           noteGenerationFailure();
           return;
@@ -1812,9 +1921,6 @@ export default function ChatRoom() {
           return;
         }
         await processResponseExtras(res.data);
-        if (res.data?.busy) {
-          return;
-        }
         let segments: Segment[] = [];
         if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
           segments = res.data.messages;
@@ -1844,12 +1950,18 @@ export default function ChatRoom() {
       noteGenerationFailure();
     } finally {
       if (!isGroup) void refreshReadReceipts();
-      setLoading(false);
+      if (!deferSend) setLoading(false);
     }
   };
 
   const retryLastGeneration = () => {
     if (loading) return;
+    if (flushFailedRef.current) {
+      flushFailedRef.current = false;
+      setGenerationFailed(false);
+      void flushBatch();
+      return;
+    }
     const last = lastFailedSendRef.current;
     if (!last) return;
     setGenerationFailed(false);
@@ -1861,7 +1973,7 @@ export default function ChatRoom() {
   };
 
   const handleSend = async () => {
-    if (loading) return;
+    if (loading && isGroup) return;
 
     // ★★ IME 截断修复:
     //   中文输入法在拼音候选还没选字确认时,TextInput state 可能没接住最后一次 keystroke。
@@ -2007,7 +2119,7 @@ export default function ChatRoom() {
             (m.subtitle || '').toLowerCase().includes(searchQuery.toLowerCase())))
     : messages;
 
-  const canSend = !loading && (inputText.trim().length > 0 || !!pendingImage);
+  const canSend = (isGroup ? !loading : true) && (inputText.trim().length > 0 || !!pendingImage);
 
   if (!ready) return (
     <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' }}>
@@ -2439,7 +2551,7 @@ export default function ChatRoom() {
           <TouchableOpacity
             style={s.attachBtn}
             onPress={() => setShowStickerPicker(open => !open)}
-            disabled={loading}
+            disabled={isGroup && loading}
           >
             <Text style={s.attachBtnText}>🙂</Text>
           </TouchableOpacity>
@@ -2464,7 +2576,7 @@ export default function ChatRoom() {
           }
           placeholderTextColor={C.textMute}
           multiline
-          editable={!loading}
+          editable={!isGroup || !loading}
           returnKeyType="send"
           onSubmitEditing={handleSend}
           blurOnSubmit={false}

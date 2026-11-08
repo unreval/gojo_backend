@@ -193,6 +193,8 @@ def init_schedule_table():
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS event_revision INTEGER')
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ')
         cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS superseded_by_id INTEGER')
+        # NULL = schedule busy inbox. 'batching' = the user is still typing.
+        cur.execute('ALTER TABLE char_phone_check ADD COLUMN IF NOT EXISTS inbox_reason TEXT')
         # Generated constraint names are truncated by PostgreSQL. Match the
         # constraint definition so every deployed name is removed reliably.
         cur.execute('''DO $$
@@ -750,7 +752,7 @@ def claim_due_phone_check(cur, oid, now, *, token=None, owner=None):
                       user_id, character_id, first_source_event_id,
                       last_source_event_id, activity_title, start_time, end_time,
                       sched_date, schedule_event_id, phase_id, event_revision,
-                      occurrence_id, seen_at, fail_count''',
+                      occurrence_id, seen_at, fail_count, inbox_reason''',
         (now, token, owner, expires, now, oid, now, now, now))
     row = cur.fetchone()
     if not row:
@@ -780,6 +782,7 @@ def claim_due_phone_check(cur, oid, now, *, token=None, owner=None):
         'claim_owner': owner,
         'seen_at': row[20] if len(row) > 20 else now,
         'fail_count': row[21] if len(row) > 21 else 0,
+        'inbox_reason': row[22] if len(row) > 22 else None,
     }
     mark_source_events_seen_tx(
         cur, claimed['user_id'], claimed['character_id'],
@@ -1089,9 +1092,56 @@ def _tighten_phone_check_at(next_at, handle_before):
     return next_at
 
 
+def find_open_batching_phone_check(user_id, character_id):
+    """Oldest open batching inbox. None when this pair has nothing waiting."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''SELECT id FROM char_phone_check
+               WHERE user_id=%s AND character_id=%s
+                 AND inbox_reason='batching'
+                 AND resolved_at IS NULL
+                 AND COALESCE(pending_count, 0) > 0
+                 AND check_state IN ('pending', 'deferred')
+               ORDER BY id
+               LIMIT 1''',
+            (user_id, character_id))
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def arm_open_phone_check(oid, now):
+    """Pull next_phone_check_at forward with the existing LEAST arm.
+
+    Does not claim the row and does not change check_state.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''UPDATE char_phone_check
+               SET next_phone_check_at = COALESCE(
+                       LEAST(next_phone_check_at, %s), %s),
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id=%s
+                 AND resolved_at IS NULL
+                 AND check_state IN ('pending', 'deferred')''',
+            (now, now, oid))
+        armed = cur.rowcount
+        conn.commit()
+        return armed
+    finally:
+        cur.close()
+        conn.close()
+
+
 def decide_phone_check(character_id, user_id, now: datetime, activity,
                        source_event_id='', pending_text='', event_meta=None,
-                       handle_before=None):
+                       handle_before=None, batching=False):
     """返回本条消息在当前日程下的 seen / can_reply 判定。
 
     soft_busy:
@@ -1101,32 +1151,47 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
       · 到点才写 seen_at，再决定 reply_now；defer 则生成下一次 check
       · hard_busy 窗口盖住 check 时，延期到 hard window 之后
     hard_busy: 只积压，不看手机、不回复。
+    batching: 角色有空、用户还在连发。绕过 free 短路，写入 inbox_reason。
     """
-    if not activity:
-        return {
+    if batching:
+        # 当天所有连发行共用同一组边界。start_time 若取当前 HH:MM，
+        # 跨分钟就对不上 SELECT，连发会被拆成两行、回两次。
+        # 忙碌路径不进这个分支，仍用活动自己的 start_time / end_time。
+        reply_state = REPLY_FREE
+        activity = {
+            'title': '',
+            'start_time': '00:00',
+            'end_time': '23:59',
             'reply_state': REPLY_FREE,
-            'seen': True,
             'can_reply': True,
-            'activity': None,
-            'opportunity_id': None,
-            'reused': False,
-            'next_phone_check_at': None,
-            'seen_at': None,
+            'character_id': character_id,
         }
+    else:
+        if not activity:
+            return {
+                'reply_state': REPLY_FREE,
+                'seen': True,
+                'can_reply': True,
+                'activity': None,
+                'opportunity_id': None,
+                'reused': False,
+                'next_phone_check_at': None,
+                'seen_at': None,
+            }
 
-    reply_state = normalize_reply_state(
-        activity.get('reply_state'), activity.get('can_reply', True))
-    if reply_state == REPLY_FREE:
-        return {
-            'reply_state': REPLY_FREE,
-            'seen': True,
-            'can_reply': True,
-            'activity': activity,
-            'opportunity_id': None,
-            'reused': False,
-            'next_phone_check_at': None,
-            'seen_at': None,
-        }
+        reply_state = normalize_reply_state(
+            activity.get('reply_state'), activity.get('can_reply', True))
+        if reply_state == REPLY_FREE:
+            return {
+                'reply_state': REPLY_FREE,
+                'seen': True,
+                'can_reply': True,
+                'activity': activity,
+                'opportunity_id': None,
+                'reused': False,
+                'next_phone_check_at': None,
+                'seen_at': None,
+            }
 
     activity = dict(activity)
     activity.setdefault('character_id', character_id)
@@ -1170,11 +1235,13 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
                   AND sched_date=%s
                   AND start_time=%s
                   AND end_time=%s
+                  AND COALESCE(inbox_reason, '') = %s
                 ORDER BY id DESC
                 LIMIT 1
                 FOR UPDATE''',
             (user_id, character_id, now.date(),
-             activity['start_time'], activity['end_time']))
+             activity['start_time'], activity['end_time'],
+             'batching' if batching else ''))
         row = cur.fetchone()
         reused = False
         watermark = 0
@@ -1251,7 +1318,9 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
             next_check_at = None
             watermark = 0
             count = 1
-            if reply_state == REPLY_SOFT_BUSY:
+            if batching:
+                next_check_at = now + timedelta(seconds=60)
+            elif reply_state == REPLY_SOFT_BUSY:
                 next_check_at = _tighten_phone_check_at(
                     sample_next_phone_check_at(now, activity, replied_at=replied_at),
                     handle_before)
@@ -1262,16 +1331,17 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
                     first_source_event_id, last_source_event_id, pending_text, event_meta,
                     next_phone_check_at, seen_watermark, check_state,
                     occurrence_id, successor_of_id, schedule_event_id,
-                    phase_id, event_revision)
+                    phase_id, event_revision, inbox_reason)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                           %s,%s,%s,%s,%s)
+                           %s,%s,%s,%s,%s,%s)
                    RETURNING id''',
                 (user_id, character_id, event_id, now.date(),
                  activity['start_time'], activity['end_time'],
                  activity.get('title', ''), reply_state, False, False, 1,
                  source_event_id, source_event_id, pending_text, event_meta_text,
                  next_check_at, 0, PHONE_CHECK_PENDING, str(uuid.uuid4()),
-                 successor_of_id, event_id, phase_id, event_revision))
+                 successor_of_id, event_id, phase_id, event_revision,
+                 'batching' if batching else None))
             oid = cur.fetchone()[0]
 
         def _decision(seen, can_reply, extra=None):
