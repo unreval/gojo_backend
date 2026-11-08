@@ -126,6 +126,12 @@ def _create_json(model, max_tokens, system_blocks, messages):
             print(f'[generation] schema unavailable model={model} '
                   f'error_type={type(exc).__name__}; using prompt contract')
             response = _provider_create(**kwargs)
+        else:
+            if not extract_text(response).strip():
+                _schema_unavailable_models.add(model)
+                print(f'[generation] schema returned empty model={model}; '
+                      f'using prompt contract')
+                response = _provider_create(**kwargs)
     else:
         response = _provider_create(**kwargs)
     raw = extract_text(response).strip()
