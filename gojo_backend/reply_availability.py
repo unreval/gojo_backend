@@ -295,5 +295,5 @@ def check_reply_availability(character_id, user_id, source_event_id='',
     decision['source_event_id'] = source_event_id
     decision['free_at'] = db_schedule.get_next_free_time(
         character_id, user_id, now, world=world) \
-        or activity.get('end_time')
+        or (activity or {}).get('end_time')
     return decision

@@ -98,11 +98,48 @@ class MessageBatchingTests(unittest.TestCase):
         self.assertEqual(row['inbox_reason'], 'batching')
         self.assertEqual(row['reply_state'], 'free')
         self.assertEqual(row['end_time'], '23:59')
-        self.assertEqual(row['start_time'], '10:00')
+        self.assertEqual(row['start_time'], '00:00')
         self.assertEqual(row['sched_date'], NOW.date())
         self.assertEqual(row['pending_count'], 3)
         self.assertEqual(row['pending_text'], '一\n二\n三')
         self.assertEqual(row['next_phone_check_at'], NOW + timedelta(seconds=60))
+
+    def test_messages_across_minute_boundaries_share_one_row(self):
+        store = PhoneCheckStore()
+        moments = (
+            datetime(2026, 11, 8, 19, 24, 58, tzinfo=timezone.utc),
+            datetime(2026, 11, 8, 19, 25, 3, tzinfo=timezone.utc),
+            datetime(2026, 11, 8, 19, 26, 10, tzinfo=timezone.utc),
+        )
+        for index, when in enumerate(moments, start=1):
+            self._batch(store, f'第{index}', f'cross-{index}', when)
+        self.assertEqual(len(store.rows), 1)
+        row = list(store.rows.values())[0]
+        self.assertEqual(row['inbox_reason'], 'batching')
+        self.assertEqual(row['start_time'], '00:00')
+        self.assertEqual(row['end_time'], '23:59')
+        self.assertEqual(row['pending_count'], 3)
+        self.assertEqual(row['pending_text'], '第1\n第2\n第3')
+        self.assertEqual(
+            [json.loads(line)['source_event_id'] for line in row['event_meta'].split('\n')],
+            ['cross-1', 'cross-2', 'cross-3'])
+
+    def test_consumed_batching_row_starts_a_successor(self):
+        store = PhoneCheckStore()
+        self._batch(store, '旧的', 'old')
+        finished = list(store.rows.values())[0]
+        finished_id = finished['id']
+        finished['check_state'] = 'consumed'
+        finished['resolved_at'] = NOW
+        self._batch(store, '新的', 'new', NOW + timedelta(minutes=2))
+        fresh = list(store.rows.values())[0]
+        self.assertEqual(fresh['pending_count'], 1)
+        self.assertEqual(fresh['pending_text'], '新的')
+        self.assertEqual(fresh['check_state'], 'pending')
+        self.assertEqual(fresh['inbox_reason'], 'batching')
+        self.assertIsNone(fresh.get('resolved_at'))
+        self.assertEqual(fresh['successor_of_id'], finished_id)
+        self.assertNotEqual(fresh['id'], finished_id)
 
     def test_identical_texts_both_enter_the_inbox(self):
         store = PhoneCheckStore()
@@ -219,6 +256,13 @@ class MessageBatchingTests(unittest.TestCase):
         self.assertIn('if (loading) return;', text)
         self.assertIn('const BATCH_FLUSH_MS = 5000;', text)
         self.assertNotIn('< 2000', text)
+        send_text = text.split('const sendText = async')[1].split('const retryLastGeneration')[0]
+        busy_at = send_text.find('if (res.data?.busy)')
+        flush_at = send_text.find('scheduleBatchFlush()')
+        self.assertGreater(busy_at, 0)
+        self.assertGreater(flush_at, busy_at)
+        self.assertNotIn('scheduleBatchFlush', send_text[busy_at:flush_at])
+        self.assertNotIn('/chat/flush', send_text[busy_at:flush_at])
 
 
 class DeferredRouteTests(unittest.TestCase):
@@ -227,7 +271,7 @@ class DeferredRouteTests(unittest.TestCase):
         order = []
 
         def avail(*_args, **kwargs):
-            order.append(('avail', kwargs.get('batching')))
+            order.append(('avail', bool(kwargs.get('batching'))))
             return {'can_reply': True, 'pending_count': 2, 'opportunity_id': 9}
 
         def explode(*_args, **_kwargs):
@@ -252,7 +296,7 @@ class DeferredRouteTests(unittest.TestCase):
         self.assertTrue(body['deferred'])
         self.assertEqual(body['pending_count'], 2)
         self.assertEqual(body['source_event_id'], 'defer-1')
-        self.assertEqual(order, ['save', ('avail', True)])
+        self.assertEqual(order, ['save', ('avail', False), ('avail', True)])
 
     def test_without_defer_the_availability_call_stays_unchanged(self):
         import route_chat
@@ -282,6 +326,91 @@ class DeferredRouteTests(unittest.TestCase):
         self.assertTrue(body['busy'])
         self.assertNotIn('batching', captured)
 
+    def test_defer_while_busy_matches_the_plain_busy_response(self):
+        import route_chat
+        decision = {
+            'can_reply': False, 'seen': False, 'reply_state': 'soft_busy',
+            'activity': {'title': '开会', 'location': '会议室', 'end_time': '11:00'},
+            'pending_count': 1, 'opportunity_id': 4,
+            'free_at': '11:00', 'seen_at': None, 'next_phone_check_at': None,
+        }
+        flags = []
+
+        def avail(*_args, **kwargs):
+            flags.append(bool(kwargs.get('batching')))
+            return decision
+
+        async def both():
+            results = []
+            for extra in ({}, {'defer': True}):
+                payload = {
+                    'user_id': 'u', 'character_id': 'gojo', 'text': '在吗',
+                    'source_event_id': 'busy-same', **extra,
+                }
+                results.append(await route_chat.chat_text(payload))
+            return results
+
+        with patch.object(route_chat, 'get_character', return_value={'voice_id': 'v'}), \
+                patch.object(route_chat, 'save_user_short_memory_once', return_value=True), \
+                patch.object(route_chat, 'get_temporal_snapshot', return_value={}), \
+                patch.object(route_chat, 'update_chat_days', return_value=3), \
+                patch('reply_availability.check_reply_availability', side_effect=avail):
+            plain, deferred = asyncio.run(both())
+        self.assertEqual(plain.status_code, deferred.status_code)
+        self.assertEqual(plain.status_code, 200)
+        self.assertEqual(json.loads(plain.body), json.loads(deferred.body))
+        self.assertEqual(json.loads(plain.body)['busy'], True)
+        self.assertEqual(flags, [False, False])
+
+    def _route_with_world(self, store, world, payload):
+        import route_chat
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+                patch.object(db_schedule, 'get_current_world_state', return_value=world), \
+                patch.object(db_schedule, 'get_next_free_time', return_value='11:00'), \
+                patch.object(db_schedule, 'sample_next_phone_check_at',
+                             return_value=NOW + timedelta(minutes=5)), \
+                patch.object(route_chat, 'get_character', return_value={'voice_id': 'v'}), \
+                patch.object(route_chat, 'save_user_short_memory_once', return_value=True), \
+                patch.object(route_chat, 'get_temporal_snapshot',
+                             return_value={'now_local': NOW}), \
+                patch.object(route_chat, 'update_chat_days', return_value=3):
+            return asyncio.run(route_chat.chat_text(payload))
+
+    def test_defer_while_busy_keeps_the_inbox_unlabeled(self):
+        store = PhoneCheckStore()
+        world = {
+            'activity': BUSY, 'event': {}, 'phase': {},
+            'availability': {'reply_state': 'soft_busy', 'can_reply': False},
+        }
+        response = self._route_with_world(store, world, {
+            'user_id': 'u', 'character_id': 'gojo', 'text': '在忙吗',
+            'source_event_id': 'busy-defer', 'defer': True,
+        })
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 200, body)
+        self.assertTrue(body['busy'])
+        self.assertNotIn('deferred', body)
+        row = list(store.rows.values())[0]
+        self.assertIsNone(row.get('inbox_reason'))
+        self.assertEqual(row['reply_state'], 'soft_busy')
+        self.assertIn('有空看手机', delayed_reply._delayed_trigger(row))
+        self.assertNotIn('连着发了几条', delayed_reply._delayed_trigger(row))
+
+    def test_defer_while_free_opens_a_batching_row(self):
+        store = PhoneCheckStore()
+        response = self._route_with_world(store, FREE_WORLD, {
+            'user_id': 'u', 'character_id': 'gojo', 'text': '连发',
+            'source_event_id': 'free-defer', 'defer': True,
+        })
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 202, body)
+        self.assertTrue(body['deferred'])
+        row = list(store.rows.values())[0]
+        self.assertEqual(row['inbox_reason'], 'batching')
+        self.assertEqual(row['start_time'], '00:00')
+        self.assertIn('连着发了几条', delayed_reply._delayed_trigger(row))
+        self.assertNotIn('有空看手机', delayed_reply._delayed_trigger(row))
+
 
 @unittest.skipUnless(
     os.getenv('COGNITIVE_TEST_PGLITE'),
@@ -302,8 +431,8 @@ class DeferredStickerPersistenceTests(unittest.TestCase):
         order = []
 
         def avail(*_args, **kwargs):
-            order.append(kwargs.get('batching'))
-            return {'can_reply': False, 'pending_count': 1, 'opportunity_id': 1}
+            order.append(bool(kwargs.get('batching')))
+            return {'can_reply': True, 'pending_count': 1, 'opportunity_id': 1}
 
         def explode(*_args, **_kwargs):
             order.append('model')
@@ -327,7 +456,7 @@ class DeferredStickerPersistenceTests(unittest.TestCase):
             response = asyncio.run(route_chat.chat_text(payload))
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 202, body)
-        self.assertEqual(order, [True])
+        self.assertEqual(order, [False, True])
         rows = self.sql(
             '''SELECT kind, extra FROM chat_log WHERE client_msg_id=%s''',
             ('defer-sticker',))

@@ -1896,6 +1896,10 @@ export default function ChatRoom() {
           sticker: opts?.sticker ? { id: opts.sticker.id, desc: opts.sticker.desc || '' } : undefined,
           ...(deferSend ? { defer: true } : {}),
         });
+        if (res.data?.busy) {
+          await processResponseExtras(res.data);
+          return;
+        }
         if (deferSend && (res.status === 202 || res.data?.deferred)) {
           scheduleBatchFlush();
           return;
@@ -1917,9 +1921,6 @@ export default function ChatRoom() {
           return;
         }
         await processResponseExtras(res.data);
-        if (res.data?.busy) {
-          return;
-        }
         let segments: Segment[] = [];
         if (Array.isArray(res.data?.messages) && res.data.messages.length > 0) {
           segments = res.data.messages;

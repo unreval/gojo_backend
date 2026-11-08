@@ -1154,10 +1154,13 @@ def decide_phone_check(character_id, user_id, now: datetime, activity,
     batching: 角色有空、用户还在连发。绕过 free 短路，写入 inbox_reason。
     """
     if batching:
+        # 当天所有连发行共用同一组边界。start_time 若取当前 HH:MM，
+        # 跨分钟就对不上 SELECT，连发会被拆成两行、回两次。
+        # 忙碌路径不进这个分支，仍用活动自己的 start_time / end_time。
         reply_state = REPLY_FREE
         activity = {
             'title': '',
-            'start_time': now.strftime('%H:%M'),
+            'start_time': '00:00',
             'end_time': '23:59',
             'reply_state': REPLY_FREE,
             'can_reply': True,

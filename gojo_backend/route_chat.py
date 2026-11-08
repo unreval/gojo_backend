@@ -1643,8 +1643,9 @@ async def chat_text(data: dict):
     availability = None
     try:
         from reply_availability import check_reply_availability
-        availability = check_reply_availability(
-            character_id, user_id,
+        availability_kwargs = dict(
+            character_id=character_id,
+            user_id=user_id,
             source_event_id=source_event_id or '',
             pending_text=user_text,
             now=temporal_snapshot.get('now_local'),
@@ -1653,9 +1654,12 @@ async def chat_text(data: dict):
                 'reply_to': reply_to,
                 'source_event_id': source_event_id,
             },
-            **({'batching': True} if defer else {}),
         )
-        if defer:
+        availability = check_reply_availability(**availability_kwargs)
+        # defer 只表示「有空就先攒着」。他真在忙时必须走原来的忙碌收件箱，
+        # 不能把 inbox_reason 标成 batching，否则补回会说成连发。
+        if defer and availability.get('can_reply'):
+            availability = check_reply_availability(**availability_kwargs, batching=True)
             _trace.mark('availability', (_time.perf_counter() - _tmark) * 1000.0)
             _latency_emit()
             return JSONResponse({
