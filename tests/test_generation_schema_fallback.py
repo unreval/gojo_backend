@@ -186,7 +186,90 @@ class SchemaEmptyProbeTests(unittest.TestCase):
         self.assertEqual(raw, '')
         provider.assert_called_once()
         self.assertNotIn('output_config', provider.call_args.kwargs)
+        self.assertNotIn('timeout', provider.call_args.kwargs)
         notes = [call.args[0] for call in logged.call_args_list
                  if call.args and isinstance(call.args[0], str)]
         self.assertFalse(any('schema returned empty' in note for note in notes))
         self.assertFalse(any('schema unavailable' in note for note in notes))
+
+
+class _ProbeTimeout(Exception):
+    pass
+
+
+class SchemaProbeTimeoutTests(unittest.TestCase):
+    def setUp(self):
+        self.model = 'claude-schema-probe-timeout'
+        route_chat._schema_unavailable_models.discard(self.model)
+
+    def tearDown(self):
+        route_chat._schema_unavailable_models.discard(self.model)
+        os.environ.pop('GENERATION_SCHEMA_PROBE_TIMEOUT', None)
+        importlib.reload(config)
+
+    def test_probe_timeout_default_is_twenty_seconds(self):
+        os.environ.pop('GENERATION_SCHEMA_PROBE_TIMEOUT', None)
+        importlib.reload(config)
+        self.assertEqual(config.GENERATION_SCHEMA_PROBE_TIMEOUT, 20.0)
+        os.environ['GENERATION_SCHEMA_PROBE_TIMEOUT'] = '8'
+        importlib.reload(config)
+        self.assertEqual(config.GENERATION_SCHEMA_PROBE_TIMEOUT, 8.0)
+        os.environ['GENERATION_SCHEMA_PROBE_TIMEOUT'] = 'nope'
+        importlib.reload(config)
+        self.assertEqual(config.GENERATION_SCHEMA_PROBE_TIMEOUT, 20.0)
+
+    def test_schema_probe_timeout_retries_once_without_schema(self):
+        transport_calls = []
+        real_transport = route_chat.call_with_transport_retry
+
+        def _spy(call, **kwargs):
+            transport_calls.append(1)
+            return real_transport(call, **kwargs)
+
+        class APITimeoutError(TimeoutError):
+            pass
+
+        class ReadTimeout(Exception):
+            pass
+
+        for exc_type in (APITimeoutError, ReadTimeout):
+            with self.subTest(exc_type=exc_type.__name__):
+                transport_calls.clear()
+                route_chat._schema_unavailable_models.discard(self.model)
+                with patch.object(route_chat, 'get_anthropic') as client_factory, \
+                        patch.object(route_chat, 'call_with_transport_retry', _spy), \
+                        patch('builtins.print') as logged:
+                    provider = client_factory.return_value.messages.create
+                    provider.side_effect = [exc_type('timed out'), _response(ENVELOPE)]
+                    raw, _ = route_chat._create_json(self.model, 100, [], [])
+                self.assertEqual(raw, ENVELOPE)
+                self.assertEqual(provider.call_count, 2)
+                self.assertEqual(transport_calls, [])
+                first, second = provider.call_args_list
+                self.assertEqual(first.kwargs['timeout'],
+                                 route_chat.GENERATION_SCHEMA_PROBE_TIMEOUT)
+                self.assertIn('output_config', first.kwargs)
+                self.assertNotIn('output_config', second.kwargs)
+                self.assertNotIn('timeout', second.kwargs)
+                self.assertIn(self.model, route_chat._schema_unavailable_models)
+                notes = [call.args[0] for call in logged.call_args_list
+                         if call.args and isinstance(call.args[0], str)]
+                self.assertTrue(any(
+                    note.startswith(
+                        f'[generation] schema unavailable model={self.model} ')
+                    and f'error_type={exc_type.__name__}' in note
+                    for note in notes))
+
+    def test_successful_schema_request_keeps_the_short_timeout(self):
+        with patch.object(route_chat, 'get_anthropic') as client_factory:
+            provider = client_factory.return_value.messages.create
+            provider.return_value = _response(ENVELOPE)
+            raw, _ = route_chat._create_json(self.model, 100, [], [])
+        self.assertEqual(raw, ENVELOPE)
+        provider.assert_called_once()
+        self.assertEqual(provider.call_args.kwargs['timeout'],
+                         route_chat.GENERATION_SCHEMA_PROBE_TIMEOUT)
+        self.assertEqual(
+            provider.call_args.kwargs['output_config']['format']['schema'],
+            GENERATION_ENVELOPE_SCHEMA)
+        self.assertNotIn(self.model, route_chat._schema_unavailable_models)

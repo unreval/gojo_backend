@@ -35,7 +35,7 @@ from fastapi.responses import JSONResponse
 from config import (
     EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN, MODEL_JP_AUX,
     PROVIDER_TRANSPORT_ATTEMPTS, PROVIDER_TRANSPORT_BACKOFF_SECONDS,
-    GENERATION_JSON_SCHEMA,
+    GENERATION_JSON_SCHEMA, GENERATION_SCHEMA_PROBE_TIMEOUT,
 )
 from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
@@ -74,6 +74,15 @@ def _provider_create(**kwargs):
     return get_anthropic(max_retries=1).messages.create(**kwargs)
 
 
+def _schema_probe_timed_out(exc):
+    """A schema-probe timeout is a capability miss for this model."""
+    name = type(exc).__name__
+    return isinstance(exc, TimeoutError) or name in (
+        'APITimeoutError', 'Timeout', 'TimeoutException',
+        'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout',
+    )
+
+
 def _create_json_resilient(model, max_tokens, system_blocks, messages):
     """Bound transport retries separately from semantic repair.
 
@@ -107,6 +116,7 @@ def _create_json(model, max_tokens, system_blocks, messages):
         try:
             response = _provider_create(
                 **kwargs,
+                timeout=GENERATION_SCHEMA_PROBE_TIMEOUT,
                 output_config={'format': {
                     'type': 'json_schema',
                     'schema': GENERATION_ENVELOPE_SCHEMA,
@@ -119,6 +129,7 @@ def _create_json(model, max_tokens, system_blocks, messages):
                 or (getattr(exc, 'status_code', None) == 400
                     and any(token in detail for token in (
                         'output_config', 'json_schema', 'schema')))
+                or _schema_probe_timed_out(exc)
             )
             if not unsupported:
                 raise

@@ -714,6 +714,8 @@ class RouteIdempotencyTests(unittest.TestCase):
                 MODEL_JP_AUX='claude-haiku-test',
                 PROVIDER_TRANSPORT_ATTEMPTS=2,
                 PROVIDER_TRANSPORT_BACKOFF_SECONDS=0.0,
+                GENERATION_JSON_SCHEMA=True,
+                GENERATION_SCHEMA_PROBE_TIMEOUT=20.0,
             ),
             'db': stub('db', get_conn=lambda: FakeConn(self.store)),
             'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),

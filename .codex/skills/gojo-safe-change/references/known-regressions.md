@@ -566,6 +566,43 @@ TESTED
 
 ---
 
+# REG-016 — Schema probe failure must return to the prompt contract
+
+## Area
+
+Generation
+
+## Historical failure
+
+`_create_json` treated a schema probe as unsupported only when `output_config`
+raised `TypeError` or HTTP 400. On 2026-11-09 the live relay did neither: the
+same model returned text without `output_config`, and with
+`GENERATION_ENVELOPE_SCHEMA` it returned an empty 200 or hung. The probe never
+entered `except`, `_schema_unavailable_models` stayed empty, and every reply
+failed the same way with `generation_failed` and no provider error.
+
+## Required behavior
+
+schema 探测失败（异常 / 空内容 / 超时）必须退回提示词契约，且不带 schema 的空响应不得触发重试。
+
+- An unsupported-schema exception, an empty schema response, or a schema-probe timeout is recorded on `_schema_unavailable_models` and retried once inside the same `_create_json` call, without `output_config`.
+- That retry does not consume a semantic repair and does not start another transport-retry loop.
+- A call that is already not using schema returns an empty body as-is, with one provider call.
+- `GENERATION_JSON_SCHEMA=0` never sends `output_config`. The default stays on.
+- `GENERATION_SCHEMA_PROBE_TIMEOUT` bounds only the schema attempt. The prompt-contract call keeps the normal client timeout.
+
+## Regression requirement
+
+`tests/test_generation_schema_fallback.py` must keep the empty-probe retry, the
+second-call skip, the HTTP 400 `json_schema` path, the plain-empty no-retry
+case, the operator switch, and the schema-probe timeout.
+
+## Status
+
+TESTED
+
+---
+
 # Regression Rule
 
 任何任务如果修改到上述 Regression 的 Area：
@@ -598,3 +635,4 @@ TESTED
 | REG-013 | User sticker canonical kind | TESTED |
 | REG-014 | Sticky note from candidate pipeline | TESTED |
 | REG-015 | Flush bypasses delayed-reply hourly quota | TESTED |
+| REG-016 | Schema probe empty / timeout / exception | TESTED |
