@@ -186,7 +186,13 @@ class NonverbalTTSTests(unittest.TestCase):
                         id=9, user_id='u', character_id='c', pending_text='你好',
                         pending_count=1, last_source_event_id='u1', reply_state='free'), helpers=helpers)
                     self.assertTrue(result['ok'], result)
-                    self.assertEqual(result['messages'], [{'jp': text, 'zh': text, 'audio_b64': ''}])
+                    self.assertEqual(result['messages'], [{
+                        'jp': text,
+                        'zh': text,
+                        'audio_b64': '',
+                        'event_id': 'delayed_reply:9:0',
+                        'segment_index': 0,
+                    }])
                     self.assertEqual(commit.call_args.args[1], text)
                     self.assertEqual(commit.call_args.kwargs['subtitle'], text)
                     self.assertEqual(helpers.generate_calls, 1)

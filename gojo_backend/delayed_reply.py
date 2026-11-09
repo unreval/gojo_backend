@@ -377,6 +377,8 @@ def generate_delayed_chat_reply(bundle, *, helpers=None, push=True):
     turn_id = delivery_event_id(phone_check_id, 0)
     for index, msg in enumerate(msgs):
         event_id = delivery_event_id(phone_check_id, index)
+        msg['event_id'] = event_id
+        msg['segment_index'] = index
         commit_visible_assistant_message(
             user_id, msg.get('jp') or '', character_id,
             event_id=event_id,
