@@ -6,6 +6,7 @@ REG-015: /chat/flush must not consult the delayed-reply hourly quota.
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 import unittest
@@ -640,6 +641,279 @@ class FlushStickerTests(unittest.TestCase):
                 {'user_id': 'u', 'character_id': 'gojo'}))
         self.assertEqual(json.loads(present.body)['sticker'], sticker)
         self.assertNotIn('sticker', json.loads(absent.body))
+
+
+_EVENT_ID_RE = re.compile(r'^delayed_reply:\d+:\d+$')
+
+
+class _ReplyHelpers:
+    def __init__(self, bubbles):
+        self.bubbles = bubbles
+
+    def _turn_context(self, *_args, **_kwargs):
+        return {}, []
+
+    def _history_plus_current(self, messages, _trigger):
+        return messages
+
+    def _generate_or_none(self, *_args, **_kwargs):
+        return {'emotion': '平静', 'messages': self.bubbles}, None
+
+    def _finalize_committed(self, result):
+        if not result:
+            return None, None
+        return '平静', list(result.get('messages') or [])
+
+    def _commit_offline_state(self, *_args, **_kwargs):
+        return None
+
+
+def _client_segment_id(seg, assistant_turn_id, index):
+    """Same precedence as app/chat/[id].tsx assistantSegmentId. Not a frontend edit."""
+    event_id = str((seg or {}).get('event_id') or '').strip()
+    if event_id:
+        return event_id
+    turn_id = str(assistant_turn_id or '').strip()
+    if turn_id:
+        return f'{turn_id}:{index}'
+    return f'local_{index}'
+
+
+class FlushReturnedEventIdTests(unittest.TestCase):
+    def _bubbles(self):
+        return [
+            {'jp': 'まだ待ってたの？偉いね、犬みたい。', 'zh': '还在等啊'},
+            {'jp': '僕は今ドトールで昼飯。', 'zh': '我在doutor吃午饭'},
+        ]
+
+    def _patches(self, commits, proactive):
+        def capture_commit(*_args, **kwargs):
+            commits.append(kwargs)
+
+        def capture_proactive(*_args, **kwargs):
+            proactive.append(kwargs)
+            return (len(proactive), NOW)
+
+        return [
+            patch.object(delayed_reply, 'assistant_already_committed', return_value=False),
+            patch.object(delayed_reply, '_persist_pending_user_messages'),
+            patch.object(delayed_reply, '_apply_promise_effects'),
+            patch.object(delayed_reply, '_precheck_pending_bundle_sources',
+                         side_effect=lambda bundle: bundle),
+            patch('characters.get_character', return_value={'voice_id': 'v', 'name': '五条'}),
+            patch('temporal_awareness.get_temporal_snapshot', return_value={}),
+            patch('temporal_awareness.record_turn'),
+            patch('prompt.build_system_blocks', return_value=[]),
+            patch('schedule_transition.validate_generated_schedule_reply',
+                  return_value=(None, {})),
+            patch('schedule_transition.commit_generated_schedule_intent',
+                  return_value={'ok': True, 'noop': True}),
+            patch('tts.tts_to_b64', return_value=''),
+            patch('user_memory.get_short_memory', return_value=[]),
+            patch('user_memory.commit_visible_assistant_message',
+                  side_effect=capture_commit),
+            patch('user_memory.update_chat_days', return_value=1),
+            patch('proactive_msg.add_proactive_msg', side_effect=capture_proactive),
+            patch('behavior_evidence.record_reply_cycle'),
+            patch('push_notify.push_to_user'),
+        ]
+
+    def _flush(self, *, push_via_worker=False):
+        commits = []
+        proactive = []
+        helpers = _ReplyHelpers(self._bubbles())
+        started = []
+        for item in self._patches(commits, proactive):
+            item.start()
+            started.append(item)
+            self.addCleanup(item.stop)
+        if push_via_worker:
+            bundle = {
+                'id': 228, 'user_id': 'u', 'character_id': 'gojo',
+                'pending_text': 'まだ待ってた', 'last_source_event_id': 'e228',
+                'reply_state': 'free', 'inbox_reason': 'batching', 'fail_count': 0,
+            }
+            result = delayed_reply.generate_delayed_chat_reply(
+                bundle, helpers=helpers, push=True)
+            return result, commits, proactive
+        store = PhoneCheckStore()
+        store.next_id = 228
+        with patch.object(db_schedule, 'get_conn', lambda: _conn(store)), \
+                patch.object(db_schedule, 'get_current_world_state', return_value=FREE_WORLD):
+            db_schedule.decide_phone_check(
+                'gojo', 'u', NOW, None,
+                source_event_id='e228', pending_text='まだ待ってた',
+                event_meta={'kind': 'text', 'source_event_id': 'e228'},
+                batching=True)
+
+            def generate_fn(bundle, push=True):
+                self.assertIs(push, False)
+                return delayed_reply.generate_delayed_chat_reply(
+                    bundle, helpers=helpers, push=push)
+
+            result = delayed_reply.flush_batching_reply(
+                'u', 'gojo', now=NOW, generate_fn=generate_fn)
+        self.assertEqual(result.get('id'), 228)
+        return result, commits, proactive
+
+    def test_flush_messages_echo_the_committed_three_part_event_id(self):
+        result, commits, proactive = self._flush()
+        messages = result['messages']
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(commits), 2)
+        for index, msg in enumerate(messages):
+            expected = f'delayed_reply:228:{index}'
+            self.assertEqual(msg['event_id'], expected)
+            self.assertRegex(msg['event_id'], _EVENT_ID_RE)
+            self.assertNotRegex(msg['event_id'], r'^delayed_reply:\d+:\d+:\d+$')
+            self.assertEqual(msg['segment_index'], index)
+            self.assertEqual(commits[index]['event_id'], expected)
+            self.assertEqual(commits[index]['metadata']['assistant_turn_id'],
+                             'delayed_reply:228:0')
+            self.assertEqual(commits[index]['metadata']['segment_index'], index)
+            self.assertEqual(proactive[index]['event_id'], expected)
+            self.assertEqual(proactive[index]['assistant_turn_id'], 'delayed_reply:228:0')
+            self.assertEqual(proactive[index]['segment_index'], index)
+        self.assertEqual(result['turn_id'], 'delayed_reply:228:0')
+
+    def test_worker_push_keeps_stored_event_ids(self):
+        result, commits, proactive = self._flush(push_via_worker=True)
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(commits), 2)
+        for index in range(2):
+            expected = f'delayed_reply:228:{index}'
+            self.assertEqual(commits[index]['event_id'], expected)
+            self.assertEqual(commits[index]['metadata'], {
+                'proactive_kind': 'delayed_reply',
+                'phone_check_id': 228,
+                'assistant_turn_id': 'delayed_reply:228:0',
+                'segment_index': index,
+            })
+            self.assertEqual(proactive[index]['event_id'], expected)
+            self.assertEqual(proactive[index]['assistant_turn_id'], 'delayed_reply:228:0')
+            self.assertEqual(proactive[index]['segment_index'], index)
+            self.assertEqual(result['messages'][index]['segment_index'], index)
+        import push_notify
+        push_notify.push_to_user.assert_called_once()
+
+    def test_already_delivered_returns_empty_messages(self):
+        bundle = {
+            'id': 228, 'user_id': 'u', 'character_id': 'gojo',
+            'pending_text': 'まだ', 'pending_count': 1,
+        }
+        with patch.object(delayed_reply, 'assistant_already_committed', return_value=True), \
+                patch('characters.get_character',
+                      return_value={'name': '五条', 'voice_id': 'v'}), \
+                patch('user_memory.commit_visible_assistant_message') as commit:
+            result = delayed_reply.generate_delayed_chat_reply(
+                bundle, helpers=_ReplyHelpers(self._bubbles()), push=False)
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['already_delivered'])
+        self.assertEqual(result['messages'], [])
+        self.assertEqual(result['turn_id'], 'delayed_reply:228:0')
+        commit.assert_not_called()
+
+
+@unittest.skipUnless(
+    os.getenv('COGNITIVE_TEST_PGLITE'),
+    'set COGNITIVE_TEST_PGLITE to the local test-only package')
+class FlushAppendDedupTests(unittest.TestCase):
+    from tests import test_private_source_first as fixture
+    setUpClass = classmethod(fixture.PrivateSourceFirstTests.setUpClass.__func__)
+    tearDownClass = classmethod(fixture.PrivateSourceFirstTests.tearDownClass.__func__)
+    sql = fixture.PrivateSourceFirstTests.sql
+    tearDown = fixture.PrivateSourceFirstTests.tearDown
+
+    def setUp(self):
+        self.fixture.PrivateSourceFirstTests.setUp(self)
+
+    def _assistant_ids(self, phone_check_id):
+        rows = self.sql(
+            '''SELECT client_msg_id FROM chat_log
+               WHERE user_id=%s AND chat_id=%s
+                 AND client_msg_id LIKE %s
+                 AND deleted_at IS NULL
+               ORDER BY id''',
+            ('u', 'gojo', f'delayed_reply:{phone_check_id}:%'))
+        return [row[0] for row in rows]
+
+    def test_flush_then_client_append_does_not_double_chat_log(self):
+        import route_chatlog
+        store = PhoneCheckStore()
+        store.next_id = 228
+        helpers = _ReplyHelpers([
+            {'jp': 'まだ待ってたの？偉いね、犬みたい。', 'zh': '还在等啊'},
+            {'jp': '僕は今ドトールで昼飯。', 'zh': '我在doutor吃午饭'},
+        ])
+        patches = [
+            patch.object(delayed_reply, '_persist_pending_user_messages'),
+            patch.object(delayed_reply, '_apply_promise_effects'),
+            patch.object(delayed_reply, '_precheck_pending_bundle_sources',
+                         side_effect=lambda bundle: bundle),
+            patch.object(db_schedule, 'get_conn', lambda: _conn(store)),
+            patch.object(db_schedule, 'get_current_world_state', return_value=FREE_WORLD),
+            patch('characters.get_character', return_value={'voice_id': 'v', 'name': '五条'}),
+            patch('temporal_awareness.get_temporal_snapshot', return_value={}),
+            patch('temporal_awareness.record_turn'),
+            patch('prompt.build_system_blocks', return_value=[]),
+            patch('schedule_transition.validate_generated_schedule_reply',
+                  return_value=(None, {})),
+            patch('schedule_transition.commit_generated_schedule_intent',
+                  return_value={'ok': True, 'noop': True}),
+            patch('tts.tts_to_b64', return_value=''),
+            patch('user_memory.get_short_memory', return_value=[]),
+            patch('user_memory.update_chat_days', return_value=1),
+            patch('proactive_msg.add_proactive_msg', return_value=(1, NOW)),
+            patch('behavior_evidence.record_reply_cycle'),
+            patch('push_notify.push_to_user'),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        db_schedule.decide_phone_check(
+            'gojo', 'u', NOW, None,
+            source_event_id='e228', pending_text='まだ待ってた',
+            event_meta={'kind': 'text', 'source_event_id': 'e228'},
+            batching=True)
+
+        def generate_fn(bundle, push=True):
+            self.assertIs(push, False)
+            return delayed_reply.generate_delayed_chat_reply(
+                bundle, helpers=helpers, push=push)
+
+        result = delayed_reply.flush_batching_reply(
+            'u', 'gojo', now=NOW, generate_fn=generate_fn)
+        self.assertTrue(result.get('ok'), result)
+        messages = result['messages']
+        self.assertEqual(len(messages), 2)
+        committed = self._assistant_ids(228)
+        self.assertEqual(committed, [
+            'delayed_reply:228:0',
+            'delayed_reply:228:1',
+        ])
+        client_messages = []
+        for index, seg in enumerate(messages):
+            client_messages.append({
+                'client_msg_id': _client_segment_id(seg, result.get('turn_id'), index),
+                'role': 'gojo',
+                'text': seg['jp'],
+                'subtitle': seg.get('zh') or '',
+                'emotion': result.get('emotion') or '',
+                'kind': 'text',
+                'has_audio': bool(seg.get('audio_b64')),
+            })
+        response = asyncio.run(route_chatlog.append_chatlog({
+            'user_id': 'u',
+            'chat_id': 'gojo',
+            'messages': client_messages,
+        }))
+        body = json.loads(response.body)
+        self.assertTrue(body['ok'], body)
+        self.assertEqual(body['written'], 0)
+        self.assertEqual(self._assistant_ids(228), committed)
+        self.assertEqual(len(committed), len(messages))
+        for client_id in (item['client_msg_id'] for item in client_messages):
+            self.assertRegex(client_id, _EVENT_ID_RE)
 
 
 if __name__ == '__main__':
