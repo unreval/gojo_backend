@@ -392,14 +392,16 @@ def generate_delayed_chat_reply(bundle, *, helpers=None, push=True):
                 'segment_index': index,
             },
         )
-        proactive_msg.add_proactive_msg(
-            character_id, user_id, 'delayed_reply',
-            msg.get('jp') or '', msg.get('zh') or '',
-            emotion, msg.get('audio_b64') or '',
-            event_id=event_id,
-            assistant_turn_id=turn_id,
-            segment_index=index,
-        )
+        # flush 的气泡已随 HTTP 响应返回。主动消息队列只给离线 worker 用。
+        if push:
+            proactive_msg.add_proactive_msg(
+                character_id, user_id, 'delayed_reply',
+                msg.get('jp') or '', msg.get('zh') or '',
+                emotion, msg.get('audio_b64') or '',
+                event_id=event_id,
+                assistant_turn_id=turn_id,
+                segment_index=index,
+            )
     record_turn(
         user_id, character_id, source='chat_delayed',
         prior_snapshot=temporal_snapshot,

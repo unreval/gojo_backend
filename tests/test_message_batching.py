@@ -694,6 +694,7 @@ class FlushReturnedEventIdTests(unittest.TestCase):
             proactive.append(kwargs)
             return (len(proactive), NOW)
 
+        self._add = Mock(side_effect=capture_proactive)
         return [
             patch.object(delayed_reply, 'assistant_already_committed', return_value=False),
             patch.object(delayed_reply, '_persist_pending_user_messages'),
@@ -713,7 +714,7 @@ class FlushReturnedEventIdTests(unittest.TestCase):
             patch('user_memory.commit_visible_assistant_message',
                   side_effect=capture_commit),
             patch('user_memory.update_chat_days', return_value=1),
-            patch('proactive_msg.add_proactive_msg', side_effect=capture_proactive),
+            patch('proactive_msg.add_proactive_msg', self._add),
             patch('behavior_evidence.record_reply_cycle'),
             patch('push_notify.push_to_user'),
         ]
@@ -771,15 +772,34 @@ class FlushReturnedEventIdTests(unittest.TestCase):
             self.assertEqual(commits[index]['metadata']['assistant_turn_id'],
                              'delayed_reply:228:0')
             self.assertEqual(commits[index]['metadata']['segment_index'], index)
-            self.assertEqual(proactive[index]['event_id'], expected)
-            self.assertEqual(proactive[index]['assistant_turn_id'], 'delayed_reply:228:0')
-            self.assertEqual(proactive[index]['segment_index'], index)
+        self.assertEqual(self._add.call_count, 0)
+        self.assertEqual(proactive, [])
         self.assertEqual(result['turn_id'], 'delayed_reply:228:0')
+
+    def test_push_false_does_not_call_add_proactive_msg(self):
+        result, commits, proactive = self._flush()
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['messages']), 2)
+        self.assertEqual(self._add.call_count, 0)
+        self._add.assert_not_called()
+        self.assertEqual(proactive, [])
+        self.assertEqual(len(commits), len(result['messages']))
+        for index, msg in enumerate(result['messages']):
+            expected = f'delayed_reply:228:{index}'
+            self.assertEqual(commits[index]['event_id'], expected)
+            self.assertRegex(commits[index]['event_id'], _EVENT_ID_RE)
+            self.assertEqual(msg['event_id'], expected)
+            self.assertRegex(msg['event_id'], _EVENT_ID_RE)
+            self.assertEqual(msg['segment_index'], index)
+        import push_notify
+        push_notify.push_to_user.assert_not_called()
 
     def test_worker_push_keeps_stored_event_ids(self):
         result, commits, proactive = self._flush(push_via_worker=True)
         self.assertTrue(result['ok'])
         self.assertEqual(len(commits), 2)
+        self.assertEqual(self._add.call_count, 2)
+        bubbles = self._bubbles()
         for index in range(2):
             expected = f'delayed_reply:228:{index}'
             self.assertEqual(commits[index]['event_id'], expected)
@@ -789,9 +809,21 @@ class FlushReturnedEventIdTests(unittest.TestCase):
                 'assistant_turn_id': 'delayed_reply:228:0',
                 'segment_index': index,
             })
+            args, kwargs = self._add.call_args_list[index]
+            self.assertEqual(args, (
+                'gojo', 'u', 'delayed_reply',
+                bubbles[index]['jp'], bubbles[index]['zh'],
+                '平静', '',
+            ))
+            self.assertEqual(kwargs, {
+                'event_id': expected,
+                'assistant_turn_id': 'delayed_reply:228:0',
+                'segment_index': index,
+            })
             self.assertEqual(proactive[index]['event_id'], expected)
             self.assertEqual(proactive[index]['assistant_turn_id'], 'delayed_reply:228:0')
             self.assertEqual(proactive[index]['segment_index'], index)
+            self.assertEqual(result['messages'][index]['event_id'], expected)
             self.assertEqual(result['messages'][index]['segment_index'], index)
         import push_notify
         push_notify.push_to_user.assert_called_once()
@@ -804,7 +836,8 @@ class FlushReturnedEventIdTests(unittest.TestCase):
         with patch.object(delayed_reply, 'assistant_already_committed', return_value=True), \
                 patch('characters.get_character',
                       return_value={'name': '五条', 'voice_id': 'v'}), \
-                patch('user_memory.commit_visible_assistant_message') as commit:
+                patch('user_memory.commit_visible_assistant_message') as commit, \
+                patch('proactive_msg.add_proactive_msg') as deliver:
             result = delayed_reply.generate_delayed_chat_reply(
                 bundle, helpers=_ReplyHelpers(self._bubbles()), push=False)
         self.assertTrue(result['ok'])
@@ -812,6 +845,7 @@ class FlushReturnedEventIdTests(unittest.TestCase):
         self.assertEqual(result['messages'], [])
         self.assertEqual(result['turn_id'], 'delayed_reply:228:0')
         commit.assert_not_called()
+        deliver.assert_not_called()
 
 
 @unittest.skipUnless(
@@ -914,6 +948,74 @@ class FlushAppendDedupTests(unittest.TestCase):
         self.assertEqual(len(committed), len(messages))
         for client_id in (item['client_msg_id'] for item in client_messages):
             self.assertRegex(client_id, _EVENT_ID_RE)
+
+    def test_flush_writes_chat_log_but_not_proactive_pending(self):
+        import proactive_msg
+        self.stack.enter_context(
+            patch.object(proactive_msg, 'get_conn', return_value=self.database))
+        proactive_msg.init_proactive_table()
+        proactive_msg.add_proactive_msg(
+            'gojo', 'u', 'life_share', '甘いものを食べた', '吃了甜的')
+        store = PhoneCheckStore()
+        store.next_id = 228
+        helpers = _ReplyHelpers([
+            {'jp': 'まだ待ってたの？偉いね、犬みたい。', 'zh': '还在等啊'},
+            {'jp': '僕は今ドトールで昼飯。', 'zh': '我在doutor吃午饭'},
+        ])
+        patches = [
+            patch.object(delayed_reply, '_persist_pending_user_messages'),
+            patch.object(delayed_reply, '_apply_promise_effects'),
+            patch.object(delayed_reply, '_precheck_pending_bundle_sources',
+                         side_effect=lambda bundle: bundle),
+            patch.object(db_schedule, 'get_conn', lambda: _conn(store)),
+            patch.object(db_schedule, 'get_current_world_state', return_value=FREE_WORLD),
+            patch('characters.get_character', return_value={'voice_id': 'v', 'name': '五条'}),
+            patch('temporal_awareness.get_temporal_snapshot', return_value={}),
+            patch('temporal_awareness.record_turn'),
+            patch('prompt.build_system_blocks', return_value=[]),
+            patch('schedule_transition.validate_generated_schedule_reply',
+                  return_value=(None, {})),
+            patch('schedule_transition.commit_generated_schedule_intent',
+                  return_value={'ok': True, 'noop': True}),
+            patch('tts.tts_to_b64', return_value=''),
+            patch('user_memory.get_short_memory', return_value=[]),
+            patch('user_memory.update_chat_days', return_value=1),
+            patch('behavior_evidence.record_reply_cycle'),
+            patch('push_notify.push_to_user'),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        db_schedule.decide_phone_check(
+            'gojo', 'u', NOW, None,
+            source_event_id='e228', pending_text='まだ待ってた',
+            event_meta={'kind': 'text', 'source_event_id': 'e228'},
+            batching=True)
+
+        def generate_fn(bundle, push=True):
+            self.assertIs(push, False)
+            return delayed_reply.generate_delayed_chat_reply(
+                bundle, helpers=helpers, push=push)
+
+        result = delayed_reply.flush_batching_reply(
+            'u', 'gojo', now=NOW, generate_fn=generate_fn)
+        self.assertTrue(result.get('ok'), result)
+        messages = result['messages']
+        self.assertEqual(len(messages), 2)
+        committed = self._assistant_ids(228)
+        self.assertEqual(committed, [
+            'delayed_reply:228:0',
+            'delayed_reply:228:1',
+        ])
+        self.assertEqual(len(committed), len(messages))
+        pending = proactive_msg.get_pending('u', 'gojo')
+        self.assertEqual([row['kind'] for row in pending], ['life_share'])
+        self.assertFalse(any(
+            str(row.get('event_id') or '').startswith('delayed_reply:')
+            for row in pending))
+        self.assertEqual(self.sql(
+            "SELECT count(*) FROM proactive_msg WHERE kind=%s",
+            ('delayed_reply',))[0][0], 0)
 
 
 if __name__ == '__main__':
