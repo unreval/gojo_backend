@@ -451,6 +451,35 @@ NOT RUN IN COVERAGE AUDIT
 
 ---
 
+# REG-016 — Schema probe failure must return to the prompt contract
+
+## Owner
+
+gojo_backend
+
+## Coverage
+
+COVERED
+
+## Direct tests
+
+- `tests/test_generation_schema_fallback.py`
+
+Confirmed behaviors include:
+
+- an empty schema probe retries once without `output_config` and remembers the model;
+- the next call skips schema and calls the provider once;
+- HTTP 400 mentioning `json_schema` still uses the previous exception path;
+- an empty response on a call that is not using schema is returned as-is;
+- `GENERATION_JSON_SCHEMA=0` never sends `output_config`;
+- a schema-probe timeout is treated as unsupported and retried once, and the short timeout is not applied to the prompt-contract call.
+
+## Execution status
+
+NOT RUN IN COVERAGE AUDIT
+
+---
+
 # Current Coverage Matrix
 
 | REG | Owner | Coverage |
@@ -468,6 +497,7 @@ NOT RUN IN COVERAGE AUDIT
 | REG-012 | gojo_backend | COVERED |
 | REG-013 | gojo_backend | COVERED |
 | REG-015 | gojo_backend | COVERED |
+| REG-016 | gojo_backend | COVERED |
 
 ---
 

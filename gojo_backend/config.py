@@ -64,6 +64,25 @@ PROVIDER_TRANSPORT_ATTEMPTS = max(1, min(4, int(
 PROVIDER_TRANSPORT_BACKOFF_SECONDS = max(0.0, min(5.0, float(
     os.getenv('PROVIDER_TRANSPORT_BACKOFF_SECONDS', '0.4'))))
 
+# Generation JSON schema. Set GENERATION_JSON_SCHEMA=0 when a relay cannot
+# honor output_config, then restart. The default stays on.
+GENERATION_JSON_SCHEMA = os.getenv(
+    'GENERATION_JSON_SCHEMA', '1').strip() not in ('0', 'false', 'False')
+
+
+def _positive_seconds(name, default):
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+    return value if value > 0 else float(default)
+
+
+# Short bound for the schema probe only. A relay that hangs on output_config
+# must not hold the reply for the normal client timeout.
+GENERATION_SCHEMA_PROBE_TIMEOUT = _positive_seconds(
+    'GENERATION_SCHEMA_PROBE_TIMEOUT', 20)
+
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_KEY', '')
 FISH_KEY      = os.environ.get('FISH_KEY', '')
 FISH_VOICE_ID = os.environ.get('FISH_VOICE_ID', 'bfcbd07c927742d6803f52084f6bb776')

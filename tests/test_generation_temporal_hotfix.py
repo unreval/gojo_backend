@@ -74,16 +74,23 @@ class PlaintextContractTests(unittest.TestCase):
         self.assertEqual(result['messages'], [{'jp': 'そうだね', 'zh': ''}])
 
     def test_invalid_or_protocol_output_fails_without_repeating_generation(self):
-        for raw in ('', '?!', 'null', '\x00hello', '{"messages":[',
-                    'hello\nschedule_action_intent: complete',
-                    'JP: hello\nZH: 你好', '<thinking>private</thinking>',
-                    'hello <<<OFFLINE_CHARACTER_STATES>>> {"inner":"x"}'):
-            with self.subTest(raw=raw):
-                result, state, calls, traces = self.generate(raw)
-                self.assertIsNone(result)
-                self.assertIsNone(state)
-                self.assertEqual(calls, 1)
-                self.assertEqual([t['output_contract'] for t in traces], ['retry_invalid'])
+        try:
+            for raw in ('', '?!', 'null', '\x00hello', '{"messages":[',
+                        'hello\nschedule_action_intent: complete',
+                        'JP: hello\nZH: 你好', '<thinking>private</thinking>',
+                        'hello <<<OFFLINE_CHARACTER_STATES>>> {"inner":"x"}'):
+                with self.subTest(raw=raw):
+                    route_chat._schema_unavailable_models.discard('offline')
+                    result, state, calls, traces = self.generate(raw)
+                    self.assertIsNone(result)
+                    self.assertIsNone(state)
+                    # Empty text is a schema-probe miss: one prompt-contract
+                    # retry, still a single invalid trace and no semantic repair.
+                    self.assertEqual(calls, 2 if not str(raw).strip() else 1)
+                    self.assertEqual(
+                        [t['output_contract'] for t in traces], ['retry_invalid'])
+        finally:
+            route_chat._schema_unavailable_models.discard('offline')
 
     def test_empty_messages_retries_without_salvaging_auxiliary_fields(self):
         raw = '{"messages":[],"reminder":{"content":"sleep"}}'
