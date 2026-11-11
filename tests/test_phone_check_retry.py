@@ -39,7 +39,7 @@ class PhoneCheckRetryTests(unittest.TestCase):
 
     def test_backoff_survives_ended_window_and_all_rearming_paths(self):
         self.fail_generation(NOW)
-        retry_at = NOW + timedelta(minutes=2)
+        retry_at = NOW + timedelta(minutes=1)
         self.assertEqual(self.row['retry_not_before'], retry_at)
         self.assertEqual(self.row['fail_count'], 1)
         self.assertEqual(self.row['last_fail_reason'], 'generation_failed')
@@ -59,7 +59,7 @@ class PhoneCheckRetryTests(unittest.TestCase):
 
     def test_fifth_failure_expires_without_deleting_pending_message(self):
         now = NOW
-        for count, minutes in enumerate((2, 10, 30, 120), 1):
+        for count, minutes in enumerate((1, 3, 8, 20), 1):
             self.fail_generation(now)
             self.assertEqual(self.row['fail_count'], count)
             self.assertEqual(self.row['retry_not_before'], now + timedelta(minutes=minutes))
