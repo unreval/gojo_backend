@@ -230,7 +230,7 @@ def format_pending_bundle_context(bundle, now=None):
         f'{elapsed_line}\n'
         '1. 这是延迟的正常回复，不是主动搭讪，不要当成 proactive。\n'
         '2. 不要逐条复读，也不要假装当时已经秒回。\n'
-        '3. 输出格式仍是 1~3 个气泡的 messages[]，每条含 jp / zh。\n'
+        '3. 输出格式仍是 1~3 个气泡的 messages[]，每条含 jp（纯日语）/ zh（中文翻译）。\n'
         '4. 图片/视频以 visual_summary 为准，不要编造没写过的画面。\n'
         '5. 积压里如果有带时间点的请求，先判断那个时间点相对现在是'
         '「还没到 / 正好是现在 / 已经过了」，再决定怎么说。'
