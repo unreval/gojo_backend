@@ -455,7 +455,8 @@ async def chat_image(data: dict):
         kind = 'video' if is_video else 'image'
         base_event_meta = _event_meta_base(
             kind, source_event_id, display_text, images, reply_to=reply_to)
-        visual_summary = ''
+        visual_summary = _build_visual_summary(
+            None, display_text, is_video, len(images))
         availability = None
 
         try:
@@ -539,6 +540,7 @@ async def chat_image(data: dict):
         from context_layer import append_current_user_turn
         messages = append_current_user_turn(messages, user_content)
 
+        base_event_meta = {**base_event_meta, 'visual_summary': visual_summary}
         save_user_short_memory_once(
             user_id, canonical_text, character_id, source_event_id=source_event_id,
             event_meta=base_event_meta,
