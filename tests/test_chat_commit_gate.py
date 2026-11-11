@@ -618,17 +618,28 @@ class ChatCommitGateTests(unittest.TestCase):
                 self.state.assert_not_called()
 
     def test_safe_raw_bracket_notes_degrade_without_copying_translation(self):
-        for index, text in enumerate(('配列の a[0] を見て。',
-                                      '补充说明（可选）[第三章]，集合 {甲, 乙}。')):
-            with self.subTest(text=text):
-                self.client.messages.create.reset_mock()
-                response, body = self.send([text] * 3, source_event_id=f'raw-bracket-{index}')
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(body['messages'][0]['jp'], text)
-                self.assertEqual(body['messages'][0]['zh'], '')
-                self.assertEqual(self.route._create_json.call_count, 1)
-                self.client.messages.create.assert_not_called()
-                self.state.assert_not_called()
+        japanese = '配列の a[0] を見て。'
+        self.client.messages.create.reset_mock()
+        response, body = self.send([japanese] * 3, source_event_id='raw-bracket-ja')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['messages'][0]['jp'], japanese)
+        self.assertEqual(body['messages'][0]['zh'], '')
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.client.messages.create.assert_not_called()
+        self.state.assert_not_called()
+
+        chinese = '补充说明（可选）[第三章]，集合 {甲, 乙}。'
+        self.client.messages.create.reset_mock()
+        response, body = self.send([chinese] * 3, source_event_id='raw-bracket-zh')
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(body['messages'], [])
+        self.assertEqual(self.route._create_json.call_count, 2)
+        self.assertNotIn(chinese, json.dumps(body, ensure_ascii=False))
+        rejected = [t for t in self.generation_traces()
+                    if t.get('retry_reason') == 'jp_not_japanese']
+        self.assertTrue(rejected[0]['will_retry'])
+        self.client.messages.create.assert_not_called()
+        self.state.assert_not_called()
 
     def test_json_debris_as_visible_text_is_rejected(self):
         debris = '{"jp":"...","zh":"..."}'
