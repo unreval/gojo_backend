@@ -34,6 +34,9 @@ from characters import get_character
 
 router = APIRouter()
 
+IMAGE_TOTAL_BUDGET_SECONDS = 120
+IMAGE_ATTEMPT_TIMEOUT_SECONDS = 55
+
 
 def _safe_reply_to(data):
     reply_to = data.get('reply_to') or data.get('replyTo')
@@ -452,7 +455,8 @@ async def chat_image(data: dict):
         kind = 'video' if is_video else 'image'
         base_event_meta = _event_meta_base(
             kind, source_event_id, display_text, images, reply_to=reply_to)
-        visual_summary = ''
+        visual_summary = _build_visual_summary(
+            None, display_text, is_video, len(images))
         availability = None
 
         try:
@@ -536,6 +540,7 @@ async def chat_image(data: dict):
         from context_layer import append_current_user_turn
         messages = append_current_user_turn(messages, user_content)
 
+        base_event_meta = {**base_event_meta, 'visual_summary': visual_summary}
         save_user_short_memory_once(
             user_id, canonical_text, character_id, source_event_id=source_event_id,
             event_meta=base_event_meta,
@@ -578,7 +583,7 @@ async def chat_image(data: dict):
         offline_state = None
         retryable = True
         max_tokens = 1600
-        deadline = time.monotonic() + 45
+        deadline = time.monotonic() + IMAGE_TOTAL_BUDGET_SECONDS
         from db_generation_receipt import GenerationHeartbeat
         with GenerationHeartbeat(
                 user_id, character_id, source_event_id, ENDPOINT_CHAT_IMAGE, claim_token):
@@ -586,13 +591,14 @@ async def chat_image(data: dict):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
+                attempt_timeout = min(IMAGE_ATTEMPT_TIMEOUT_SECONDS, remaining)
                 try:
                     response = get_anthropic(max_retries=0).messages.create(
                         model=MODEL_MAIN,
                         max_tokens=max_tokens,
                         system=system_blocks,
                         messages=messages,
-                        timeout=remaining,
+                        timeout=attempt_timeout,
                     )
                     log_cache_usage(f'image:{character_id}', response)
                     raw = extract_text(response).strip()
