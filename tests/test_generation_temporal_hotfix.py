@@ -56,10 +56,10 @@ class PlaintextContractTests(unittest.TestCase):
 
     def test_plain_japanese_degrades_without_fake_translation(self):
         # Split from test_plain_japanese_chinese_english_degrade_without_fake_translation.
-        # Japanese plaintext is still accepted once, and no translation is invented.
+        # Japanese plaintext still degrades with no invented translation, after one retry.
         raw = '今日はゆっくり話そう'
         result, state, calls, traces = self.generate(raw)
-        self.assertEqual(calls, 1)
+        self.assertEqual(calls, 2)
         self.assertIsNone(state)
         self.assertEqual(result['messages'], [{'jp': raw, 'zh': ''}])
         self.assertEqual(result['_acceptance_mode'], 'plaintext')
@@ -67,9 +67,12 @@ class PlaintextContractTests(unittest.TestCase):
                       'pending_transaction', 'proactive_promise'):
             self.assertNotIn(field, result)
         self.assertIsNone(utils.normalize_plaintext_reply(raw))
-        self.assertEqual(traces[0]['output_contract'], 'salvaged_plaintext')
-        self.assertFalse(traces[0]['will_retry'])
-        self.assertEqual(traces[0]['acceptance_mode'], 'plaintext')
+        self.assertEqual(traces[0]['outcome'], 'parse_invalid')
+        self.assertEqual(traces[0]['retry_reason'], 'plaintext_verbal')
+        self.assertTrue(traces[0]['will_retry'])
+        self.assertEqual(traces[1]['output_contract'], 'salvaged_plaintext')
+        self.assertFalse(traces[1]['will_retry'])
+        self.assertEqual(traces[1]['acceptance_mode'], 'plaintext')
 
     def test_plain_chinese_and_english_plaintext_is_rejected_and_retried(self):
         for raw in ('现在我们慢慢聊吧', 'We can talk now'):
@@ -78,9 +81,11 @@ class PlaintextContractTests(unittest.TestCase):
                 self.assertIsNone(result)
                 self.assertIsNone(state)
                 self.assertEqual(calls, 2)
-                self.assertEqual(traces[0]['parse_invalid_reason'], 'jp_not_japanese')
-                self.assertEqual(traces[0]['retry_reason'], 'jp_not_japanese')
+                self.assertEqual(traces[0]['parse_invalid_reason'], 'plaintext_verbal')
+                self.assertEqual(traces[0]['retry_reason'], 'plaintext_verbal')
                 self.assertTrue(traces[0]['will_retry'])
+                self.assertEqual(traces[1]['parse_invalid_reason'], 'jp_not_japanese')
+                self.assertEqual(traces[1]['retry_reason'], 'jp_not_japanese')
                 self.assertFalse(traces[1]['will_retry'])
                 self.assertEqual(summaries[0]['status'], 'generation_failed')
 
@@ -107,8 +112,10 @@ class PlaintextContractTests(unittest.TestCase):
                 result, _, calls, traces, _ = self.salvage(raw, attempts=2)
                 self.assertIsNone(result)
                 self.assertEqual(calls, 2)
-                self.assertEqual(traces[0]['retry_reason'], 'jp_not_japanese')
+                self.assertEqual(traces[0]['retry_reason'], 'plaintext_verbal')
                 self.assertTrue(traces[0]['will_retry'])
+                self.assertEqual(traces[1]['retry_reason'], 'jp_not_japanese')
+                self.assertFalse(traces[1]['will_retry'])
 
     def test_nonverbal_salvage_is_unchanged(self):
         for raw in ('……', '😒'):
@@ -144,8 +151,9 @@ class PlaintextContractTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIsNone(state)
         self.assertEqual(calls, 2)
-        self.assertEqual(traces[0]['retry_reason'], 'jp_not_japanese')
+        self.assertEqual(traces[0]['retry_reason'], 'plaintext_verbal')
         self.assertTrue(traces[0]['will_retry'])
+        self.assertEqual(traces[1]['retry_reason'], 'jp_not_japanese')
         self.assertFalse(traces[1]['will_retry'])
         self.assertEqual(summaries[0]['status'], 'generation_failed')
 
@@ -166,9 +174,10 @@ class PlaintextContractTests(unittest.TestCase):
             result, state = route_chat._generate_or_none(
                 'offline', 100, [], [], attempts=3, log_tag='test', cache_tag='test',
                 salvage=True)
-        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(provider.call_count, 2)
         self.assertIsNone(state)
-        self.assertEqual(result['messages'], [{'jp': 'そうだね', 'zh': ''}])
+        self.assertEqual(result['messages'], [{'jp': 'そうだね', 'zh': '是啊'}])
+        self.assertNotIn('_acceptance_mode', result)
 
     def test_invalid_or_protocol_output_fails_without_repeating_generation(self):
         try:
@@ -228,9 +237,13 @@ class PlaintextContractTests(unittest.TestCase):
                 result, _, calls, _ = self.generate('話そう', stop_reason=reason)
                 self.assertIsNone(result)
                 self.assertEqual(calls, 1)
-        result, _, calls, _ = self.generate('話そう', min_messages=3)
+        result, _, calls, traces = self.generate('話そう', min_messages=3)
         self.assertIsNone(result)
-        self.assertEqual(calls, 1)
+        self.assertEqual(calls, 2)
+        self.assertEqual(traces[0]['retry_reason'], 'plaintext_verbal')
+        self.assertTrue(traces[0]['will_retry'])
+        self.assertFalse(traces[1]['will_retry'])
+        self.assertIsNone(traces[1].get('acceptance_mode'))
 
     def test_structured_success_and_truth_guard_keep_existing_contract(self):
         raw = '{"messages":[{"jp":"そうだね","zh":"是啊"}]}'
