@@ -365,19 +365,33 @@ class ChatCommitGateTests(unittest.TestCase):
         self.grumble.assert_not_called()
 
     def test_verbal_plaintext_in_three_languages_displays_once_without_fake_zh(self):
+        # Japanese plaintext is still shown once, with no fabricated translation.
+        # Chinese and English plaintext are not dialogue: they retry, and the
+        # prose itself is not what gets committed.
+        japanese = '今日はゆっくり話そう'
+        response, body = self.send([japanese], source_event_id='plain-ja')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.assertEqual(body['messages'][0]['jp'], japanese)
+        self.assertEqual(body['messages'][0]['zh'], '')
+        for field in ('pending_transaction', 'reminder', 'schedule_transition'):
+            self.assertNotIn(field, body)
+        self.assertNotIn('_proactive_promise', body)
+        self.promise.assert_not_called()
+
         valid = chat_reply('そうだね', '是啊')
-        for index, raw in enumerate(('今日はゆっくり話そう', '今天慢慢聊吧',
-                                     'We can talk now')):
+        for index, raw in enumerate(('今天慢慢聊吧', 'We can talk now')):
             with self.subTest(raw=raw):
-                response, body = self.send([raw, valid], source_event_id=f'plain-{index}')
+                response, body = self.send(
+                    [raw, valid], source_event_id=f'plain-{index}')
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(self.route._create_json.call_count, 1)
-                self.assertEqual(body['messages'][0]['jp'], raw)
-                self.assertEqual(body['messages'][0]['zh'], '')
-                for field in ('pending_transaction', 'reminder', 'schedule_transition'):
-                    self.assertNotIn(field, body)
-                self.assertNotIn('_proactive_promise', body)
-                self.promise.assert_not_called()
+                self.assertEqual(self.route._create_json.call_count, 2)
+                self.assertEqual(body['messages'][0]['jp'], 'そうだね。')
+                self.assertEqual(body['messages'][0]['zh'], '是啊')
+                self.assertNotIn(raw, json.dumps(body, ensure_ascii=False))
+                rejected = [t for t in self.generation_traces()
+                            if t.get('retry_reason') == 'jp_not_japanese']
+                self.assertTrue(rejected[-1]['will_retry'])
 
     def test_two_semantic_rejections_fail_closed_with_specific_reasons(self):
         private_raw = '今日は疲れたよ'
@@ -604,17 +618,28 @@ class ChatCommitGateTests(unittest.TestCase):
                 self.state.assert_not_called()
 
     def test_safe_raw_bracket_notes_degrade_without_copying_translation(self):
-        for index, text in enumerate(('配列の a[0] を見て。',
-                                      '补充说明（可选）[第三章]，集合 {甲, 乙}。')):
-            with self.subTest(text=text):
-                self.client.messages.create.reset_mock()
-                response, body = self.send([text] * 3, source_event_id=f'raw-bracket-{index}')
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(body['messages'][0]['jp'], text)
-                self.assertEqual(body['messages'][0]['zh'], '')
-                self.assertEqual(self.route._create_json.call_count, 1)
-                self.client.messages.create.assert_not_called()
-                self.state.assert_not_called()
+        japanese = '配列の a[0] を見て。'
+        self.client.messages.create.reset_mock()
+        response, body = self.send([japanese] * 3, source_event_id='raw-bracket-ja')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['messages'][0]['jp'], japanese)
+        self.assertEqual(body['messages'][0]['zh'], '')
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.client.messages.create.assert_not_called()
+        self.state.assert_not_called()
+
+        chinese = '补充说明（可选）[第三章]，集合 {甲, 乙}。'
+        self.client.messages.create.reset_mock()
+        response, body = self.send([chinese] * 3, source_event_id='raw-bracket-zh')
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(body['messages'], [])
+        self.assertEqual(self.route._create_json.call_count, 2)
+        self.assertNotIn(chinese, json.dumps(body, ensure_ascii=False))
+        rejected = [t for t in self.generation_traces()
+                    if t.get('retry_reason') == 'jp_not_japanese']
+        self.assertTrue(rejected[0]['will_retry'])
+        self.client.messages.create.assert_not_called()
+        self.state.assert_not_called()
 
     def test_json_debris_as_visible_text_is_rejected(self):
         debris = '{"jp":"...","zh":"..."}'

@@ -4,7 +4,7 @@ JSON Schema constrains transport shape. The existing reply and schedule guards
 remain responsible for language, truth, and machine-intent validation.
 """
 
-from utils import classify_reply_content, reply_message_rejection_reason
+from utils import classify_reply_content, has_japanese_kana, reply_message_rejection_reason
 
 
 def _object(properties, required=()):
@@ -85,6 +85,8 @@ def rejection_reason(parsed, raw='', min_messages=1, acceptance_mode=None):
         if (len(messages) == 1 and isinstance(messages[0], dict)
                 and classify_reply_content(messages[0].get('jp')) == 'text'
                 and messages[0].get('zh') == ''):
+            if not has_japanese_kana(messages[0].get('jp')):
+                return 'jp_not_japanese'
             return None
         return 'invalid_message_field'
     for index, message in enumerate(messages, 1):

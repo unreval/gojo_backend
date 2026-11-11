@@ -493,6 +493,15 @@ def reply_message_rejection_reason(m: dict, *, message_index=1):
     return reasons[0] if reasons and TRANSLATION_CHECKS_BLOCKING else None
 
 
+def has_japanese_kana(text) -> bool:
+    """Japanese prose carries at least as much kana as han."""
+    s = str(text or '')
+    kana = sum('\u3041' <= ch <= '\u3096' or '\u30a1' <= ch <= '\u30fa'
+               or '\uff66' <= ch <= '\uff9f' for ch in s)
+    han = sum('\u3400' <= ch <= '\u9fff' for ch in s)
+    return kana >= han and kana > 0
+
+
 def valid_reply_msg(m: dict) -> bool:
     """Require safe bilingual text, or an intentional nonverbal reply."""
     return reply_message_rejection_reason(m) is None

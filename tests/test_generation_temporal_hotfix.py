@@ -37,20 +37,117 @@ class PlaintextContractTests(unittest.TestCase):
                   if c.args and isinstance(c.args[0], str) and c.args[0].startswith('[generation_trace] {')]
         return result, state, provider.call_count, traces
 
-    def test_plain_japanese_chinese_english_degrade_without_fake_translation(self):
-        for raw in ('今日はゆっくり話そう', '现在我们慢慢聊吧', 'We can talk now'):
+    def salvage(self, raw, *, attempts=2):
+        response = types.SimpleNamespace(
+            content=[types.SimpleNamespace(type='text', text=raw)],
+            stop_reason='end_turn', usage=None)
+        with mock_provider_create(return_value=response) as provider, \
+                patch('builtins.print') as logged:
+            result, state = route_chat._generate_or_none(
+                'offline', 100, [], [], attempts=attempts, log_tag='test', cache_tag='test',
+                salvage=True, generation_trace={'source_event_id': 'test'})
+
+        def payloads(prefix):
+            return [json.loads(c.args[0].split(' ', 1)[1]) for c in logged.call_args_list
+                    if c.args and isinstance(c.args[0], str) and c.args[0].startswith(prefix)]
+
+        return (result, state, provider.call_count,
+                payloads('[generation_trace] {'), payloads('[generation_result] {'))
+
+    def test_plain_japanese_degrades_without_fake_translation(self):
+        # Split from test_plain_japanese_chinese_english_degrade_without_fake_translation.
+        # Japanese plaintext is still accepted once, and no translation is invented.
+        raw = '今日はゆっくり話そう'
+        result, state, calls, traces = self.generate(raw)
+        self.assertEqual(calls, 1)
+        self.assertIsNone(state)
+        self.assertEqual(result['messages'], [{'jp': raw, 'zh': ''}])
+        self.assertEqual(result['_acceptance_mode'], 'plaintext')
+        for field in ('schedule_action_intent', 'reminder', 'cancel_reminder',
+                      'pending_transaction', 'proactive_promise'):
+            self.assertNotIn(field, result)
+        self.assertIsNone(utils.normalize_plaintext_reply(raw))
+        self.assertEqual(traces[0]['output_contract'], 'salvaged_plaintext')
+        self.assertFalse(traces[0]['will_retry'])
+        self.assertEqual(traces[0]['acceptance_mode'], 'plaintext')
+
+    def test_plain_chinese_and_english_plaintext_is_rejected_and_retried(self):
+        for raw in ('现在我们慢慢聊吧', 'We can talk now'):
             with self.subTest(raw=raw):
-                result, state, calls, traces = self.generate(raw)
+                result, state, calls, traces, summaries = self.salvage(raw, attempts=2)
+                self.assertIsNone(result)
+                self.assertIsNone(state)
+                self.assertEqual(calls, 2)
+                self.assertEqual(traces[0]['parse_invalid_reason'], 'jp_not_japanese')
+                self.assertEqual(traces[0]['retry_reason'], 'jp_not_japanese')
+                self.assertTrue(traces[0]['will_retry'])
+                self.assertFalse(traces[1]['will_retry'])
+                self.assertEqual(summaries[0]['status'], 'generation_failed')
+
+    def test_non_japanese_retry_still_invalid_returns_none(self):
+        raw = '现在我们慢慢聊吧'
+        result, state, calls, traces, summaries = self.salvage(raw, attempts=2)
+        self.assertIsNone(result)
+        self.assertIsNone(state)
+        self.assertEqual(calls, 2)
+        self.assertEqual([t['outcome'] for t in traces], ['parse_invalid', 'parse_invalid'])
+        self.assertEqual(summaries[0]['status'], 'generation_failed')
+        self.assertEqual(summaries[0]['provider_calls'], 2)
+
+    def test_production_chinese_plaintext_samples_are_rejected(self):
+        samples = (
+            '冷成这样还点个没食欲的汤，这不是折磨自己吗。下次点个辣的暖暖胃啊。\n\n'
+            '行，知道你不跑。离十点还有一会儿，先把汤对付喝了，别空着肚子上课。',
+            '……没食欲的汤是什么鬼，那你点它干嘛。冷就该点胡椒多的那种，一口下去整个人都暖了。'
+            '\n\nまあいい、好歹喝完。十点见，别迟到。',
+        )
+        for raw in samples:
+            with self.subTest(raw=raw[:12]):
+                self.assertFalse(utils.has_japanese_kana(raw))
+                result, _, calls, traces, _ = self.salvage(raw, attempts=2)
+                self.assertIsNone(result)
+                self.assertEqual(calls, 2)
+                self.assertEqual(traces[0]['retry_reason'], 'jp_not_japanese')
+                self.assertTrue(traces[0]['will_retry'])
+
+    def test_nonverbal_salvage_is_unchanged(self):
+        for raw in ('……', '😒'):
+            with self.subTest(raw=raw):
+                result, state, calls, traces, _ = self.salvage(raw, attempts=2)
                 self.assertEqual(calls, 1)
                 self.assertIsNone(state)
-                self.assertEqual(result['messages'], [{'jp': raw, 'zh': ''}])
-                self.assertEqual(result['_acceptance_mode'], 'plaintext')
-                for field in ('schedule_action_intent', 'reminder', 'cancel_reminder',
-                              'pending_transaction', 'proactive_promise'):
-                    self.assertNotIn(field, result)
-                self.assertIsNone(utils.normalize_plaintext_reply(raw))
-                self.assertEqual(traces[0]['output_contract'], 'salvaged_plaintext')
+                self.assertEqual(result['messages'], [{'jp': raw, 'zh': raw}])
+                self.assertEqual(result['_acceptance_mode'], 'nonverbal')
+                self.assertEqual(traces[0]['acceptance_mode'], 'nonverbal')
                 self.assertFalse(traces[0]['will_retry'])
+                self.assertIsNone(traces[0]['parse_invalid_reason'])
+
+    def test_pure_kanji_japanese_json_is_still_accepted(self):
+        raw = json.dumps(
+            {'emotion': '平静', 'messages': [{'jp': '了解。', 'zh': '知道了。'}]},
+            ensure_ascii=False)
+        result, state, calls, traces = self.generate(raw)
+        self.assertEqual(calls, 1)
+        self.assertIsNone(state)
+        self.assertEqual(result['messages'], [{'jp': '了解。', 'zh': '知道了。'}])
+        self.assertNotIn('_acceptance_mode', result)
+        self.assertEqual(traces[0]['outcome'], 'accepted')
+        self.assertEqual(traces[0]['acceptance_mode'], 'structured')
+        self.assertFalse(traces[0]['will_retry'])
+
+    def test_kana_light_daijoubu_plaintext_retries_once(self):
+        # 假名 1、汉字 3。本规则把它判成非日语，因此触发一次重试。
+        # 代价是多一次调用；重试后模型通常会给出带翻译的合规 JSON，可见结果反而更好。
+        raw = '大丈夫か。'
+        self.assertFalse(utils.has_japanese_kana(raw))
+        result, state, calls, traces, summaries = self.salvage(raw, attempts=2)
+        self.assertIsNone(result)
+        self.assertIsNone(state)
+        self.assertEqual(calls, 2)
+        self.assertEqual(traces[0]['retry_reason'], 'jp_not_japanese')
+        self.assertTrue(traces[0]['will_retry'])
+        self.assertFalse(traces[1]['will_retry'])
+        self.assertEqual(summaries[0]['status'], 'generation_failed')
 
     def test_nonverbal_plaintext_salvages_once(self):
         for raw in ('😒', '……', '...'):
@@ -530,6 +627,25 @@ class CanonicalActivitySQLTests(unittest.TestCase):
         self.assertEqual(row['last_user_message_at'], datetime(2026, 9, 30, 13, 30, tzinfo=timezone.utc))
         self.assertEqual(row['last_assistant_message_at'], datetime(2026, 9, 30, 5, 18, tzinfo=timezone.utc))
         self.assertEqual(self.database.query('SELECT COUNT(*) AS n FROM chat_log')['rows'][0]['n'], 8)
+
+
+class JapaneseKanaRatioTests(unittest.TestCase):
+    """Ratio gate: a Chinese sentence with a Japanese fragment is not Japanese."""
+
+    MIXED_FRAGMENT = (
+        '……没食欲的汤是什么鬼，那你点它干嘛。冷就该点胡椒多的那种，一口下去整个人都暖了。'
+        '\n\nまあいい、好歹喝完。十点见，别迟到。'
+    )
+
+    def test_kana_must_be_at_least_as_common_as_han(self):
+        self.assertTrue(utils.has_japanese_kana('今日はゆっくり話そう'))
+        self.assertTrue(utils.has_japanese_kana('こんにちは'))
+        self.assertFalse(utils.has_japanese_kana('现在我们慢慢聊吧'))
+        self.assertFalse(utils.has_japanese_kana('We can talk now'))
+        self.assertFalse(utils.has_japanese_kana('大丈夫か。'))
+        self.assertFalse(utils.has_japanese_kana(self.MIXED_FRAGMENT))
+        self.assertFalse(utils.has_japanese_kana(''))
+        self.assertFalse(utils.has_japanese_kana(None))
 
 
 if __name__ == '__main__':

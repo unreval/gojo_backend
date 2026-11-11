@@ -633,7 +633,7 @@ class DelayedReplyTests(unittest.TestCase):
             result = delayed_reply.generate_delayed_chat_reply(
                 bundle, helpers=helpers)
         self.assertEqual(result, {'ok': False, 'reason': 'provider_auth_failed'})
-        self.assertEqual(helpers.generation_attempts, 1)
+        self.assertEqual(helpers.generation_attempts, 2)
 
     def test_source_replay_failure_precedes_llm_and_schedule_commit(self):
         helpers = HelpersStub()
