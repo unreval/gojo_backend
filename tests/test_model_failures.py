@@ -425,7 +425,8 @@ class ImageFailureTests(unittest.TestCase):
 
     def test_exhausted_time_budget_stops_requests(self):
         self.client.messages.create.return_value = model_response(REPLY)
-        self.route.time = types.SimpleNamespace(monotonic=Mock(side_effect=[0, 46]))
+        self.route.time = types.SimpleNamespace(
+            monotonic=Mock(side_effect=[0, self.route.IMAGE_TOTAL_BUDGET_SECONDS + 1]))
         response, result = self.send()
         self.client.messages.create.assert_not_called()
         self.assert_generation_failed(response, result)
