@@ -739,7 +739,8 @@ def _generate_or_none(
         if (salvage and not unusable_stop and parsed is None and state is None
                 and min_messages == 1):
             recovered = degraded_reply(raw)
-            if recovered:
+            if recovered and (recovered['_acceptance_mode'] == 'nonverbal'
+                              or attempt + 1 >= semantic_attempts):
                 parsed = recovered
                 acceptance_mode = recovered['_acceptance_mode']
         reason = ('malformed_json' if unusable_stop else _protocol_rejection_reason(
