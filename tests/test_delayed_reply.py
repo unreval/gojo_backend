@@ -544,7 +544,7 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertEqual(row['pending_count'], 2)
         self.assertIn('一', row['pending_text'])
         self.assertEqual(row['fail_count'], 1)
-        self.assertEqual(row['retry_not_before'], NOW + timedelta(minutes=2))
+        self.assertEqual(row['retry_not_before'], NOW + timedelta(minutes=1))
 
     def test_auth_failure_defers_phone_check_without_losing_inbox(self):
         store = PhoneCheckStore()
@@ -604,7 +604,7 @@ class DelayedReplyTests(unittest.TestCase):
                     first = delayed_reply.process_due_phone_checks(NOW, generate_fn=generate)
                     self.assertEqual(first[0]['reason'], 'provider_retryable')
                     self.assertEqual(row['check_state'], 'deferred')
-                    self.assertEqual(row['next_phone_check_at'], NOW + timedelta(seconds=max(delay, 120)))
+                    self.assertEqual(row['next_phone_check_at'], NOW + timedelta(seconds=max(delay, 60)))
                     self.assertEqual(delayed_reply.process_due_phone_checks(
                         NOW + timedelta(seconds=delay - 1), generate_fn=generate), [])
                     self.assertEqual(calls, [oid])

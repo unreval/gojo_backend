@@ -848,7 +848,7 @@ def release_claimed_phone_check(cur, oid, token, *, retry_at=None,
     expired = reason == 'source_invalid' or fail_count >= 5
     retry_not_before = None
     if not expired:
-        minutes = (2, 10, 30, 120)[fail_count - 1]
+        minutes = (1, 3, 8, 20)[fail_count - 1]
         if reason == 'provider_auth_failed':
             minutes = max(minutes, 15)
         retry_not_before = now + timedelta(minutes=minutes)
