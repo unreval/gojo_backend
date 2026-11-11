@@ -365,19 +365,33 @@ class ChatCommitGateTests(unittest.TestCase):
         self.grumble.assert_not_called()
 
     def test_verbal_plaintext_in_three_languages_displays_once_without_fake_zh(self):
+        # Japanese plaintext is still shown once, with no fabricated translation.
+        # Chinese and English plaintext are not dialogue: they retry, and the
+        # prose itself is not what gets committed.
+        japanese = '今日はゆっくり話そう'
+        response, body = self.send([japanese], source_event_id='plain-ja')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.route._create_json.call_count, 1)
+        self.assertEqual(body['messages'][0]['jp'], japanese)
+        self.assertEqual(body['messages'][0]['zh'], '')
+        for field in ('pending_transaction', 'reminder', 'schedule_transition'):
+            self.assertNotIn(field, body)
+        self.assertNotIn('_proactive_promise', body)
+        self.promise.assert_not_called()
+
         valid = chat_reply('そうだね', '是啊')
-        for index, raw in enumerate(('今日はゆっくり話そう', '今天慢慢聊吧',
-                                     'We can talk now')):
+        for index, raw in enumerate(('今天慢慢聊吧', 'We can talk now')):
             with self.subTest(raw=raw):
-                response, body = self.send([raw, valid], source_event_id=f'plain-{index}')
+                response, body = self.send(
+                    [raw, valid], source_event_id=f'plain-{index}')
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(self.route._create_json.call_count, 1)
-                self.assertEqual(body['messages'][0]['jp'], raw)
-                self.assertEqual(body['messages'][0]['zh'], '')
-                for field in ('pending_transaction', 'reminder', 'schedule_transition'):
-                    self.assertNotIn(field, body)
-                self.assertNotIn('_proactive_promise', body)
-                self.promise.assert_not_called()
+                self.assertEqual(self.route._create_json.call_count, 2)
+                self.assertEqual(body['messages'][0]['jp'], 'そうだね。')
+                self.assertEqual(body['messages'][0]['zh'], '是啊')
+                self.assertNotIn(raw, json.dumps(body, ensure_ascii=False))
+                rejected = [t for t in self.generation_traces()
+                            if t.get('retry_reason') == 'jp_not_japanese']
+                self.assertTrue(rejected[-1]['will_retry'])
 
     def test_two_semantic_rejections_fail_closed_with_specific_reasons(self):
         private_raw = '今日は疲れたよ'

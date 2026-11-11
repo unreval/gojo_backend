@@ -161,6 +161,7 @@ _TRACE_RETRY_REASONS = {
     'malformed_json',
     'jp_equals_zh_verbal',
     'zh_contains_kana',
+    'jp_not_japanese',
     'invalid_message_field',
     'provider_error',
     'candidate_rejected',
@@ -748,7 +749,7 @@ def _generate_or_none(
             # length errors get at most one semantic regeneration.
             will_retry = (reason in (
                 'missing_messages', 'jp_equals_zh_verbal', 'zh_contains_kana',
-                'invalid_message_field',
+                'jp_not_japanese', 'invalid_message_field',
                 'time_word_contradiction', 'negation_polarity_mismatch',
                 'number_value_mismatch') and attempt + 1 < semantic_attempts)
             _emit_generation_trace(
