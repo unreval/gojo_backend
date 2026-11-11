@@ -532,5 +532,24 @@ class CanonicalActivitySQLTests(unittest.TestCase):
         self.assertEqual(self.database.query('SELECT COUNT(*) AS n FROM chat_log')['rows'][0]['n'], 8)
 
 
+class JapaneseKanaRatioTests(unittest.TestCase):
+    """Ratio gate: a Chinese sentence with a Japanese fragment is not Japanese."""
+
+    MIXED_FRAGMENT = (
+        '……没食欲的汤是什么鬼，那你点它干嘛。冷就该点胡椒多的那种，一口下去整个人都暖了。'
+        '\n\nまあいい、好歹喝完。十点见，别迟到。'
+    )
+
+    def test_kana_must_be_at_least_as_common_as_han(self):
+        self.assertTrue(utils.has_japanese_kana('今日はゆっくり話そう'))
+        self.assertTrue(utils.has_japanese_kana('こんにちは'))
+        self.assertFalse(utils.has_japanese_kana('现在我们慢慢聊吧'))
+        self.assertFalse(utils.has_japanese_kana('We can talk now'))
+        self.assertFalse(utils.has_japanese_kana('大丈夫か。'))
+        self.assertFalse(utils.has_japanese_kana(self.MIXED_FRAGMENT))
+        self.assertFalse(utils.has_japanese_kana(''))
+        self.assertFalse(utils.has_japanese_kana(None))
+
+
 if __name__ == '__main__':
     unittest.main()
