@@ -1628,7 +1628,7 @@ export default function ChatRoom() {
           payload.media_type = mediaType;
         }
         const res = await axios.post(`${SERVER_URL}/chat/image`, payload,
-          { timeout: video ? 90000 : 60000 });
+          { timeout: video ? 180000 : 150000 });
         if (isGenerationFailedPayload(res.data)) {
           if (res.data?.media) {
             setMessages(prev => prev.map(m => m.id === sourceEventId
