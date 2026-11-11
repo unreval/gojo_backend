@@ -11,6 +11,7 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 import prompt
+import reply_availability
 
 
 LOCK_MARKER = '【语言锁】'
@@ -81,3 +82,26 @@ class LanguageLockPlacementTests(unittest.TestCase):
         self.assertTrue(text.rstrip().endswith('系统触发语只负责执行。'))
         self.assertEqual(text.count('【当前消息优先】'), 1)
         self.assertIn('jp字段：必须是纯日语', self._blocks(suffix)[0]['text'])
+
+
+class PendingBundleLanguageLabelTests(unittest.TestCase):
+    def test_item_three_names_japanese_and_chinese_without_rewriting_neighbors(self):
+        text = reply_availability.format_pending_bundle_context({
+            'id': 4,
+            'activity_title': '深夜事务处理',
+            'reply_state': 'soft_busy',
+            'pending_count': 1,
+            'pending_text': '明天记得六点叫我起床',
+        }, now=datetime(2026, 10, 26, 6, 3, tzinfo=timezone.utc))
+        self.assertIn('jp（纯日语）', text)
+        self.assertIn('每条含 jp（纯日语）/ zh（中文翻译）。', text)
+        self.assertNotIn('每条含 jp / zh。', text)
+        for line in (
+                '1. 这是延迟的正常回复，不是主动搭讪，不要当成 proactive。',
+                '2. 不要逐条复读，也不要假装当时已经秒回。',
+                '4. 图片/视频以 visual_summary 为准，不要编造没写过的画面。',
+                '5. 积压里如果有带时间点的请求，先判断那个时间点相对现在是'
+                '「还没到 / 正好是现在 / 已经过了」，再决定怎么说。'
+                '已经过了就正面承认没做到，不要假装做过，也不要默认事情已经发生。',
+        ):
+            self.assertIn(line, text)
