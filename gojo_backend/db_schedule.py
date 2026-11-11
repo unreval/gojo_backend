@@ -1117,7 +1117,9 @@ def find_open_batching_phone_check(user_id, character_id):
 def arm_open_phone_check(oid, now):
     """Pull next_phone_check_at forward with the existing LEAST arm.
 
-    Does not claim the row and does not change check_state.
+    A user flush is the only caller. Clear retry_not_before so that request
+    is not held by the worker backoff. Does not claim the row, does not
+    change check_state, and does not reset fail_count.
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -1126,6 +1128,7 @@ def arm_open_phone_check(oid, now):
             '''UPDATE char_phone_check
                SET next_phone_check_at = COALESCE(
                        LEAST(next_phone_check_at, %s), %s),
+                   retry_not_before = NULL,
                    updated_at = CURRENT_TIMESTAMP
                WHERE id=%s
                  AND resolved_at IS NULL

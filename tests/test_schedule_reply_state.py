@@ -175,6 +175,8 @@ class FakeCursor:
             if row and row.get('check_state') in ('pending', 'deferred'):
                 existing = row.get('next_phone_check_at')
                 row['next_phone_check_at'] = min(existing, now) if existing else now
+                if 'retry_not_before = NULL' in compact:
+                    row['retry_not_before'] = None
                 self.rowcount = 1
             return
 
