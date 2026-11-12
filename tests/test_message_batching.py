@@ -4,6 +4,7 @@
 REG-015: /chat/flush must not consult the delayed-reply hourly quota.
 """
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -319,7 +320,7 @@ class DeferredRouteTests(unittest.TestCase):
                 patch('reply_availability.check_reply_availability', side_effect=avail), \
                 patch.object(route_chat, '_create_json', side_effect=explode), \
                 patch.object(route_chat, '_provider_create', side_effect=explode):
-            response = asyncio.run(route_chat.chat_text(payload))
+            response = route_chat.chat_text(payload)
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 202, body)
         self.assertTrue(body['deferred'])
@@ -349,8 +350,9 @@ class DeferredRouteTests(unittest.TestCase):
                 patch.object(route_chat, 'get_temporal_snapshot', return_value={}), \
                 patch.object(route_chat, 'update_chat_days', return_value=1), \
                 patch('reply_availability.check_reply_availability', side_effect=avail):
-            response = asyncio.run(route_chat.chat_text(payload))
+            response = route_chat.chat_text(payload)
         body = json.loads(response.body)
+        self.assertFalse(inspect.iscoroutine(response))
         self.assertEqual(response.status_code, 200, body)
         self.assertTrue(body['busy'])
         self.assertNotIn('batching', captured)
@@ -376,7 +378,7 @@ class DeferredRouteTests(unittest.TestCase):
                     'user_id': 'u', 'character_id': 'gojo', 'text': '在吗',
                     'source_event_id': 'busy-same', **extra,
                 }
-                results.append(await route_chat.chat_text(payload))
+                results.append(route_chat.chat_text(payload))
             return results
 
         with patch.object(route_chat, 'get_character', return_value={'voice_id': 'v'}), \
@@ -403,7 +405,7 @@ class DeferredRouteTests(unittest.TestCase):
                 patch.object(route_chat, 'get_temporal_snapshot',
                              return_value={'now_local': NOW}), \
                 patch.object(route_chat, 'update_chat_days', return_value=3):
-            return asyncio.run(route_chat.chat_text(payload))
+            return route_chat.chat_text(payload)
 
     def test_defer_while_busy_keeps_the_inbox_unlabeled(self):
         store = PhoneCheckStore()
@@ -482,7 +484,7 @@ class DeferredStickerPersistenceTests(unittest.TestCase):
                 patch('reply_availability.check_reply_availability', side_effect=avail), \
                 patch.object(route_chat, '_create_json', side_effect=explode), \
                 patch.object(route_chat, '_provider_create', side_effect=explode):
-            response = asyncio.run(route_chat.chat_text(payload))
+            response = route_chat.chat_text(payload)
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 202, body)
         self.assertEqual(order, [False, True])
@@ -631,14 +633,14 @@ class FlushStickerTests(unittest.TestCase):
                 'messages': [{'jp': '見た', 'zh': '看到了'}],
                 'turn_id': 't1', 'source_event_id': 'e1', 'full_jp': '見た',
                 'sticker': sticker}):
-            present = asyncio.run(route_chat.chat_flush(
-                {'user_id': 'u', 'character_id': 'gojo'}))
+            present = route_chat.chat_flush(
+                {'user_id': 'u', 'character_id': 'gojo'})
         with patch('delayed_reply.flush_batching_reply', return_value={
                 'ok': True, 'emotion': '平静',
                 'messages': [{'jp': '見た', 'zh': '看到了'}],
                 'turn_id': 't1', 'full_jp': '見た'}):
-            absent = asyncio.run(route_chat.chat_flush(
-                {'user_id': 'u', 'character_id': 'gojo'}))
+            absent = route_chat.chat_flush(
+                {'user_id': 'u', 'character_id': 'gojo'})
         self.assertEqual(json.loads(present.body)['sticker'], sticker)
         self.assertNotIn('sticker', json.loads(absent.body))
 

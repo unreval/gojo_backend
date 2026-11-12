@@ -168,7 +168,7 @@ class ImageFailureTests(unittest.TestCase):
         data = {'user_id': 'u', 'character_id': 'gojo', 'image_base64': PNG,
                 'media_type': 'image/jpeg', 'text': '看这张图'}
         data.update(extra)
-        response = asyncio.run(self.route.chat_image(data))
+        response = self.route.chat_image(data)
         return response, json.loads(response.body)
 
     def _reply_calls(self):

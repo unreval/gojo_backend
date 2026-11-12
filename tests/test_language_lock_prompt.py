@@ -137,13 +137,13 @@ class ImageVisualLanguageLockTests(unittest.TestCase):
                 {'type': 'text', 'text': 'FIXED-RULES', 'cache_control': {'type': 'ephemeral'}},
                 {'type': 'text', 'text': 'DYNAMIC-TAIL'},
             ]
-            response = asyncio.run(route_image.chat_image({
+            response = route_image.chat_image({
                 'user_id': 'u1',
                 'character_id': 'gojo',
                 'image_base64': PNG_B64,
                 'source_event_id': 'img-lang-lock',
                 'text': '看',
-            }))
+            })
             self.assertEqual(response.status_code, 502)
             self.assertEqual(json.loads(response.body)['error'], 'generation_failed')
             blocks = host.llm.call_args_list[0].kwargs['messages'][0]['content']

@@ -57,7 +57,7 @@ class ReceiptWindowTests(unittest.TestCase):
     def test_A_abort_before_receipt_commit_keeps_only_user_evidence(self):
         with self.http() as (route, generate), patch.object(receipt, 'CRASH_BEFORE_COMPLETE', True):
             with self.assertRaisesRegex(RuntimeError, 'injected crash before complete'):
-                asyncio.run(route.chat_text(self.request('window-a')))
+                route.chat_text(self.request('window-a'))
             generate.assert_called_once()
         self.drain_jobs()
         self.run_cycle()
@@ -72,7 +72,7 @@ class ReceiptWindowTests(unittest.TestCase):
     def test_B_disconnect_after_commit_replays_same_response_without_generator(self):
         from generation_side_effect_worker import process_one_side_effect
         with self.http() as (route, generate):
-            response = asyncio.run(route.chat_text(self.request('window-b')))
+            response = route.chat_text(self.request('window-b'))
             self.assertEqual(response.status_code, 200)
             stored = receipt.get_generation('u', 'c', 'window-b', 'chat_text')
             self.assertEqual(stored['status'], 'completed')
@@ -80,7 +80,7 @@ class ReceiptWindowTests(unittest.TestCase):
                 raise ConnectionResetError('client connection lost before response delivery')
             with self.assertRaises(ConnectionResetError):
                 asyncio.run(response({'type': 'http'}, None, disconnected_send))
-            replay = asyncio.run(route.chat_text(self.request('window-b')))
+            replay = route.chat_text(self.request('window-b'))
             self.assertEqual(json.loads(response.body), json.loads(replay.body))
             generate.assert_called_once()
         self.assertTrue(process_one_side_effect(self.assistant_effect('window-b')))
@@ -98,8 +98,8 @@ class ReceiptWindowTests(unittest.TestCase):
         raw = '今なら話せるよ。'
         with self.http() as (route, generate), patch.object(route, '_emit_generation_turn_link') as link:
             generate.return_value = (raw, Mock(stop_reason='end_turn'))
-            first = asyncio.run(route.chat_text(self.request('retry-sql')))
-            replay = asyncio.run(route.chat_text(self.request('retry-sql')))
+            first = route.chat_text(self.request('retry-sql'))
+            replay = route.chat_text(self.request('retry-sql'))
             self.assertEqual((first.status_code, replay.status_code), (200, 200))
             self.assertEqual(json.loads(first.body), json.loads(replay.body))
             self.assertEqual(json.loads(first.body)['messages'][0]['jp'], raw)
@@ -115,7 +115,7 @@ class ReceiptWindowTests(unittest.TestCase):
     def test_C_repair_interrupted_assistant_effect_keeps_event_job_projection_once(self):
         from generation_side_effect_worker import process_one_side_effect
         with self.http() as (route, generate):
-            response = asyncio.run(route.chat_text(self.request('window-c')))
+            response = route.chat_text(self.request('window-c'))
             self.assertEqual(response.status_code, 200)
             generate.assert_called_once()
         with patch.object(receipt, 'CRASH_AFTER_EFFECT', 'assistant_short_memory'):
@@ -149,7 +149,7 @@ class ReceiptWindowTests(unittest.TestCase):
         request = self.request('phase-d')
         request['text'] = '我还是叫你宝宝。你接不接受这个称呼？'
         with self.http(reply='yes', translation='是的') as (route, generate):
-            self.assertEqual(asyncio.run(route.chat_text(request)).status_code,200)
+            self.assertEqual(route.chat_text(request).status_code,200)
             generate.assert_called_once()
         with patch.object(receipt,'CRASH_AFTER_EFFECT','assistant_short_memory'):
             with self.assertRaisesRegex(RuntimeError,'injected crash after'):

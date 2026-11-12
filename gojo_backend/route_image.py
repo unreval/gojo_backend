@@ -337,7 +337,7 @@ def _extract_pending_tx(result: dict, user_id: str):
 
 
 @router.post('/chat/image')
-async def chat_image(data: dict):
+def chat_image(data: dict):
     """
     接收图片（base64）+ 可选文字（caption），让 Claude Vision 识别后回复。
     请求体：

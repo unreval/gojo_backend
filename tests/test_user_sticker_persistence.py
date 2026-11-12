@@ -112,7 +112,7 @@ class UserStickerPersistenceTests(unittest.TestCase):
                 'characters.get_character', return_value={'voice_id': 'offline'}), patch(
                 'db_chat_media.get_media_for_source_event', return_value=None), patch(
                 'sticker_registry.get', catalog):
-            response = asyncio.run(route_chat.chat_text(payload))
+            response = route_chat.chat_text(payload)
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 200, body)
         self.assertFalse(catalog.called)

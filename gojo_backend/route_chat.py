@@ -1611,7 +1611,7 @@ def _user_sticker_event_meta(sticker):
 
 
 @router.post('/chat/text')
-async def chat_text(data: dict):
+def chat_text(data: dict):
     from latency_telemetry import LatencyTrace, bind_trace, reset_trace
     import time as _time
     _trace = LatencyTrace('chat:text')
@@ -1969,7 +1969,7 @@ async def chat_text(data: dict):
 
 
 @router.post('/chat/flush')
-async def chat_flush(data: dict):
+def chat_flush(data: dict):
     """Claim the open batching inbox and return one normal chat reply.
 
     Does not go through the delayed-reply hourly quota. A missed flush is

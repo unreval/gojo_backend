@@ -932,7 +932,7 @@ class RouteIdempotencyTests(unittest.TestCase):
         }
         if extra:
             payload.update(extra)
-        response = asyncio.run(self.route.chat_text(payload))
+        response = self.route.chat_text(payload)
         if drain and getattr(response, 'status_code', None) == 200:
             self._drain()
         return response, json.loads(response.body)
@@ -1085,7 +1085,7 @@ class RouteIdempotencyTests(unittest.TestCase):
                 'user_id': 'u', 'character_id': 'gojo',
                 'text': '你好', 'source_event_id': 'conc-1',
             }
-            response = asyncio.run(self.route.chat_text(payload))
+            response = self.route.chat_text(payload)
             results.append((response.status_code, json.loads(response.body)))
 
         threads = [threading.Thread(target=worker) for _ in range(2)]
@@ -1358,10 +1358,10 @@ class RouteIdempotencyTests(unittest.TestCase):
         finished = []
 
         def owner():
-            response = asyncio.run(self.route.chat_text({
+            response = self.route.chat_text({
                 'user_id': 'u', 'character_id': 'gojo',
                 'text': '你好', 'source_event_id': 'hb-long',
-            }))
+            })
             finished.append((response.status_code, json.loads(response.body)))
 
         thread = threading.Thread(target=owner)
@@ -1733,7 +1733,7 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
             'source_event_id': source_event_id,
         }
         data.update(extra)
-        response = asyncio.run(self.route.chat_image(data))
+        response = self.route.chat_image(data)
         if drain and getattr(response, 'status_code', None) == 200:
             self._drain()
         return response, json.loads(response.body)

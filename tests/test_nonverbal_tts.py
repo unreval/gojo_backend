@@ -267,7 +267,7 @@ class NonverbalDeliveryTests(unittest.TestCase):
                     source = f'nonverbal-{index}'
                     request = dict(self.request(source), text='你好')
                     for _ in range(2):
-                        response = asyncio.run(route.chat_text(request))
+                        response = route.chat_text(request)
                         self.assertEqual(response.status_code, 200)
                         msg = json.loads(response.body)['messages'][0]
                         self.assertEqual((msg['jp'], msg['zh'], msg['audio_b64']), (text, text, ''))

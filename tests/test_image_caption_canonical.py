@@ -318,7 +318,7 @@ class ImageRouteCanonicalTextTests(unittest.TestCase):
             'source_event_id': 'img-canonical-1',
         }
         data.update(extra)
-        response = asyncio.run(self.route.chat_image(data))
+        response = self.route.chat_image(data)
         return response, json.loads(response.body)
 
     def _saved_text(self):
