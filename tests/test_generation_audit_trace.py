@@ -631,12 +631,12 @@ class GenerationAuditTraceTests(unittest.TestCase):
             stack.enter_context(patch.object(route_chat, '_text_effect_ctx', return_value={}))
             stack.enter_context(patch.object(route_chat, '_emit_generation_turn_link', link))
             stack.enter_context(patch('builtins.print'))
-            response = asyncio.run(route_chat.chat_text({
+            response = route_chat.chat_text({
                 'user_id': 'u',
                 'character_id': 'gojo',
                 'text': '你好',
                 'source_event_id': 'evt-link',
-            }))
+            })
         return response, events, link
 
     def test_assistant_turn_link_only_follows_durable_commit(self):

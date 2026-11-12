@@ -118,9 +118,9 @@ class PrivateSourceFirstTests(unittest.TestCase):
                         RuntimeError('offline provider error') if failure == 'provider' else None),
                     return_value=('' if failure == 'empty' else '{"messages":[', Mock())) as generate, patch.object(
                     receipt, 'GenerationHeartbeat'):
-                response = asyncio.run(route_chat.chat_text({
+                response = route_chat.chat_text({
                     'user_id': 'u', 'character_id': 'c',
-                    'source_event_id': failure, 'text': '我的职业是「教师」。'}))
+                    'source_event_id': failure, 'text': '我的职业是「教师」。'})
                 self.assertEqual(response.status_code, 502)
                 self.assertEqual(generate.call_count, 1)
         self.drain_jobs()
@@ -183,7 +183,7 @@ class PrivateSourceFirstTests(unittest.TestCase):
             request = {'user_id': 'u', 'character_id': 'c', 'source_event_id': 'http',
                        'text': '我的职业是「教师」。'}
             for _ in range(2):
-                response = asyncio.run(route_chat.chat_text(request))
+                response = route_chat.chat_text(request)
                 self.assertEqual(response.status_code, 200, response.body)
                 self.assertEqual(json.loads(response.body)['messages'][0]['jp'], '🥺...')
             generate.assert_called_once()

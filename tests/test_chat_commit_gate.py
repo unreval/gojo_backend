@@ -206,7 +206,10 @@ class ChatCommitGateTests(unittest.TestCase):
         if extra:
             payload.update(extra)
         fn = handler or self.route.chat_text
-        response = asyncio.run(fn(payload))
+        if fn is self.route.chat_text:
+            response = fn(payload)
+        else:
+            response = asyncio.run(fn(payload))
         return response, json.loads(response.body)
 
     def generation_traces(self):
@@ -248,10 +251,10 @@ class ChatCommitGateTests(unittest.TestCase):
         self.route._create_json = Mock(side_effect=ProviderHTTPError(
             403, provider='anthropic', model='claude-test',
             code='permission_error', message='credential abcdefghijklmnopqrstuvwx denied'))
-        response = asyncio.run(self.route.chat_text({
+        response = self.route.chat_text({
             'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
             'source_event_id': 'evt-provider-403',
-        }))
+        })
         body = json.loads(response.body)
         self.assert_generation_failed(response, body)
         self.assertNotIn('abcdefghijklmnopqrstuvwx',
@@ -262,10 +265,10 @@ class ChatCommitGateTests(unittest.TestCase):
             ProviderHTTPError(503, provider='anthropic', model='claude-test'),
             (chat_reply('そうだね', '是啊'), Mock()),
         ])
-        response = asyncio.run(self.route.chat_text({
+        response = self.route.chat_text({
             'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
             'source_event_id': 'evt-transient-503',
-        }))
+        })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.route._create_json.call_count, 2)
         self.assertEqual(self.route._create_json.call_args_list[0],
@@ -280,10 +283,10 @@ class ChatCommitGateTests(unittest.TestCase):
     def test_exhausted_provider_503_returns_retry_after_without_assistant_commit(self):
         self.route._create_json = Mock(side_effect=ProviderHTTPError(
             503, provider='anthropic', model='claude-test'))
-        response = asyncio.run(self.route.chat_text({
+        response = self.route.chat_text({
             'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
             'source_event_id': 'evt-exhausted-503',
-        }))
+        })
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.headers['Retry-After'], '60')
@@ -304,10 +307,10 @@ class ChatCommitGateTests(unittest.TestCase):
             pass
 
         self.route._create_json = Mock(side_effect=ReadTimeout('read failed'))
-        response = asyncio.run(self.route.chat_text({
+        response = self.route.chat_text({
             'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
             'source_event_id': 'evt-read-timeout',
-        }))
+        })
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.headers['Retry-After'], '60')
         self.assertEqual(json.loads(response.body)['error'], 'provider_unavailable')
@@ -320,10 +323,10 @@ class ChatCommitGateTests(unittest.TestCase):
             unavailable, (chat_reply('こんにちは', 'こんにちは'), Mock()),
             unavailable, (chat_reply('そうだね', '是啊'), Mock()),
         ])
-        response = asyncio.run(self.route.chat_text({
+        response = self.route.chat_text({
             'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
             'source_event_id': 'evt-transport-semantic',
-        }))
+        })
         self.assertEqual(response.status_code, 200)
         calls = self.route._create_json.call_args_list
         self.assertEqual(len(calls), 4)
@@ -931,10 +934,10 @@ class ChatCommitGateTests(unittest.TestCase):
             return queue.pop(0), Mock()
 
         self.route._create_json = Mock(side_effect=_create)
-        response = asyncio.run(self.route.chat_text({
+        response = self.route.chat_text({
             'user_id': 'u', 'character_id': 'gojo', 'text': '你好',
             'source_event_id': 'evt-preflight',
-        }))
+        })
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 200, body)
         self.assertNotIn('generation_failed', body)

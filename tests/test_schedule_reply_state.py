@@ -1135,13 +1135,13 @@ class BusyImageVisionTests(unittest.TestCase):
                 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8'
                 'z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
             )
-            response = asyncio.run(route_image.chat_image({
+            response = route_image.chat_image({
                 'user_id': 'u1',
                 'character_id': 'gojo',
                 'image_base64': tiny_png,
                 'text': '看这个杯子',
                 'source_event_id': 'img-busy-1',
-            }))
+            })
 
         body = json.loads(response.body)
         self.assertTrue(body['busy'])

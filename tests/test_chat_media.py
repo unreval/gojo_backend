@@ -431,13 +431,13 @@ class ChatImagePersistRouteTests(unittest.TestCase):
             self.addCleanup(item.stop)
 
     def test_llm_failure_after_put_keeps_chat_media(self):
-        response = asyncio.run(route_image.chat_image({
+        response = route_image.chat_image({
             'user_id': 'u1',
             'character_id': 'gojo',
             'image_base64': PNG_B64,
             'source_event_id': 'img-keep-1',
             'text': '看',
-        }))
+        })
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 502)
         self.assertEqual(body['error'], 'generation_failed')
@@ -448,12 +448,12 @@ class ChatImagePersistRouteTests(unittest.TestCase):
 
     def test_put_failure_does_not_pretend_success(self):
         self.put.side_effect = RuntimeError('r2 down')
-        response = asyncio.run(route_image.chat_image({
+        response = route_image.chat_image({
             'user_id': 'u1',
             'character_id': 'gojo',
             'image_base64': PNG_B64,
             'source_event_id': 'img-fail-1',
-        }))
+        })
         body = json.loads(response.body)
         self.assertEqual(response.status_code, 503)
         self.assertEqual(body['error'], 'media_persist_failed')
@@ -462,13 +462,13 @@ class ChatImagePersistRouteTests(unittest.TestCase):
         self.llm.assert_not_called()
 
     def test_video_frames_are_not_persisted_as_original(self):
-        response = asyncio.run(route_image.chat_image({
+        response = route_image.chat_image({
             'user_id': 'u1',
             'character_id': 'gojo',
             'images': [{'data': PNG_B64}, {'data': PNG_B64}],
             'is_video': True,
             'source_event_id': 'vid-1',
-        }))
+        })
         body = json.loads(response.body)
         self.assertNotEqual(body.get('error'), 'media_persist_failed')
         self.assertIsNone(body.get('media'))
