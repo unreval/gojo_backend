@@ -9,7 +9,7 @@ import random
 from datetime import datetime, timedelta
 
 from config import CN_TZ, MODEL_MAIN
-from ai_client import get_anthropic
+from ai_client import fold_system_into_messages, get_anthropic
 import db_schedule
 import proactive_msg
 from temporal_awareness import (
@@ -174,11 +174,13 @@ def _generate_share(character_id, user_id, activity):
 不发 → {{"skip": true, "reason": "原因"}}'''
 
     try:
+        folded_system, folded_messages = fold_system_into_messages(
+            _SYSTEM, [{'role': 'user', 'content': prompt}])
         resp = get_anthropic().messages.create(
             model=MODEL_MAIN,
             max_tokens=500,
-            system=_SYSTEM,
-            messages=[{'role': 'user', 'content': prompt}],
+            system=folded_system,
+            messages=folded_messages,
         )
         raw = extract_text(resp).strip()
         parsed = extract_json(raw)

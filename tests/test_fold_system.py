@@ -173,5 +173,40 @@ class AnthropicCreateChatFoldTests(unittest.TestCase):
         self.assertNotIn('了解', str(payload))
 
 
+class CreateJsonFoldTests(unittest.TestCase):
+    def setUp(self):
+        self._flag = ai_client.FOLD_SYSTEM_INTO_MESSAGES
+        ai_client.FOLD_SYSTEM_INTO_MESSAGES = True
+
+    def tearDown(self):
+        ai_client.FOLD_SYSTEM_INTO_MESSAGES = self._flag
+
+    def test_create_json_sends_no_system_and_one_copy_of_the_blocks(self):
+        import route_chat
+        blocks = [
+            {'type': 'text', 'text': 'HEAD', 'cache_control': {'type': 'ephemeral'}},
+            {'type': 'text', 'text': 'RULES', 'cache_control': {'type': 'ephemeral'}},
+            {'type': 'text', 'text': 'TAIL'},
+        ]
+        messages = [
+            {'role': 'assistant', 'content': '先开口'},
+            {'role': 'user', 'content': '现在这句'},
+        ]
+        with patch.object(route_chat, 'get_anthropic') as factory:
+            provider = factory.return_value.messages.create
+            provider.return_value = _anthropic_response('{"messages":[]}')
+            route_chat._create_json('claude-fold-json', 100, blocks, messages)
+        kwargs = provider.call_args.kwargs
+        self.assertTrue(kwargs.get('system') is None)
+        self.assertEqual(kwargs['messages'][0]['role'], 'user')
+        self.assertEqual(kwargs['messages'][0]['content'], blocks)
+        self.assertEqual(kwargs['messages'][1]['role'], 'assistant')
+        self.assertEqual(kwargs['messages'][1]['content'], '了解。')
+        self.assertEqual(kwargs['messages'][2:], messages)
+        self.assertEqual(_message_texts(kwargs['messages']).count('HEAD'), 1)
+        self.assertEqual(_message_texts(kwargs['messages']).count('TAIL'), 1)
+        self.assertEqual(blocks[0]['cache_control'], {'type': 'ephemeral'})
+
+
 if __name__ == '__main__':
     unittest.main()

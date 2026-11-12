@@ -146,15 +146,15 @@ class ImageVisualLanguageLockTests(unittest.TestCase):
             }))
             self.assertEqual(response.status_code, 502)
             self.assertEqual(json.loads(response.body)['error'], 'generation_failed')
-            system = host.llm.call_args_list[0].kwargs['system']
-            self.assertEqual([block['text'] for block in system[:3]],
+            blocks = host.llm.call_args_list[0].kwargs['messages'][0]['content']
+            self.assertEqual([block['text'] for block in blocks[:3]],
                              ['STATIC-HEAD', 'FIXED-RULES', 'DYNAMIC-TAIL'])
-            last = system[-1]['text']
+            last = blocks[-1]['text']
             self.assertIn(_ORIGINAL_VISUAL, last)
             self.assertIn('只输出完整的回复 JSON', last)
             self.assertIn(_IMAGE_LOCK, last)
             self.assertLess(last.index('只输出完整的回复 JSON'), last.index(_IMAGE_LOCK))
             self.assertTrue(last.endswith(_IMAGE_LOCK))
-            self.assertNotIn(_IMAGE_LOCK, ''.join(block['text'] for block in system[:-1]))
+            self.assertNotIn(_IMAGE_LOCK, ''.join(block['text'] for block in blocks[:-1]))
         finally:
             host.doCleanups()

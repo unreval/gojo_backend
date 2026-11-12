@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from config import EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX, MODEL_MID
 from db import get_conn
 from utils import extract_json, sanitize_jp
-from ai_client import extract_text, get_anthropic
+from ai_client import extract_text, fold_system_into_messages, get_anthropic
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from characters import get_character
@@ -526,11 +526,13 @@ def _generate_one_reply(gid, member, history, user_text, all_members, replying_t
 
     for attempt in range(3):
         try:
+            folded_system, folded_messages = fold_system_into_messages(
+                system_blocks, messages)
             resp = get_anthropic().messages.create(
                 model=MODEL_MID,
                 max_tokens=800,
-                system=system_blocks,
-                messages=messages
+                system=folded_system,
+                messages=folded_messages
             )
             log_cache_usage(f'group:{member["id"]}', resp)
             raw = extract_text(resp).strip()

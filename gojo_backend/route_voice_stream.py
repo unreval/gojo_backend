@@ -26,7 +26,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from config import EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_JP_AUX
-from ai_client import get_async_anthropic
+from ai_client import fold_system_into_messages, get_async_anthropic
 from tts import tts_to_b64
 from prompt import build_system_blocks
 from user_memory import save_short_memory, save_user_short_memory_once, get_short_memory
@@ -266,11 +266,13 @@ async def chat_voice_stream(data: dict):
             return out
 
         try:
+            folded_system, folded_messages = fold_system_into_messages(
+                system_blocks, messages)
             async with get_async_anthropic().messages.stream(
                 model=MODEL_JP_AUX,
                 max_tokens=500,
-                system=system_blocks,
-                messages=messages,
+                system=folded_system,
+                messages=folded_messages,
             ) as stream:
                 async for text_delta in stream.text_stream:
                     buffer += text_delta
