@@ -45,7 +45,7 @@ from utils import (
 from generation_contract import (
     GENERATION_ENVELOPE_SCHEMA, degraded_reply, rejection_reason,
 )
-from ai_client import extract_text, get_anthropic
+from ai_client import extract_text, fold_system_into_messages, get_anthropic
 from provider_error import diagnostics as provider_diagnostics
 from provider_error import call_with_transport_retry, is_auth_error, retry_delay_seconds
 from context_budget import estimate_tokens
@@ -106,6 +106,7 @@ def _create_json_resilient(model, max_tokens, system_blocks, messages):
 
 def _create_json(model, max_tokens, system_blocks, messages):
     """Request one GenerationEnvelope; fall back only if schema is unsupported."""
+    system_blocks, messages = fold_system_into_messages(system_blocks, messages)
     kwargs = dict(
         model=model,
         max_tokens=max_tokens,

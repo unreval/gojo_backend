@@ -70,6 +70,16 @@ ANALYSIS = json.dumps({
 }, ensure_ascii=False)
 
 
+def _folded_head_text_len(call):
+    content = call.kwargs['messages'][0]['content']
+    if isinstance(content, str):
+        return len(content)
+    return len(''.join(
+        block.get('text') or ''
+        for block in content
+        if isinstance(block, dict)))
+
+
 class ImageFailureTests(unittest.TestCase):
     def setUp(self):
         self.client = Mock()
@@ -301,8 +311,12 @@ class ImageFailureTests(unittest.TestCase):
         ]
         _, result = self.send()
         first, second = self._reply_calls()
-        self.assertGreater(len(second.kwargs['system']), len(first.kwargs['system']))
-        self.assertEqual(first.kwargs['messages'], second.kwargs['messages'])
+        self.assertGreater(_folded_head_text_len(second), _folded_head_text_len(first))
+        self.assertEqual(first.kwargs['messages'][2:], second.kwargs['messages'][2:])
+        for call in (first, second):
+            for message in call.kwargs['messages']:
+                if message.get('role') == 'assistant':
+                    self.assertTrue(message.get('content'))
         self.assertNotIn('error', result)
 
     def test_truncated_json_is_not_accepted_even_if_a_complete_object_can_be_parsed(self):

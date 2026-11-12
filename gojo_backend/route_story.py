@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 from config import EMOTIONS, DEFAULT_CHARACTER_ID, MODEL_MID
 from utils import extract_json, sanitize_jp
-from ai_client import extract_text, get_anthropic
+from ai_client import extract_text, fold_system_into_messages, get_anthropic
 from tts import tts_to_b64
 from characters import get_character
 
@@ -229,11 +229,13 @@ async def story_generate(data: dict):
     best = None
     for attempt in range(5):
         try:
+            folded_system, folded_messages = fold_system_into_messages(
+                system_prompt, messages)
             response = get_anthropic().messages.create(
                 model=MODEL_MID,
                 max_tokens=10000,    # ★ 长故事 + 可能夹 thinking，给够输出额度
-                system=system_prompt,
-                messages=messages,
+                system=folded_system,
+                messages=folded_messages,
             )
             raw = extract_text(response).strip()
             n_out = getattr(getattr(response, 'usage', None), 'output_tokens', '?')

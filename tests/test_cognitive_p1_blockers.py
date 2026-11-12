@@ -19,6 +19,22 @@ from tests import test_memory_critical_delta as memory_tests
 from tests.test_explicit_answer_sql import ExplicitAnswerFixture
 
 
+def _user_message_text(messages):
+    parts = []
+    for message in messages or []:
+        if message.get('role') != 'user':
+            continue
+        content = message.get('content')
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.append('\n'.join(
+                block.get('text') or ''
+                for block in content
+                if isinstance(block, dict)))
+    return '\n'.join(parts)
+
+
 class QuestionTransitionTests(ExplicitAnswerFixture, unittest.TestCase):
     def test_resolved_cannot_become_active(self):
         self.exchange()
@@ -305,7 +321,8 @@ class RuntimeCognitionTests(unittest.TestCase):
                 stack.enter_context(patch.object(scheduler, 'extract_text', return_value='{}'))
                 scheduler.generate_from_promise(dict(id=1, character_id='gojo', user_id='u',
                     context='明天回答称呼问题', origin_text='是否接受称呼', trigger_kind='time'), pending.NOW)
-                self.assert_contract(llm.call_args.kwargs['messages'][0]['content'], unresolved)
+                self.assert_contract(_user_message_text(
+                    llm.call_args.kwargs['messages']), unresolved)
                 self.assertIn('是否接受称呼', load.call_args.kwargs['user_message'])
 
     def test_diary_reaction_reads_judgment_and_preserves_unresolved(self):

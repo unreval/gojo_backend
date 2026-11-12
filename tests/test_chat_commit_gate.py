@@ -21,6 +21,7 @@ if os.path.dirname(__file__) not in sys.path:
 
 from receipt_passthrough import passthrough_generation_receipt  # noqa: E402
 from provider_error import ProviderHTTPError  # noqa: E402
+from ai_client import fold_system_into_messages  # noqa: E402
 
 
 def stub(name, **attributes):
@@ -120,7 +121,8 @@ class ChatCommitGateTests(unittest.TestCase):
             ),
             'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
             'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
-                              extract_text=lambda response, sep='': ''),
+                              extract_text=lambda response, sep='': '',
+                              fold_system_into_messages=fold_system_into_messages),
             'tts': stub('tts', tts_to_b64=self.tts, transcribe_audio_b64=Mock()),
             'prompt': stub(
                 'prompt',
@@ -1115,7 +1117,8 @@ class VoiceProactiveIdentityTests(unittest.TestCase):
             ),
             'db': stub('db', get_conn=Mock(side_effect=AssertionError('unexpected DB access'))),
             'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
-                              extract_text=lambda response, sep='': ''),
+                              extract_text=lambda response, sep='': '',
+                              fold_system_into_messages=fold_system_into_messages),
             'tts': stub('tts', tts_to_b64=Mock(return_value='audio'), transcribe_audio_b64=Mock()),
             'prompt': stub(
                 'prompt',

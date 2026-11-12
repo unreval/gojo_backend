@@ -544,7 +544,7 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertEqual(row['pending_count'], 2)
         self.assertIn('一', row['pending_text'])
         self.assertEqual(row['fail_count'], 1)
-        self.assertEqual(row['retry_not_before'], NOW + timedelta(minutes=2))
+        self.assertEqual(row['retry_not_before'], NOW + timedelta(minutes=1))
 
     def test_auth_failure_defers_phone_check_without_losing_inbox(self):
         store = PhoneCheckStore()
@@ -604,7 +604,7 @@ class DelayedReplyTests(unittest.TestCase):
                     first = delayed_reply.process_due_phone_checks(NOW, generate_fn=generate)
                     self.assertEqual(first[0]['reason'], 'provider_retryable')
                     self.assertEqual(row['check_state'], 'deferred')
-                    self.assertEqual(row['next_phone_check_at'], NOW + timedelta(seconds=max(delay, 120)))
+                    self.assertEqual(row['next_phone_check_at'], NOW + timedelta(seconds=max(delay, 60)))
                     self.assertEqual(delayed_reply.process_due_phone_checks(
                         NOW + timedelta(seconds=delay - 1), generate_fn=generate), [])
                     self.assertEqual(calls, [oid])
@@ -1063,6 +1063,130 @@ class DelayedReplyTests(unittest.TestCase):
         self.assertEqual(results[0]['action'], 'replied')
         self.assertEqual(len(generate_calls), 1)
         self.assertEqual(row['check_state'], 'consumed')
+
+
+class FlushRetryLockTests(unittest.TestCase):
+    """A user flush may retry now. The worker backoff guard stays closed."""
+
+    def _locked_batch(self, store, *, fail_count=2, when=NOW):
+        row = {
+            'id': 267,
+            'user_id': 'u',
+            'character_id': 'gojo',
+            'sched_date': when.date(),
+            'start_time': '08:00',
+            'end_time': '23:59',
+            'pending_count': 3,
+            'pending_text': '一条\n两条\n三条',
+            'check_state': 'pending',
+            'resolved_at': None,
+            'next_phone_check_at': when + timedelta(minutes=30),
+            'retry_not_before': when + timedelta(minutes=30),
+            'fail_count': fail_count,
+            'inbox_reason': 'batching',
+            'last_fail_reason': 'generation_failed',
+            'seen': True,
+            'can_reply': False,
+        }
+        store.extra_rows.append(row)
+        return row
+
+    def _world(self):
+        return patch.object(db_schedule, 'get_current_world_state', return_value={
+            'event': {}, 'phase': {}, 'activity': None,
+            'availability': {'reply_state': 'free', 'can_reply': True},
+        })
+
+    def _open(self, store):
+        stack = ExitStack()
+        stack.enter_context(patch.object(
+            db_schedule, 'get_conn', lambda: _conn(store)))
+        stack.enter_context(self._world())
+        stack.enter_context(patch.object(
+            delayed_reply, '_precheck_pending_bundle_sources',
+            side_effect=lambda bundle: bundle))
+        return stack
+
+    def test_user_flush_clears_retry_lock_and_generates(self):
+        store = PhoneCheckStore()
+        row = self._locked_batch(store)
+        calls = []
+
+        def generate(bundle, push=True):
+            calls.append(bundle)
+            self.assertIsNone(row['retry_not_before'])
+            self.assertEqual(row['fail_count'], 2)
+            self.assertEqual(bundle['fail_count'], 2)
+            self.assertEqual(bundle['pending_text'], '一条\n两条\n三条')
+            self.assertIs(push, False)
+            return {'ok': True, 'messages': [{'jp': '待ってた', 'zh': '在等'}]}
+
+        with self._open(store):
+            blocked = db_schedule.iter_due_phone_checks(NOW)
+            result = delayed_reply.flush_batching_reply(
+                'u', 'gojo', now=NOW, generate_fn=generate)
+        self.assertEqual(blocked, [])
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['action'], 'replied')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(row['fail_count'], 2)
+        self.assertEqual(row['check_state'], 'consumed')
+        self.assertEqual(row['pending_text'], '一条\n两条\n三条')
+
+    def test_worker_claim_keeps_future_retry_lock(self):
+        store = PhoneCheckStore()
+        row = self._locked_batch(store)
+        row['next_phone_check_at'] = NOW - timedelta(seconds=1)
+        locked_until = NOW + timedelta(minutes=30)
+        row['retry_not_before'] = locked_until
+        with self._open(store):
+            self.assertEqual(db_schedule.iter_due_phone_checks(NOW), [])
+            self.assertIsNone(db_schedule.claim_due_phone_check(
+                _conn(store).cursor(), row['id'], NOW))
+            decision = db_schedule.evaluate_due_phone_check(row['id'], NOW)
+        self.assertEqual(decision['action'], 'skip')
+        self.assertIsNone(decision['claimed'])
+        self.assertEqual(row['check_state'], 'pending')
+        self.assertEqual(row['fail_count'], 2)
+        self.assertEqual(row['retry_not_before'], locked_until)
+        self.assertEqual(row['pending_text'], '一条\n两条\n三条')
+
+    def test_flush_keeps_fail_count_and_fifth_failure_still_expires(self):
+        store = PhoneCheckStore()
+        row = self._locked_batch(store, fail_count=2)
+        seen = []
+
+        def generate(bundle, push=True):
+            seen.append(bundle['fail_count'])
+            self.assertIsNone(row['retry_not_before'])
+            self.assertEqual(bundle['pending_text'], '一条\n两条\n三条')
+            return {'ok': False, 'reason': 'generation_failed'}
+
+        with self._open(store):
+            for incoming in (2, 3, 4):
+                self.assertEqual(row['fail_count'], incoming)
+                self.assertIn(row['check_state'], ('pending', 'deferred'))
+                result = delayed_reply.flush_batching_reply(
+                    'u', 'gojo', now=NOW, generate_fn=generate)
+                self.assertFalse(result['ok'])
+                self.assertEqual(row['fail_count'], incoming + 1)
+                self.assertEqual(row['pending_count'], 3)
+                self.assertEqual(row['pending_text'], '一条\n两条\n三条')
+                if incoming + 1 < 5:
+                    self.assertEqual(result['action'], 'failed')
+                    self.assertNotEqual(row['check_state'], 'expired')
+                    self.assertGreater(row['retry_not_before'], NOW)
+                    self.assertEqual(db_schedule.iter_due_phone_checks(NOW), [])
+                else:
+                    self.assertEqual(row['check_state'], 'expired')
+                    self.assertIsNone(row['retry_not_before'])
+                    self.assertEqual(row['resolved_at'], NOW)
+            again = delayed_reply.flush_batching_reply(
+                'u', 'gojo', now=NOW, generate_fn=generate)
+        self.assertEqual(seen, [2, 3, 4])
+        self.assertEqual(again, {'ok': False, 'reason': 'nothing_pending'})
+        self.assertEqual(row['fail_count'], 5)
+        self.assertEqual(row['pending_text'], '一条\n两条\n三条')
 
 
 class DelayedGroundingTests(unittest.TestCase):
