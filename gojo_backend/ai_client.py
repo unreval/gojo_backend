@@ -143,6 +143,31 @@ def response_metadata(response):
     }
 
 
+FOLD_SYSTEM_INTO_MESSAGES = os.environ.get(
+    'FOLD_SYSTEM_INTO_MESSAGES', 'true').lower() not in ('0', 'false', 'no')
+
+
+def fold_system_into_messages(system, messages):
+    """Relays that drop Anthropic's `system` field need it inside messages.
+
+    Returns (system_for_sdk, messages). When folding is on, system is None
+    and its content leads the message list.
+    """
+    if not FOLD_SYSTEM_INTO_MESSAGES or not system:
+        return system, messages
+    if isinstance(system, str):
+        blocks = [{'type': 'text', 'text': system}] if system.strip() else []
+    else:
+        blocks = [dict(b) for b in system
+                  if isinstance(b, dict) and b.get('type') == 'text'
+                  and (b.get('text') or '').strip()]
+    if not blocks:
+        return system, messages
+    head = [{'role': 'user', 'content': blocks},
+            {'role': 'assistant', 'content': '了解。'}]
+    return None, head + list(messages or [])
+
+
 def _call_anthropic(model, messages, system, max_tokens, temperature, *, max_retries=None):
     client = _get_anthropic()
     if max_retries is not None:
