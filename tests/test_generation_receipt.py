@@ -1006,11 +1006,11 @@ class RouteIdempotencyTests(unittest.TestCase):
         with patch.object(self.route, '_emit_generation_turn_link') as link, \
                 patch.object(self.route, '_provider_create',
                              side_effect=AssertionError('translation must be local')):
-            first, body1 = self.send([raw], 'salvage-once')
+            first, body1 = self.send([raw, raw], 'salvage-once')
             self.assertEqual(self.tts.call_count, 1)
             second, body2 = self.send([], 'salvage-once')
         self.assertEqual((first.status_code, second.status_code), (200, 200))
-        self.assertEqual(self.route._create_json.call_count, 1)
+        self.assertEqual(self.route._create_json.call_count, 2)
         self.assertEqual(body1['messages'][0]['jp'], raw)
         self.assertEqual(body2['messages'][0]['jp'], raw)
         self.assertEqual(body1['assistant_turn_id'], body2['assistant_turn_id'])

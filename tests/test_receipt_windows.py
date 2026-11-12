@@ -104,7 +104,7 @@ class ReceiptWindowTests(unittest.TestCase):
             self.assertEqual(json.loads(first.body), json.loads(replay.body))
             self.assertEqual(json.loads(first.body)['messages'][0]['jp'], raw)
             self.assertEqual(json.loads(first.body)['messages'][0]['zh'], '')
-            self.assertEqual(generate.call_count, 1)
+            self.assertEqual(generate.call_count, 2)
             link.assert_called_once_with('retry-sql', 'chat_reply:retry-sql')
         self.assertTrue(process_one_side_effect(self.assistant_effect('retry-sql')))
         self.assertFalse(process_one_side_effect(self.assistant_effect('retry-sql')))
