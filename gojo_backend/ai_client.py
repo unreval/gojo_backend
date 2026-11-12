@@ -172,6 +172,7 @@ def _call_anthropic(model, messages, system, max_tokens, temperature, *, max_ret
     client = _get_anthropic()
     if max_retries is not None:
         client = client.with_options(max_retries=max_retries)
+    system, messages = fold_system_into_messages(system, messages)
     kwargs = {
         'model': model,
         'max_tokens': max_tokens,

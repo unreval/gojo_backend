@@ -1,7 +1,9 @@
 """Relays that drop Anthropic `system` must receive it inside messages."""
 import os
 import sys
+import types
 import unittest
+from unittest.mock import Mock, patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 BACKEND = os.path.join(ROOT, 'gojo_backend')
@@ -87,6 +89,88 @@ class FoldHelperTests(unittest.TestCase):
                     system, messages)
                 self.assertEqual(out_system, system)
                 self.assertIs(out_messages, messages)
+
+
+def _anthropic_response(text):
+    return types.SimpleNamespace(
+        content=[types.SimpleNamespace(type='text', text=text)],
+        stop_reason='end_turn',
+        usage=None,
+        id='fold-response',
+    )
+
+
+def _message_texts(messages):
+    texts = []
+    for message in messages:
+        content = message.get('content')
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(
+                block.get('text') or ''
+                for block in content
+                if isinstance(block, dict))
+    return texts
+
+
+class AnthropicCreateChatFoldTests(unittest.TestCase):
+    def setUp(self):
+        self._flag = ai_client.FOLD_SYSTEM_INTO_MESSAGES
+        ai_client.FOLD_SYSTEM_INTO_MESSAGES = True
+
+    def tearDown(self):
+        ai_client.FOLD_SYSTEM_INTO_MESSAGES = self._flag
+
+    def test_create_chat_folds_system_once(self):
+        client = Mock()
+        client.messages.create.return_value = _anthropic_response('ok')
+        system = [{'type': 'text', 'text': 'SYS-ONCE',
+                   'cache_control': {'type': 'ephemeral'}}]
+        messages = [{'role': 'user', 'content': 'hi'}]
+        with patch.object(ai_client, '_get_anthropic', return_value=client):
+            ai_client.create_chat('claude-test', messages, system=system)
+        kwargs = client.messages.create.call_args.kwargs
+        self.assertNotIn('system', kwargs)
+        self.assertEqual(_message_texts(kwargs['messages']).count('SYS-ONCE'), 1)
+        self.assertEqual(kwargs['messages'][0]['role'], 'user')
+        self.assertEqual(kwargs['messages'][0]['content'][0]['cache_control'],
+                         {'type': 'ephemeral'})
+        self.assertEqual(kwargs['messages'][1]['content'], '了解。')
+        self.assertEqual(kwargs['messages'][2:], messages)
+
+    def test_switch_off_passes_system_and_messages_unchanged(self):
+        ai_client.FOLD_SYSTEM_INTO_MESSAGES = False
+        client = Mock()
+        client.messages.create.return_value = _anthropic_response('ok')
+        system = [{'type': 'text', 'text': 'SYS'}]
+        messages = [{'role': 'user', 'content': 'hi'}]
+        with patch.object(ai_client, '_get_anthropic', return_value=client):
+            ai_client.create_chat('claude-test', messages, system=system)
+        kwargs = client.messages.create.call_args.kwargs
+        self.assertEqual(kwargs['system'], system)
+        self.assertEqual(kwargs['messages'], messages)
+
+    def test_deepseek_still_uses_a_system_role_message(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            'id': 'ds-1',
+            'choices': [{'message': {'content': 'ds'}, 'finish_reason': 'stop'}],
+            'usage': {},
+        }
+        messages = [{'role': 'user', 'content': 'hi'}]
+        with patch.object(ai_client, 'DEEPSEEK_KEY', 'test-key'), \
+                patch.object(ai_client.requests, 'post', return_value=response) as post:
+            text, usage = ai_client.create_chat(
+                'deepseek-chat', messages, system='SYS-DS')
+        self.assertEqual(text, 'ds')
+        self.assertEqual(usage['provider'], 'deepseek')
+        payload = post.call_args.kwargs['json']
+        self.assertEqual(payload['messages'], [
+            {'role': 'system', 'content': 'SYS-DS'},
+            {'role': 'user', 'content': 'hi'},
+        ])
+        self.assertNotIn('了解', str(payload))
 
 
 if __name__ == '__main__':
