@@ -23,6 +23,7 @@ if os.path.dirname(__file__) not in sys.path:
 
 import db_generation_receipt as receipt  # noqa: E402
 import db_read_receipt  # noqa: E402
+from ai_client import fold_system_into_messages  # noqa: E402
 
 
 class _PassthroughHeartbeat:
@@ -719,7 +720,8 @@ class RouteIdempotencyTests(unittest.TestCase):
             ),
             'db': stub('db', get_conn=lambda: FakeConn(self.store)),
             'ai_client': stub('ai_client', get_anthropic=Mock(return_value=self.client),
-                              extract_text=lambda response, sep='': ''),
+                              extract_text=lambda response, sep='': '',
+                              fold_system_into_messages=fold_system_into_messages),
             'tts': stub('tts', tts_to_b64=self.tts, transcribe_audio_b64=Mock()),
             'prompt': stub(
                 'prompt',
@@ -1591,6 +1593,7 @@ class ImageRouteIdempotencyTests(unittest.TestCase):
                 response_metadata=lambda response: {
                     'stop_reason': getattr(response, 'stop_reason', 'end_turn'),
                 },
+                fold_system_into_messages=fold_system_into_messages,
             ),
             'tts': stub('tts', tts_to_b64=Mock(return_value='audio')),
             'prompt': stub(

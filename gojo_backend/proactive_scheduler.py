@@ -8,7 +8,7 @@ from datetime import datetime
 from config import CN_TZ, MODEL_MAIN
 
 from characters import get_character
-from ai_client import extract_text, get_anthropic
+from ai_client import extract_text, fold_system_into_messages, get_anthropic
 from user_memory import get_bond_memories, get_short_memory, commit_visible_assistant_message
 from character_relations import get_relations_text
 from temporal_awareness import (
@@ -121,11 +121,13 @@ def generate_from_promise(promise, now):
 说 → {{"jp":"日语","zh":"中文","emotion":"平静/自信/调皮/认真/温柔/冷淡"}}
 不说 → {{"skip": true, "reason": "原因"}}'''
 
+        folded_system, folded_messages = fold_system_into_messages(
+            _SYSTEM, [{'role': 'user', 'content': prompt}])
         resp = get_anthropic().messages.create(
             model=MODEL_MAIN,
             max_tokens=400,
-            system=_SYSTEM,
-            messages=[{'role': 'user', 'content': prompt}],
+            system=folded_system,
+            messages=folded_messages,
         )
         raw = extract_text(resp).strip()
         from utils import extract_json

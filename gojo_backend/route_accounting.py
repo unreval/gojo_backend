@@ -14,7 +14,7 @@ from accounting import (
 from characters import get_character, retrieve_character_memory
 from characters_data._loader import load_canon_lock
 from utils import extract_json
-from ai_client import extract_text, get_anthropic
+from ai_client import extract_text, fold_system_into_messages, get_anthropic
 
 router = APIRouter()
 
@@ -203,11 +203,13 @@ async def get_insights(user_id: str = 'default',
     text_jp, text_zh = '', ''
     for attempt in range(3):
         try:
+            folded_system, folded_messages = fold_system_into_messages(
+                system_prompt, [{'role': 'user', 'content': user_prompt}])
             response = get_anthropic().messages.create(
                 model=MODEL_JP_AUX,
                 max_tokens=300,
-                system=system_prompt,
-                messages=[{'role': 'user', 'content': user_prompt}],
+                system=folded_system,
+                messages=folded_messages,
             )
             raw = extract_text(response).strip()
             try:

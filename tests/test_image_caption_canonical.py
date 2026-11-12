@@ -27,6 +27,7 @@ import db_chatlog  # noqa: E402
 import raw_events  # noqa: E402
 import user_memory  # noqa: E402
 from tests.receipt_passthrough import passthrough_generation_receipt  # noqa: E402
+from ai_client import fold_system_into_messages  # noqa: E402
 
 
 CAPTION = '给你看我们学校开的🪷'
@@ -230,6 +231,7 @@ class ImageRouteCanonicalTextTests(unittest.TestCase):
                 response_metadata=lambda response: {
                     'stop_reason': getattr(response, 'stop_reason', 'end_turn'),
                 },
+                fold_system_into_messages=fold_system_into_messages,
             ),
             'tts': _stub('tts', tts_to_b64=Mock(return_value='')),
             'prompt': _stub(

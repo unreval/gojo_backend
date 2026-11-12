@@ -78,9 +78,20 @@ class TaggedModelProviderTests(unittest.TestCase):
                     else:
                         sdk.with_options.assert_called_once_with(max_retries=0)
                         sent, unused = retry_sdk, sdk
+                    if client.FOLD_SYSTEM_INTO_MESSAGES:
+                        expected_messages = [
+                            {'role': 'user', 'content': [
+                                {'type': 'text', 'text': 'system'}]},
+                            {'role': 'assistant', 'content': '了解。'},
+                            *messages,
+                        ]
+                        system_kwargs = {}
+                    else:
+                        expected_messages = messages
+                        system_kwargs = {'system': 'system'}
                     sent.messages.create.assert_called_once_with(
-                        model=model, messages=messages, system='system',
-                        max_tokens=123, temperature=0.4)
+                        model=model, messages=expected_messages,
+                        max_tokens=123, temperature=0.4, **system_kwargs)
                     unused.messages.create.assert_not_called()
                     self.assertEqual(text, 'answer')
                     self.assertEqual(usage['provider'], 'anthropic')

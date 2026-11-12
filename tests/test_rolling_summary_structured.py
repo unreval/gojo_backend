@@ -141,8 +141,16 @@ class RollingSummaryStructuredTests(unittest.TestCase):
         client.with_options.return_value.messages.create.assert_called_once()
         kwargs = client.with_options.return_value.messages.create.call_args.kwargs
         self.assertEqual(kwargs['max_tokens'], 1200)
-        self.assertIn('每字段只写简短要点', kwargs['messages'][0]['content'])
-        self.assertIn('六字段正文合计最多300字', kwargs['messages'][0]['content'])
+        user_text = '\n'.join(
+            message['content'] if isinstance(message.get('content'), str)
+            else '\n'.join(
+                block.get('text') or ''
+                for block in message.get('content') or []
+                if isinstance(block, dict))
+            for message in kwargs['messages']
+            if message.get('role') == 'user')
+        self.assertIn('每字段只写简短要点', user_text)
+        self.assertIn('六字段正文合计最多300字', user_text)
 
 
 class RollingSummaryRetryTests(unittest.TestCase):

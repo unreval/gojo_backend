@@ -20,7 +20,7 @@ from media_storage import MediaStorageError
 
 from config import EMOTIONS, TTS_PROVIDER, DEFAULT_CHARACTER_ID, MODEL_MAIN
 from utils import ingest_model_output, finalize_user_messages, valid_reply_msg, commit_ready_msgs
-from ai_client import extract_text, response_metadata, get_anthropic
+from ai_client import extract_text, fold_system_into_messages, response_metadata, get_anthropic
 from tts import tts_to_b64
 from prompt import build_system_blocks, log_cache_usage
 from user_memory import (
@@ -593,11 +593,13 @@ async def chat_image(data: dict):
                     break
                 attempt_timeout = min(IMAGE_ATTEMPT_TIMEOUT_SECONDS, remaining)
                 try:
+                    folded_system, folded_messages = fold_system_into_messages(
+                        system_blocks, messages)
                     response = get_anthropic(max_retries=0).messages.create(
                         model=MODEL_MAIN,
                         max_tokens=max_tokens,
-                        system=system_blocks,
-                        messages=messages,
+                        system=folded_system,
+                        messages=folded_messages,
                         timeout=attempt_timeout,
                     )
                     log_cache_usage(f'image:{character_id}', response)
