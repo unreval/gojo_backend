@@ -18,6 +18,7 @@ if os.path.dirname(__file__) not in sys.path:
     sys.path.insert(0, os.path.dirname(__file__))
 
 from receipt_passthrough import passthrough_generation_receipt  # noqa: E402
+from ai_client import fold_system_into_messages  # noqa: E402
 
 
 def stub(name, **attributes):
@@ -1028,7 +1029,8 @@ class BusyImageVisionTests(unittest.TestCase):
                 get_anthropic=Mock(return_value=Mock(messages=Mock(create=Mock(
                     return_value='{"visual_summary":"蓝色马克杯，杯沿有裂纹"}'
                 )))),
-                response_metadata=Mock()),
+                response_metadata=Mock(),
+                fold_system_into_messages=fold_system_into_messages),
             'tts': stub('tts', tts_to_b64=Mock(return_value='')),
             'prompt': stub(
                 'prompt', build_system_blocks=Mock(return_value=[]),

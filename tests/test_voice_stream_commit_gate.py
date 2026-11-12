@@ -12,6 +12,8 @@ BACKEND = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'gojo_backend
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
+from ai_client import fold_system_into_messages  # noqa: E402
+
 
 def stub(name, **attributes):
     module = types.ModuleType(name)
@@ -93,7 +95,11 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
             get_short_memory=self.get_short,
         )
         modules = {
-            'ai_client': stub('ai_client', get_async_anthropic=Mock(return_value=self.client)),
+            'ai_client': stub(
+                'ai_client',
+                get_async_anthropic=Mock(return_value=self.client),
+                fold_system_into_messages=fold_system_into_messages,
+            ),
             'fastapi': stub('fastapi', APIRouter=Mock(return_value=router)),
             'fastapi.responses': stub(
                 'fastapi.responses',
@@ -288,7 +294,11 @@ class VoiceStreamCommitGateTests(unittest.TestCase):
         )
         self.assertEqual(len(self.stream_calls), 1)
         msgs = self.stream_calls[0]['messages']
-        self.assertEqual([m['content'] for m in msgs], ['上次的话', '你好啊'])
+        dialogue = [
+            message['content'] for message in msgs
+            if isinstance(message.get('content'), str) and message['content'] != '了解。'
+        ]
+        self.assertEqual(dialogue, ['上次的话', '你好啊'])
         current = [m for m in msgs if m.get('role') == 'user' and m.get('content') == '你好啊']
         self.assertEqual(len(current), 1)
         self.assertIn('generation_failed', self.types(events))
