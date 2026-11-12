@@ -740,7 +740,8 @@ def _generate_or_none(
         if (salvage and not unusable_stop and parsed is None and state is None
                 and min_messages == 1):
             recovered = degraded_reply(raw)
-            if recovered:
+            if recovered and (recovered['_acceptance_mode'] == 'nonverbal'
+                              or attempt + 1 >= semantic_attempts):
                 parsed = recovered
                 acceptance_mode = recovered['_acceptance_mode']
         reason = ('malformed_json' if unusable_stop else _protocol_rejection_reason(
@@ -750,7 +751,7 @@ def _generate_or_none(
             # length errors get at most one semantic regeneration.
             will_retry = (reason in (
                 'missing_messages', 'jp_equals_zh_verbal', 'zh_contains_kana',
-                'jp_not_japanese', 'invalid_message_field',
+                'jp_not_japanese', 'invalid_message_field', 'plaintext_verbal',
                 'time_word_contradiction', 'negation_polarity_mismatch',
                 'number_value_mismatch') and attempt + 1 < semantic_attempts)
             _emit_generation_trace(

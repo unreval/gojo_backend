@@ -70,14 +70,17 @@ class GenerationAuditTraceTests(unittest.TestCase):
                 salvage=True, generation_trace=self.trace_context)
         self.assertEqual(result['messages'], [{'jp': 'こんにちは', 'zh': ''}])
         self.assertIsNone(state)
-        self.assertEqual(generate.call_count, 1)
+        self.assertEqual(generate.call_count, 2)
         traces = self._trace_payloads(logged)
-        self.assertEqual([trace['outcome'] for trace in traces], ['accepted'])
-        self.assertEqual(traces[0]['acceptance_mode'], 'plaintext')
-        self.assertEqual([trace['will_retry'] for trace in traces], [False])
+        self.assertEqual([trace['outcome'] for trace in traces],
+                         ['parse_invalid', 'accepted'])
+        self.assertEqual(traces[0]['retry_reason'], 'plaintext_verbal')
+        self.assertTrue(traces[0]['will_retry'])
+        self.assertEqual(traces[1]['acceptance_mode'], 'plaintext')
+        self.assertFalse(traces[1]['will_retry'])
         summary = self._result_payloads(logged)[0]
         self.assertEqual(summary['status'], 'degraded_plaintext')
-        self.assertEqual((summary['provider_calls'], summary['semantic_retries']), (1, 0))
+        self.assertEqual((summary['provider_calls'], summary['semantic_retries']), (2, 1))
         self.assertNotIn(self.secret, json.dumps(summary))
         self.assertNotIn(self.secret, str(logged.call_args_list))
 

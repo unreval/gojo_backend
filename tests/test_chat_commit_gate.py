@@ -371,11 +371,16 @@ class ChatCommitGateTests(unittest.TestCase):
         # Chinese and English plaintext are not dialogue: they retry, and the
         # prose itself is not what gets committed.
         japanese = '今日はゆっくり話そう'
-        response, body = self.send([japanese], source_event_id='plain-ja')
+        response, body = self.send([japanese, japanese], source_event_id='plain-ja')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.route._create_json.call_count, 1)
+        self.assertEqual(self.route._create_json.call_count, 2)
         self.assertEqual(body['messages'][0]['jp'], japanese)
         self.assertEqual(body['messages'][0]['zh'], '')
+        traces = [t for t in self.generation_traces() if 'outcome' in t]
+        self.assertEqual(traces[0]['retry_reason'], 'plaintext_verbal')
+        self.assertTrue(traces[0]['will_retry'])
+        self.assertEqual(traces[1]['acceptance_mode'], 'plaintext')
+        self.assertFalse(traces[1]['will_retry'])
         for field in ('pending_transaction', 'reminder', 'schedule_transition'):
             self.assertNotIn(field, body)
         self.assertNotIn('_proactive_promise', body)
@@ -392,7 +397,7 @@ class ChatCommitGateTests(unittest.TestCase):
                 self.assertEqual(body['messages'][0]['zh'], '是啊')
                 self.assertNotIn(raw, json.dumps(body, ensure_ascii=False))
                 rejected = [t for t in self.generation_traces()
-                            if t.get('retry_reason') == 'jp_not_japanese']
+                            if t.get('retry_reason') == 'plaintext_verbal']
                 self.assertTrue(rejected[-1]['will_retry'])
 
     def test_two_semantic_rejections_fail_closed_with_specific_reasons(self):
@@ -626,7 +631,12 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body['messages'][0]['jp'], japanese)
         self.assertEqual(body['messages'][0]['zh'], '')
-        self.assertEqual(self.route._create_json.call_count, 1)
+        self.assertEqual(self.route._create_json.call_count, 2)
+        ja_traces = [t for t in self.generation_traces() if 'outcome' in t]
+        self.assertEqual(ja_traces[0]['retry_reason'], 'plaintext_verbal')
+        self.assertTrue(ja_traces[0]['will_retry'])
+        self.assertEqual(ja_traces[1]['acceptance_mode'], 'plaintext')
+        self.assertFalse(ja_traces[1]['will_retry'])
         self.client.messages.create.assert_not_called()
         self.state.assert_not_called()
 
@@ -637,9 +647,12 @@ class ChatCommitGateTests(unittest.TestCase):
         self.assertEqual(body['messages'], [])
         self.assertEqual(self.route._create_json.call_count, 2)
         self.assertNotIn(chinese, json.dumps(body, ensure_ascii=False))
-        rejected = [t for t in self.generation_traces()
-                    if t.get('retry_reason') == 'jp_not_japanese']
-        self.assertTrue(rejected[0]['will_retry'])
+        zh_traces = [t for t in self.generation_traces() if 'outcome' in t]
+        self.assertEqual(zh_traces[0]['retry_reason'], 'plaintext_verbal')
+        self.assertTrue(zh_traces[0]['will_retry'])
+        rejected = [t for t in zh_traces if t.get('retry_reason') == 'jp_not_japanese']
+        self.assertTrue(rejected)
+        self.assertFalse(rejected[-1]['will_retry'])
         self.client.messages.create.assert_not_called()
         self.state.assert_not_called()
 
@@ -801,12 +814,18 @@ class ChatCommitGateTests(unittest.TestCase):
                     self.route, 'get_temporal_snapshot', return_value=snapshot) as clock, patch.object(
                     self.route, '_turn_context', return_value=(None, [])) as context:
                 response, body = self.send([
-                    '今日はゆっくり話そう', chat_reply('今日はゆっくり話そう。', '今天慢慢聊吧。')], handler=handler,
+                    '今日はゆっくり話そう', '今日はゆっくり話そう'], handler=handler,
                                            source_event_id=handler.__name__)
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(body['messages'][0]['jp'], '今日はゆっくり話そう')
                 self.assertEqual(body['messages'][0]['zh'], '')
-                self.assertEqual(self.route._create_json.call_count, 1)
+                self.assertEqual(self.route._create_json.call_count, 2)
+                if handler.__name__ == 'chat_text':
+                    voice_traces = [t for t in self.generation_traces() if 'outcome' in t]
+                    self.assertEqual(voice_traces[0]['retry_reason'], 'plaintext_verbal')
+                    self.assertTrue(voice_traces[0]['will_retry'])
+                    self.assertEqual(voice_traces[1]['acceptance_mode'], 'plaintext')
+                    self.assertFalse(voice_traces[1]['will_retry'])
                 clock.assert_called_once()
                 self.assertIs(context.call_args.kwargs['temporal_snapshot'], snapshot)
                 self.assertIs(self.route.build_system_blocks.call_args.kwargs['temporal_snapshot'], snapshot)
