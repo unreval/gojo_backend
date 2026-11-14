@@ -193,3 +193,28 @@ class TranslateFallbackTests(unittest.TestCase):
             self.assertIsNone(route_chat._translate_plaintext_fallback(CHINESE))
         with patch('ai_client.create_chat', return_value=(CHINESE, {})):
             self.assertIsNone(route_chat._translate_plaintext_fallback(CHINESE))
+
+
+class StructuredChineseJpLogTests(unittest.TestCase):
+    def test_long_chinese_jp_is_logged_and_still_accepted(self):
+        message = {'jp': '冷成这样还点个没食欲的汤', 'zh': '这么冷还点汤'}
+        for blocking in (False, True):
+            with self.subTest(blocking=blocking), \
+                    patch.object(config, 'TRANSLATION_CHECKS_BLOCKING', blocking), \
+                    patch('builtins.print') as logged:
+                self.assertIsNone(utils.reply_message_rejection_reason(message))
+                warnings = _payloads(logged, '[translation_check] ')
+                matched = [row for row in warnings
+                           if row['reason'] == 'jp_structured_not_japanese']
+                self.assertEqual(len(matched), 1)
+                self.assertEqual(matched[0]['message_index'], 1)
+                self.assertIs(matched[0]['blocking'], blocking)
+
+    def test_short_kanji_japanese_is_not_logged(self):
+        for jp in ('了解。', '大丈夫？'):
+            with self.subTest(jp=jp), patch('builtins.print') as logged:
+                self.assertIsNone(utils.reply_message_rejection_reason(
+                    {'jp': jp, 'zh': '知道了。'}))
+                self.assertFalse(any(
+                    call.args and 'jp_structured_not_japanese' in str(call.args[0])
+                    for call in logged.call_args_list))

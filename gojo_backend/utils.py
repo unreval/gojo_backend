@@ -454,6 +454,7 @@ def log_translation_check(reason, message_index, jp, zh):
         'number_value_mismatch': r'[0-9０-９零〇一二三四五六七八九十百千万萬亿億兆]+',
         'bilingual_numeric_anchor_mismatch': r'日元|日圆|分钟|分鐘|分間|時間|小时|小時|円|元|天|日|年|月|个|個|時|时|点|分',
         'zh_contains_kana': r'[\u3041-\u3096\u30a1-\u30fa\uff66-\uff9f]+',
+        'jp_structured_not_japanese': r'[\u3400-\u9fff]+',
     }
     markers = list(dict.fromkeys(
         match.group()[:8] for match in re.finditer(patterns[reason], jp + ' ' + zh)))[:6]
@@ -475,6 +476,10 @@ def reply_message_rejection_reason(m: dict, *, message_index=1):
         return 'invalid_message_field'
     if 'text' in (jp_kind, zh_kind) and jp.strip() == zh.strip():
         return 'jp_equals_zh_verbal'
+    # Observation only. Not added to reasons, so the blocking switch cannot veto it.
+    jp_han = sum('\u3400' <= ch <= '\u9fff' for ch in jp)
+    if jp_han >= 6 and not has_japanese_kana(jp):
+        log_translation_check('jp_structured_not_japanese', message_index, jp, zh)
     # A short quoted Japanese word can appear inside otherwise Chinese text.
     without_short_quote = re.sub(
         r'[「『“][\u3041-\u3096\u30a1-\u30fa\uff66-\uff9f]{1,6}[」』”]', '', zh)
