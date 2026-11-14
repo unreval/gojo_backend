@@ -39,7 +39,7 @@ from config import (
 )
 from utils import (
     ingest_model_output, sanitize_user_reply, contains_offline_marker,
-    finalize_user_messages, classify_reply_content,
+    finalize_user_messages, classify_reply_content, has_japanese_kana,
     has_visible_text, valid_reply_msg, commit_ready_msgs, msg_has_json_debris,
 )
 from generation_contract import (
@@ -663,6 +663,47 @@ def _protocol_rejection_reason(parsed, raw='', min_messages=1, acceptance_mode=N
     return rejection_reason(parsed, raw, min_messages, acceptance_mode)
 
 
+def _han_and_kana_counts(text):
+    s = str(text or '')
+    han = sum('\u3400' <= ch <= '\u9fff' for ch in s)
+    kana = sum(
+        '\u3041' <= ch <= '\u3096' or '\u30a1' <= ch <= '\u30fa'
+        or '\uff66' <= ch <= '\uff9f' for ch in s)
+    return han, kana
+
+
+def _translate_plaintext_fallback(text):
+    """Translate recovered Chinese prose into spoken Japanese. None on any failure."""
+    try:
+        source = str(text or '').strip()
+        if not source:
+            return None
+        from ai_client import create_chat
+        translated, _usage = create_chat(
+            model=MODEL_JP_AUX,
+            messages=[{
+                'role': 'user',
+                'content': (
+                    '把下面这段中文翻成自然的日语口语。'
+                    '保持原语气和人称。不增不删内容。'
+                    '只输出日语正文，不要 JSON、不要解释、不要引号。\n\n'
+                    + source
+                ),
+            }],
+            system=None,
+            max_tokens=800,
+            max_retries=0,
+        )
+    except Exception:
+        return None
+    if not isinstance(translated, str):
+        return None
+    cleaned = translated.strip()
+    if not cleaned or not has_japanese_kana(cleaned) or cleaned == source:
+        return None
+    return cleaned
+
+
 def _generate_or_none(
     model, max_tokens, system_blocks, messages, *,
     attempts, log_tag, cache_tag, min_messages=1, salvage=False, reject_fn=None,
@@ -673,6 +714,7 @@ def _generate_or_none(
     repair_reason = None
     provider_calls = [0]
     generation_calls = 0
+    translated_fallback = False
     scope = ('delayed' if isinstance(log_tag, str) and log_tag.startswith('delayed:')
              else cache_tag.split(':', 1)[0] if isinstance(cache_tag, str)
              else 'unknown')
@@ -746,6 +788,39 @@ def _generate_or_none(
                 acceptance_mode = recovered['_acceptance_mode']
         reason = ('malformed_json' if unusable_stop else _protocol_rejection_reason(
             parsed, raw, min_messages, acceptance_mode))
+        translated_fallback = False
+        source_text = None
+        if (reason == 'jp_not_japanese' and acceptance_mode == 'plaintext'
+                and attempt + 1 >= semantic_attempts and isinstance(parsed, dict)):
+            current_messages = parsed.get('messages')
+            if (isinstance(current_messages, list) and len(current_messages) == 1
+                    and isinstance(current_messages[0], dict)
+                    and isinstance(current_messages[0].get('jp'), str)):
+                source_text = current_messages[0]['jp']
+        if source_text is not None:
+            han, kana = _han_and_kana_counts(source_text)
+            import config as _config
+            if (getattr(_config, 'TRANSLATE_FALLBACK_ENABLED', False)
+                    and han >= 2 and kana < han):
+                provider_calls[0] += 1
+                try:
+                    translated = _translate_plaintext_fallback(source_text)
+                except Exception:
+                    translated = None
+                translated_text = translated.strip() if isinstance(translated, str) else ''
+                if (translated_text and has_japanese_kana(translated_text)
+                        and translated_text != source_text.strip()):
+                    parsed = {
+                        'emotion': '平静',
+                        'messages': [{
+                            'jp': translated_text,
+                            'zh': source_text.strip(),
+                        }],
+                    }
+                    acceptance_mode = 'structured'
+                    reason = _protocol_rejection_reason(
+                        parsed, raw, min_messages, 'structured')
+                    translated_fallback = not reason
         if reason:
             # Malformed JSON fails immediately. Message shape, language and story
             # length errors get at most one semantic regeneration.
@@ -800,7 +875,8 @@ def _generate_or_none(
             trace_context=generation_trace, response=response,
             outcome='accepted', will_retry=False, acceptance_mode=acceptance_mode,
         )
-        status = ('degraded_plaintext' if acceptance_mode == 'plaintext'
+        status = ('translated_fallback' if translated_fallback
+                  else 'degraded_plaintext' if acceptance_mode == 'plaintext'
                   else 'nonverbal_ok' if acceptance_mode == 'nonverbal'
                   else 'semantic_retry' if attempt else 'structured_ok')
         _emit_generation_result(

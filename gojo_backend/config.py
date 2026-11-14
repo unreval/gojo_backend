@@ -16,6 +16,11 @@ MODEL_MID = os.getenv('MODEL_MID', 'claude-sonnet-4-6')
 TRANSLATION_CHECKS_BLOCKING = os.getenv(
     'TRANSLATION_CHECKS_BLOCKING', 'false').strip().lower() in ('1', 'true')
 
+# Last-attempt Chinese prose can be translated into Japanese. Default off, so
+# the jp_not_japanese gate still drops the reply until an operator enables it.
+TRANSLATE_FALLBACK_ENABLED = os.getenv(
+    'TRANSLATE_FALLBACK_ENABLED', 'false').strip().lower() in ('1', 'true')
+
 # Schedule claim diagnostics do not veto a reply; true restores strict checks.
 # These guards compare the reply's wording against the canonical world. They
 # carry no authority: commit_schedule_transition is the only path to schedule
