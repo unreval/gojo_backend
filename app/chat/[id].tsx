@@ -2362,7 +2362,11 @@ export default function ChatRoom() {
           // ★ 长按头像/名字 → @这个人（仅群聊）
           const mentionThis = () => {
             if (isGroup && msg.senderName) {
-              setInputText(prev => prev + '@' + msg.senderName + ' ');
+              setInputText(prev => {
+                const next = prev + '@' + msg.senderName + ' ';
+                inputTextRef.current = next;
+                return next;
+              });
             }
           };
 
@@ -2510,8 +2514,11 @@ export default function ChatRoom() {
               key={m.id}
               style={s.mentionItem}
               onPress={() => {
-                setInputText(prev =>
-                  prev.endsWith('@') ? prev + m.name + ' ' : prev + '@' + m.name + ' ');
+                setInputText(prev => {
+                  const next = prev.endsWith('@') ? prev + m.name + ' ' : prev + '@' + m.name + ' ';
+                  inputTextRef.current = next;
+                  return next;
+                });
                 setShowMention(false);
               }}
             >
