@@ -218,3 +218,47 @@ class StructuredChineseJpLogTests(unittest.TestCase):
                 self.assertFalse(any(
                     call.args and 'jp_structured_not_japanese' in str(call.args[0])
                     for call in logged.call_args_list))
+
+
+class TranslationOutputCleaningTests(unittest.TestCase):
+    def accept(self, raw, source='冷成这样还点个没食欲的汤'):
+        with patch('ai_client.create_chat', return_value=(raw, {})):
+            return route_chat._translate_plaintext_fallback(source)
+
+    def test_live_english_preamble_is_removed(self):
+        raw = (
+            'Translate phrase.\n\n'
+            'こんなに寒いのに食欲のわかないスープ頼むなんて、自分をいじめてるようなもんでしょ。'
+        )
+        result = self.accept(raw)
+        self.assertEqual(
+            result,
+            'こんなに寒いのに食欲のわかないスープ頼むなんて、自分をいじめてるようなもんでしょ。',
+        )
+        self.assertNotIn('Translate phrase.', result)
+
+    def test_jp_tag_is_unwrapped(self):
+        self.assertEqual(self.accept('<jp>こんにちは、元気？</jp>'), 'こんにちは、元気？')
+
+    def test_surrounding_english_outside_the_tag_is_dropped(self):
+        raw = 'Here is the translation:\n<jp>寒いね。</jp>\nHope this helps.'
+        self.assertEqual(self.accept(raw), '寒いね。')
+
+    def test_english_only_output_is_rejected(self):
+        self.assertIsNone(self.accept('Translate phrase.'))
+
+    def test_english_line_between_japanese_paragraphs_is_rejected(self):
+        raw = '寒いね。\n\nNote: casual tone.\n\n早く帰ろう。'
+        self.assertIsNone(self.accept(raw))
+
+    def test_japanese_line_with_english_words_is_kept(self):
+        raw = 'OKだよ、LINEで送って。'
+        self.assertEqual(self.accept(raw), raw)
+
+    def test_blank_line_between_japanese_paragraphs_is_kept(self):
+        raw = '寒いね。\n\n早く帰ろう。'
+        self.assertEqual(self.accept(raw), raw)
+
+    def test_empty_or_chinese_tag_is_rejected(self):
+        self.assertIsNone(self.accept('<jp></jp>'))
+        self.assertIsNone(self.accept('<jp>现在我们慢慢聊吧</jp>'))

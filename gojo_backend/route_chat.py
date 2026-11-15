@@ -674,6 +674,27 @@ def _han_and_kana_counts(text):
 
 def _translate_plaintext_fallback(text):
     """Translate recovered Chinese prose into spoken Japanese. None on any failure."""
+    def has_kana(value):
+        return any(
+            '\u3041' <= ch <= '\u3096' or '\u30a1' <= ch <= '\u30fa'
+            or '\uff66' <= ch <= '\uff9f' for ch in value)
+
+    def has_han(value):
+        return any('\u3400' <= ch <= '\u9fff' for ch in value)
+
+    def clean_output(raw_text):
+        """Keep the first <jp> body, or drop only leading and trailing non-script lines."""
+        match = re.search(r'<jp>(.*?)</jp>', raw_text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        lines = raw_text.splitlines()
+        start, end = 0, len(lines)
+        while start < end and not (has_kana(lines[start]) or has_han(lines[start])):
+            start += 1
+        while end > start and not (has_kana(lines[end - 1]) or has_han(lines[end - 1])):
+            end -= 1
+        return '\n'.join(lines[start:end]).strip()
+
     try:
         source = str(text or '').strip()
         if not source:
@@ -686,7 +707,8 @@ def _translate_plaintext_fallback(text):
                 'content': (
                     '把下面这段中文翻成自然的日语口语。'
                     '保持原语气和人称。不增不删内容。'
-                    '只输出日语正文，不要 JSON、不要解释、不要引号。\n\n'
+                    '只输出日语正文，不要 JSON、不要解释、不要引号。'
+                    '把日语正文放在 <jp> 和 </jp> 之间，标签外不要写任何东西。\n\n'
                     + source
                 ),
             }],
@@ -698,9 +720,15 @@ def _translate_plaintext_fallback(text):
         return None
     if not isinstance(translated, str):
         return None
-    cleaned = translated.strip()
+    cleaned = clean_output(translated)
     if not cleaned or not has_japanese_kana(cleaned) or cleaned == source:
         return None
+    if '<jp>' in cleaned or '</jp>' in cleaned:
+        return None
+    for line in cleaned.splitlines():
+        latin = any('A' <= ch <= 'Z' or 'a' <= ch <= 'z' for ch in line)
+        if latin and not has_kana(line) and not has_han(line):
+            return None
     return cleaned
 
 
