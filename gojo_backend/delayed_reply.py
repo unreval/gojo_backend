@@ -274,7 +274,8 @@ def _push_delayed_reply(user_id, character_id, char_name, msgs):
         print(f'[delayed_reply] push skipped: {exc}')
 
 
-def generate_delayed_chat_reply(bundle, *, helpers=None, push=True):
+def generate_delayed_chat_reply(bundle, *, helpers=None, push=True,
+                                 abort_if_superseded=False):
     """Read pending bundle → INTERNAL CONTEXT → normal chat generator → commit.
 
     Resolve is the caller's job after this returns ok=True.
@@ -354,6 +355,14 @@ def generate_delayed_chat_reply(bundle, *, helpers=None, push=True):
             return {'ok': False, 'reason': 'provider_retryable',
                     'retry_delay_seconds': retry_delay}
         return {'ok': False, 'reason': 'generation_failed'}
+
+    if abort_if_superseded:
+        import db_schedule
+        if db_schedule.find_open_batching_successor(
+                phone_check_id, user_id, character_id) is not None:
+            print(f'[delayed_reply] #{phone_check_id} superseded_by_new_message; '
+                  'reply discarded')
+            return {'ok': False, 'reason': 'superseded_by_new_message'}
 
     from schedule_transition import commit_generated_schedule_intent
     transition = commit_generated_schedule_intent(
@@ -504,54 +513,147 @@ def _settle_flushed_reply(oid, claimed, generated, now):
     }
 
 
-def flush_batching_reply(user_id, character_id, *, now=None, generate_fn=None):
-    """Arm and claim the open batching inbox, then generate once.
+def _merge_batching_claims(claimed_a, claimed_b):
+    """In-memory union of two claims. Neither phone-check row is rewritten."""
+    from reply_availability import parse_pending_event_meta
 
-    The worker's _generation_allowed() quota and provider pause are not
-    consulted. A second consumer that loses the claim gets nothing_pending.
+    metas = (parse_pending_event_meta(claimed_a.get('event_meta'))
+             + parse_pending_event_meta(claimed_b.get('event_meta')))
+    text_a = claimed_a.get('pending_text') or ''
+    text_b = claimed_b.get('pending_text') or ''
+    merged = dict(claimed_a)
+    merged['event_meta'] = metas
+    merged['pending_text'] = f'{text_a}\n{text_b}'
+    merged['pending_count'] = (int(claimed_a.get('pending_count') or 0)
+                               + int(claimed_b.get('pending_count') or 0))
+    merged['first_source_event_id'] = claimed_a.get('first_source_event_id')
+    merged['last_source_event_id'] = claimed_b.get('last_source_event_id')
+    return merged
+
+
+def _flush_generation_result(claimed, exc):
+    from provider_error import is_auth_error, retry_delay_seconds
+    from raw_events import SourceValidityError
+
+    print(f'[delayed_reply] flush generate #{claimed.get("id")} failed: '
+          f'{type(exc).__name__} message={str(exc)[:300]}')
+    source_invalid = isinstance(exc, SourceValidityError)
+    retry_delay = None if source_invalid else retry_delay_seconds(exc)
+    generated = {'ok': False, 'reason': (
+        'source_invalid' if source_invalid else
+        'provider_auth_failed' if is_auth_error(exc) else
+        'provider_retryable' if retry_delay else 'generation_failed')}
+    if retry_delay:
+        generated['retry_delay_seconds'] = retry_delay
+    return generated
+
+
+def flush_batching_reply(user_id, character_id, *, now=None, generate_fn=None):
+    """Arm and claim the open batching inbox, then generate.
+
+    One open successor may replace that generation with a single combined
+    reply. The worker's hourly quota and provider pause are not consulted.
+    A caller-supplied generate_fn keeps the original signature and is never
+    discarded for a successor.
     """
     import db_schedule
 
     now = now or _now()
-    generate_fn = generate_fn or (
-        lambda bundle, push=True: generate_delayed_chat_reply(bundle, push=push))
+    injected = generate_fn is not None
+
+    def _invoke(bundle, *, abort):
+        if injected:
+            return generate_fn(bundle, push=False)
+        return generate_delayed_chat_reply(
+            bundle, push=False, abort_if_superseded=abort)
+
+    def _generate_checked(claimed_row, *, abort):
+        try:
+            checked = _precheck_pending_bundle_sources(claimed_row)
+            if checked is None:
+                print(f'[delayed_reply] flush phone_check_id={claimed_row.get("id")} '
+                      'source_invalid no_active_canonical_user_sources')
+                return {'ok': False, 'reason': 'source_invalid'}
+            return _invoke(checked, abort=abort)
+        except Exception as exc:
+            return _flush_generation_result(claimed_row, exc)
+
+    def _not_claimed(action):
+        return {'ok': False, 'reason': action or 'nothing_pending', 'action': action}
+
+    def _claim(target_id, claim_now):
+        try:
+            decision = db_schedule.evaluate_due_phone_check(target_id, claim_now)
+        except Exception as exc:
+            print(f'[delayed_reply] flush evaluate #{target_id} failed: {exc}')
+            return None, None
+        action = (decision or {}).get('action')
+        claimed_row = (decision or {}).get('claimed')
+        if action != 'reply' or not claimed_row:
+            return action, None
+        return action, claimed_row
+
     oid = db_schedule.find_open_batching_phone_check(user_id, character_id)
     if oid is None:
         return {'ok': False, 'reason': 'nothing_pending'}
     db_schedule.arm_open_phone_check(oid, now)
-    try:
-        decision = db_schedule.evaluate_due_phone_check(oid, now)
-    except Exception as exc:
-        print(f'[delayed_reply] flush evaluate #{oid} failed: {exc}')
-        return {'ok': False, 'reason': 'nothing_pending'}
-    action = (decision or {}).get('action')
-    claimed = (decision or {}).get('claimed')
-    if action != 'reply' or not claimed:
-        return {'ok': False, 'reason': action or 'nothing_pending', 'action': action}
+    _action, claimed = _claim(oid, now)
+    if not claimed:
+        return _not_claimed(_action)
 
-    generated = None
+    if injected:
+        return _settle_flushed_reply(
+            oid, claimed, _generate_checked(claimed, abort=False), now)
+
+    successor_id = db_schedule.find_open_batching_successor(
+        oid, user_id, character_id)
+    if successor_id is None:
+        generated = _generate_checked(claimed, abort=True)
+        if (not isinstance(generated, dict)
+                or generated.get('reason') != 'superseded_by_new_message'):
+            return _settle_flushed_reply(oid, claimed, generated, now)
+        successor_id = db_schedule.find_open_batching_successor(
+            oid, user_id, character_id)
+
+    now = _now()
+    db_schedule.release_superseded_phone_check(oid, claimed['claim_token'], now)
+    _action, claimed = _claim(oid, now)
+    if not claimed:
+        return _not_claimed(_action)
+
+    claimed_b = None
+    if successor_id is not None:
+        db_schedule.arm_open_phone_check(successor_id, now)
+        _action_b, claimed_b = _claim(successor_id, now)
+    if not claimed_b:
+        return _settle_flushed_reply(
+            oid, claimed, _generate_checked(claimed, abort=False), now)
+
+    generated = _generate_checked(
+        _merge_batching_claims(claimed, claimed_b), abort=False)
+    if generated and generated.get('ok'):
+        settled = _settle_flushed_reply(oid, claimed, generated, now)
+        try:
+            won = db_schedule.complete_delayed_reply(
+                claimed_b['id'], claimed_b['claim_token'], now)
+            if won:
+                db_schedule.log_phone_check_action('consumed', claimed_b)
+            else:
+                print(f'[delayed_reply] flush finish #{claimed_b["id"]} '
+                      'did not win watermark CAS; successor remains pending')
+        except Exception as exc:
+            print(f'[delayed_reply] flush finish successor '
+                  f'#{claimed_b["id"]} failed: {exc}')
+        return settled
+
+    settled = _settle_flushed_reply(oid, claimed, generated, now)
     try:
-        checked = _precheck_pending_bundle_sources(claimed)
-        if checked is None:
-            print(f'[delayed_reply] flush phone_check_id={oid} '
-                  'source_invalid no_active_canonical_user_sources')
-            generated = {'ok': False, 'reason': 'source_invalid'}
-        else:
-            generated = generate_fn(checked, push=False)
+        db_schedule.release_superseded_phone_check(
+            claimed_b['id'], claimed_b['claim_token'], now)
     except Exception as exc:
-        from provider_error import is_auth_error, retry_delay_seconds
-        from raw_events import SourceValidityError
-        print(f'[delayed_reply] flush generate #{oid} failed: {type(exc).__name__} '
-              f'message={str(exc)[:300]}')
-        source_invalid = isinstance(exc, SourceValidityError)
-        retry_delay = None if source_invalid else retry_delay_seconds(exc)
-        generated = {'ok': False, 'reason': (
-            'source_invalid' if source_invalid else
-            'provider_auth_failed' if is_auth_error(exc) else
-            'provider_retryable' if retry_delay else 'generation_failed')}
-        if retry_delay:
-            generated['retry_delay_seconds'] = retry_delay
-    return _settle_flushed_reply(oid, claimed, generated, now)
+        print(f'[delayed_reply] flush release successor '
+              f'#{claimed_b["id"]} failed: {exc}')
+    return settled
 
 
 def process_due_phone_checks(now=None, *, generate_fn=None, evaluate_fn=None):
