@@ -27,6 +27,7 @@ import os
 import random
 import threading
 import uuid
+from typing import Optional
 from db import get_conn
 from db_read_receipt import mark_source_events_seen_tx, source_event_ids_from_claim
 from schedule_contract import (
@@ -881,6 +882,67 @@ def release_claimed_phone_check(cur, oid, token, *, retry_at=None,
         log_phone_check_action('expired', {'id': oid, 'fail_count': fail_count},
                                reason=reason)
     return cur.rowcount
+
+
+def find_open_batching_successor(oid, user_id, character_id) -> Optional[int]:
+    """Id of an open batching successor of this claim, or None.
+
+    A miss or any error returns None so the caller still delivers.
+    """
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            '''SELECT id FROM char_phone_check
+               WHERE successor_of_id=%s
+                 AND user_id=%s
+                 AND character_id=%s
+                 AND inbox_reason='batching'
+                 AND resolved_at IS NULL
+                 AND COALESCE(pending_count, 0) > 0
+                 AND check_state IN ('pending', 'deferred')
+               ORDER BY id
+               LIMIT 1''',
+            (oid, user_id, character_id))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def release_superseded_phone_check(oid, token, now) -> int:
+    """Put a processing claim back to pending without counting a failure."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            '''UPDATE char_phone_check SET -- phone_check:release_superseded
+                   check_state = 'pending',
+                   next_phone_check_at = %s,
+                   claimed_at = NULL, claim_token = NULL,
+                   claim_owner = NULL, claim_expires_at = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = %s AND claim_token = %s AND check_state = 'processing' ''',
+            (now, oid, token))
+        n = cur.rowcount
+        conn.commit()
+        return n
+    finally:
+        cur.close()
+        conn.close()
 
 
 def list_due_phone_check_ids(cur, now, *, limit=20):
