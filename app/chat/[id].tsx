@@ -157,6 +157,7 @@ function isGenerationInProgressPayload(data: any): boolean {
 // Automatic 202 retries for one image source_event_id. A new id starts over.
 const IMAGE_PROGRESS_RETRY_LIMIT = 8;
 const BATCH_FLUSH_MS = 5000;
+const BATCH_TYPING_HOLD_MAX_MS = 30000;
 const DUP_SEND_GUARD_MS = 400;
 
 function assistantSegmentId(
@@ -395,6 +396,7 @@ export default function ChatRoom() {
   const messagesRef = useRef<Message[]>([]);  // ★ 消息镜像（离开后仍能落盘）
   const lastSentRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });  // ★ 防抖：挡网络卡顿导致的重复发送
   const batchFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const batchFlushAnchorRef = useRef(0);
   const flushInFlightRef = useRef(false);
   const flushAgainRef = useRef(false);
   const flushFailedRef = useRef(false);
@@ -1724,10 +1726,20 @@ export default function ChatRoom() {
 
   const scheduleBatchFlush = () => {
     clearBatchFlushTimer();
-    batchFlushTimerRef.current = setTimeout(() => {
-      batchFlushTimerRef.current = null;
-      void flushBatch();
-    }, BATCH_FLUSH_MS);
+    batchFlushAnchorRef.current = Date.now();
+    const arm = () => {
+      batchFlushTimerRef.current = setTimeout(() => {
+        batchFlushTimerRef.current = null;
+        const stillTyping = inputTextRef.current.trim().length > 0;
+        const heldMs = Date.now() - batchFlushAnchorRef.current;
+        if (stillTyping && heldMs < BATCH_TYPING_HOLD_MAX_MS) {
+          arm();
+          return;
+        }
+        void flushBatch();
+      }, BATCH_FLUSH_MS);
+    };
+    arm();
   };
 
   const flushBatch = async () => {
@@ -2561,6 +2573,7 @@ export default function ChatRoom() {
           style={s.input}
           value={inputText}
           onChangeText={(t) => {
+            inputTextRef.current = t;
             setInputText(t);
             if (isGroup) {
               if (t.endsWith('@')) setShowMention(true);
