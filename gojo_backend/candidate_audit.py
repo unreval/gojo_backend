@@ -50,6 +50,13 @@ CANDIDATE_AUDIT_DDL = (
     # raw_content is the user turn G9 compared. Observation only; nothing reads it.
     '''ALTER TABLE candidate_audit_log
        ADD COLUMN IF NOT EXISTS raw_content TEXT''',
+    # View-note observation. Write-only, same as raw_content. Nothing reads it.
+    '''ALTER TABLE candidate_audit_log
+       ADD COLUMN IF NOT EXISTS perspective TEXT''',
+    '''ALTER TABLE candidate_audit_log
+       ADD COLUMN IF NOT EXISTS emotion TEXT''',
+    '''ALTER TABLE candidate_audit_log
+       ADD COLUMN IF NOT EXISTS view_version TEXT''',
 )
 
 
@@ -146,10 +153,11 @@ def log_candidate(record, *, batch_id=None, occurred_at=None,
                    candidate_index, quote, summary, interpretation, persistence,
                    gate_accepted, accepted, reason, projection_status,
                    projection_reason, module_version, shadow, occurred_at,
-                   created_at, utterance_mode, context_excerpt, raw_content
+                   created_at, utterance_mode, context_excerpt, raw_content,
+                   perspective, emotion, view_version
                ) VALUES (
                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, %s, %s, %s, %s
+                   %s, %s, %s, %s, %s, %s, %s, %s, %s
                ) RETURNING id''',
             (
                 user_id,
@@ -174,6 +182,9 @@ def log_candidate(record, *, batch_id=None, occurred_at=None,
                 _text(record.get('utterance_mode')),
                 _text(record.get('context_excerpt')),
                 _text(record.get('raw_content')),
+                _text(record.get('perspective')),
+                _text(record.get('emotion')),
+                _text(record.get('view_version')),
             ),
         )
         row_id = cur.fetchone()

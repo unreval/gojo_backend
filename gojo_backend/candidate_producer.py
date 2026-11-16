@@ -41,7 +41,7 @@ _STOP = threading.Event()
 # any same-named values the model returns are discarded before the gates.
 _FIELDS = frozenset({'source_event_id', 'quote', 'summary', 'interpretation',
                      'predicate', 'object', 'value', 'time_scope', 'perspective',
-                     'persistence', 'utterance_mode',
+                     'persistence', 'utterance_mode', 'emotion',
                      'prior_character_text', 'context_excerpt'})
 # Observation only. The producer's own reading of how long the fact holds, used
 # to measure whether an LLM can pick the retention tier before any routing is
@@ -75,6 +75,19 @@ def observed_utterance_mode(candidate):
     """
     value = candidate.get('utterance_mode') if isinstance(candidate, dict) else None
     return value if isinstance(value, str) and value in _UTTERANCE_MODES else None
+
+
+def observed_emotion(candidate):
+    """Emotion label for the audit log, or None when it is not in the enum.
+
+    The batch schema does not type-check emotion. A missing value, a number,
+    or a word outside the enum must not raise and must not reject the candidate.
+    """
+    value = candidate.get('emotion') if isinstance(candidate, dict) else None
+    if not isinstance(value, str):
+        return None
+    from cognitive_output import STICKY_NOTE_EMOTIONS
+    return value if value in STICKY_NOTE_EMOTIONS else None
 
 
 _REQUIRED = frozenset({'source_event_id', 'quote', 'summary', 'predicate', 'object', 'value'})
@@ -124,6 +137,79 @@ utterance_mode只能是sincere、practice或unsure，不确定就省略或写uns
 perspective是角色自己的感受，最多40字，以“我”开头，没把握时省略该字段，不要输出空字符串；它不是用户事实。
 纯寒暄、语气词、无法确认的内容和重复候选不提取，可以输出[]。
 候选不是事实；它们还必须通过来源验证和确定性闸门。'''
+
+_PERSPECTIVE_RULE = (
+    'perspective是角色自己的感受，最多40字，以“我”开头，没把握时省略该字段，不要输出空字符串；它不是用户事实。'
+)
+_VOICE_MARKER = '【笑声规则'
+_VOICE_HEADER = (
+    '【角色资料——只用于写 perspective 的口气。你仍然是观察者，不要扮演他，其余字段的规则完全不变】'
+)
+
+
+def _sticky_view_on():
+    from config import STICKY_VIEW_ENABLED
+    return bool(STICKY_VIEW_ENABLED)
+
+
+def _character_voice(character_id):
+    """Name plus the profile used only to word perspective.
+
+    load_core reads the character file. Failure or an empty result keeps the
+    id as the name and appends no profile. The profile is never put through
+    the % template.
+    """
+    try:
+        from characters_data._loader import load_core
+        core = load_core(character_id)
+    except Exception:
+        return character_id, None
+    if not isinstance(core, dict) or not core:
+        return character_id, None
+    name = core.get('name')
+    if not isinstance(name, str) or not name.strip():
+        name = character_id
+    else:
+        name = name.strip()
+    prompt = core.get('core_prompt')
+    if not isinstance(prompt, str) or not prompt.strip():
+        return name, None
+    if _VOICE_MARKER in prompt:
+        material = prompt.split(_VOICE_MARKER, 1)[0]
+    else:
+        material = prompt[:700]
+    material = material[:900]
+    if not isinstance(material, str) or not material.strip():
+        return name, None
+    return name, material
+
+
+def _system_prompt(character_id):
+    """System text for one candidate batch.
+
+    The switch-off result is the historical template, byte for byte. The
+    switch-on result changes only the field list, the perspective rule, and
+    an optional profile trailer.
+    """
+    system = _SYSTEM % ', '.join(sorted(_PREDICATES))
+    if not _sticky_view_on():
+        return system
+    system = system.replace(
+        'perspective?、persistence?', 'perspective?、emotion?、persistence?', 1)
+    name, material = _character_voice(character_id)
+    from cognitive_output import STICKY_NOTE_EMOTIONS
+    emotions = '、'.join(sorted(STICKY_NOTE_EMOTIONS))
+    voice = (
+        f'perspective是{name}本人读到这句话时心里冒出来的一句话，像他随手写给自己的便利贴，不是分析报告。'
+        f'用他平时说话的口气，写中文，最多40字，必须以“我”开头，不能以“我们”开头。'
+        f'不要复述她的话，不要写“她说”“用户”“角色”。不要断言她心里怎么想、她其实怎样，只写他自己的反应。'
+        f'不要写成“你说过”。没有特别的想法就省略该字段，不要硬写，不要输出空字符串。它不是用户事实。\n'
+        f'emotion是他写这句话时的情绪，只能是：{emotions}；拿不准就省略该字段。只有写了perspective时才写emotion。'
+    )
+    system = system.replace(_PERSPECTIVE_RULE, voice, 1)
+    if material:
+        system += '\n' + _VOICE_HEADER + '\n' + material
+    return system
 
 
 class BatchOutputError(ValueError):
@@ -487,6 +573,7 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
         contract_reason = candidate_contract_reason(screened, by_source)
         checked = dict(screened)
         checked.pop('utterance_mode', None)
+        checked.pop('emotion', None)
         gate_accepted, reason = (False, contract_reason) if contract_reason else (
             validate_candidate(cur, user_id, character_id, checked))
         gates = gate_results(gate_accepted, reason,
@@ -500,6 +587,7 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
             projected.pop('interpretation', None)
             projected.pop('persistence', None)
             projected.pop('utterance_mode', None)
+            projected.pop('emotion', None)
             projected.pop('context_excerpt', None)
             projected.pop('prior_character_text', None)
             projection = adjudicate_and_project(cur, user_id=user_id,
@@ -529,6 +617,9 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
             utterance_mode=observed_utterance_mode(item),
             context_excerpt=excerpt if isinstance(excerpt, str) and excerpt else None,
             raw_content=raw_content if isinstance(raw_content, str) else None,
+            perspective=item.get('perspective') if isinstance(item.get('perspective'), str) else None,
+            emotion=observed_emotion(item),
+            view_version='view_v1' if _sticky_view_on() else None,
             gates=gates, gate_accepted=gate_accepted, accepted=accepted,
             reason=reason if not gate_accepted or shadow else (projection or {}).get('reason'),
             projection_status=(projection or {}).get('status'),
@@ -601,7 +692,7 @@ def run_pair(user_id, character_id, *, now=None, create_chat_fn=None, conn=None,
         committing = False
 
         stage = 'model_call'
-        system = _SYSTEM % ', '.join(sorted(_PREDICATES))
+        system = _system_prompt(character_id)
         messages = [{'role': 'user', 'content': json.dumps(
             [_model_payload(item) for item in inputs], ensure_ascii=False)}]
         chat_fn = create_chat_fn
