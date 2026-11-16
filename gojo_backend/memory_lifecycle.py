@@ -1120,8 +1120,10 @@ def recall_lifecycle_memories(user_id, character_id, user_message='', limit=6,
 def recall_sticky_notes(user_id, character_id, user_message='', limit=3):
     try:
         from cognitive_reader import list_user_facing_sticky_notes
+        from config import STICKY_VIEW_IN_CHAT
         rows = list_user_facing_sticky_notes(
-            user_id, character_id, limit=limit * 2)
+            user_id, character_id, limit=limit * 2,
+            include_view=STICKY_VIEW_IN_CHAT)
         items = []
         for row in rows:
             item = dict(row, source_type='sticky_note')

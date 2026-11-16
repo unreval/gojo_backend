@@ -56,7 +56,7 @@ async def get_grumbles(user_id: str = DEFAULT_USER,
                        limit: int = 100):
     """列出有原始证据的便利贴。character_id 传空则列出全部角色。"""
     items = list_user_facing_sticky_notes(
-        user_id, character_id or None, limit=limit,
+        user_id, character_id or None, limit=limit, include_view=True,
     )
     return JSONResponse({'grumbles': [_public_grumble(item) for item in items]})
 
@@ -66,6 +66,7 @@ async def unviewed_count(user_id: str = DEFAULT_USER, character_id: str = None):
     """首页给便利贴 tile 显示红点用。character_id 可选。"""
     n = count_unviewed_sticky_notes(
         user_id, character_id or None, source=USER_FACING_STICKY_SOURCE,
+        include_view=True,
     )
     return JSONResponse({'count': n})
 
@@ -77,6 +78,7 @@ async def mark_viewed(data: dict):
     character_id = data.get('character_id') or None
     n = mark_sticky_notes_viewed(
         user_id, character_id, source=USER_FACING_STICKY_SOURCE,
+        include_view=True,
     )
     return JSONResponse({'ok': True, 'marked': n})
 

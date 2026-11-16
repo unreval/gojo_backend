@@ -20,9 +20,11 @@ async def get_sticky_notes(user_id: str = 'default',
                            include_inactive: bool = False,
                            limit: int = 50):
     notes = (list_sticky_notes(user_id, character_id,
-                              include_inactive=True, limit=limit)
+                              include_inactive=True, limit=limit,
+                              include_view=True)
              if include_inactive else
-             list_user_facing_sticky_notes(user_id, character_id, limit=limit))
+             list_user_facing_sticky_notes(
+                 user_id, character_id, limit=limit, include_view=True))
     return JSONResponse({'sticky_notes': notes})
 
 

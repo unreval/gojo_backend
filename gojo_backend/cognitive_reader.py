@@ -385,9 +385,11 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
             for row in cur.fetchall()
         ]
 
+        from config import STICKY_VIEW_IN_CHAT
         sticky_notes = list_user_facing_sticky_notes(
             user_id, character_id,
-            limit=COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT, conn=database)
+            limit=COGNITIVE_MAX_STICKY_NOTES_IN_CONTEXT, conn=database,
+            include_view=STICKY_VIEW_IN_CHAT)
 
         cur.execute(
             '''SELECT prediction_key, metadata, expires_at
@@ -651,7 +653,8 @@ def _iso(value):
 
 def _sticky_where(user_id, character_id=None, *, include_inactive=False,
                   source=None, include_hidden=True, exclude_expired=False,
-                  unviewed_only=False, user_visible_only=False):
+                  unviewed_only=False, user_visible_only=False,
+                  include_view=False):
     clauses = ['user_id = %s']
     params = [user_id]
     if character_id:
@@ -663,8 +666,11 @@ def _sticky_where(user_id, character_id=None, *, include_inactive=False,
         clauses.append('source = %s')
         params.append(source)
     if source == USER_FACING_STICKY_SOURCE:
+        versions = "'sticky_evidence_v1','sticky_candidate_v1'"
+        if include_view:
+            versions += ",'sticky_view_v1'"
         clauses.extend((
-            "metadata->>'projection_version' IN ('sticky_evidence_v1','sticky_candidate_v1')",
+            f"metadata->>'projection_version' IN ({versions})",
             "(CASE WHEN jsonb_typeof(source_event_refs) = 'array' "
             "THEN jsonb_array_length(source_event_refs) ELSE 0 END) = 1",
             "source_event_refs->0->>'source_type' = 'raw_event'",
@@ -730,7 +736,8 @@ def _serialize_sticky_row(row):
 
 def list_sticky_notes(user_id, character_id=None, *, include_inactive=False,
                       limit=50, conn=None, source=None, include_hidden=True,
-                      exclude_expired=False, user_visible_only=False):
+                      exclude_expired=False, user_visible_only=False,
+                      include_view=False):
     database = conn
     owns_connection = database is None
     if database is None:
@@ -745,6 +752,7 @@ def list_sticky_notes(user_id, character_id=None, *, include_inactive=False,
             include_hidden=include_hidden,
             exclude_expired=exclude_expired,
             user_visible_only=user_visible_only,
+            include_view=include_view,
         )
         params = list(params)
         params.append(max(1, min(int(limit), 100)))
@@ -768,7 +776,7 @@ def list_sticky_notes(user_id, character_id=None, *, include_inactive=False,
 
 
 def list_user_facing_sticky_notes(user_id, character_id=None, *, limit=50,
-                                  conn=None):
+                                  conn=None, include_view=False):
     """Canonical visible sticky projection shared by UI and chat."""
     return list_sticky_notes(
         user_id,
@@ -780,11 +788,12 @@ def list_user_facing_sticky_notes(user_id, character_id=None, *, limit=50,
         include_hidden=False,
         exclude_expired=True,
         user_visible_only=True,
+        include_view=include_view,
     )
 
 
 def count_unviewed_sticky_notes(user_id, character_id=None, *, source=None,
-                                conn=None):
+                                conn=None, include_view=False):
     """User-facing unread count. Does not change semantic status."""
     database = conn
     owns_connection = database is None
@@ -801,6 +810,7 @@ def count_unviewed_sticky_notes(user_id, character_id=None, *, source=None,
             exclude_expired=True,
             unviewed_only=True,
             user_visible_only=True,
+            include_view=include_view,
         )
         cur.execute(
             f'''SELECT COUNT(*) FROM cognitive_sticky_notes
@@ -816,7 +826,7 @@ def count_unviewed_sticky_notes(user_id, character_id=None, *, source=None,
 
 
 def mark_sticky_notes_viewed(user_id, character_id=None, *, source=None,
-                             conn=None):
+                             conn=None, include_view=False):
     """Mark matching notes as read. Never changes status/completed_at."""
     database = conn
     owns_connection = database is None
@@ -833,6 +843,7 @@ def mark_sticky_notes_viewed(user_id, character_id=None, *, source=None,
             exclude_expired=True,
             unviewed_only=True,
             user_visible_only=True,
+            include_view=include_view,
         )
         cur.execute(
             f'''UPDATE cognitive_sticky_notes
