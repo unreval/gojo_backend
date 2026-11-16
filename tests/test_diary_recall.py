@@ -108,6 +108,7 @@ class DiaryRecallTests(unittest.TestCase):
             },
             'characters_data._loader': {
                 'load_canon_lock': Mock(return_value=''),
+                'load_channel_note': Mock(return_value=''),
                 'load_core': Mock(return_value=None),
             },
             'user_memory': {
