@@ -530,7 +530,9 @@ def _failure_delay(count):
     return PAUSE_SECONDS if count >= 3 else 30 * (2 ** (count - 1))
 
 
-def _project_accepted_sticky(cur, user_id, character_id, source, source_id, candidate):
+def _project_accepted_sticky(cur, user_id, character_id, source, source_id, candidate,
+                             *, perspective=None, emotion=None, quote=None,
+                             occurred_at=None):
     """Derived sticky. A failure here must not abort the candidate transaction."""
     try:
         cur.execute('SAVEPOINT candidate_sticky')
@@ -541,7 +543,8 @@ def _project_accepted_sticky(cur, user_id, character_id, source, source_id, cand
         project_candidate_sticky(
             cur, user_id=user_id, character_id=character_id, event_id=event_id,
             source_id=source_id, candidate=candidate, now=datetime.now(CN_TZ),
-            source_text=source_text)
+            source_text=source_text, perspective=perspective, emotion=emotion,
+            quote=quote, occurred_at=occurred_at)
         cur.execute('RELEASE SAVEPOINT candidate_sticky')
     except Exception:
         _LOGGER.exception(
@@ -576,6 +579,9 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
         checked.pop('emotion', None)
         gate_accepted, reason = (False, contract_reason) if contract_reason else (
             validate_candidate(cur, user_id, character_id, checked))
+        # G8 pops an unsafe perspective in place and still accepts the candidate.
+        # Whatever remains here is the perspective the view note may keep.
+        kept_perspective = checked.get('perspective') if gate_accepted else None
         gates = gate_results(gate_accepted, reason,
             candidate if isinstance(candidate, dict) else {}, evaluated=not contract_reason)
         projection = None
@@ -588,6 +594,7 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
             projected.pop('persistence', None)
             projected.pop('utterance_mode', None)
             projected.pop('emotion', None)
+            projected.pop('perspective', None)
             projected.pop('context_excerpt', None)
             projected.pop('prior_character_text', None)
             projection = adjudicate_and_project(cur, user_id=user_id,
@@ -601,8 +608,12 @@ def _process_candidates(cur, user_id, character_id, candidates, inputs, common, 
         # Sticky fields stay on item. Projection above already stripped them
         # so they cannot enter a claim. Shadow mode must not write.
         if accepted and not shadow:
+            quote = item.get('quote') if isinstance(item.get('quote'), str) else None
+            occurred_at = source.get('occurred_at') if isinstance(source, dict) else None
             _project_accepted_sticky(
-                cur, user_id, character_id, source, source_id, item)
+                cur, user_id, character_id, source, source_id, item,
+                perspective=kept_perspective, emotion=observed_emotion(item),
+                quote=quote, occurred_at=occurred_at)
         excerpt = source.get('context_excerpt') if isinstance(source, dict) else None
         # The gates compared this turn, not the quote span. Keep it on the
         # observation record only. A model field of the same name is not accepted.
