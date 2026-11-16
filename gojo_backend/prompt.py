@@ -7,9 +7,9 @@
     - 表情包目录同样是静态规范,进缓存头;未启用时整节不出现
 """
 from datetime import datetime, timedelta, timezone
-from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID
+from config import CN_TZ, EMOTIONS, DEFAULT_CHARACTER_ID, CHANNEL_CAPABILITY
 from characters import get_character, retrieve_character_memory
-from characters_data._loader import load_canon_lock, load_core
+from characters_data._loader import load_canon_lock, load_channel_note, load_core
 from user_memory import (
     get_long_memory, get_recent_openings, get_last_assistant_reply,
     get_bond_memories, get_first_interaction_days,
@@ -771,6 +771,9 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
 
     # ── ★ 角色专属铁律 ──
     canon_lock = load_canon_lock(character_id)
+    channel_note = load_channel_note(character_id, CHANNEL_CAPABILITY)
+    if channel_note:
+        canon_lock = f'{canon_lock}\n{channel_note}'
 
     # ── 时间 + 输出规范 ──
     # The frozen clock and transient-state constraints must survive aux trimming.

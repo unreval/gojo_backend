@@ -4,6 +4,7 @@
                     PHONE_BEHAVIOR 可选；只影响 soft_busy 看手机节奏
   - memories.py:    SEED_MEMORIES  (list of tuple: content, category, keywords, importance)
   - canon_lock.py:  CANON_LOCK  (str)
+  - channel.py:     可选；CHANNEL_NOTES，按硬件通道给一段说明。没有则跳过
   - lore.json:      可选；剧情/关系/世界观背景，带时间档
 """
 import os
@@ -53,6 +54,37 @@ def load_canon_lock(character_id: str) -> str:
         return getattr(mod, 'CANON_LOCK', '')
     except Exception as e:
         print(f'[loader] 加载 {character_id}/canon_lock.py 失败：{e}')
+        return ''
+
+
+def load_channel_note(character_id: str, capability: str) -> str:
+    """加载当前硬件通道说明。没有 channel.py 时返回空串。"""
+    module_name = f'characters_data.{character_id}.channel'
+    try:
+        mod = importlib.import_module(module_name)
+    except ModuleNotFoundError as e:
+        if getattr(e, 'name', None) == module_name:
+            return ''
+        print(f'[loader] 加载 {character_id}/channel.py 失败：{e}')
+        return ''
+    except Exception as e:
+        print(f'[loader] 加载 {character_id}/channel.py 失败：{e}')
+        return ''
+    try:
+        notes = getattr(mod, 'CHANNEL_NOTES', None)
+        if not isinstance(notes, dict):
+            print(f'[loader] {character_id}/channel.py 没有可用的 CHANNEL_NOTES')
+            return ''
+        key = (capability or '').strip().lower()
+        if key in notes:
+            return notes[key] or ''
+        print(f'[loader] {character_id} 的通道说明没有 {key!r}，回退到 remote')
+        if 'remote' not in notes:
+            print(f'[loader] {character_id} 的通道说明也没有 remote')
+            return ''
+        return notes['remote'] or ''
+    except Exception as e:
+        print(f'[loader] 读取 {character_id} 通道说明失败：{e}')
         return ''
 
 
