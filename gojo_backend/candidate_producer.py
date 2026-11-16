@@ -374,7 +374,8 @@ def _pending_inputs(cur, user_id, character_id, version, cutoff):
             AND c.chat_id=COALESCE(NULLIF(e.payload->>'source_chat_id',''),e.character_id)
             AND COALESCE(NULLIF(c.event_id,''),c.client_msg_id)=e.source_event_id
             AND c.role='user' AND COALESCE(c.status,'active')='active'
-            AND c.text=e.payload->>'content')
+            AND c.text=e.payload->>'content'
+            AND c.kind IS DISTINCT FROM 'sticker')
           AND NOT EXISTS (SELECT 1 FROM event_processing_state p
             WHERE p.event_id=e.source_event_id AND p.processor_type=%s
               AND p.processor_version=%s AND p.status IN ('succeeded','done','skipped'))
