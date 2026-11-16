@@ -95,6 +95,10 @@ GROQ_KEY      = os.environ.get('GROQ_KEY', '')
 DATABASE_URL  = os.environ.get('DATABASE_URL', '')
 TTS_PROVIDER  = os.environ.get('TTS_PROVIDER', 'fish')
 
+# 硬件通道。描述眼下设备能传递什么，只能由部署环境设定。
+# 不得由关系状态、认知状态或模型输出改写。
+CHANNEL_CAPABILITY = (os.getenv('CHANNEL_CAPABILITY', 'remote') or 'remote').strip().lower()
+
 CN_TZ = timezone(timedelta(hours=8))
 
 EMOTION_TAGS = {
