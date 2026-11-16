@@ -352,7 +352,8 @@ class PersistStickyProvenanceTests(unittest.TestCase):
             memory_lifecycle.recall_sticky_notes('u', 'gojo')
         self.assertIn('user_visible = TRUE', ui_sql)
         self.assertIn(USER_FACING_STICKY_SOURCE, ui_params)
-        shared_reader.assert_called_once_with('u', 'gojo', limit=6)
+        shared_reader.assert_called_once_with(
+            'u', 'gojo', limit=6, include_view=False)
 
 
 class StickyDisplayContractTests(unittest.TestCase):
@@ -467,15 +468,15 @@ class RouteGrumbleApiTests(unittest.TestCase):
         self.marked_kwargs = []
         self.hidden_ids = []
 
-        def _list(user_id, character_id=None, *, limit=100):
+        def _list(user_id, character_id=None, *, limit=100, include_view=False):
             self.list_kwargs.append((user_id, character_id, limit))
             return list(self.listed)
 
-        def _count(user_id, character_id=None, *, source=None):
+        def _count(user_id, character_id=None, *, source=None, include_view=False):
             self.unviewed_kwargs.append((user_id, character_id, source))
             return 2
 
-        def _mark(user_id, character_id=None, *, source=None):
+        def _mark(user_id, character_id=None, *, source=None, include_view=False):
             self.marked_kwargs.append((user_id, character_id, source))
             for note in self.listed:
                 note['viewed'] = True
@@ -646,15 +647,15 @@ class CrossCharacterGrumbleApiTests(unittest.TestCase):
                 items = [n for n in items if not n['viewed']]
             return items
 
-        def _list(user_id, character_id=None, *, limit=100):
+        def _list(user_id, character_id=None, *, limit=100, include_view=False):
             self.list_kwargs.append((user_id, character_id, limit))
             return _visible(character_id)[:limit]
 
-        def _count(user_id, character_id=None, *, source=None):
+        def _count(user_id, character_id=None, *, source=None, include_view=False):
             self.unviewed_kwargs.append((user_id, character_id, source))
             return len(_visible(character_id, unviewed_only=True))
 
-        def _mark(user_id, character_id=None, *, source=None):
+        def _mark(user_id, character_id=None, *, source=None, include_view=False):
             self.marked_kwargs.append((user_id, character_id, source))
             marked = 0
             for note in _visible(character_id, unviewed_only=True):

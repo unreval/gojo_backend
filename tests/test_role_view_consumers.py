@@ -128,7 +128,8 @@ class RoleViewConsumerTests(unittest.TestCase):
             notes = memory_lifecycle.recall_sticky_notes('user-1', 'gojo')
         self.assertEqual(notes[0]['content'], '她说今天很累。')
         self.assertEqual(notes[0]['source_event_refs'], public['source_event_refs'])
-        shared_reader.assert_called_once_with('user-1', 'gojo', limit=6)
+        shared_reader.assert_called_once_with(
+            'user-1', 'gojo', limit=6, include_view=False)
 
 
 if __name__ == '__main__':
