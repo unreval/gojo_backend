@@ -221,6 +221,47 @@ Generation 输出不得直接决定：
 
 ---
 
+## 9. 表达层便利贴（view）
+
+### INV-VIEW-001 — View notes are not authority
+
+view 便利贴的内容由模型生成，不具权威。
+
+不得写入 long_memory、bond_memory、cognitive_beliefs、cognitive_hypotheses，
+也不得作为任何裁决、关系判断或记忆投影的证据。
+
+---
+
+### INV-VIEW-002 — One view note hangs on one live utterance
+
+每张 view 便利贴必须且只能挂一条有效的用户原话。
+
+原话被改或被删，便利贴即不可见。
+
+---
+
+### INV-VIEW-003 — View wording is the character's own thought
+
+view 内容不得表述为「你说过」。
+
+它只能是角色自己的想法。
+
+---
+
+### INV-VIEW-004 — View notes do not feed back
+
+view 不回流。
+
+G1–G9、候选投影、日记的事实部分不得读取它。
+
+---
+
+### INV-VIEW-005 — Chat does not read view notes unless switched on
+
+聊天是否读取 view 便利贴由 STICKY_VIEW_IN_CHAT 决定，默认关闭。
+
+---
+
 ## Change Rule
 
 如果某项修改需要改变这些 invariant：

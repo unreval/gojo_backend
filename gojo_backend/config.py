@@ -41,6 +41,22 @@ try:
 except (TypeError, ValueError):
     CANDIDATE_PRODUCER_LOOKBACK_DAYS = 7
 
+# 表达层便利贴。默认关闭：不改提示词，也不把 perspective 写成便利贴。
+# 聊天读取另有开关，默认同样关闭。
+STICKY_VIEW_ENABLED = os.getenv(
+    'STICKY_VIEW_ENABLED', 'false').strip().lower() in ('1', 'true')
+STICKY_VIEW_IN_CHAT = os.getenv(
+    'STICKY_VIEW_IN_CHAT', 'false').strip().lower() in ('1', 'true')
+try:
+    STICKY_VIEW_DAILY_LIMIT = int(os.getenv('STICKY_VIEW_DAILY_LIMIT', '8') or 8)
+except (TypeError, ValueError):
+    STICKY_VIEW_DAILY_LIMIT = 8
+try:
+    STICKY_VIEW_MAX_AGE_HOURS = int(
+        os.getenv('STICKY_VIEW_MAX_AGE_HOURS', '48') or 48)
+except (TypeError, ValueError):
+    STICKY_VIEW_MAX_AGE_HOURS = 48
+
 # 表情包冷却是快环确定性规则,不调模型。非正整数回落到默认。
 def _sticker_window(name, default):
     try:

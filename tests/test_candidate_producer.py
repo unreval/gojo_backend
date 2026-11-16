@@ -1146,7 +1146,10 @@ class ProducerDatabaseTests(unittest.TestCase):
                 'INSERT INTO CANDIDATE_AUDIT_LOG ',
                 'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS UTTERANCE_MODE TEXT',
                 'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS CONTEXT_EXCERPT TEXT',
-                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS RAW_CONTENT TEXT')), sql)
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS RAW_CONTENT TEXT',
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS PERSPECTIVE TEXT',
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS EMOTION TEXT',
+                'ALTER TABLE CANDIDATE_AUDIT_LOG ADD COLUMN IF NOT EXISTS VIEW_VERSION TEXT')), sql)
         logs = self.candidate_logs()
         self.assertEqual(logs[0]['gates']['G9']['status'], 'passed')
         self.assertEqual(logs[1]['gates']['G4']['status'], 'rejected')

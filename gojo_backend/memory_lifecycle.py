@@ -447,18 +447,147 @@ def sticky_ttl_from_time_scope(time_scope, now):
     return seconds
 
 
+_VIEW_NOT_APPLIED = object()
+_VIEW_FORBIDDEN_PHRASES = ('你说过', '你讲过', '你提过', '你告诉过')
+
+
+def _sticky_view_enabled():
+    from config import STICKY_VIEW_ENABLED
+    return bool(STICKY_VIEW_ENABLED)
+
+
+def _view_within_max_age(occurred_at, now):
+    """True when the source turn is not older than the view window.
+
+    A bad timestamp falls through to the summary sticky. It must not raise:
+    a raise inside the sticky savepoint would also drop that older path.
+    """
+    from config import STICKY_VIEW_MAX_AGE_HOURS
+    try:
+        hours = int(STICKY_VIEW_MAX_AGE_HOURS)
+    except (TypeError, ValueError):
+        return False
+    if hours < 0:
+        return False
+    if (not isinstance(occurred_at, datetime) or not isinstance(now, datetime)
+            or occurred_at.tzinfo is None or occurred_at.utcoffset() is None
+            or now.tzinfo is None or now.utcoffset() is None):
+        return False
+    delta = now - occurred_at
+    return timedelta(0) <= delta <= timedelta(hours=hours)
+
+
+def _view_under_daily_limit(cur, user_id, character_id, now):
+    """Count today's view notes in Singapore local time (UTC+8, no DST).
+
+    CN_TZ is that same fixed offset. Bounds are passed as instants so the
+    query does not need a timezone database.
+    """
+    from config import STICKY_VIEW_DAILY_LIMIT
+    try:
+        limit = int(STICKY_VIEW_DAILY_LIMIT)
+    except (TypeError, ValueError):
+        return False
+    if limit <= 0 or not isinstance(now, datetime):
+        return False
+    if now.tzinfo is None or now.utcoffset() is None:
+        local = now.replace(tzinfo=CN_TZ)
+    else:
+        local = now.astimezone(CN_TZ)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    cur.execute(
+        '''SELECT COUNT(*) FROM cognitive_sticky_notes
+           WHERE user_id=%s AND character_id=%s
+             AND metadata->>'projection_version' = 'sticky_view_v1'
+             AND created_at >= %s AND created_at < %s''',
+        (user_id, character_id, start, end))
+    row = cur.fetchone()
+    count = int((row[0] if row else 0) or 0)
+    return count < limit
+
+
+def _project_sticky_view(cur, *, user_id, character_id, event_id, source_id,
+                         source_text, candidate, now, perspective, emotion,
+                         quote, occurred_at):
+    """Write the character's own note, or report that the old path should run."""
+    if not _sticky_view_enabled():
+        return _VIEW_NOT_APPLIED
+    if not isinstance(perspective, str) or not perspective.strip():
+        return _VIEW_NOT_APPLIED
+    from cognitive_output import is_user_facing_sticky_content, sticky_emotion_tag
+    if not is_user_facing_sticky_content(perspective):
+        return _VIEW_NOT_APPLIED
+    if any(phrase in perspective for phrase in _VIEW_FORBIDDEN_PHRASES):
+        return _VIEW_NOT_APPLIED
+    if not _view_within_max_age(occurred_at, now):
+        return _VIEW_NOT_APPLIED
+    if not _view_under_daily_limit(cur, user_id, character_id, now):
+        return _VIEW_NOT_APPLIED
+    time_scope = candidate.get('time_scope') if isinstance(candidate, dict) else None
+    time_scope_text = time_scope.strip() if isinstance(time_scope, str) else ''
+    ttl = sticky_ttl_from_time_scope(time_scope, now) if time_scope_text else None
+    if ttl is None:
+        from cognitive_config import get_sticky_note_ttl_config
+        ttl = get_sticky_note_ttl_config()['default']
+    note_key = 'memory_lifecycle.raw.' + hashlib.sha1(
+        str(source_id).encode('utf-8')).hexdigest()[:20]
+    refs = [{'event_id': event_id, 'source_type': 'raw_event',
+             'source_id': str(source_id), 'user_id': user_id,
+             'character_id': character_id}]
+    emotion_text = emotion if isinstance(emotion, str) else ''
+    metadata = {
+        'projection_version': 'sticky_view_v1',
+        'source_text': source_text,
+        'emotion': emotion_text,
+        'tag': sticky_emotion_tag(emotion_text or None),
+        'trigger_snippet': quote[:40] if isinstance(quote, str) else '',
+        'view_version': 'view_v1',
+    }
+    if time_scope_text:
+        metadata['time_scope'] = time_scope
+    cur.execute(
+        '''INSERT INTO cognitive_sticky_notes (
+               user_id, character_id, note_key, content, status, source,
+               source_event_refs, expires_at, metadata)
+           VALUES (%s, %s, %s, %s, 'active', %s, %s::jsonb, %s, %s::jsonb)
+           ON CONFLICT (user_id, character_id, note_key) DO NOTHING
+           RETURNING id''',
+        (user_id, character_id, note_key, perspective, MEMORY_LIFECYCLE_SOURCE,
+         _json(refs), now + timedelta(seconds=ttl), _json(metadata)),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    print(
+        f'[sticky] created view from candidate source_event_id={source_id} '
+        f'ttl_seconds={ttl}',
+        flush=True)
+    return row[0]
+
+
 def project_candidate_sticky(cur, *, user_id, character_id, event_id,
-                             source_id, candidate, now, source_text):
+                             source_id, candidate, now, source_text,
+                             perspective=None, emotion=None, quote=None,
+                             occurred_at=None):
     """Project one derived sticky from an accepted candidate.
 
-    Content is the candidate summary. Interpretation is not a user fact and
-    is not stored. The note_key matches project_pending_sticky, so the two
-    writers leave one note per source. source_text is the verbatim chat_log
-    row; an empty value does not write.
+    A kept perspective can become a view note. Otherwise content is the
+    candidate summary. Interpretation is not a user fact and is not stored.
+    The note_key matches project_pending_sticky, so the two writers leave
+    one note per source. source_text is the verbatim chat_log row; an empty
+    value does not write.
     """
     if not isinstance(source_text, str) or source_text == '':
         return None
     candidate = candidate if isinstance(candidate, dict) else {}
+    view_id = _project_sticky_view(
+        cur, user_id=user_id, character_id=character_id, event_id=event_id,
+        source_id=source_id, source_text=source_text, candidate=candidate,
+        now=now, perspective=perspective, emotion=emotion, quote=quote,
+        occurred_at=occurred_at)
+    if view_id is not _VIEW_NOT_APPLIED:
+        return view_id
     time_scope = candidate.get('time_scope')
     time_scope_text = time_scope.strip() if isinstance(time_scope, str) else ''
 
@@ -991,8 +1120,10 @@ def recall_lifecycle_memories(user_id, character_id, user_message='', limit=6,
 def recall_sticky_notes(user_id, character_id, user_message='', limit=3):
     try:
         from cognitive_reader import list_user_facing_sticky_notes
+        from config import STICKY_VIEW_IN_CHAT
         rows = list_user_facing_sticky_notes(
-            user_id, character_id, limit=limit * 2)
+            user_id, character_id, limit=limit * 2,
+            include_view=STICKY_VIEW_IN_CHAT)
         items = []
         for row in rows:
             item = dict(row, source_type='sticky_note')
