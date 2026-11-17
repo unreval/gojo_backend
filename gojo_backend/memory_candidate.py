@@ -100,6 +100,7 @@ _PERSPECTIVE_ASSERTION = re.compile(
     r'|(?:她|他|你|您|用户|对方)[^，。！？；\n]{0,12}'
     r'(?:在意|喜欢|讨厌|爱|想要|希望|害怕|担心|难过|开心|嫉妒|依赖|安全感)'
 )
+_PERSPECTIVE_SUBJECT_RE = re.compile(r'^(?:她|他|你|您|用户|对方)')
 # Prompt-shaped report frame. Dropped once from the start of the residue,
 # after pronouns, the same way a leading answer particle is dropped once.
 # A 说 later in the sentence can be what she actually said, so it stays.
@@ -330,9 +331,12 @@ def validate_candidate(cur, user_id, character_id, candidate):
 
     if 'perspective' in candidate:
         perspective = candidate['perspective']
-        if (not isinstance(perspective, str) or not perspective.strip()
-                or len(perspective) > 40 or not perspective.strip().startswith('我')
-                or perspective.strip().startswith('我们')
+        text = perspective.strip() if isinstance(perspective, str) else ''
+        if (not isinstance(perspective, str) or not text
+                or len(perspective) > 40
+                or '我' not in text
+                or text.startswith('我们')
+                or _PERSPECTIVE_SUBJECT_RE.match(text)
                 or _PERSPECTIVE_ASSERTION.search(perspective)):
             candidate.pop('perspective')
             return True, 'perspective_dropped'

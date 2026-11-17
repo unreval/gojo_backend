@@ -1905,7 +1905,7 @@ def assemble_from_events(
             trimmed = filter_recall_authority(trimmed, user_id, character_id)
             pack.recall_result = trimmed
             memory_text, bond_text, told_text = format_recall_for_prompt(
-                trimmed, include_legacy=True)
+                trimmed, include_legacy=True, include_view_sticky=True)
         except Exception:
             memory_text, bond_text, told_text = '', '', ''
         pack.memory_text = memory_text

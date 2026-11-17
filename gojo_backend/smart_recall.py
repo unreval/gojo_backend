@@ -816,7 +816,8 @@ def _format_expiry(exp, *, record_id=None) -> str:
         return str(exp)[:16].replace('T', ' ')
 
 
-def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=False):
+def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=False,
+                             include_view_sticky=False):
     """把 two_level_recall 的结果格式化成 prompt 文本。
 
     返回 (memory_text, bond_text, told_text) 三个字符串，
@@ -849,9 +850,23 @@ def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=Fal
     diary_memories = recall_result.get('diary_memories', [])
     legacy_rows = recall_result.get('legacy_recollections') or []
 
+    def sticky_metadata(note):
+        metadata = note.get('metadata') if isinstance(note, dict) else None
+        return metadata if isinstance(metadata, dict) else {}
+
+    reminder_notes = []
+    view_notes = []
+    for note in sticky_notes:
+        version = sticky_metadata(note).get('projection_version')
+        if version == 'sticky_view_v1':
+            view_notes.append(note)
+        else:
+            reminder_notes.append(note)
+
     has_any = bool(
         facts or loose_bonds or tolds or lifecycle_memories or episodes
-        or sticky_notes or diary_memories
+        or reminder_notes or diary_memories
+        or (include_view_sticky and view_notes)
         or (include_legacy and legacy_rows)
     )
     memory_text = RECALL_EVIDENCE_PRIORITY if has_any else ''
@@ -908,9 +923,9 @@ def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=Fal
 5. 优先级仍服从上方统一证据顺序：当前消息/直接事件 > 较新事实 > active lifecycle/bond > 历史回忆。'''
         memory_text = f'{memory_text}{block}' if memory_text else block
 
-    if sticky_notes:
+    if reminder_notes:
         sticky_lines = []
-        for note in sticky_notes:
+        for note in reminder_notes:
             exp = note.get('expires_at')
             exp_text = _format_expiry(exp, record_id=note.get('id'))
             sticky_lines.append(f'- [到期 {exp_text}] {visible(note)}')
@@ -923,6 +938,28 @@ def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=Fal
 1. 便利贴用于临近事项、未完成目标和短期提醒。
 2. 到期或完成后不要继续当作普通回忆主动提起。
 3. 它不绕过证据管线，也不能直接改变关系判断。'''
+        memory_text = f'{memory_text}{block}' if memory_text else block
+
+    if include_view_sticky and view_notes:
+        view_lines = []
+        for note in view_notes:
+            emotion = sticky_metadata(note).get('emotion')
+            emotion = emotion.strip() if isinstance(emotion, str) else ''
+            content = visible(note)
+            if emotion:
+                view_lines.append(f'- [{emotion}] {content}')
+            else:
+                view_lines.append(f'- {content}')
+        block = f'''
+
+【你自己记下的念头——你当时心里冒出来的话，不是她说的】
+{chr(10).join(view_lines)}
+
+使用规则：
+1. 这是你当时自己的想法。可以顺着它接话，也可以完全不提。
+2. 绝不能说成“你说过”，也不能当成她说过的话或已确认的事实。
+3. 它不能用来反驳她，也不改变任何关系判断。
+4. 想法会变。它只代表当时，不代表你现在还这么想。'''
         memory_text = f'{memory_text}{block}' if memory_text else block
 
     if diary_memories:
