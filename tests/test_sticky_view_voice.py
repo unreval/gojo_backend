@@ -93,7 +93,7 @@ class StickyViewPromptTests(unittest.TestCase):
         with patch('config.STICKY_VIEW_ENABLED', True):
             system = producer._system_prompt('gojo')
         self.assertIn('perspective是五条悟本人读到这句话时心里冒出来的一句话', system)
-        self.assertIn('必须以“我”开头，不能以“我们”开头', system)
+        self.assertIn('句子里必须出现“我”，但不必放在开头；不能以“我们”开头，也不能以“她”“他”“你”开头', system)
         self.assertIn('不要写成“你说过”', system)
         self.assertIn('emotion是他写这句话时的情绪，只能是：' + enum, system)
         self.assertIn('只有写了perspective时才写emotion', system)
