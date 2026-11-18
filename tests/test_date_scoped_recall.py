@@ -10,8 +10,10 @@ BACKEND = os.path.join(ROOT, 'gojo_backend')
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
+import config
 import date_expr
 import smart_recall
+from memory_authority import AUTHORITY
 from tests import test_cognitive_deterministic as acceptance
 
 
@@ -215,6 +217,74 @@ class DateScopedPromptTests(unittest.TestCase):
         memory, _, _ = smart_recall.format_recall_for_prompt(self._rows())
         self.assertNotIn('她问到的那天', memory)
         self.assertEqual(memory, '')
+
+    def test_chat_passes_include_date_scoped_and_diary_does_not(self):
+        prompt = open(os.path.join(ROOT, 'gojo_backend', 'prompt.py'), encoding='utf-8').read()
+        layer = open(os.path.join(ROOT, 'gojo_backend', 'context_layer.py'), encoding='utf-8').read()
+        diary = open(os.path.join(ROOT, 'gojo_backend', 'diary_engine.py'), encoding='utf-8').read()
+        self.assertEqual(prompt.count('include_date_scoped=True'), 2)
+        self.assertEqual(layer.count('include_date_scoped=True'), 1)
+        self.assertNotIn('include_date_scoped', diary)
+        self.assertIn('format_recall_for_prompt(verified)', diary)
+
+
+class DateRecallSwitchTests(unittest.TestCase):
+    def test_default_is_off(self):
+        source = open(os.path.join(ROOT, 'gojo_backend', 'config.py'), encoding='utf-8').read()
+        self.assertIn("DATE_RECALL_ENABLED', 'false'", source)
+        if not os.getenv('DATE_RECALL_ENABLED'):
+            self.assertFalse(config.DATE_RECALL_ENABLED)
+
+    def test_switch_off_skips_parse_and_query_and_keeps_the_prompt(self):
+        payload = {
+            'facts': [{
+                'id': 1,
+                'content': '她说「你就是臭手」',
+                'timestamp': datetime(2026, 11, 10, 16, 30),
+                'category': '其他',
+                'authority': AUTHORITY,
+                'bonds': [],
+            }],
+        }
+        before = smart_recall.format_recall_for_prompt(
+            payload, include_legacy=True, include_view_sticky=True)
+        after = smart_recall.format_recall_for_prompt(
+            payload, include_legacy=True, include_view_sticky=True,
+            include_date_scoped=True)
+        self.assertEqual(after, before)
+        self.assertIn('你就是臭手', before[0])
+        self.assertNotIn('她问到的那天', before[0])
+        with patch.object(config, 'DATE_RECALL_ENABLED', False), \
+                patch('date_expr.parse_date_expression') as parse, \
+                patch('smart_recall.recall_by_date') as query, \
+                patch('smart_recall.get_conn', side_effect=RuntimeError('stop')):
+            result = smart_recall.two_level_recall(
+                'u', 'c', '十一号发生了什么',
+                now_local=datetime(2026, 11, 18, 12, 0))
+        self.assertIsNone(result)
+        parse.assert_not_called()
+        query.assert_not_called()
+
+    def test_switch_on_queries_only_when_a_day_parses(self):
+        rows = [{
+            'id': 7,
+            'content': '她说「你就是臭手」',
+            'timestamp': datetime(2026, 11, 10, 16, 30),
+            'category': '其他',
+            'recall_kind': 'date_scoped',
+        }]
+        clock = datetime(2026, 11, 18, 12, 0)
+        with patch.object(config, 'DATE_RECALL_ENABLED', True), \
+                patch('smart_recall.recall_by_date', return_value=rows) as query:
+            asked = smart_recall._date_scoped_extra(
+                'u', 'c', '十一号发生了什么', clock)
+            missing = smart_recall._date_scoped_extra(
+                'u', 'c', '随便聊聊', clock)
+        query.assert_called_once_with('u', 'c', date(2026, 11, 11))
+        self.assertEqual(asked['date_scoped_on'], date(2026, 11, 11))
+        self.assertEqual(asked['date_scoped'], rows)
+        self.assertEqual(missing, {'date_scoped': []})
+        self.assertNotIn('date_scoped_on', missing)
 
 
 if __name__ == '__main__':
