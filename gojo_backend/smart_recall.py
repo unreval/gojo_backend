@@ -22,10 +22,12 @@ import json
 import logging
 import math
 import time as _time
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from db import get_conn
-from memory_authority import STATE_REPORT_TTL_HOURS, authoritative_memory_sql
+from memory_authority import (
+    AUTHORITY, STATE_REPORT_TTL_HOURS, authoritative_memory_sql,
+)
 from role_view import PROJECTION_VERSION, render_role_view
 from told_projection import canonical_told_view, told_display
 from config import CN_TZ, DEFAULT_CHARACTER_ID
@@ -209,6 +211,96 @@ def _trace_selected_items(label, items, item_type):
           f'items=[{";".join(refs)}{suffix}]')
 
 
+def _trace_date_scoped(rows, target_date):
+    """Same trace shape as the other buckets: ids and the day, never content."""
+    day = target_date.isoformat()
+    refs = []
+    for item in list(rows or [])[:12]:
+        if not isinstance(item, dict):
+            continue
+        refs.append(f'id={item.get("id")},type=date_scoped,date={day}')
+    suffix = '' if len(rows or []) <= 12 else ',…'
+    print(f'[recall_trace] date_scoped selected={len(rows or [])} '
+          f'date={day} items=[{";".join(refs)}{suffix}]')
+
+
+def _date_utc_wall_bounds(target_date):
+    """Singapore-local midnight through the next midnight, as naive UTC wall clocks.
+
+    long_memory.timestamp is TIMESTAMP WITHOUT TIME ZONE and stores UTC wall time.
+    """
+    if isinstance(target_date, datetime):
+        target_date = target_date.date()
+    start_local = datetime.combine(target_date, time.min, tzinfo=CN_TZ)
+    end_local = start_local + timedelta(days=1)
+    start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+    return start_utc, end_utc
+
+
+def recall_by_date(user_id, character_id, target_date, limit=8):
+    """Authoritative long_memory rows from one Singapore-local calendar day.
+
+    The day's CN_TZ bounds are converted to the UTC wall clock before comparison.
+    No scoring, no relevance order, and no mention_count update.
+    """
+    if isinstance(target_date, datetime):
+        target_date = target_date.date()
+    try:
+        row_limit = int(limit)
+    except (TypeError, ValueError):
+        row_limit = 8
+    if row_limit <= 0:
+        row_limit = 8
+    start_utc, end_utc = _date_utc_wall_bounds(target_date)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f'''SELECT id, content, timestamp, category
+                FROM long_memory
+                WHERE user_id = %s AND character_id = %s
+                  AND timestamp >= %s AND timestamp < %s
+                  AND {authoritative_memory_sql('long_memory')}
+                ORDER BY timestamp ASC
+                LIMIT %s''',
+            (user_id, character_id, start_utc, end_utc, row_limit),
+        )
+        rows = []
+        for fid, content, ts, category in cur.fetchall():
+            rows.append({
+                'id': fid,
+                'content': content,
+                'timestamp': ts,
+                'category': category or '其他',
+                'recall_kind': 'date_scoped',
+                'authority': AUTHORITY,
+            })
+        _trace_date_scoped(rows, target_date)
+        return rows
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _date_scoped_extra(user_id, character_id, user_message, now_local):
+    """None keeps the recall dict unchanged. An empty list means no parsed day."""
+    import config
+    if not getattr(config, 'DATE_RECALL_ENABLED', False):
+        return None
+    from date_expr import parse_date_expression
+    clock = now_local if now_local is not None else datetime.now(CN_TZ)
+    asked = parse_date_expression(user_message or '', clock)
+    if asked is None:
+        return {'date_scoped': []}
+    try:
+        rows = recall_by_date(user_id, character_id, asked)
+    except Exception as exc:
+        print(f'[recall] date scoped lookup skipped:{type(exc).__name__}')
+        return {'date_scoped': []}
+    return {'date_scoped': rows, 'date_scoped_on': asked}
+
+
 def score_fact(content, category, timestamp, mention_count, last_mentioned,
                user_message, query_embedding=None, memory_embedding=None):
     """给一条 long_memory 打分。分数越高越该被召回。"""
@@ -250,7 +342,7 @@ def _cosine_sim(a, b):
 
 def two_level_recall(user_id, character_id, user_message,
                      shared_id='shared', query_embedding=None,
-                     exclude_event_ids=None):
+                     exclude_event_ids=None, now_local=None):
     """两级智能召回。返回结构化结果，供 prompt.py 组装。
 
     返回 dict:
@@ -280,6 +372,8 @@ def two_level_recall(user_id, character_id, user_message,
     """
     try:
         t0 = _time.time()
+        date_extra = _date_scoped_extra(
+            user_id, character_id, user_message, now_local)
 
         # ── 1. 拉全量 long_memory（不再 LIMIT 40，全部拉出来打分）──
         conn = get_conn()
@@ -673,7 +767,7 @@ def two_level_recall(user_id, character_id, user_message,
               f' = 共 {total_injected} 条'
               f'，耗时 {elapsed:.0f}ms')
 
-        return {
+        result = {
             'facts': selected_facts,
             'observer_id': character_id,
             'loose_bonds': loose_bonds,
@@ -687,6 +781,9 @@ def two_level_recall(user_id, character_id, user_message,
                 if str(item).strip()
             ],
         }
+        if date_extra:
+            result.update(date_extra)
+        return result
 
     except Exception as e:
         print(f'[recall] ⚠️ 两级召回失败，退回旧逻辑：{e}')
@@ -816,8 +913,59 @@ def _format_expiry(exp, *, record_id=None) -> str:
         return str(exp)[:16].replace('T', ' ')
 
 
+def _date_scoped_hhmm(ts):
+    """Naive timestamps are UTC wall clocks. Show Singapore local hour and minute."""
+    if not ts:
+        return '?'
+    try:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(CN_TZ).strftime('%H:%M')
+    except (AttributeError, TypeError, ValueError):
+        return '?'
+
+
+def _date_scoped_prompt_block(recall_result, visible):
+    """The day the user named. Empty when no date was parsed."""
+    asked = recall_result.get('date_scoped_on')
+    if asked is None:
+        return ''
+    if isinstance(asked, datetime):
+        asked = asked.date()
+    label = f'{asked.month}月{asked.day}日'
+    rows = [row for row in (recall_result.get('date_scoped') or []) if isinstance(row, dict)]
+
+    def sort_key(row):
+        ts = row.get('timestamp')
+        if not isinstance(ts, datetime):
+            return datetime.max
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+        return ts
+
+    rows.sort(key=sort_key)
+    if not rows:
+        return f'''
+
+【她问到的那天——{label}】
+那天没有留下记录。你可以说那天没什么印象，或者请她提个具体的事。不要拿别的日子说过的话当成那天的。'''
+    lines = [
+        f'- [{_date_scoped_hhmm(row.get("timestamp"))}] {visible(row)}'
+        for row in rows
+    ]
+    return f'''
+
+【她问到的那天——{label}那天留下的记录】
+{chr(10).join(lines)}
+
+使用规则：
+1. 这是那一天的记录，按发生顺序排的。
+2. 仍然只是她说过的话，不是你自己当时说了什么。
+3. 这些可以当作记得。超出这些的细节，没印象就说没印象。'''
+
+
 def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=False,
-                             include_view_sticky=False):
+                             include_view_sticky=False, include_date_scoped=False):
     """把 two_level_recall 的结果格式化成 prompt 文本。
 
     返回 (memory_text, bond_text, told_text) 三个字符串，
@@ -1018,6 +1166,11 @@ def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=Fal
 5. 与上面任何有出处的条目冲突时，一律以有出处的为准。
 6. 优先级最低：当前消息 > 有出处的明确自述 > lifecycle/bond > 日记反思 > 这些模糊印象。'''
         memory_text = f'{memory_text}{block}' if memory_text else block
+
+    if include_date_scoped:
+        block = _date_scoped_prompt_block(recall_result, visible)
+        if block:
+            memory_text = f'{memory_text}{block}' if memory_text else block
 
     # ── 独立羁绊（没有关联事实的）──
     bond_text = ''

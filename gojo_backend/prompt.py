@@ -627,7 +627,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
             getattr(context_pack, 'recall_result', None) or {}, user_id, character_id)
         memory_text, bond_text, told_text = format_recall_for_prompt(
             _recall_result, observer_id=character_id, include_legacy=True,
-            include_view_sticky=True)
+            include_view_sticky=True, include_date_scoped=True)
     else:
         try:
             from smart_recall import two_level_recall, format_recall_for_prompt
@@ -651,7 +651,7 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
                 _recall_result = filter_recall_authority(_recall_result, user_id, character_id)
                 memory_text, bond_text, told_text = format_recall_for_prompt(
                     _recall_result, observer_id=character_id, include_legacy=True,
-                    include_view_sticky=True)
+                    include_view_sticky=True, include_date_scoped=True)
         except Exception as _e:
             print(f'[prompt] 两级召回失败，退回旧逻辑：{_e}')
             _recall_result = None

@@ -45,6 +45,9 @@ except (TypeError, ValueError):
 # 聊天读取另有开关，默认同样关闭。
 STICKY_VIEW_ENABLED = os.getenv(
     'STICKY_VIEW_ENABLED', 'false').strip().lower() in ('1', 'true')
+# 按日期取那天的 long_memory。默认关闭：不解析日期，提示词也不加那天的记录。
+DATE_RECALL_ENABLED = os.getenv(
+    'DATE_RECALL_ENABLED', 'false').strip().lower() in ('1', 'true')
 STICKY_VIEW_IN_CHAT = os.getenv(
     'STICKY_VIEW_IN_CHAT', 'false').strip().lower() in ('1', 'true')
 try:
