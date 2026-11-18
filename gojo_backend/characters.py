@@ -12,6 +12,9 @@ from characters_data import REGISTRY
 from characters_data._loader import load_core, load_memories, load_lore, reload_lore
 
 
+CHARACTER_LORE_TITLE = '【关于你自己的背景资料】'
+CHARACTER_LORE_NOTE = '（对方这句话里提到了下面这些人或事，列出来供你核对，不是要你说的话题。对方没问到就不用主动提。）'
+
 CHARACTER_ANCHOR = {
     'gojo': 2,
     'geto': 2,

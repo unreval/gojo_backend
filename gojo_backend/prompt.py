@@ -604,11 +604,12 @@ def _build_prompt_parts(user_id, character_id=DEFAULT_CHARACTER_ID,
     else:
         recalls = retrieve_character_memory(character_id, user_message, limit=4)
         if recalls:
+            from characters import CHARACTER_LORE_NOTE, CHARACTER_LORE_TITLE
             recall_lines = '\n'.join(f'- {r}' for r in recalls)
             recall_text = f'''
 
-【你此刻自然想起的、关于你自己的一些事】
-（这些都是你真实的经历、喜好和设定。聊到相关话题时可以像突然想起一样自然带出，但绝对不要生硬罗列、也不要刻意全部用到，不相关就不提。）
+{CHARACTER_LORE_TITLE}
+{CHARACTER_LORE_NOTE}
 {recall_lines}'''
 
     # ══════════════════════════════════════════════════════════
