@@ -913,8 +913,59 @@ def _format_expiry(exp, *, record_id=None) -> str:
         return str(exp)[:16].replace('T', ' ')
 
 
+def _date_scoped_hhmm(ts):
+    """Naive timestamps are UTC wall clocks. Show Singapore local hour and minute."""
+    if not ts:
+        return '?'
+    try:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(CN_TZ).strftime('%H:%M')
+    except (AttributeError, TypeError, ValueError):
+        return '?'
+
+
+def _date_scoped_prompt_block(recall_result, visible):
+    """The day the user named. Empty when no date was parsed."""
+    asked = recall_result.get('date_scoped_on')
+    if asked is None:
+        return ''
+    if isinstance(asked, datetime):
+        asked = asked.date()
+    label = f'{asked.month}月{asked.day}日'
+    rows = [row for row in (recall_result.get('date_scoped') or []) if isinstance(row, dict)]
+
+    def sort_key(row):
+        ts = row.get('timestamp')
+        if not isinstance(ts, datetime):
+            return datetime.max
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+        return ts
+
+    rows.sort(key=sort_key)
+    if not rows:
+        return f'''
+
+【她问到的那天——{label}】
+那天没有留下记录。你可以说那天没什么印象，或者请她提个具体的事。不要拿别的日子说过的话当成那天的。'''
+    lines = [
+        f'- [{_date_scoped_hhmm(row.get("timestamp"))}] {visible(row)}'
+        for row in rows
+    ]
+    return f'''
+
+【她问到的那天——{label}那天留下的记录】
+{chr(10).join(lines)}
+
+使用规则：
+1. 这是那一天的记录，按发生顺序排的。
+2. 仍然只是她说过的话，不是你自己当时说了什么。
+3. 这些可以当作记得。超出这些的细节，没印象就说没印象。'''
+
+
 def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=False,
-                             include_view_sticky=False):
+                             include_view_sticky=False, include_date_scoped=False):
     """把 two_level_recall 的结果格式化成 prompt 文本。
 
     返回 (memory_text, bond_text, told_text) 三个字符串，
@@ -1115,6 +1166,11 @@ def format_recall_for_prompt(recall_result, observer_id=None, include_legacy=Fal
 5. 与上面任何有出处的条目冲突时，一律以有出处的为准。
 6. 优先级最低：当前消息 > 有出处的明确自述 > lifecycle/bond > 日记反思 > 这些模糊印象。'''
         memory_text = f'{memory_text}{block}' if memory_text else block
+
+    if include_date_scoped:
+        block = _date_scoped_prompt_block(recall_result, visible)
+        if block:
+            memory_text = f'{memory_text}{block}' if memory_text else block
 
     # ── 独立羁绊（没有关联事实的）──
     bond_text = ''

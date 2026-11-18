@@ -165,5 +165,57 @@ class RecallByDateTests(unittest.TestCase):
         self.assertIn('茶', kept[0]['content'])
 
 
+class DateScopedPromptTests(unittest.TestCase):
+    def _rows(self):
+        return {
+            'date_scoped_on': date(2026, 11, 11),
+            'date_scoped': [
+                {
+                    'content': '她说「你就是臭手」',
+                    'timestamp': datetime(2026, 11, 10, 18, 0),
+                },
+                {
+                    'content': '她说「堂々と来い」',
+                    'timestamp': datetime(2026, 11, 10, 16, 30),
+                },
+            ],
+        }
+
+    def test_records_render_in_singapore_time_order(self):
+        memory, bond, told = smart_recall.format_recall_for_prompt(
+            self._rows(), include_date_scoped=True)
+        early = memory.index('- [00:30] 她说「堂々と来い」')
+        late = memory.index('- [02:00] 她说「你就是臭手」')
+        self.assertLess(early, late)
+        self.assertIn('【她问到的那天——11月11日那天留下的记录】', memory)
+        self.assertIn('这是那一天的记录，按发生顺序排的。', memory)
+        self.assertIn('仍然只是她说过的话，不是你自己当时说了什么。', memory)
+        self.assertIn('这些可以当作记得。超出这些的细节，没印象就说没印象。', memory)
+        self.assertEqual(bond, '')
+        self.assertEqual(told, '')
+
+    def test_empty_day_says_there_is_no_record(self):
+        memory, _, _ = smart_recall.format_recall_for_prompt({
+            'date_scoped_on': date(2026, 11, 11),
+            'date_scoped': [],
+        }, include_date_scoped=True)
+        self.assertIn('【她问到的那天——11月11日】', memory)
+        self.assertNotIn('那天留下的记录', memory)
+        self.assertIn('那天没有留下记录。', memory)
+        self.assertIn('不要拿别的日子说过的话当成那天的。', memory)
+
+    def test_no_parsed_date_emits_no_block(self):
+        memory, _, _ = smart_recall.format_recall_for_prompt({
+            'date_scoped': self._rows()['date_scoped'],
+        }, include_date_scoped=True)
+        self.assertNotIn('她问到的那天', memory)
+        self.assertEqual(memory, '')
+
+    def test_include_date_scoped_defaults_to_false(self):
+        memory, _, _ = smart_recall.format_recall_for_prompt(self._rows())
+        self.assertNotIn('她问到的那天', memory)
+        self.assertEqual(memory, '')
+
+
 if __name__ == '__main__':
     unittest.main()
