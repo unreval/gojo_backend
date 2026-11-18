@@ -1623,11 +1623,16 @@ def _support_items(user_id, character_id, user_message, hot_messages, temporal_s
         print(f'[context_layer] schedule skipped:{exc}')
 
     try:
-        from characters import retrieve_character_memory
+        from characters import (
+            CHARACTER_LORE_NOTE,
+            CHARACTER_LORE_TITLE,
+            retrieve_character_memory,
+        )
         recalls = retrieve_character_memory(character_id, user_message, limit=4)
         if recalls:
             lore = (
-                '【你此刻自然想起的、关于你自己的一些事】\n'
+                f'{CHARACTER_LORE_TITLE}\n'
+                f'{CHARACTER_LORE_NOTE}\n'
                 + '\n'.join(f'- {row}' for row in recalls)
             )
             _add('character_lore', lore, 28, 'lore:hits')
