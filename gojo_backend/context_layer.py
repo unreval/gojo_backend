@@ -1415,6 +1415,13 @@ def _format_summary_block(items: Sequence[ContextItem], observer_id=None) -> str
     lines = ['【稍早连续讨论的滚动摘要——不能替代原文 Raw Event】']
     for item in items:
         lines.append(f'- {_view_text(item.text, observer_id)}')
+    lines.extend((
+        '使用规则：',
+        '1. 摘要里「我」说的部分，只说明你当时那样说过，不等于那件事被核实过。',
+        '2. 可以和自己上次说过的保持一致，但不要用「我说过」来证明一件事是真的。',
+        '3. 「她」说的部分有原话可查，按记得处理。',
+        '4. 摘要不记录精确时间，不要据此断定是哪一天。',
+    ))
     return '\n' + '\n'.join(lines) + '\n'
 
 
