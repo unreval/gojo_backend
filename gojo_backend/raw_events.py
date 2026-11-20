@@ -491,6 +491,80 @@ def get_previous_active_user_events(user_id, character_id, event_id, n=2,
     return out
 
 
+def _row_extra(extra):
+    meta = {}
+    if extra:
+        try:
+            parsed = json.loads(extra)
+            if isinstance(parsed, dict):
+                meta = parsed
+        except Exception:
+            pass
+    return meta
+
+
+def _fetch_active_rows_before(cur, user_id, character_id, event_id, hours, limit):
+    """Active chat_log rows strictly before one user anchor, newest first."""
+    cur.execute(
+        '''WITH anchor AS (
+               SELECT id, created_at
+               FROM chat_log
+               WHERE user_id=%s AND chat_id=%s
+                 AND COALESCE(status, 'active') = 'active'
+                 AND role='user'
+                 AND COALESCE(NULLIF(event_id, ''), client_msg_id)=%s
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1
+           )
+           SELECT COALESCE(NULLIF(prior.event_id, ''), prior.client_msg_id),
+                  prior.role, prior.text, prior.kind, prior.extra,
+                  prior.created_at, prior.subtitle
+           FROM chat_log AS prior
+           CROSS JOIN anchor
+           WHERE prior.user_id=%s AND prior.chat_id=%s
+             AND COALESCE(prior.status, 'active') = 'active'
+             AND prior.created_at >= anchor.created_at
+                 - (%s * INTERVAL '1 hour')
+             AND (prior.created_at, prior.id) < (anchor.created_at, anchor.id)
+           ORDER BY prior.created_at DESC, prior.id DESC
+           LIMIT %s''',
+        (user_id, character_id, event_id, user_id, character_id, hours, limit),
+    )
+    return cur.fetchall()
+
+
+def _prior_turn_dicts(rows):
+    """The historical turn-window shape. Newest-first rows come back chronological."""
+    out = []
+    for prior_id, role, text, kind, extra, ts, subtitle in reversed(rows):
+        out.append({
+            'event_id': prior_id or '',
+            'role': _prompt_role(role),
+            'content': text or '',
+            'kind': kind or 'text',
+            'metadata': _row_extra(extra),
+            'timestamp': ts,
+            'subtitle': subtitle or '',
+        })
+    return out
+
+
+def _thinking_row(prior_id, role, text, kind, extra, ts, subtitle):
+    return {
+        'event_id': prior_id or '',
+        'role': role or '',
+        'text': text or '',
+        'subtitle': subtitle or '',
+        'kind': kind or 'text',
+        'extra': _row_extra(extra),
+        'created_at': ts,
+    }
+
+
+def _thinking_rows(rows):
+    return [_thinking_row(*row) for row in rows]
+
+
 def get_previous_active_turn_events(user_id, character_id, event_id, n=6,
                                     hours=24, conn=None):
     """Return a small canonical turn window immediately before a user event.
@@ -499,6 +573,8 @@ def get_previous_active_turn_events(user_id, character_id, event_id, n=6,
     derived record verify a nearby user/assistant exchange (for example, a
     user-confirmed reply symbol) without turning the hot-context cache into
     factual evidence or allowing arbitrary older assistant text as a source.
+
+    上限写死最多 6 行，是故意收窄的，给沟通约定回填用。不要放宽这个上限。
     """
     event_id = _normalize_event_id(event_id)
     if not event_id:
@@ -511,32 +587,8 @@ def get_previous_active_turn_events(user_id, character_id, event_id, n=6,
     database, owned = _borrow_conn(conn)
     cur = database.cursor()
     try:
-        cur.execute(
-            '''WITH anchor AS (
-                   SELECT id, created_at
-                   FROM chat_log
-                   WHERE user_id=%s AND chat_id=%s
-                     AND COALESCE(status, 'active') = 'active'
-                     AND role='user'
-                     AND COALESCE(NULLIF(event_id, ''), client_msg_id)=%s
-                   ORDER BY created_at DESC, id DESC
-                   LIMIT 1
-               )
-               SELECT COALESCE(NULLIF(prior.event_id, ''), prior.client_msg_id),
-                      prior.role, prior.text, prior.kind, prior.extra,
-                      prior.created_at, prior.subtitle
-               FROM chat_log AS prior
-               CROSS JOIN anchor
-               WHERE prior.user_id=%s AND prior.chat_id=%s
-                 AND COALESCE(prior.status, 'active') = 'active'
-                 AND prior.created_at >= anchor.created_at
-                     - (%s * INTERVAL '1 hour')
-                 AND (prior.created_at, prior.id) < (anchor.created_at, anchor.id)
-               ORDER BY prior.created_at DESC, prior.id DESC
-               LIMIT %s''',
-            (user_id, character_id, event_id, user_id, character_id, hours, n),
-        )
-        rows = cur.fetchall()
+        rows = _fetch_active_rows_before(
+            cur, user_id, character_id, event_id, hours, n)
     except SourceValidityError:
         raise
     except Exception as e:
@@ -552,26 +604,131 @@ def get_previous_active_turn_events(user_id, character_id, event_id, n=6,
         if owned:
             database.close()
 
-    out = []
-    for prior_id, role, text, kind, extra, ts, subtitle in reversed(rows):
-        meta = {}
-        if extra:
+    return _prior_turn_dicts(rows)
+
+
+def get_thinking_window(user_id, character_id, first_event_id, last_event_id, *,
+                        before_rows=30, before_hours=6, after_rows=10, conn=None):
+    """Active private-chat rows around one candidate batch.
+
+    before: rows before the first utterance, inside before_hours, at most
+    before_rows. batch: every active row from the first utterance through the
+    last, both ends included. after: character rows after the last utterance
+    and before the next user message, at most after_rows. chat_id is
+    character_id. This is a read for the thinking prompt, not evidence.
+    """
+    first_event_id = _normalize_event_id(first_event_id)
+    last_event_id = _normalize_event_id(last_event_id)
+    empty = {'before': [], 'batch': [], 'after': []}
+    if not first_event_id or not last_event_id:
+        return empty
+    before_rows = max(0, int(before_rows))
+    before_hours = max(0, int(before_hours))
+    after_rows = max(0, int(after_rows))
+
+    database, owned = _borrow_conn(conn)
+    cur = database.cursor()
+    try:
+        before = []
+        if before_rows and before_hours:
+            before = _thinking_rows(reversed(_fetch_active_rows_before(
+                cur, user_id, character_id, first_event_id, before_hours, before_rows)))
+        cur.execute(
+            '''WITH first_anchor AS (
+                   SELECT id, created_at
+                   FROM chat_log
+                   WHERE user_id=%s AND chat_id=%s
+                     AND COALESCE(status, 'active') = 'active'
+                     AND COALESCE(NULLIF(event_id, ''), client_msg_id)=%s
+                   ORDER BY created_at ASC, id ASC
+                   LIMIT 1
+               ),
+               last_anchor AS (
+                   SELECT id, created_at
+                   FROM chat_log
+                   WHERE user_id=%s AND chat_id=%s
+                     AND COALESCE(status, 'active') = 'active'
+                     AND COALESCE(NULLIF(event_id, ''), client_msg_id)=%s
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT 1
+               )
+               SELECT COALESCE(NULLIF(row.event_id, ''), row.client_msg_id),
+                      row.role, row.text, row.kind, row.extra,
+                      row.created_at, row.subtitle
+               FROM chat_log AS row
+               CROSS JOIN first_anchor
+               CROSS JOIN last_anchor
+               WHERE row.user_id=%s AND row.chat_id=%s
+                 AND COALESCE(row.status, 'active') = 'active'
+                 AND (row.created_at, row.id) >= (first_anchor.created_at, first_anchor.id)
+                 AND (row.created_at, row.id) <= (last_anchor.created_at, last_anchor.id)
+               ORDER BY row.created_at ASC, row.id ASC''',
+            (user_id, character_id, first_event_id,
+             user_id, character_id, last_event_id,
+             user_id, character_id),
+        )
+        batch = _thinking_rows(cur.fetchall())
+        if after_rows:
+            cur.execute(
+                '''WITH last_anchor AS (
+                       SELECT id, created_at
+                       FROM chat_log
+                       WHERE user_id=%s AND chat_id=%s
+                         AND COALESCE(status, 'active') = 'active'
+                         AND COALESCE(NULLIF(event_id, ''), client_msg_id)=%s
+                       ORDER BY created_at DESC, id DESC
+                       LIMIT 1
+                   ),
+                   next_user AS (
+                       SELECT chat_log.id, chat_log.created_at
+                       FROM chat_log
+                       CROSS JOIN last_anchor
+                       WHERE chat_log.user_id=%s AND chat_log.chat_id=%s
+                         AND COALESCE(chat_log.status, 'active') = 'active'
+                         AND chat_log.role = 'user'
+                         AND (chat_log.created_at, chat_log.id)
+                             > (last_anchor.created_at, last_anchor.id)
+                       ORDER BY chat_log.created_at ASC, chat_log.id ASC
+                       LIMIT 1
+                   )
+                   SELECT COALESCE(NULLIF(row.event_id, ''), row.client_msg_id),
+                          row.role, row.text, row.kind, row.extra,
+                          row.created_at, row.subtitle
+                   FROM chat_log AS row
+                   CROSS JOIN last_anchor
+                   WHERE row.user_id=%s AND row.chat_id=%s
+                     AND COALESCE(row.status, 'active') = 'active'
+                     AND row.role IS DISTINCT FROM 'user'
+                     AND (row.created_at, row.id) > (last_anchor.created_at, last_anchor.id)
+                     AND NOT EXISTS (
+                         SELECT 1 FROM next_user
+                         WHERE (row.created_at, row.id)
+                             >= (next_user.created_at, next_user.id)
+                     )
+                   ORDER BY row.created_at ASC, row.id ASC
+                   LIMIT %s''',
+                (user_id, character_id, last_event_id,
+                 user_id, character_id,
+                 user_id, character_id, after_rows),
+            )
+            after = _thinking_rows(cur.fetchall())
+        else:
+            after = []
+        return {'before': before, 'batch': batch, 'after': after}
+    except SourceValidityError:
+        raise
+    except Exception as e:
+        if owned:
             try:
-                parsed = json.loads(extra)
-                if isinstance(parsed, dict):
-                    meta = parsed
+                database.rollback()
             except Exception:
                 pass
-        out.append({
-            'event_id': prior_id or '',
-            'role': _prompt_role(role),
-            'content': text or '',
-            'kind': kind or 'text',
-            'metadata': meta,
-            'timestamp': ts,
-            'subtitle': subtitle or '',
-        })
-    return out
+        raise SourceValidityError(
+            str(e) or 'thinking window lookup failed') from e
+    finally:
+        cur.close()
+        if owned:
+            database.close()
 
 
 

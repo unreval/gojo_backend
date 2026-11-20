@@ -282,8 +282,37 @@ def _top_k_ids(table, query_vec, candidate_ids, top_k):
     return scored[:top_k]
 
 
-def search_long_memory(user_id, character_id, shared_id, query_text, top_k=8):
-    """语义检索用户事实。返回 [(content, timestamp, category)] 或 None（退回全量）。"""
+def _long_memory_where_sql():
+    """Candidate filter shared by semantic search and the newest-row fallback.
+
+    Authoritative rows only, not expired, and a status row only while it is
+    still inside STATUS_EXPIRE_HOURS. Callers must not copy this predicate.
+    """
+    return (
+        "user_id = %s AND character_id IN (%s, %s)\n"
+        f"                 AND {authoritative_memory_sql('long_memory')}\n"
+        "                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)\n"
+        "                 AND (category IS DISTINCT FROM '状态' OR timestamp IS NULL\n"
+        f"                      OR timestamp >= CURRENT_TIMESTAMP - INTERVAL '{STATUS_EXPIRE_HOURS} hours')"
+    )
+
+
+def _long_memory_hit(row, character_id, *, with_id):
+    rendered = render_role_view(
+        row[1], observer_id=character_id, source_character_id=row[4],
+        semantic=row[5] if row[6] == PROJECTION_VERSION else None)
+    body = (rendered, row[2], row[3] or '其他')
+    if with_id:
+        return (row[0],) + body
+    return body
+
+
+def search_long_memory(user_id, character_id, shared_id, query_text, top_k=8, with_ids=False):
+    """语义检索用户事实。返回 [(content, timestamp, category)] 或 None（退回全量）。
+
+    with_ids 为 True 时返回 [(id, content, timestamp, category)]。
+    不传时返回值和原来一致。
+    """
     if not _VECTOR_READY:
         return None
     qv = _to_vec(embed(query_text))
@@ -294,11 +323,7 @@ def search_long_memory(user_id, character_id, shared_id, query_text, top_k=8):
         cur = conn.cursor()
         cur.execute(
             f'''SELECT id, content, timestamp, category, character_id, semantic_payload, projection_version FROM long_memory
-               WHERE user_id = %s AND character_id IN (%s, %s)
-                 AND {authoritative_memory_sql('long_memory')}
-                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-                 AND (category IS DISTINCT FROM '状态' OR timestamp IS NULL
-                      OR timestamp >= CURRENT_TIMESTAMP - INTERVAL '{STATUS_EXPIRE_HOURS} hours')''',
+               WHERE {_long_memory_where_sql()}''',
             (user_id, character_id, shared_id)
         )
         rows = cur.fetchall()
@@ -311,17 +336,40 @@ def search_long_memory(user_id, character_id, shared_id, query_text, top_k=8):
         hits = _top_k_ids('long_memory', qv, list(by_id.keys()), top_k)
         if not hits:
             return None
-        out = []
-        for rid, _sim in hits:
-            r = by_id[rid]
-            out.append((render_role_view(r[1], observer_id=character_id,
-                                         source_character_id=r[4],
-                                         semantic=r[5] if r[6] == PROJECTION_VERSION else None),
-                        r[2], r[3] or '其他'))
-        return out
+        return [_long_memory_hit(by_id[rid], character_id, with_id=with_ids)
+                for rid, _sim in hits]
     except Exception as e:
         print(f'[rag] 检索 long_memory 失败，退回全量：{e}')
         return None
+
+
+def latest_long_memory_with_ids(user_id, character_id, shared_id='shared', limit=20):
+    """Newest authoritative rows when vector search returns None.
+
+    Same WHERE clause as search_long_memory. Returns
+    [(id, content, timestamp, category)], or [] when the read fails.
+    """
+    try:
+        limit = max(1, int(limit))
+    except (TypeError, ValueError):
+        limit = 20
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            f'''SELECT id, content, timestamp, category, character_id, semantic_payload, projection_version
+               FROM long_memory
+               WHERE {_long_memory_where_sql()}
+               ORDER BY timestamp DESC NULLS LAST, id DESC
+               LIMIT %s''',
+            (user_id, character_id, shared_id, limit))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f'[rag] 最新 long_memory 失败：{e}')
+        return []
+    return [_long_memory_hit(row, character_id, with_id=True) for row in rows]
 
 
 def search_bond_memory(user_id, character_id, kind, query_text, top_k=6):
