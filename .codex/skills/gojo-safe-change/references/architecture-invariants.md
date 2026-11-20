@@ -88,6 +88,8 @@ Fast Loop 的权威判断不能依赖 LLM。
 LLM 可以参与表达，
 但不能成为 authoritative decision maker。
 
+注：`thinking_fast` / `thinking_slow`（思维链）不是这里说的 Fast/Slow Loop，不写认知权威，见 INV-THINK-*。
+
 ---
 
 ### INV-COG-002 — Slow Loop uses evidence pipeline
@@ -99,6 +101,8 @@ canonical evidence
 → deterministic policy / revision
 
 直接写入权威认知状态。
+
+注：`thinking_fast` / `thinking_slow`（思维链）不是这里说的 Fast/Slow Loop，不写认知权威，见 INV-THINK-*。
 
 ---
 
@@ -259,6 +263,52 @@ G1–G9、候选投影、日记的事实部分不得读取它。
 ### INV-VIEW-005 — Chat does not read view notes unless switched on
 
 聊天是否读取 view 便利贴由 STICKY_VIEW_IN_CHAT 决定，默认关闭。
+
+---
+
+### INV-THINK-001 — Thinking outputs are not authority
+
+思维链的理解（thinking_understandings）和看法（character_views）由模型生成，不具权威。
+不得写入 long_memory、bond_memory、cognitive_* 表、cognitive_sticky_notes，
+不得作为 G1–G9、裁决、关系判断、记忆投影的证据。
+
+---
+
+### INV-THINK-002 — Citations come from the given candidates
+
+理解引用的对话、经历、看法，必须是本次调用里给出的候选，由代码检查。
+不在候选里的引用使这一条理解作废，不影响同批其他条。
+
+---
+
+### INV-THINK-003 — View evidence is counted by utterances
+
+看法的独立证据按用户亲口说过、仍然有效的原话去重计数，不按理解计数。
+
+---
+
+### INV-THINK-004 — Views move one level at a time
+
+看法强度一次最多变化一级。
+
+---
+
+### INV-THINK-005 — No transaction or lock during model calls
+
+思维链调用模型期间不开数据库事务、不持有锁。
+
+---
+
+### INV-THINK-006 — Prompts carry no character name or prescribed reaction
+
+思维链提示词里不出现任何角色名或角色 id（角色名只从角色配置注入），
+不出现"遇到 X 要 Y"这类规定反应的话。
+
+---
+
+### INV-THINK-007 — Nothing reads thinking outputs unless switched on
+
+聊天、日记、便利贴、记忆召回不读取理解和看法。以后要读，必须新增默认关闭的开关。
 
 ---
 

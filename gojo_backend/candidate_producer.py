@@ -863,6 +863,13 @@ def _producer_loop():
             _emit(dict(kind='worker_failure', ts=_now().isoformat(),
                 module_version=MODULE_VERSION, stage='worker', status='failed',
                 reason=type(exc).__name__))
+        try:
+            from thinking_fast import run_worker_once as thinking_once
+            thinking_once()
+        except Exception as exc:
+            _emit(dict(kind='worker_failure', ts=_now().isoformat(),
+                module_version=MODULE_VERSION, stage='thinking_fast',
+                status='failed', reason=type(exc).__name__))
 
 
 def start_candidate_producer():

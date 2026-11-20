@@ -41,6 +41,16 @@ try:
 except (TypeError, ValueError):
     CANDIDATE_PRODUCER_LOOKBACK_DAYS = 7
 
+# 思维链快链。默认关闭，关闭时不查库、不调模型。理解和看法不是权威。
+THINKING_FAST_ENABLED = os.getenv(
+    'THINKING_FAST_ENABLED', 'false').strip().lower() in ('1', 'true')
+THINKING_PROMPT_VERSION = (os.getenv('THINKING_PROMPT_VERSION', 'neutral_v0') or 'neutral_v0').strip()
+try:
+    THINKING_FAST_DAILY_LIMIT = int(
+        os.getenv('THINKING_FAST_DAILY_LIMIT', '20') or 20)
+except (TypeError, ValueError):
+    THINKING_FAST_DAILY_LIMIT = 20
+
 # 表达层便利贴。默认关闭：不改提示词，也不把 perspective 写成便利贴。
 # 聊天读取另有开关，默认同样关闭。
 STICKY_VIEW_ENABLED = os.getenv(
