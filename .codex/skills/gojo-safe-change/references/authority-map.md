@@ -542,6 +542,33 @@ MEDIUM
 
 ---
 
+# 11. Thinking Chain（思维链）
+
+## Stores
+
+- thinking_understandings：快链产物，一段对话的第一人称理解
+- character_views：看法本（单 1 只建表，不写入）
+- thinking_audit_log：只写的观测记录（被退的条目、批次失败）
+
+## Authority
+
+NONE。见 INV-THINK-001。
+
+## LLM authority
+
+CANDIDATE ONLY。模型写理解和提议，代码只检查引用和格式。
+
+## Important rule
+
+快链依赖候选管线：只处理候选管线已 succeeded 的批次。
+当前没有任何读取方（INV-THINK-007）。
+
+## Confidence
+
+HIGH（新模块，边界由测试覆盖）
+
+---
+
 # Known Authority Risks
 
 ## AC-001 — Proactive promise competing writers
@@ -575,3 +602,4 @@ Do not fix as an unrelated side effect of another task.
 | Schedule | schedule event + phase | CANDIDATE ONLY | HIGH |
 | Phone Check | phone occurrence state machine | NONE | HIGH |
 | Identity | structured IDs / typed refs | NONE | MEDIUM |
+| Thinking chain | none（observation only） | CANDIDATE ONLY | HIGH |

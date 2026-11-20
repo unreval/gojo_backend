@@ -192,6 +192,9 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
         "tts",
         "voice",
     ),
+    "thinking-chain": (
+        "thinking_",
+    ),
 }
 
 
@@ -255,6 +258,15 @@ DOMAIN_INVARIANTS: dict[str, tuple[str, ...]] = {
     ),
     "identity/role": (
         "INV-ID-001",
+    ),
+    "thinking-chain": (
+        "INV-THINK-001",
+        "INV-THINK-002",
+        "INV-THINK-003",
+        "INV-THINK-004",
+        "INV-THINK-005",
+        "INV-THINK-006",
+        "INV-THINK-007",
     ),
 }
 
