@@ -115,6 +115,11 @@ except Exception as e:
     print(f'[init] generation side-effect worker skipped:{e}')
 from raw_events import init_raw_event_layer
 init_raw_event_layer()
+try:
+    from thinking_chain import init_thinking_tables
+    init_thinking_tables()
+except Exception as e:
+    print(f'[init] thinking tables skipped:{type(e).__name__}')
 from context_layer import init_context_layer_tables
 init_context_layer_tables()
 from episodic_index import init_episodic_index_tables
