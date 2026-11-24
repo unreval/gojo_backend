@@ -548,7 +548,11 @@ def _exchange_parts(text):
         elif _WITHDRAW_ANSWER.fullmatch(body):
             kind, value = 'withdrawal', _WITHDRAW_ANSWER.fullmatch(body).groupdict()
         else:
-            kind, value = 'literal', None
+            milestone = _milestone_clause(body) if _relationship_milestone_enabled() else None
+            if milestone:
+                kind, value = milestone
+            else:
+                kind, value = 'literal', None
         result.append({'operation_id': 'main' if len(parts) == 1 else f'clause.{index}',
                        'kind': kind, 'value': value, 'text': part})
     return result
@@ -588,7 +592,7 @@ def _question_spec(source, part):
             'dependencies': [dict(source, evidence_role='question')]}
 
 
-def _answer_candidates(cur, user_id, character_id, source, name=None):
+def _answer_candidates(cur, user_id, character_id, source, name=None, predicate=None):
     """An explicit reference or a contiguous bounded question window, never recency alone."""
     ref = source.get('reply_to_event_id') or source['metadata'].get('reply_to_event_id')
     if (source.get('reply_to_event_id') and source['metadata'].get('reply_to_event_id')
@@ -626,9 +630,11 @@ def _answer_candidates(cur, user_id, character_id, source, name=None):
         if any(text != prior['content'] or status == 'superseded' for text, status in cur.fetchall()):
             break
         for part in questions:
-            spec = _question_spec(prior, part)
+            spec = _question_spec_for(prior, part)
             spec['dependencies'].extend(bridges)
             if spec['respondent'] != _exchange_role(source) or (name and spec['object'] != name):
+                continue
+            if predicate and spec.get('predicate') != predicate:
                 continue
             cur.execute('''SELECT status FROM cognitive_questions
                 WHERE user_id=%s AND character_id=%s AND question_key=%s FOR UPDATE''',
@@ -639,6 +645,406 @@ def _answer_candidates(cur, user_id, character_id, source, name=None):
     return candidates
 
 
+def _relationship_milestone_enabled():
+    from config import RELATIONSHIP_MILESTONE_ENABLED
+    return bool(RELATIONSHIP_MILESTONE_ENABLED)
+
+
+def _clause_body(text):
+    return (text or '').strip().rstrip('。.!！;；').strip()
+
+
+_MILESTONE_AFFECTION = {
+    '我喜欢你', '喜欢你', '我也喜欢你', '我爱你',
+    '好き', '好きだ', '好きです', '好きだよ', '大好き', '愛してる',
+    '私も好き', '俺も好き', '僕も好き',
+}
+_MILESTONE_PROPOSAL = {
+    '我们在一起吧', '在一起吧', '做我女朋友', '做我男朋友', '和我交往', '交往吧',
+    '付き合おう', '付き合ってください', '付き合ってくれ', '彼女になって', '彼氏になって',
+}
+_MILESTONE_ACCEPT = {
+    '好', '好啊', '好的', '可以', '愿意', '我愿意', '在一起吧', '我也喜欢你',
+    'いいよ', 'はい', 'うん', '好き', '付き合おう', 'よろしくお願いします',
+}
+_MILESTONE_REJECT = {'不要', '不行', '不可以', '不愿意', '不了', 'ごめん', '無理'}
+_MILESTONE_SECOND_PERSON = (
+    'あなた', 'あんた', 'お前', 'おまえ', '君', 'きみ', 'てめえ', '貴方', '貴女',
+)
+
+
+def _milestone_visible(text):
+    """Drop quoted spans. A clause that is only a quotation is not a statement."""
+    visible = re.sub(r'「[^」]*」|『[^』]*』|“[^”]*”|"[^"]*"', '', text or '')
+    visible = _clause_body(visible)
+    return visible or None
+
+
+def _milestone_blocked(text):
+    body = text or ''
+    if any(mark in body for mark in ('如果', '要是', '假如', 'もし')):
+        return True
+    if re.search(r'なら(?!ない)', body):
+        return True
+    if any(mark in body for mark in ('不喜欢', '好きじゃない', '好きではない', 'もう好きじゃない')):
+        return True
+    if any(mark in body for mark in ('喜欢他', '喜欢她', '彼が好き', '彼女が好き', '彼を好き', '彼女を好き')):
+        return True
+    if any(mark in body for mark in ('?', '？', '吗')):
+        return True
+    return False
+
+
+def _milestone_bad_object(text):
+    for match in re.finditer(r'([^\s、。！？]{1,24})[がを](?:好き|大好き|愛して)', text or ''):
+        obj = match.group(1)
+        if not any(obj.endswith(person) for person in _MILESTONE_SECOND_PERSON):
+            return True
+    return False
+
+
+def _is_affection_text(text):
+    if text in _MILESTONE_AFFECTION:
+        return True
+    for base in ('私も好き', '俺も好き', '僕も好き', '好き'):
+        if text in {base + 'だ', base + 'です', base + 'だよ'}:
+            return True
+    return False
+
+
+def _milestone_clause(body):
+    visible = _milestone_visible(body)
+    if not visible or _milestone_blocked(body) or _milestone_bad_object(visible):
+        return None
+    if visible in _MILESTONE_PROPOSAL or _is_affection_text(visible):
+        surface = 'proposal' if visible in _MILESTONE_PROPOSAL else 'affection'
+        return ('question', {'milestone': True, 'surface': surface, 'text': visible})
+    if visible == '我也是':
+        return ('milestone_reply', {'reply': 'affection', 'text': visible})
+    if visible in _MILESTONE_REJECT:
+        return ('milestone_reply', {'reply': 'reject', 'text': visible})
+    if visible in _MILESTONE_ACCEPT:
+        return ('milestone_reply', {'reply': 'accept', 'text': visible})
+    return None
+
+
+def _question_spec_for(prior, part):
+    value = part.get('value')
+    if isinstance(value, dict) and value.get('milestone'):
+        return _milestone_question_spec(prior, part)
+    return _question_spec(prior, part)
+
+
+def _milestone_question_spec(source, part):
+    speaker = _exchange_role(source)
+    respondent = 'character' if speaker == 'user' else 'user'
+    surface = part['value']['surface']
+    predicate = 'romantic_proposal' if surface == 'proposal' else 'mutual_feelings'
+    if surface == 'proposal':
+        text = '她提议确定关系。' if speaker == 'user' else '我提议确定关系。'
+    else:
+        text = '她说喜欢我。' if speaker == 'user' else '我说喜欢她。'
+    return {
+        'question_key': 'answer.' + _digest(source['source_id'] + ':' + part['operation_id']),
+        'question_text': text,
+        'object': None,
+        'speaker': speaker,
+        'respondent': respondent,
+        'predicate': predicate,
+        'time_scope': 'this_exchange',
+        'dependencies': [dict(source, evidence_role='question')],
+    }
+
+
+def _upsert_cognitive_question(cur, *, user_id, character_id, question_key, question_text,
+                               status, meta, refs, cycle_id, now):
+    stored = dict(meta)
+    stored['updated_by'] = 'explicit_answer_v1'
+    cur.execute('''INSERT INTO cognitive_questions(user_id,character_id,question_key,question_text,
+        status,metadata,source_event_refs,created_by_cycle_id,updated_by_cycle_id,updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)
+        ON CONFLICT (user_id,character_id,question_key) DO UPDATE SET
+          status=EXCLUDED.status,metadata=EXCLUDED.metadata,source_event_refs=EXCLUDED.source_event_refs,
+          updated_by_cycle_id=EXCLUDED.updated_by_cycle_id,updated_at=EXCLUDED.updated_at''',
+        (user_id, character_id, question_key, question_text, status,
+         json.dumps(stored, ensure_ascii=False), json.dumps(refs, ensure_ascii=False),
+         cycle_id, cycle_id, now))
+
+
+def _milestone_status(previous_status, requested, meta):
+    from cognitive_events import question_transition_status
+    return question_transition_status(
+        previous_status or 'active', requested, metadata=meta, operation=(
+            'resolution' if requested == 'resolved' else 'update'))
+
+
+def _load_question_row(cur, user_id, character_id, question_key):
+    cur.execute('''SELECT metadata,source_event_refs,status FROM cognitive_questions
+        WHERE user_id=%s AND character_id=%s AND question_key=%s FOR UPDATE''',
+        (user_id, character_id, question_key))
+    return cur.fetchone()
+
+
+def _supersede_milestone_operation(cur, old, event_id):
+    if not old or not old.get('event_id') or not old.get('operation_id'):
+        return
+    cur.execute('''UPDATE cognitive_events SET adjudication=jsonb_set(adjudication,
+        ARRAY['operations',%s], (adjudication->'operations'->%s) || %s::jsonb)
+        WHERE id=%s''', (old['operation_id'], old['operation_id'],
+        json.dumps({'status': 'superseded', 'superseded_by_event_id': event_id}), old['event_id']))
+
+
+def _milestone_semantic(user_id, character_id, source_id, actor, object_name, value, evidence_text):
+    from memory_authority import canonical_semantic_payload
+    subject = 'user:' + user_id if actor == 'user' else 'character:' + character_id
+    return canonical_semantic_payload(
+        user_id=user_id, character_id=character_id, source_id=source_id,
+        semantic={
+            'subject_ref': subject,
+            'predicate': 'explicit_answer',
+            'object': object_name,
+            'value': value,
+            'evidence_text': evidence_text,
+        })
+
+
+def _bind_milestone(cur, user_id, character_id, source, predicate):
+    """Use the existing answer window, and do not skip a nearer question of another kind."""
+    matched = _answer_candidates(cur, user_id, character_id, source, predicate=predicate)
+    if len(matched) != 1:
+        return None
+    window = _answer_candidates(cur, user_id, character_id, source)
+    if window and window[0].get('question_key') != matched[0].get('question_key'):
+        if window[0].get('predicate') != predicate:
+            return None
+    return matched[0]
+
+
+def _write_fixed_milestone(cur, *, cycle_id, user_id, character_id, event_id, now,
+                           question_key, question_text, value, content, actor,
+                           evidence_ids, semantic, operation_id, deps, source_id):
+    from role_view import PROJECTION_VERSION
+    previous = _load_question_row(cur, user_id, character_id, question_key)
+    meta = dict(_json(previous[0], {}) if previous else {})
+    refs = list(_json(previous[1], []) if previous else [])
+    ref = {'event_id': event_id, 'operation_id': operation_id, 'source_id': source_id}
+    if ref not in refs:
+        refs.append(ref)
+    old = meta.get('current_judgment') or {}
+    history = list(meta.get('lifecycle_history') or [])
+    if old:
+        history.append({'current_judgment': old, 'pending_answer': meta.get('pending_answer')})
+        _invalidate_dependents(
+            cur, user_id, character_id, old.get('event_id'), event_id, cycle_id, now,
+            operation_id=old.get('operation_id'))
+        _supersede_milestone_operation(cur, old, event_id)
+    judgment = {
+        'value': value,
+        'content': content,
+        'status': 'committed',
+        'event_id': event_id,
+        'operation_id': operation_id,
+        'actor': actor,
+        'evidence_event_ids': list(evidence_ids),
+        'semantic_payload': semantic,
+        'projection_version': PROJECTION_VERSION,
+    }
+    meta.update(
+        proposition={
+            'question_key': question_key,
+            'predicate': question_key,
+            'time_scope': 'this_exchange',
+        },
+        dependencies=deps,
+        lifecycle_history=history,
+        current_judgment=judgment,
+        resolution=judgment,
+        evidence_event_ids=list(evidence_ids),
+    )
+    status = _milestone_status(previous[2] if previous else 'active', 'resolved', meta)
+    _upsert_cognitive_question(
+        cur, user_id=user_id, character_id=character_id, question_key=question_key,
+        question_text=question_text, status=status, meta=meta, refs=refs,
+        cycle_id=cycle_id, now=now)
+    return {
+        'status': 'applied',
+        'action': 'answered',
+        'authority': 'explicit_answer_v1',
+        'question_key': question_key,
+        'operation_id': operation_id,
+        'value': value,
+        'projection_version': PROJECTION_VERSION,
+        'semantic_payload': semantic,
+    }
+
+
+def _commit_milestone(cur, *, cycle_id, user_id, character_id, event_id, source, part,
+                      spec, now, outcome):
+    """outcome is 'mutual', 'affirmed', or 'declined'."""
+    from relationship_semantics import MUTUAL_FEELINGS_KEY, ROMANTIC_LABEL_KEY
+    from role_view import PROJECTION_VERSION
+    deps = list(spec.get('dependencies') or [])
+    deps.append(dict(source, evidence_role='answer'))
+    evidence_ids = list(dict.fromkeys(
+        str(item.get('source_id')) for item in deps if item.get('source_id')))
+    actor = _exchange_role(source) or spec.get('respondent')
+    answer_text = _clause_body(part.get('text') or '')
+    op = part.get('operation_id') or 'main'
+    previous = _load_question_row(cur, user_id, character_id, spec['question_key'])
+    meta = dict(_json(previous[0], {}) if previous else {})
+    refs = list(_json(previous[1], []) if previous else [])
+    ref = {'event_id': event_id, 'operation_id': op, 'source_id': source['source_id']}
+    if ref not in refs:
+        refs.append(ref)
+    digest_value = outcome
+    digest_semantic = _milestone_semantic(
+        user_id, character_id, source['source_id'], actor, spec.get('predicate'),
+        digest_value, answer_text)
+    judgment = {
+        'value': digest_value,
+        'content': spec.get('question_text') or '',
+        'status': 'committed',
+        'event_id': event_id,
+        'operation_id': op,
+        'actor': actor,
+        'evidence_event_ids': evidence_ids,
+        'semantic_payload': digest_semantic,
+        'projection_version': PROJECTION_VERSION,
+    }
+    history = list(meta.get('lifecycle_history') or [])
+    old = meta.get('current_judgment') or {}
+    if old:
+        history.append({'current_judgment': old, 'pending_answer': meta.get('pending_answer')})
+    meta.update(
+        proposition=spec,
+        dependencies=deps,
+        lifecycle_history=history,
+        current_judgment=judgment,
+        resolution=judgment,
+        evidence_event_ids=evidence_ids,
+    )
+    status = _milestone_status(previous[2] if previous else 'active', 'resolved', meta)
+    _upsert_cognitive_question(
+        cur, user_id=user_id, character_id=character_id, question_key=spec['question_key'],
+        question_text=spec.get('question_text') or '', status=status, meta=meta, refs=refs,
+        cycle_id=cycle_id, now=now)
+    extras = {}
+    if outcome in ('mutual', 'affirmed'):
+        semantic = _milestone_semantic(
+            user_id, character_id, source['source_id'], actor, MUTUAL_FEELINGS_KEY,
+            'mutual', answer_text)
+        extras['milestone.mutual_feelings'] = _write_fixed_milestone(
+            cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+            event_id=event_id, now=now, question_key=MUTUAL_FEELINGS_KEY,
+            question_text='双方是否互相喜欢？', value='mutual', content='双方都明确说过喜欢。',
+            actor=actor, evidence_ids=evidence_ids, semantic=semantic,
+            operation_id='milestone.mutual_feelings', deps=deps, source_id=source['source_id'])
+    if outcome in ('affirmed', 'declined'):
+        label_value = 'affirmed' if outcome == 'affirmed' else 'declined'
+        content = '双方已经确定关系。' if label_value == 'affirmed' else '用户拒绝了这一次确定关系的提议。'
+        semantic = _milestone_semantic(
+            user_id, character_id, source['source_id'], actor, ROMANTIC_LABEL_KEY,
+            label_value, answer_text)
+        extras['milestone.romantic_label'] = _write_fixed_milestone(
+            cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+            event_id=event_id, now=now, question_key=ROMANTIC_LABEL_KEY,
+            question_text='双方是否确定关系？', value=label_value, content=content,
+            actor=actor, evidence_ids=evidence_ids, semantic=semantic,
+            operation_id='milestone.romantic_label', deps=deps, source_id=source['source_id'])
+    return {
+        'status': 'applied', 'action': 'answered', 'authority': 'explicit_answer_v1',
+        'question_key': spec['question_key'], 'operation_id': op, 'value': digest_value,
+        'actor': actor, 'object': spec.get('object'), 'dependencies': deps,
+        'projection_version': PROJECTION_VERSION, 'semantic_payload': digest_semantic,
+        'extra_operations': extras,
+    }
+
+
+def _open_milestone_question(cur, *, cycle_id, user_id, character_id, event_id, source, part, now):
+    spec = _milestone_question_spec(source, part)
+    previous = _load_question_row(cur, user_id, character_id, spec['question_key'])
+    meta = dict(_json(previous[0], {}) if previous else {})
+    refs = list(_json(previous[1], []) if previous else [])
+    ref = {'event_id': event_id, 'operation_id': part['operation_id'], 'source_id': source['source_id']}
+    if ref not in refs:
+        refs.append(ref)
+    if not previous:
+        meta.update(proposition=spec, dependencies=list(spec['dependencies']))
+    status = _milestone_status(previous[2] if previous else 'active', 'active', meta)
+    _upsert_cognitive_question(
+        cur, user_id=user_id, character_id=character_id, question_key=spec['question_key'],
+        question_text=spec['question_text'], status=status, meta=meta, refs=refs,
+        cycle_id=cycle_id, now=now)
+    return {
+        'status': 'applied', 'action': 'question', 'authority': 'explicit_answer_v1',
+        'question_key': spec['question_key'], 'operation_id': part['operation_id'],
+        'dependencies': list(spec['dependencies']),
+    }
+
+
+def _apply_milestone_question(cur, *, cycle_id, user_id, character_id, event_id, source, part, now, decision):
+    surface = (part.get('value') or {}).get('text') or ''
+    role = _exchange_role(source)
+    if (part.get('value') or {}).get('surface') == 'affection' or _is_affection_text(surface):
+        spec = _bind_milestone(cur, user_id, character_id, source, 'mutual_feelings')
+        if spec and spec.get('respondent') == role:
+            return _commit_milestone(
+                cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+                event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='mutual')
+    if role == 'user' and surface in _MILESTONE_ACCEPT:
+        spec = _bind_milestone(cur, user_id, character_id, source, 'romantic_proposal')
+        if spec:
+            return _commit_milestone(
+                cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+                event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='affirmed')
+    return _open_milestone_question(
+        cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+        event_id=event_id, source=source, part=part, now=now)
+
+
+def _apply_milestone_reply(cur, *, cycle_id, user_id, character_id, event_id, source, part, now, decision):
+    reply = (part.get('value') or {}).get('reply')
+    role = _exchange_role(source)
+    if reply == 'affection':
+        spec = _bind_milestone(cur, user_id, character_id, source, 'mutual_feelings')
+        if spec and spec.get('respondent') == role:
+            return _commit_milestone(
+                cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+                event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='mutual')
+        return decision
+    if role != 'user':
+        return decision
+    if reply == 'accept':
+        spec = _bind_milestone(cur, user_id, character_id, source, 'romantic_proposal')
+        if spec:
+            return _commit_milestone(
+                cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+                event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='affirmed')
+    elif reply == 'reject':
+        spec = _bind_milestone(cur, user_id, character_id, source, 'romantic_proposal')
+        if spec:
+            return _commit_milestone(
+                cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+                event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='declined')
+    return decision
+
+
+def _apply_user_proposal_reply(cur, *, cycle_id, user_id, character_id, event_id, source, part, spec, now, decision):
+    """A listed user reply can settle a proposal. Anything else leaves it active."""
+    if _exchange_role(source) != 'user':
+        return decision
+    body = _clause_body(part.get('text') or '')
+    if body in _MILESTONE_ACCEPT:
+        outcome = 'affirmed'
+    elif body in _MILESTONE_REJECT:
+        outcome = 'declined'
+    else:
+        return decision
+    return _commit_milestone(
+        cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+        event_id=event_id, source=source, part=part, spec=spec, now=now, outcome=outcome)
+
+
 def _apply_exchange_operation(cur, *, cycle_id, user_id, character_id, event_id,
                                source, part, now):
     from memory_authority import canonical_semantic_payload, project_canonical_memory
@@ -646,6 +1052,20 @@ def _apply_exchange_operation(cur, *, cycle_id, user_id, character_id, event_id,
     op = part['operation_id']
     decision = {'status': 'pending', 'action': 'pending', 'authority': 'explicit_answer_v1',
                 'operation_id': op, 'reason': 'question_not_unique_or_active'}
+    milestone_value = part.get('value')
+    if part['kind'] == 'milestone_reply':
+        if not source:
+            return decision
+        return _apply_milestone_reply(
+            cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+            event_id=event_id, source=source, part=part, now=now, decision=decision)
+    if (part['kind'] == 'question' and isinstance(milestone_value, dict)
+            and milestone_value.get('milestone')):
+        if not source:
+            return decision
+        return _apply_milestone_question(
+            cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+            event_id=event_id, source=source, part=part, now=now, decision=decision)
     if part['kind'] == 'question':
         spec = _question_spec(source, part)
     else:
@@ -664,6 +1084,13 @@ def _apply_exchange_operation(cur, *, cycle_id, user_id, character_id, event_id,
                 return decision
         else:
             spec = candidates[0]
+            if spec.get('predicate') == 'mutual_feelings':
+                return decision
+            if spec.get('predicate') == 'romantic_proposal':
+                return _apply_user_proposal_reply(
+                    cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
+                    event_id=event_id, source=source, part=part, spec=spec, now=now,
+                    decision=decision)
     qkey = spec['question_key']
     cur.execute('''SELECT metadata,source_event_refs,status FROM cognitive_questions
         WHERE user_id=%s AND character_id=%s AND question_key=%s FOR UPDATE''',
@@ -1035,10 +1462,14 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                             source_id=source_id, semantic=quote_semantic))
                 for part in parts:
                     op = part['operation_id']
-                    if part['kind'] in ('question', 'answer', 'deferred'):
-                        operations[op] = _apply_exchange_operation(cur, cycle_id=cycle_id,
+                    if part['kind'] in ('question', 'answer', 'deferred', 'milestone_reply'):
+                        applied = _apply_exchange_operation(cur, cycle_id=cycle_id,
                             user_id=user_id, character_id=character_id, event_id=event_id,
                             source=source, part=part, now=now)
+                        extras = applied.pop('extra_operations', None) if isinstance(applied, dict) else None
+                        operations[op] = applied
+                        if extras:
+                            operations.update(extras)
                     elif part['kind'] == 'withdrawal':
                         operations[op] = _withdraw_answer(cur, cycle_id=cycle_id,
                             user_id=user_id, character_id=character_id, event_id=event_id,

@@ -7,6 +7,7 @@ Slow Loop agree on which layer owns each semantic conclusion.
 
 ENGAGEMENT_STYLE_KEY = 'relationship.engagement_style'
 ROMANTIC_LABEL_KEY = 'relationship.romantic_label'
+MUTUAL_FEELINGS_KEY = 'relationship.mutual_feelings'
 ROMANTIC_OPENNESS_KEY = 'relationship.romantic_openness'
 INTERNAL_CONFLICT_KEY = 'relationship.internal_conflict'
 
@@ -29,6 +30,10 @@ LEGACY_PENDING_RELATIONSHIP_CUES = frozenset({
 
 ROMANTIC_LABEL_VALUES = frozenset({
     'unresolved', 'affirmed', 'declined', 'other',
+})
+
+MUTUAL_FEELINGS_VALUES = frozenset({
+    'unresolved', 'mutual',
 })
 
 # These are user-visible generated expressions, not source facts for a
@@ -68,6 +73,14 @@ def normalize_romantic_label(value, *, allow_legacy_polarity=True):
             return 'affirmed'
         if raw == 'no':
             return 'declined'
+    return None
+
+
+def normalize_mutual_feelings(value):
+    """Normalize only explicit narrow encodings; never infer from prose."""
+    raw = str(value or '').strip().casefold()
+    if raw in MUTUAL_FEELINGS_VALUES:
+        return raw
     return None
 
 
