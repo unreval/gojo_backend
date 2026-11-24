@@ -21,6 +21,16 @@
 
 ---
 
+### INV-REL-MILESTONE-001 — 关系里程碑只由显式问答写入
+
+`relationship.romantic_label` 和 `relationship.mutual_feelings` 只能由显式问答管线（`explicit_answer_v1`）写入。亲密度、信任、承诺次数、互动次数、LLM 输出、传感器都不能写或推断它们。
+
+确认需要双方各有一句明确表态并能绑定，其中至少一句是用户的独立消息。
+
+第一版没有自动撤回。状态只会因来源消息失效而失效。来源失效时，依赖它的状态在读取时立即失效。
+
+---
+
 ### INV-AUTH-002 — Durable memory authority
 
 Durable memory 必须通过统一的权威写入路径。

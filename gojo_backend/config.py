@@ -58,6 +58,9 @@ STICKY_VIEW_ENABLED = os.getenv(
 # 按日期取那天的 long_memory。默认关闭：不解析日期，提示词也不加那天的记录。
 DATE_RECALL_ENABLED = os.getenv(
     'DATE_RECALL_ENABLED', 'false').strip().lower() in ('1', 'true')
+# 互相喜欢 / 确定关系。默认关闭：不识别新说法，也不读取这两项。
+RELATIONSHIP_MILESTONE_ENABLED = os.getenv(
+    'RELATIONSHIP_MILESTONE_ENABLED', 'false').strip().lower() in ('1', 'true')
 STICKY_VIEW_IN_CHAT = os.getenv(
     'STICKY_VIEW_IN_CHAT', 'false').strip().lower() in ('1', 'true')
 try:

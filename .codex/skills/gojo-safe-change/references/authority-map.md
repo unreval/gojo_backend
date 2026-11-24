@@ -139,6 +139,24 @@ Cognitive:
 
 负责窄语义认知结论。
 
+## Milestone labels
+
+Keys:
+
+- `relationship.romantic_label`（`unresolved` / `affirmed` / `declined` / `other`）
+- `relationship.mutual_feelings`（`unresolved` / `mutual`）
+
+Writer:
+
+只有显式问答管线（`cognitive_revision` 的 explicit answer path，`updated_by='explicit_answer_v1'`）。亲密度、信任、承诺次数、互动次数、LLM 输出和传感器都不是写入方。
+
+Readers:
+
+- 关系面板通过 `cognitive_reader.read_relationship_semantic_state` 读取；面板正文目前仍只展示 `romantic_label`
+- 聊天提示词的常驻状态行通过 `cognitive_reader.read_relationship_milestones`，由 `shared_relation_prompt.build_milestone_expression` 产出；`build_relation_rules` 和无包路径拼入它，`context_layer.assemble_from_events` 把它放进 `relationship_prompt_text`
+
+开关 `RELATIONSHIP_MILESTONE_ENABLED` 默认关闭。关闭时不识别这两种说法，也不查询这两项。
+
 ## Important rule
 
 以上是不同职责范围。
