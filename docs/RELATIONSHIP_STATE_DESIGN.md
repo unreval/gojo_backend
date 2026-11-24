@@ -1,6 +1,6 @@
 # 关系与内心状态设计补充（Relationship State Design）
 
-> 状态：设计提案，尚未实现或上线。
+> 状态：第 4 节里程碑部分已首期实现（2026-11-24，默认关闭，开关 RELATIONSHIP_MILESTONE_ENABLED），其余仍为设计提案。
 > 日期：2026-10-10（Asia/Singapore）。
 > 源码基线：分支 `docs/readme-20261007`，HEAD `ba69717918cea2b3abeb8b3f07ecf0fad6c32ec0`。
 > 本轮范围：只新增本文档；不改现有文件、不写业务代码、不连接数据库、不调用业务 LLM / Provider、不提交。
@@ -195,6 +195,17 @@ A、V、C 在 `[0,1]`；A 与 V 可同时高。没有合格来源时为 unknown�
 - proactive 只有用户允许且当前触发与问题相关时才补答，不新增催问式主动消息；delayed 按原始提问 scope 补答。故事模式最多在故事前加短应答，不把主角台词充作答复。
 
 默认用户面板不展示“欠账次数”，只提供可选“这个问题还没正面回答”提示。该机制承担角色的答复义务，不能指责用户追问或要求用户继续互动。
+
+### 4.5 首期实现说明（2026-11-24）
+
+首期只实现两个认知问题键，默认关闭，开关 `RELATIONSHIP_MILESTONE_ENABLED`。
+
+- `relationship.mutual_feelings`：`unresolved` / `mutual`。互相喜欢成立时 `current_judgment` 与 `resolution` 的 value 为 `mutual`。
+- `relationship.romantic_label`：沿用已有 `unresolved` / `affirmed` / `declined` / `other`。确定关系被接受时 value 为 `affirmed`，被拒绝时为 `declined`。`affirmed` 时同一对证据同时把 `relationship.mutual_feelings` 写成 `mutual`。
+
+写入方只有显式问答管线（`explicit_answer_v1`）。用户先提议、角色再接受的情况，第一版不自动确认，问题保持 active，因为确认必须来自用户的独立消息。
+
+与 §4.1「明确撤回立即收缩」不同，第一版不做自动撤回。原因是「分手」「不喜欢了」这类话常是口是心非或希望被挽留，角色说的也一样。这些话不改状态。状态只因来源消息删除而失效；读取时来源若已失效，结论立即不再授权。
 
 ## 5. 内心卡片 v2 与表达范围
 
