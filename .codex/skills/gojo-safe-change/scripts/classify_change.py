@@ -132,6 +132,7 @@ DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
         "relationship/",
         "rel_state",
         "rel_declared",
+        "gojo_backend/shared_relation_prompt.py",
     ),
     "memory": (
         "gojo_backend/candidate_producer.py",

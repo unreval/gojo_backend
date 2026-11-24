@@ -1678,7 +1678,16 @@ def _support_items(user_id, character_id, user_message, hot_messages, temporal_s
     except Exception as exc:
         print(f'[context_layer] period/accounts skipped:{exc}')
 
-    return items, locals().get('_EXPRESSION_ONLY_RULES', '')
+    rules = locals().get('_EXPRESSION_ONLY_RULES', '')
+    line = ''
+    if rules:
+        try:
+            from shared_relation_prompt import build_milestone_expression
+            line, rules = build_milestone_expression(user_id, character_id)
+        except Exception as exc:
+            print(f'[context_layer] milestone expression skipped:{exc}')
+            line, rules = '', locals().get('_EXPRESSION_ONLY_RULES', '')
+    return items, rules, line
 
 
 def assemble_from_events(
@@ -1816,9 +1825,10 @@ def assemble_from_events(
         items.extend(_items_from_recall(recall_result))
 
     expression_rules = ''
+    milestone_line = ''
     if include_support:
         try:
-            extra, expression_rules = _support_items(
+            support = _support_items(
                 user_id, character_id, user_message,
                 [
                     {'role': ev.get('role'), 'content': ev.get('prompt_text') or ev.get('content')}
@@ -1826,6 +1836,9 @@ def assemble_from_events(
                 ],
                 temporal_snapshot=temporal_snapshot,
             )
+            extra = support[0] if support else []
+            expression_rules = support[1] if len(support) > 1 else ''
+            milestone_line = support[2] if len(support) > 2 else ''
             items.extend(extra)
         except Exception as exc:
             print(f'[context_layer] support wrap skipped:{exc}')
@@ -1867,6 +1880,11 @@ def assemble_from_events(
                 'content': content,
             })
 
+    relationship_text = _format_plain_block('', rel_kept)
+    if milestone_line:
+        relationship_text = (
+            relationship_text + '\n' + milestone_line if relationship_text else milestone_line
+        )
     pack = ChatContextPack(
         temporal_snapshot=temporal_snapshot,
         messages=messages,
@@ -1884,7 +1902,7 @@ def assemble_from_events(
         pinned_prompt_text=_format_pinned_block(pin_kept, character_id),
         summary_prompt_text=_format_summary_block(sum_kept, character_id),
         episode_prompt_text=_format_episode_block(episode_kept, character_id),
-        relationship_prompt_text=_format_plain_block('', rel_kept),
+        relationship_prompt_text=relationship_text,
         cognitive_prompt_text=_format_plain_block(
             '【当前认知——结论只表达，未决保持未决】', cog_kept),
         diary_hint_text=_format_plain_block('', [

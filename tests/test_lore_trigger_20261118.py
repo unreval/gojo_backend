@@ -93,7 +93,7 @@ class LoreTitleTests(unittest.TestCase):
                 'ai_client.get_anthropic', side_effect=AssertionError('model forbidden')))
             stack.enter_context(patch.object(
                 characters, 'retrieve_character_memory', return_value=[LORE_SAMPLE]))
-            items, _rules = context_layer._support_items('u', 'gojo', '你喜欢喜久福吗', [])
+            items, _rules, _line = context_layer._support_items('u', 'gojo', '你喜欢喜久福吗', [])
         lore = [item for item in items if item.item_type == 'character_lore']
         self.assertEqual(len(lore), 1)
         self.assertEqual(lore[0].item_id, 'lore:hits')

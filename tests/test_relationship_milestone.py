@@ -64,6 +64,35 @@ class MilestoneGrammarTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(_kind(text), [('literal', None)])
 
+    def test_a_later_clause_can_carry_the_statement(self):
+        self.assertEqual(_kind('……ずっと言えなかったけど、好きだよ')[0][0], 'question')
+        self.assertEqual(_kind('……ずっと言えなかったけど、好きだよ')[0][1]['surface'], 'affection')
+        self.assertEqual(_kind('もし好きだよ'), [('literal', None)])
+        self.assertEqual(_kind('如果下雨。もし好きだよ'), [('literal', None), ('literal', None)])
+        self.assertEqual(_kind('如果下雨。好きだよ')[1][0], 'question')
+
+    def test_added_phrases_count_and_a_food_like_does_not(self):
+        recognized = (
+            '君のことが好きだよ',
+            'お前が好き',
+            'あなたが好きです',
+            'あんたが好き',
+            '大好きだよ',
+            '愛してるよ',
+            '付き合おうよ',
+            '付き合ってほしい',
+            '我喜欢你啊',
+            '在一起吧！',
+            '我喜欢你😊',
+        )
+        for text in recognized:
+            with self.subTest(text=text):
+                self.assertEqual(_kind(text)[0][0], 'question', text)
+        self.assertEqual(_kind('ラーメンが好き'), [('literal', None)])
+
+    def test_a_later_turn_cancels_a_short_answer(self):
+        self.assertEqual(_kind('好啊，但是我还没想好'), [('literal', None)])
+
     def test_normalize_mutual_feelings_does_not_infer_prose(self):
         self.assertEqual(relationship_semantics.normalize_mutual_feelings('mutual'), 'mutual')
         self.assertEqual(relationship_semantics.normalize_mutual_feelings('unresolved'), 'unresolved')
@@ -136,14 +165,22 @@ class MilestonePromptTests(unittest.TestCase):
             self.assertNotIn('除非 Cognitive romantic_label=affirmed', text)
             self.assertNotIn('romantic_label 未 affirmed', text)
         self.assertIn('▹ 心动：', groups['unspoken'])
+        self.assertIn('温柔的时刻', groups['unspoken'])
+        self.assertIn('一直在等这样的时刻', groups['unspoken'])
+        self.assertIn('贪心地想要', groups['unspoken'])
         self.assertIn('▹ 独占与承诺：', groups['unspoken'])
         self.assertIn('▹ 亲密描写：', groups['unspoken'])
         self.assertNotIn('▹ 心动：', groups['mutual'])
+        self.assertNotIn('温柔的时刻', groups['mutual'])
+        self.assertIn('一直在等这样的时刻', groups['mutual'])
         self.assertIn('▹ 独占与承诺：', groups['mutual'])
         self.assertIn('▹ 亲密描写：', groups['mutual'])
         self.assertNotIn('▹ 心动：', groups['affirmed'])
         self.assertNotIn('▹ 独占与承诺：', groups['affirmed'])
         self.assertNotIn('▹ 亲密描写：', groups['affirmed'])
+        self.assertNotIn('温柔的时刻', groups['affirmed'])
+        self.assertNotIn('一直在等这样的时刻', groups['affirmed'])
+        self.assertNotIn('贪心地想要', groups['affirmed'])
         self.assertIn('动作仍按通道规则。', groups['affirmed'])
         self.assertEqual(shared_relation_prompt.milestone_status_line(unspoken), '')
         self.assertEqual(
@@ -170,6 +207,65 @@ class MilestonePromptTests(unittest.TestCase):
         self.assertNotIn('▹ 心动：', rendered)
         self.assertIn('▹ 独占与承诺：', rendered)
         self.assertIn('LEDGER', rendered)
+
+    def _pack(self, milestones=None, enabled=False):
+        import context_layer
+        reader = patch('cognitive_reader.read_relationship_milestones', return_value=milestones)
+        if milestones is None:
+            reader = patch('cognitive_reader.read_relationship_milestones',
+                           side_effect=AssertionError('milestone read'))
+        with patch('config.RELATIONSHIP_MILESTONE_ENABLED', enabled), \
+             patch('context_layer.list_rolling_summaries', return_value=[]), \
+             patch('context_layer.list_pins', return_value=[]), \
+             patch('user_memory.get_first_interaction_days', return_value=3), \
+             patch('relationship_reader.build_state_summary', return_value='LEDGER'), \
+             patch('cognitive_reader.iter_active_cognitive_items', return_value=[]), \
+             patch('cognitive_reader.build_cognitive_prompt_context', return_value=''), \
+             patch('diary_engine.build_diary_hint', return_value=''), \
+             patch('temporal_awareness.build_prompt_context', return_value=''), \
+             patch('db_schedule.format_world_prompt', return_value=('', {})), \
+             patch('characters.retrieve_character_memory', return_value=[]), \
+             patch('user_memory.get_recent_openings', return_value=[]), \
+             patch('user_memory.get_last_assistant_reply', return_value=''), \
+             patch('prompt.get_period_context', return_value=''), \
+             patch('prompt._accounts_block', return_value=''), \
+             reader:
+            return context_layer.assemble_from_events(
+                [], user_id='u', character_id='c', user_message='今天天气怎么样',
+                include_support=True, include_recall=False, auto_pin_enabled=False,
+            )
+
+    def test_pack_keeps_the_old_expression_rules_when_the_switch_is_off(self):
+        pack = self._pack(enabled=False)
+        self.assertEqual(pack.expression_rules, shared_relation_prompt._EXPRESSION_ONLY_RULES)
+        self.assertEqual(
+            hashlib.sha256(pack.expression_rules.encode('utf-8')).hexdigest(),
+            _EXPRESSION_HASH,
+        )
+        self.assertNotIn('你们已经确定关系', pack.relationship_prompt_text)
+        self.assertNotIn('你们互相说过喜欢', pack.relationship_prompt_text)
+
+    def test_pack_carries_the_standing_line_and_tiers_when_the_switch_is_on(self):
+        unspoken = {'mutual_feelings': None, 'romantic_label': None, 'pending': [], 'as_of': {}}
+        mutual = {
+            'mutual_feelings': 'mutual', 'romantic_label': None, 'pending': [],
+            'as_of': {'mutual_feelings': '2026-11-24'},
+        }
+        affirmed = {
+            'mutual_feelings': 'mutual', 'romantic_label': 'affirmed', 'pending': [],
+            'as_of': {'romantic_label': '2026-11-24'},
+        }
+        off_rules = self._pack(unspoken, enabled=True)
+        self.assertIn('▹ 心动：', off_rules.expression_rules)
+        self.assertNotIn('你们互相说过喜欢', off_rules.relationship_prompt_text)
+        liked = self._pack(mutual, enabled=True)
+        self.assertNotIn('▹ 心动：', liked.expression_rules)
+        self.assertIn('▹ 独占与承诺：', liked.expression_rules)
+        self.assertIn('你们互相说过喜欢（2026-11-24），还没有确定关系。', liked.relationship_prompt_text)
+        together = self._pack(affirmed, enabled=True)
+        self.assertNotIn('▹ 独占与承诺：', together.expression_rules)
+        self.assertNotIn('▹ 亲密描写：', together.expression_rules)
+        self.assertIn('你们已经确定关系（2026-11-24）。', together.relationship_prompt_text)
 
 
 @unittest.skipUnless(os.getenv('COGNITIVE_TEST_PGLITE'), 'set COGNITIVE_TEST_PGLITE to the local test-only package')
@@ -307,11 +403,11 @@ class RelationshipMilestoneTests(ExplicitAnswerFixture, unittest.TestCase):
                WHERE op.key='milestone.romantic_label' ORDER BY cognitive_events.id""")
         self.assertEqual([item[0] for item in statuses], ['superseded', 'applied'])
 
-    def test_character_acceptance_of_a_user_proposal_stays_active(self):
+    def test_character_acceptance_of_a_user_proposal_confirms(self):
         self.say('u1', '我们在一起吧')
         self.say('a1', 'いいよ', 'assistant', reply='u1')
-        self.assertIsNone(self.fixed('relationship.romantic_label'))
-        self.assertIn(('romantic_proposal', 'active'), self.active_predicates())
+        self.assertEqual(self.value_of('relationship.romantic_label'), 'affirmed')
+        self.assertEqual(self.value_of('relationship.mutual_feelings'), 'mutual')
 
     def test_character_claiming_agreement_does_not_count(self):
         self.say('u1', '我喜欢你')
@@ -419,3 +515,58 @@ class RelationshipMilestoneTests(ExplicitAnswerFixture, unittest.TestCase):
         state = self.semantic()
         self.assertIsNone(state['mutual_feelings'])
         self.assertIsNone(state['romantic_label'])
+
+    def test_a_turned_short_yes_stays_unresolved(self):
+        self.say('a1', '我们在一起吧', 'assistant')
+        self.say('u1', '好啊，但是我还没想好')
+        self.assertIsNone(self.value_of('relationship.romantic_label'))
+        self.assertIn(('romantic_proposal', 'active'), self.active_predicates())
+
+    def test_short_yes_only_answers_the_immediately_previous_turn(self):
+        self.say('a1', '付き合おう', 'assistant')
+        self.say('a2', '今日は暑いね', 'assistant')
+        self.say('u1', '好')
+        self.assertIsNone(self.value_of('relationship.romantic_label'))
+        self.assertIn(('romantic_proposal', 'active'), self.active_predicates())
+        self.say('a3', '付き合おう', 'assistant')
+        self.say('u2', '好')
+        self.assertEqual(self.value_of('relationship.romantic_label'), 'affirmed')
+        self.assertEqual(self.value_of('relationship.mutual_feelings'), 'mutual')
+
+    def test_character_reply_accepts_or_declines_a_user_proposal(self):
+        self.say('u1', '我们在一起吧')
+        self.say('a1', 'いいよ', 'assistant')
+        self.assertEqual(self.value_of('relationship.romantic_label'), 'affirmed')
+        self.assertEqual(self.value_of('relationship.mutual_feelings'), 'mutual')
+
+    def test_character_refusal_declines_a_user_proposal(self):
+        self.say('u1', '我们在一起吧')
+        self.say('a1', 'ごめん', 'assistant')
+        self.assertEqual(self.value_of('relationship.romantic_label'), 'declined')
+        self.assertIsNone(self.value_of('relationship.mutual_feelings'))
+
+    def test_fetch_keeps_ordinary_questions_beside_milestone_questions(self):
+        self.say('nick', '我可以叫你宝宝吗？')
+        for index in range(6):
+            self.say(f'like{index}', '好きだよ', 'assistant')
+        state = cognitive_reader.fetch_cognitive_reader_state('u', 'c', conn=self.database)
+        for key in ('questions', 'beliefs', 'hypotheses', 'sticky_notes', 'predictions', 'cycle_summary'):
+            self.assertIn(key, state)
+        predicates = [
+            ((row.get('metadata') or {}).get('proposition') or {}).get('predicate')
+            for row in state['questions']
+        ]
+        self.assertIn('nickname_permission', predicates)
+        self.assertNotIn('mutual_feelings', predicates)
+        self.assertNotIn('romantic_proposal', predicates)
+        self.assertTrue(all(not str(row['question_key']).startswith('relationship.')
+                            for row in state['questions']))
+        with patch('config.RELATIONSHIP_MILESTONE_ENABLED', False):
+            crowded = cognitive_reader.fetch_cognitive_reader_state('u', 'c', conn=self.database)
+        crowded_predicates = [
+            ((row.get('metadata') or {}).get('proposition') or {}).get('predicate')
+            for row in crowded['questions']
+        ]
+        self.assertEqual(len(crowded['questions']), 6)
+        self.assertNotIn('nickname_permission', crowded_predicates)
+        self.assertTrue(all(item == 'mutual_feelings' for item in crowded_predicates))

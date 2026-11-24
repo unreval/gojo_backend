@@ -52,21 +52,7 @@ def build_relation_rules(first_days, bond_count: int, fact_count: int,
             parts = [meet_line, v4_summary]
             if cognitive_summary:
                 parts.append(cognitive_summary)
-            rules = _EXPRESSION_ONLY_RULES
-            status_line = ''
-            if _relationship_milestone_enabled():
-                try:
-                    from cognitive_reader import read_relationship_milestones
-                    milestones = read_relationship_milestones(user_id, character_id)
-                    rules = expression_rules_for_milestones(milestones)
-                    status_line = milestone_status_line(milestones)
-                except Exception as milestone_error:
-                    print(
-                        '[shared_relation_prompt] 关系里程碑读取失败，保留全部表达约束: '
-                        f'{milestone_error}'
-                    )
-                    rules = _EXPRESSION_ONLY_RULES
-                    status_line = ''
+            status_line, rules = build_milestone_expression(user_id, character_id)
             if status_line:
                 parts.append(status_line)
             parts.append(rules)
@@ -472,11 +458,32 @@ def _relationship_milestone_enabled():
     return bool(RELATIONSHIP_MILESTONE_ENABLED)
 
 
-_HEART_WORDS = '心跳（加速/漏拍）、想念到发疼、恍惚、怔住、脸红、屏住呼吸、失神、放不下她、心里装着她、这样也不错'
+def build_milestone_expression(user_id, character_id):
+    """Standing line plus the expression rules for this pair.
+
+    The switch-off result is the historical full text and an empty line,
+    with no database read. A failed read keeps that same full text.
+    """
+    if not _relationship_milestone_enabled():
+        return '', _EXPRESSION_ONLY_RULES
+    try:
+        from cognitive_reader import read_relationship_milestones
+        milestones = read_relationship_milestones(user_id, character_id)
+    except Exception as milestone_error:
+        print(
+            '[shared_relation_prompt] 关系里程碑读取失败，保留全部表达约束: '
+            f'{milestone_error}'
+        )
+        return '', _EXPRESSION_ONLY_RULES
+    return milestone_status_line(milestones), expression_rules_for_milestones(milestones)
+
+
+_HEART_WORDS = '心跳（加速/漏拍）、想念到发疼、恍惚、怔住、脸红、屏住呼吸、失神、放不下她、心里装着她、这样也不错、温柔的时刻'
 _EXCLUSIVE_WORDS = (
     '只属于我、只有我懂她、除了我没人、别人不能这样对她、我要成为她唯一的、'
     '一辈子、余生、永远、以后每天、陪她到老、直到永远、这次不能再放开、'
-    '注定、命运、终于遇到、缺失的那一半、原来我在等的是她、被她填满、为她做任何事'
+    '注定、命运、终于遇到、缺失的那一半、原来我在等的是她、被她填满、为她做任何事、'
+    '一直在等这样的时刻、贪心地想要'
 )
 _INTIMATE_WORDS = '怀里、肩头、指尖、发丝、贴近、蹭、依偎、抱得更紧'
 _LOVE_HEADER = '━━ 【★ 爱情腔词汇 + 句式——除非 Cognitive romantic_label=affirmed，否则一律禁用】 ━━'
@@ -512,7 +519,6 @@ def expression_rules_for_milestones(milestones):
     if not affirmed:
         lines.append('▹ 独占与承诺：' + _EXCLUSIVE_WORDS)
         lines.append('▹ 亲密描写：' + _INTIMATE_WORDS)
-    lines.append('▹ 已识别的具体套话：一直在等这样的时刻、贪心地想要、温柔的时刻')
     if affirmed:
         lines.append('动作仍按通道规则。')
     lines.append('')

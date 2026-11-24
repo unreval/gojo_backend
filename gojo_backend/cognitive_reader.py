@@ -414,6 +414,7 @@ def fetch_cognitive_reader_state(user_id, character_id, *, conn=None):
                             AND {fresh_state_report_sql('b')}))
                  AND (metadata->>'updated_by' IS DISTINCT FROM 'explicit_answer_v1'
                       OR {current_answer_question_sql()})
+                 {_milestone_question_sql_filter()}
                ORDER BY updated_at DESC, id DESC
                LIMIT 6''',
             (user_id, character_id),
@@ -584,6 +585,19 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=No
         return ''
     return '【当前认知——结论只表达，未决保持未决】\n' + '\n'.join(
         row['text'] for row in items)
+
+
+def _milestone_question_sql_filter():
+    """Keep milestone rows out of the six-question fetch only while the switch is on."""
+    from config import RELATIONSHIP_MILESTONE_ENABLED
+    if not RELATIONSHIP_MILESTONE_ENABLED:
+        return ''
+    return (
+        "AND question_key NOT IN "
+        "('relationship.romantic_label', 'relationship.mutual_feelings') "
+        "AND COALESCE(metadata->'proposition'->>'predicate', '') NOT IN "
+        "('mutual_feelings', 'romantic_proposal')"
+    )
 
 
 def _milestone_question_stays_out_of_prompt(question):

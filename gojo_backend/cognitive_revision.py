@@ -548,11 +548,23 @@ def _exchange_parts(text):
         elif _WITHDRAW_ANSWER.fullmatch(body):
             kind, value = 'withdrawal', _WITHDRAW_ANSWER.fullmatch(body).groupdict()
         else:
-            milestone = _milestone_clause(body) if _relationship_milestone_enabled() else None
-            if milestone:
-                kind, value = milestone
-            else:
-                kind, value = 'literal', None
+            hits = []
+            if _relationship_milestone_enabled() and not _milestone_answer_vetoed(text):
+                hits = _milestone_hits(body, allow_reply=(index == 0))
+            if not hits:
+                result.append({'operation_id': 'main' if len(parts) == 1 else f'clause.{index}',
+                               'kind': 'literal', 'value': None, 'text': part})
+                continue
+            for hit_index, (kind, value) in enumerate(hits):
+                if len(parts) == 1 and len(hits) == 1:
+                    operation_id = 'main'
+                elif len(hits) == 1:
+                    operation_id = f'clause.{index}'
+                else:
+                    operation_id = f'clause.{index}.{hit_index}'
+                result.append({'operation_id': operation_id, 'kind': kind,
+                               'value': value, 'text': part})
+            continue
         result.append({'operation_id': 'main' if len(parts) == 1 else f'clause.{index}',
                        'kind': kind, 'value': value, 'text': part})
     return result
@@ -616,7 +628,12 @@ def _answer_candidates(cur, user_id, character_id, source, name=None, predicate=
             break  # A deleted intervening turn must not create a new adjacency.
         parts = _exchange_parts(prior['content'])
         questions = [p for p in parts if p['kind'] == 'question']
-        if not questions or any(p['kind'] not in ('question', 'antecedent') for p in parts):
+        milestone_only = predicate in ('mutual_feelings', 'romantic_proposal')
+        if milestone_only:
+            questions = [p for p in questions if _is_milestone_statement(p)]
+            if not questions:
+                break
+        elif not questions or any(p['kind'] not in ('question', 'antecedent') for p in parts):
             if not ref and (all(p['kind'] == 'deferred' for p in parts)
                             or prior['content'].strip() in ('答案呢？', '答案呢?', '你的回答呢？')):
                 bridges.append(dict(prior, evidence_role='context'))
@@ -673,11 +690,28 @@ _MILESTONE_SECOND_PERSON = (
 )
 
 
+def _is_milestone_statement(part):
+    value = part.get('value')
+    return (part.get('kind') == 'question' and isinstance(value, dict)
+            and value.get('milestone') and value.get('surface') in ('affection', 'proposal'))
+
+
 def _milestone_visible(text):
     """Drop quoted spans. A clause that is only a quotation is not a statement."""
     visible = re.sub(r'「[^」]*」|『[^』]*』|“[^”]*”|"[^"]*"', '', text or '')
     visible = _clause_body(visible)
     return visible or None
+
+
+def _milestone_segments(text):
+    """Finer split for milestones only. Nickname clauses stay on _exchange_clauses."""
+    segments = []
+    for clause in _exchange_clauses(text or ''):
+        for bit in re.split(r'[、，,]+', clause):
+            bit = _milestone_visible(bit)
+            if bit:
+                segments.append(bit)
+    return segments
 
 
 def _milestone_blocked(text):
@@ -703,29 +737,94 @@ def _milestone_bad_object(text):
     return False
 
 
+_MILESTONE_TRAIL = re.compile(
+    r'(?:[啊呀哦嘛啦吧!~～！]+|[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]+)+$'
+)
+_JP_SECOND_LIKE = re.compile(
+    r'^(?:君|お前|あなた|あんた)(?:のこと)?が好き(?:だ|です)?(?:よ|ね)?$'
+)
+_JP_AFFECTION_EXTRA = re.compile(r'^(?:大好き(?:だ|です)?(?:よ)?|愛してる(?:よ)?)$')
+_JP_PROPOSAL_EXTRA = re.compile(r'^(?:付き合おう(?:よ)?|付き合ってほしい)$')
+_SHORT_MILESTONE_REPLIES = frozenset({
+    '好', '好啊', '好的', '可以', '愿意', '我愿意', 'はい', 'うん', 'いいよ', '好き',
+})
+_TURN_MARKERS = ('不过还是', '其实不', '但是', '不过', '可是', 'でも', 'けど', 'じゃない', '不')
+
+
 def _is_affection_text(text):
     if text in _MILESTONE_AFFECTION:
         return True
     for base in ('私も好き', '俺も好き', '僕も好き', '好き'):
         if text in {base + 'だ', base + 'です', base + 'だよ'}:
             return True
+    if _JP_SECOND_LIKE.fullmatch(text or '') or _JP_AFFECTION_EXTRA.fullmatch(text or ''):
+        return True
     return False
 
 
-def _milestone_clause(body):
-    visible = _milestone_visible(body)
-    if not visible or _milestone_blocked(body) or _milestone_bad_object(visible):
+def _strip_milestone_trail(text):
+    stripped = _MILESTONE_TRAIL.sub('', text or '').strip()
+    return stripped or text
+
+
+def _segment_kind(text):
+    """One milestone segment: statement, proposal, or reply. None if it does not count."""
+    visible = _milestone_visible(text)
+    if not visible:
         return None
-    if visible in _MILESTONE_PROPOSAL or _is_affection_text(visible):
-        surface = 'proposal' if visible in _MILESTONE_PROPOSAL else 'affection'
-        return ('question', {'milestone': True, 'surface': surface, 'text': visible})
-    if visible == '我也是':
-        return ('milestone_reply', {'reply': 'affection', 'text': visible})
-    if visible in _MILESTONE_REJECT:
-        return ('milestone_reply', {'reply': 'reject', 'text': visible})
-    if visible in _MILESTONE_ACCEPT:
-        return ('milestone_reply', {'reply': 'accept', 'text': visible})
+    candidates = [visible]
+    stripped = _strip_milestone_trail(visible)
+    if stripped != visible:
+        candidates.append(stripped)
+    for candidate in candidates:
+        if _milestone_blocked(candidate):
+            continue
+        second_like = bool(_JP_SECOND_LIKE.fullmatch(candidate))
+        if not second_like and _milestone_bad_object(candidate):
+            continue
+        if candidate in _MILESTONE_PROPOSAL or _JP_PROPOSAL_EXTRA.fullmatch(candidate):
+            return 'proposal', candidate
+        if _is_affection_text(candidate):
+            return 'affection', candidate
+        if candidate == '我也是':
+            return 'reply-affection', candidate
+        if candidate in _MILESTONE_REJECT:
+            return 'reply-reject', candidate
+        if candidate in _MILESTONE_ACCEPT:
+            return 'reply-accept', candidate
     return None
+
+
+def _milestone_answer_vetoed(text):
+    """A reply's later clause can cancel the whole answer. Statements are separate."""
+    segments = _milestone_segments(text)
+    if len(segments) < 2:
+        return False
+    first = _segment_kind(segments[0])
+    if not first or not first[0].startswith('reply-'):
+        return False
+    later = '\n'.join(segments[1:])
+    return any(marker in later for marker in _TURN_MARKERS)
+
+
+def _milestone_hits(body, *, allow_reply):
+    hits = []
+    for index, segment in enumerate(_milestone_segments(body)):
+        kind = _segment_kind(segment)
+        if not kind:
+            continue
+        surface, shown = kind
+        if surface == 'proposal':
+            hits.append(('question', {'milestone': True, 'surface': 'proposal', 'text': shown}))
+        elif surface == 'affection':
+            hits.append(('question', {'milestone': True, 'surface': 'affection', 'text': shown}))
+        elif allow_reply and index == 0 and surface == 'reply-affection':
+            hits.append(('milestone_reply', {'reply': 'affection', 'text': shown}))
+        elif allow_reply and index == 0 and surface == 'reply-reject':
+            hits.append(('milestone_reply', {'reply': 'reject', 'text': shown}))
+        elif allow_reply and index == 0 and surface == 'reply-accept':
+            hits.append(('milestone_reply', {'reply': 'accept', 'text': shown}))
+    return hits
 
 
 def _question_spec_for(prior, part):
@@ -818,6 +917,84 @@ def _bind_milestone(cur, user_id, character_id, source, predicate):
         if window[0].get('predicate') != predicate:
             return None
     return matched[0]
+
+
+def _explicit_reply_target(source):
+    reply = source.get('reply_to_event_id') or (source.get('metadata') or {}).get('reply_to_event_id')
+    return bool(reply)
+
+
+def _latest_other_turn(cur, user_id, character_id, source):
+    """The other party's immediately previous turn.
+
+    Bubbles that share assistant_turn_id are one turn. A row without that id
+    is a turn by itself, so a later character message hides an older proposal.
+    """
+    cur.execute('''SELECT COALESCE(NULLIF(event_id,''),client_msg_id) FROM chat_log
+        WHERE user_id=%s AND chat_id=%s AND (created_at,id)<(%s,%s)
+        ORDER BY created_at DESC, id DESC LIMIT 20''',
+        (user_id, character_id, source['timestamp'], source['row_id']))
+    priors = []
+    for (sid,) in cur.fetchall():
+        prior = _exchange_source(cur, user_id, character_id, sid)
+        if not prior:
+            break
+        priors.append(prior)
+    if not priors:
+        return []
+    speaker = _exchange_role(source)
+    def other(row):
+        role = _exchange_role(row)
+        return bool(role and role != speaker)
+    if not other(priors[0]):
+        return []
+    turn_id = str((priors[0].get('metadata') or {}).get('assistant_turn_id') or '').strip()
+    chosen = [priors[0]]
+    if turn_id:
+        for prior in priors[1:]:
+            if not other(prior):
+                break
+            if str((prior.get('metadata') or {}).get('assistant_turn_id') or '').strip() != turn_id:
+                break
+            chosen.append(prior)
+    return list(reversed(chosen))
+
+
+def _bind_latest_turn(cur, user_id, character_id, source, predicate):
+    """Short replies bind only to a question inside the immediately previous turn."""
+    role = _exchange_role(source)
+    found = []
+    for prior in _latest_other_turn(cur, user_id, character_id, source):
+        cur.execute('''SELECT payload->>'content' AS content,adjudication->>'status' AS status
+            FROM cognitive_events WHERE user_id=%s AND character_id=%s AND source_event_id=%s''',
+            (user_id, character_id, prior['source_id']))
+        rows = cur.fetchall()
+        if rows and any(text != prior['content'] or status == 'superseded' for text, status in rows):
+            continue
+        for part in _exchange_parts(prior['content']):
+            if not _is_milestone_statement(part):
+                continue
+            spec = _question_spec_for(prior, part)
+            if spec.get('predicate') != predicate or spec.get('respondent') != role:
+                continue
+            cur.execute('''SELECT status FROM cognitive_questions
+                WHERE user_id=%s AND character_id=%s AND question_key=%s FOR UPDATE''',
+                (user_id, character_id, spec['question_key']))
+            old = cur.fetchone()
+            if not old or old[0] == 'active':
+                found.append(spec)
+    if not found:
+        return None
+    latest = found[-1]
+    if latest.get('predicate') != predicate:
+        return None
+    return latest
+
+
+def _bind_romantic_reply(cur, user_id, character_id, source, phrase):
+    if phrase in _SHORT_MILESTONE_REPLIES and not _explicit_reply_target(source):
+        return _bind_latest_turn(cur, user_id, character_id, source, 'romantic_proposal')
+    return _bind_milestone(cur, user_id, character_id, source, 'romantic_proposal')
 
 
 def _write_fixed_milestone(cur, *, cycle_id, user_id, character_id, event_id, now,
@@ -991,9 +1168,9 @@ def _apply_milestone_question(cur, *, cycle_id, user_id, character_id, event_id,
             return _commit_milestone(
                 cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
                 event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='mutual')
-    if role == 'user' and surface in _MILESTONE_ACCEPT:
-        spec = _bind_milestone(cur, user_id, character_id, source, 'romantic_proposal')
-        if spec:
+    if surface in _MILESTONE_ACCEPT and role in ('user', 'character'):
+        spec = _bind_romantic_reply(cur, user_id, character_id, source, surface)
+        if spec and spec.get('respondent') == role:
             return _commit_milestone(
                 cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
                 event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='affirmed')
@@ -1005,6 +1182,8 @@ def _apply_milestone_question(cur, *, cycle_id, user_id, character_id, event_id,
 def _apply_milestone_reply(cur, *, cycle_id, user_id, character_id, event_id, source, part, now, decision):
     reply = (part.get('value') or {}).get('reply')
     role = _exchange_role(source)
+    if _milestone_answer_vetoed(source.get('content') or ''):
+        return decision
     if reply == 'affection':
         spec = _bind_milestone(cur, user_id, character_id, source, 'mutual_feelings')
         if spec and spec.get('respondent') == role:
@@ -1012,17 +1191,16 @@ def _apply_milestone_reply(cur, *, cycle_id, user_id, character_id, event_id, so
                 cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
                 event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='mutual')
         return decision
-    if role != 'user':
-        return decision
+    phrase = (part.get('value') or {}).get('text') or ''
     if reply == 'accept':
-        spec = _bind_milestone(cur, user_id, character_id, source, 'romantic_proposal')
-        if spec:
+        spec = _bind_romantic_reply(cur, user_id, character_id, source, phrase)
+        if spec and spec.get('respondent') == role:
             return _commit_milestone(
                 cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
                 event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='affirmed')
     elif reply == 'reject':
         spec = _bind_milestone(cur, user_id, character_id, source, 'romantic_proposal')
-        if spec:
+        if spec and spec.get('respondent') == role:
             return _commit_milestone(
                 cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
                 event_id=event_id, source=source, part=part, spec=spec, now=now, outcome='declined')
@@ -1030,15 +1208,25 @@ def _apply_milestone_reply(cur, *, cycle_id, user_id, character_id, event_id, so
 
 
 def _apply_user_proposal_reply(cur, *, cycle_id, user_id, character_id, event_id, source, part, spec, now, decision):
-    """A listed user reply can settle a proposal. Anything else leaves it active."""
-    if _exchange_role(source) != 'user':
+    """A listed reply can settle a proposal. A short reply must sit on the previous turn."""
+    role = _exchange_role(source)
+    if role not in ('user', 'character'):
+        return decision
+    if _milestone_answer_vetoed(source.get('content') or ''):
         return decision
     body = _clause_body(part.get('text') or '')
+    body = _strip_milestone_trail(body)
     if body in _MILESTONE_ACCEPT:
         outcome = 'affirmed'
+        if body in _SHORT_MILESTONE_REPLIES and not _explicit_reply_target(source):
+            spec = _bind_latest_turn(cur, user_id, character_id, source, 'romantic_proposal')
+            if not spec or spec.get('respondent') != role:
+                return decision
     elif body in _MILESTONE_REJECT:
         outcome = 'declined'
     else:
+        return decision
+    if spec.get('respondent') != role:
         return decision
     return _commit_milestone(
         cur, cycle_id=cycle_id, user_id=user_id, character_id=character_id,
@@ -1440,7 +1628,13 @@ def apply_rule_evidence(cur, *, cycle_id, user_id, character_id, output, now):
                     parse_cognitive_evidence(p['text'], user_id, character_id)['operation'] != 'pending'
                     for p in parts)
                 if not supported:
-                    parts = [dict(kind='literal', text=raw[0]['content'], operation_id='main')]
+                    # A statement or proposal survives neighboring unrecognized
+                    # clauses. Nickname messages keep the old whole-message gate.
+                    kept = [p for p in parts if _is_milestone_statement(p)]
+                    if kept:
+                        parts = kept
+                    else:
+                        parts = [dict(kind='literal', text=raw[0]['content'], operation_id='main')]
                 source = (_exchange_source(cur, user_id, character_id, source_id)
                           if any(p['kind'] not in ('literal', 'antecedent') for p in parts) else None)
                 operations = {}

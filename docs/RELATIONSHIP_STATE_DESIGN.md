@@ -203,7 +203,7 @@ A、V、C 在 `[0,1]`；A 与 V 可同时高。没有合格来源时为 unknown�
 - `relationship.mutual_feelings`：`unresolved` / `mutual`。互相喜欢成立时 `current_judgment` 与 `resolution` 的 value 为 `mutual`。
 - `relationship.romantic_label`：沿用已有 `unresolved` / `affirmed` / `declined` / `other`。确定关系被接受时 value 为 `affirmed`，被拒绝时为 `declined`。`affirmed` 时同一对证据同时把 `relationship.mutual_feelings` 写成 `mutual`。
 
-写入方只有显式问答管线（`explicit_answer_v1`）。用户先提议、角色再接受的情况，第一版不自动确认，问题保持 active，因为确认必须来自用户的独立消息。
+写入方只有显式问答管线（`explicit_answer_v1`）。确认需要双方各有一句明确表态并能绑定，其中至少一句是用户的独立消息。用户先提议、角色用已提交的正式回复接受，和角色先提议、用户自己接受，都会写成确定关系；角色自称“你也答应了”不算。
 
 与 §4.1「明确撤回立即收缩」不同，第一版不做自动撤回。原因是「分手」「不喜欢了」这类话常是口是心非或希望被挽留，角色说的也一样。这些话不改状态。状态只因来源消息删除而失效；读取时来源若已失效，结论立即不再授权。
 
