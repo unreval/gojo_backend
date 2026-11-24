@@ -19,9 +19,11 @@ from memory_authority import (
 from relationship_semantics import (
     ENGAGEMENT_STYLE_KEY,
     INTERNAL_CONFLICT_KEY,
+    MUTUAL_FEELINGS_KEY,
     ROMANTIC_LABEL_KEY,
     ROMANTIC_OPENNESS_KEY,
     is_nonrelationship_generated_source,
+    normalize_mutual_feelings,
     normalize_romantic_label,
 )
 from role_view import PROJECTION_VERSION, render_role_view
@@ -131,6 +133,76 @@ def _relationship_item(kind, row, *, source_event_ids, value=None):
     }
 
 
+def _read_labeled_question(cur, database, user_id, character_id, key, normalize):
+    """Same provenance gate for every explicit relationship label."""
+    cur.execute(
+        '''SELECT question_key, question_text, status, metadata,
+                  source_event_refs, updated_at
+           FROM cognitive_questions
+           WHERE user_id = %s AND character_id = %s AND question_key = %s
+           LIMIT 1''',
+        (user_id, character_id, key),
+    )
+    question = cur.fetchone()
+    if not question:
+        return None
+    metadata = _json_value(question[3], {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    resolution = metadata.get('resolution') or {}
+    judgment = metadata.get('current_judgment') or {}
+    candidate = resolution if question[2] == 'resolved' and resolution else judgment
+    if metadata.get('updated_by') == 'explicit_answer_v1' and not answer_question_is_current(
+            user_id, character_id,
+            {'question_key': question[0], 'status': question[2], 'metadata': metadata},
+            conn=database):
+        candidate = None
+    if isinstance(candidate, dict):
+        value = normalize(candidate.get('value'))
+        raw_ids = candidate.get('evidence_event_ids') or ()
+        refs = _json_list(candidate.get('evidence_refs')) or _json_list(question[4])
+        source_ids = _active_relationship_source_ids(
+            user_id, character_id, refs=refs, raw_ids=raw_ids, conn=database,
+        )
+        if value and source_ids:
+            return _relationship_item(
+                'question',
+                {
+                    'status': question[2],
+                    'content': _projected_text(candidate.get('content') or question[1],
+                                               candidate, character_id),
+                    'updated_at': question[5],
+                },
+                source_event_ids=source_ids,
+                value=value,
+            )
+    return None
+
+
+def _cn_day(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        from config import CN_TZ
+        return value.astimezone(CN_TZ).date().isoformat()
+    return None
+
+
+def _positive_label(item, *, allowed):
+    if not isinstance(item, dict):
+        return None
+    value = item.get('value')
+    if value in allowed:
+        return value
+    return None
+
+
 def read_relationship_semantic_state(user_id, character_id, *, conn=None):
     """Read only the canonical Slow Loop items used by ``relationship_panel``.
 
@@ -146,50 +218,16 @@ def read_relationship_semantic_state(user_id, character_id, *, conn=None):
     result = {
         'engagement_style': None,
         'romantic_label': None,
+        'mutual_feelings': None,
         'romantic_openness': None,
         'internal_conflict': None,
     }
     cur = database.cursor()
     try:
-        cur.execute(
-            '''SELECT question_key, question_text, status, metadata,
-                      source_event_refs, updated_at
-               FROM cognitive_questions
-               WHERE user_id = %s AND character_id = %s AND question_key = %s
-               LIMIT 1''',
-            (user_id, character_id, ROMANTIC_LABEL_KEY),
-        )
-        question = cur.fetchone()
-        if question:
-            metadata = _json_value(question[3], {})
-            metadata = metadata if isinstance(metadata, dict) else {}
-            resolution = metadata.get('resolution') or {}
-            judgment = metadata.get('current_judgment') or {}
-            candidate = resolution if question[2] == 'resolved' and resolution else judgment
-            if metadata.get('updated_by') == 'explicit_answer_v1' and not answer_question_is_current(
-                    user_id, character_id,
-                    {'question_key': question[0], 'status': question[2], 'metadata': metadata},
-                    conn=database):
-                candidate = None
-            if isinstance(candidate, dict):
-                value = normalize_romantic_label(candidate.get('value'))
-                raw_ids = candidate.get('evidence_event_ids') or ()
-                refs = _json_list(candidate.get('evidence_refs')) or _json_list(question[4])
-                source_ids = _active_relationship_source_ids(
-                    user_id, character_id, refs=refs, raw_ids=raw_ids, conn=database,
-                )
-                if value and source_ids:
-                    result['romantic_label'] = _relationship_item(
-                        'question',
-                        {
-                            'status': question[2],
-                            'content': _projected_text(candidate.get('content') or question[1],
-                                                       candidate, character_id),
-                            'updated_at': question[5],
-                        },
-                        source_event_ids=source_ids,
-                        value=value,
-                    )
+        result['romantic_label'] = _read_labeled_question(
+            cur, database, user_id, character_id, ROMANTIC_LABEL_KEY, normalize_romantic_label)
+        result['mutual_feelings'] = _read_labeled_question(
+            cur, database, user_id, character_id, MUTUAL_FEELINGS_KEY, normalize_mutual_feelings)
 
         cur.execute(
             '''SELECT belief_key, statement, confidence, belief_type, status,
@@ -269,6 +307,71 @@ def read_relationship_semantic_state(user_id, character_id, *, conn=None):
         return result
     finally:
         cur.close()
+        if owns_connection:
+            database.close()
+
+
+def read_relationship_milestones(user_id, character_id, *, conn=None):
+    """Read confirmed milestones and questions still waiting on the user.
+
+    The switch-off path does not open a database connection.
+    """
+    empty = {
+        'mutual_feelings': None,
+        'romantic_label': None,
+        'pending': [],
+        'as_of': {},
+    }
+    from config import RELATIONSHIP_MILESTONE_ENABLED
+    if not RELATIONSHIP_MILESTONE_ENABLED:
+        return empty
+    database = conn
+    owns_connection = database is None
+    if database is None:
+        from db import get_conn
+        database = get_conn()
+    try:
+        state = read_relationship_semantic_state(user_id, character_id, conn=database)
+        mutual_item = state.get('mutual_feelings') if isinstance(state, dict) else None
+        label_item = state.get('romantic_label') if isinstance(state, dict) else None
+        mutual = _positive_label(mutual_item, allowed={'mutual'})
+        label = _positive_label(label_item, allowed={'affirmed', 'declined', 'other'})
+        as_of = {}
+        if mutual and isinstance(mutual_item, dict):
+            as_of['mutual_feelings'] = _cn_day(mutual_item.get('updated_at'))
+        if label and isinstance(label_item, dict):
+            as_of['romantic_label'] = _cn_day(label_item.get('updated_at'))
+        cur = database.cursor()
+        try:
+            cur.execute(
+                '''SELECT metadata, updated_at
+                   FROM cognitive_questions
+                   WHERE user_id = %s AND character_id = %s AND status = 'active'
+                     AND metadata->'proposition'->>'respondent' = 'user'
+                     AND metadata->'proposition'->>'predicate' IN
+                         ('mutual_feelings', 'romantic_proposal')
+                   ORDER BY updated_at, question_key''',
+                (user_id, character_id),
+            )
+            pending = []
+            for metadata, updated_at in cur.fetchall():
+                meta = _json_value(metadata, {})
+                proposition = meta.get('proposition') if isinstance(meta, dict) else {}
+                proposition = proposition if isinstance(proposition, dict) else {}
+                pending.append({
+                    'type': proposition.get('predicate'),
+                    'speaker': proposition.get('speaker') or 'character',
+                    'date': _cn_day(updated_at),
+                })
+        finally:
+            cur.close()
+        return {
+            'mutual_feelings': mutual,
+            'romantic_label': label,
+            'pending': pending,
+            'as_of': as_of,
+        }
+    finally:
         if owns_connection:
             database.close()
 
@@ -483,6 +586,18 @@ def build_cognitive_prompt_context(user_id, character_id, *, conn=None, query=No
         row['text'] for row in items)
 
 
+def _milestone_question_stays_out_of_prompt(question):
+    """Confirmed milestones are a standing line, not one of the capped cognitive items."""
+    from config import RELATIONSHIP_MILESTONE_ENABLED
+    if not RELATIONSHIP_MILESTONE_ENABLED:
+        return False
+    key = question.get('question_key')
+    if key in (ROMANTIC_LABEL_KEY, MUTUAL_FEELINGS_KEY):
+        return True
+    predicate = ((question.get('metadata') or {}).get('proposition') or {}).get('predicate')
+    return predicate in ('mutual_feelings', 'romantic_proposal')
+
+
 def iter_active_cognitive_items(user_id, character_id, *, conn=None,
                                 query='', now=None, _state=None):
     """Select the current, relevant working set from the existing Slow Loop.
@@ -573,6 +688,8 @@ def iter_active_cognitive_items(user_id, character_id, *, conn=None,
             _projected_text(current_belief_display(belief), belief.get('metadata'), character_id),
             belief, 'judgment')
     for question in state.get('questions') or []:
+        if _milestone_question_stays_out_of_prompt(question):
+            continue
         meta = question.get('metadata') or {}
         if meta.get('updated_by') == 'explicit_answer_v1' and not answer_question_is_current(
                 user_id, character_id, question, conn=conn):

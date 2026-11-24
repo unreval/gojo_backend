@@ -52,7 +52,24 @@ def build_relation_rules(first_days, bond_count: int, fact_count: int,
             parts = [meet_line, v4_summary]
             if cognitive_summary:
                 parts.append(cognitive_summary)
-            parts.append(_EXPRESSION_ONLY_RULES)
+            rules = _EXPRESSION_ONLY_RULES
+            status_line = ''
+            if _relationship_milestone_enabled():
+                try:
+                    from cognitive_reader import read_relationship_milestones
+                    milestones = read_relationship_milestones(user_id, character_id)
+                    rules = expression_rules_for_milestones(milestones)
+                    status_line = milestone_status_line(milestones)
+                except Exception as milestone_error:
+                    print(
+                        '[shared_relation_prompt] 关系里程碑读取失败，保留全部表达约束: '
+                        f'{milestone_error}'
+                    )
+                    rules = _EXPRESSION_ONLY_RULES
+                    status_line = ''
+            if status_line:
+                parts.append(status_line)
+            parts.append(rules)
             return '\n\n'.join(parts)
         except Exception as e:
             # Keep chat available without re-authorizing a second judgment path.
@@ -448,3 +465,84 @@ _LEGACY_RELATION_RULES_BODY = '''━━ A. 判断的地基（所有关系判断�
 
 # 向后兼容：老代码如果 import RELATION_RULES_BODY 也不会断
 RELATION_RULES_BODY = _EXPRESSION_ONLY_RULES
+
+
+def _relationship_milestone_enabled():
+    from config import RELATIONSHIP_MILESTONE_ENABLED
+    return bool(RELATIONSHIP_MILESTONE_ENABLED)
+
+
+_HEART_WORDS = '心跳（加速/漏拍）、想念到发疼、恍惚、怔住、脸红、屏住呼吸、失神、放不下她、心里装着她、这样也不错'
+_EXCLUSIVE_WORDS = (
+    '只属于我、只有我懂她、除了我没人、别人不能这样对她、我要成为她唯一的、'
+    '一辈子、余生、永远、以后每天、陪她到老、直到永远、这次不能再放开、'
+    '注定、命运、终于遇到、缺失的那一半、原来我在等的是她、被她填满、为她做任何事'
+)
+_INTIMATE_WORDS = '怀里、肩头、指尖、发丝、贴近、蹭、依偎、抱得更紧'
+_LOVE_HEADER = '━━ 【★ 爱情腔词汇 + 句式——除非 Cognitive romantic_label=affirmed，否则一律禁用】 ━━'
+_PATTERN_HEADER = '【★ 句式（比字面词更狡猾）——同样禁用】'
+
+
+def expression_rules_for_milestones(milestones):
+    """Drop banned-word groups the current milestone already unlocks.
+
+    A missing read keeps the historical full text. An empty milestone is
+    "not yet stated": every group stays, but the model is not asked to judge.
+    """
+    if milestones is None:
+        return _EXPRESSION_ONLY_RULES
+    full = _EXPRESSION_ONLY_RULES
+    if _LOVE_HEADER not in full or _PATTERN_HEADER not in full:
+        return full
+    head, rest = full.split(_LOVE_HEADER, 1)
+    _, tail = rest.split(_PATTERN_HEADER, 1)
+    label = milestones.get('romantic_label')
+    mutual = milestones.get('mutual_feelings')
+    affirmed = label == 'affirmed'
+    heart_open = affirmed or mutual == 'mutual'
+    lines = [
+        '━━ 【★ 爱情腔词汇 + 句式——下列词和句式仍禁用；关系状态由系统填写，不要自行判断】 ━━',
+        '',
+        '这些一旦出现就说明你在写言情小说，不是记录真实感情。下面列出的不要用。',
+        '',
+        '【★ 字面词】',
+    ]
+    if not heart_open:
+        lines.append('▹ 心动：' + _HEART_WORDS)
+    if not affirmed:
+        lines.append('▹ 独占与承诺：' + _EXCLUSIVE_WORDS)
+        lines.append('▹ 亲密描写：' + _INTIMATE_WORDS)
+    lines.append('▹ 已识别的具体套话：一直在等这样的时刻、贪心地想要、温柔的时刻')
+    if affirmed:
+        lines.append('动作仍按通道规则。')
+    lines.append('')
+    return head + '\n'.join(lines) + '\n' + _PATTERN_HEADER + tail
+
+
+def milestone_status_line(milestones):
+    """One factual standing line. Empty when nothing has been said."""
+    if not milestones:
+        return ''
+    label = milestones.get('romantic_label')
+    mutual = milestones.get('mutual_feelings')
+    as_of = milestones.get('as_of') or {}
+    lines = []
+    if label == 'affirmed':
+        day = as_of.get('romantic_label')
+        lines.append('你们已经确定关系（%s）。' % (day or '日期不详'))
+    elif mutual == 'mutual':
+        day = as_of.get('mutual_feelings')
+        lines.append('你们互相说过喜欢（%s），还没有确定关系。' % (day or '日期不详'))
+    for item in milestones.get('pending') or []:
+        kind = item.get('type')
+        speaker = item.get('speaker')
+        if speaker == 'user':
+            who = '她'
+            what = '想和你在一起' if kind == 'romantic_proposal' else '喜欢你'
+        else:
+            who = '你'
+            what = '想和她在一起' if kind == 'romantic_proposal' else '喜欢她'
+        lines.append(
+            f'{who}说过{what}，还没有明确回应。你可以用自己的方式正面问她，不要替她回答。'
+        )
+    return '\n'.join(lines)
