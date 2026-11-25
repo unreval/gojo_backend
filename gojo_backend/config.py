@@ -123,6 +123,7 @@ GENERATION_SCHEMA_PROBE_TIMEOUT = _positive_seconds(
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_KEY', '')
 FISH_KEY      = os.environ.get('FISH_KEY', '')
 FISH_VOICE_ID = os.environ.get('FISH_VOICE_ID', 'bfcbd07c927742d6803f52084f6bb776')
+FISH_MODEL    = os.environ.get('FISH_MODEL', 's2.1-pro').strip() or 's2.1-pro'
 GROQ_KEY      = os.environ.get('GROQ_KEY', '')
 DATABASE_URL  = os.environ.get('DATABASE_URL', '')
 TTS_PROVIDER  = os.environ.get('TTS_PROVIDER', 'fish')
