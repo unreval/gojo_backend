@@ -435,6 +435,36 @@ def _strip_sticker_section(text):
     return text[:start] + text[end:]
 
 
+THINK_SPEC = '''【回复前先想一下——think 字段】
+在 JSON 最前面先写 think，再写 emotion 和 messages。
+think 是你自己心里过的一下，她看不到。用中文写一两句，不超过 80 字：
+1. 她这几句话真正想表达什么——字面背后的意思和情绪；是认真、开玩笑、玩梗，还是在试探。
+2. 你自己怎么看，打算怎么接。
+然后 messages 照你想的去回。没把握她什么意思时，think 里就写没把握，回复里可以直接问她。
+think 里的内容不要原样搬进 messages。
+格式：{"think":"……","emotion":"情绪","messages":[{"jp":"日语","zh":"中文翻译"}]}
+think 只在输出 JSON 时写；按 EMOTION/JP/ZH 逐行格式输出时不要写。'''
+
+_THINK_ANCHOR = (
+    '不要输出 <<<OFFLINE_CHARACTER_STATES>>> 或任何内部状态 JSON。那些不是当前协议，用户永远不该看到。'
+)
+
+
+def _insert_think_spec(text):
+    """Put THINK_SPEC on the line after the anchor. Missing anchor is a no-op."""
+    idx = text.find(_THINK_ANCHOR)
+    if idx < 0:
+        print('[prompt] think spec anchor missing')
+        return text
+    insert_at = idx + len(_THINK_ANCHOR)
+    if text.startswith('\r\n', insert_at):
+        insert_at += 2
+    elif text.startswith('\n', insert_at) or text.startswith('\r', insert_at):
+        insert_at += 1
+    spec = THINK_SPEC if THINK_SPEC.endswith('\n') else THINK_SPEC + '\n'
+    return text[:insert_at] + spec + text[insert_at:]
+
+
 def render_output_spec(emotion_list):
     """Static reply spec. The sticker section is omitted entirely when unused.
 
@@ -452,6 +482,9 @@ def render_output_spec(emotion_list):
     text = OUTPUT_SPEC.format(emotion_list=emotion_list, sticker_catalog=catalog)
     if not catalog:
         text = _strip_sticker_section(text)
+    import config
+    if getattr(config, 'REPLY_THINK_ENABLED', False):
+        text = _insert_think_spec(text)
     return text
 
 
