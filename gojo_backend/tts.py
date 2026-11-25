@@ -8,7 +8,7 @@ import threading
 import requests
 import tempfile
 
-from config import FISH_KEY, FISH_VOICE_ID, GROQ_KEY
+from config import FISH_KEY, FISH_MODEL, FISH_VOICE_ID, GROQ_KEY
 from utils import classify_reply_content
 
 
@@ -52,15 +52,20 @@ TTS_TEMPERATURE = 0.4
 TTS_TOP_P       = 0.7
 
 # ★ Fish Audio 模型选择(通过 HTTP header 传)
-#   常见 model ID(以 Fish 官方文档为准,不同账号可能不同):
-#   - speech-1.5 / speech-1.6:老一代,便宜
-#   - s1:v2 主力,质量好
-#   - s1-mini:s1 的低成本版
-#   - s2.1-pro / speech-2.1-pro:新的 pro 档
-#
-#   ★ 如果你的账号支持的 model ID 是"s2.1-pro"/"speech-2.1-pro"或者别的写法,
-#     去 Fish Audio 后台 Playground 里看下具体字符串,替换到这里。
-FISH_MODEL = 's2.1-pro'
+#   官方可选值: s1、s2-pro、s2.1-pro(默认)、s2.1-pro-free、drama-3、s3-pro。
+#   实际字符串来自环境变量 FISH_MODEL(config.FISH_MODEL)。代码默认仍是 s2.1-pro。
+#   值不认识时 Fish 静默退回 s2.1-pro，所以改完要去 Fish 后台用量记录里确认实际计费的模型。
+_FISH_OFFICIAL_MODELS = frozenset({
+    's1',
+    's2-pro',
+    's2.1-pro',
+    's2.1-pro-free',
+    'drama-3',
+    's3-pro',
+})
+print(f'[tts] fish model={FISH_MODEL}')
+if FISH_MODEL not in _FISH_OFFICIAL_MODELS:
+    print('[tts] WARNING unknown fish model, Fish will fall back to s2.1-pro')
 
 
 # ★ 情绪 → Fish Audio 内联标签
