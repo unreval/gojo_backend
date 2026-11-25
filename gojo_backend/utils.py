@@ -589,6 +589,21 @@ def ingest_model_output(raw: str):
             _extract_state_from_messages(chat['messages'])
             or _extract_sibling_offline_state(raw)
         )
+        if 'think' in chat:
+            think = chat.pop('think')
+            think_at = raw.find('"think"')
+            messages_at = raw.find('"messages"')
+            if think_at < 0 or messages_at < 0:
+                first = 'unknown'
+            else:
+                first = 'true' if think_at < messages_at else 'false'
+            if isinstance(think, str):
+                shown = think.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')[:120]
+                chars = len(think)
+            else:
+                shown = '<non-string>'
+                chars = 0
+            print(f'[think] first={first} chars={chars} text={shown}')
         _sanitize_message_fields(chat)
         return '', chat, state
 
