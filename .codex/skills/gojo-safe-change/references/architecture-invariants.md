@@ -235,6 +235,15 @@ Generation 输出不得直接决定：
 
 ---
 
+### INV-GEN-002 — Reply think stays private
+
+主聊天输出里的 think 字段只用于让模型回复前先想一下。
+它在 ingest_model_output 解析时即被移除：不显示、不写入 chat_log、
+不返回前端、不进入记忆、候选管线、便利贴和思维链。只写一行运行日志。
+受 REPLY_THINK_ENABLED 控制，默认关闭。
+
+---
+
 ## 9. 表达层便利贴（view）
 
 ### INV-VIEW-001 — View notes are not authority

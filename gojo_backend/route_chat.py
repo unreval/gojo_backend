@@ -43,7 +43,7 @@ from utils import (
     has_visible_text, valid_reply_msg, commit_ready_msgs, msg_has_json_debris,
 )
 from generation_contract import (
-    GENERATION_ENVELOPE_SCHEMA, degraded_reply, rejection_reason,
+    degraded_reply, generation_schema, rejection_reason,
 )
 from ai_client import extract_text, fold_system_into_messages, get_anthropic
 from provider_error import diagnostics as provider_diagnostics
@@ -65,6 +65,7 @@ from characters import get_character
 router = APIRouter()
 _schema_unavailable_models = set()
 _provider_call_counter = ContextVar('provider_call_counter', default=None)
+THINK_TOKEN_HEADROOM = 250
 
 
 def _provider_create(**kwargs):
@@ -120,7 +121,7 @@ def _create_json(model, max_tokens, system_blocks, messages):
                 timeout=GENERATION_SCHEMA_PROBE_TIMEOUT,
                 output_config={'format': {
                     'type': 'json_schema',
-                    'schema': GENERATION_ENVELOPE_SCHEMA,
+                    'schema': generation_schema(),
                 }},
             )
         except Exception as exc:
@@ -762,8 +763,11 @@ def _generate_or_none(
         generation_calls += 1
         counter_token = _provider_call_counter.set(provider_calls)
         try:
+            import config
+            token_budget = max_tokens + (
+                THINK_TOKEN_HEADROOM if getattr(config, 'REPLY_THINK_ENABLED', False) else 0)
             raw, response = _create_json_resilient(
-                model, max_tokens, request_system_blocks, messages)
+                model, token_budget, request_system_blocks, messages)
         except Exception as exc:
             if error_out is not None:
                 error_out['provider_auth_failed'] = is_auth_error(exc)

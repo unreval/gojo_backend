@@ -106,6 +106,11 @@ PROVIDER_TRANSPORT_BACKOFF_SECONDS = max(0.0, min(5.0, float(
 GENERATION_JSON_SCHEMA = os.getenv(
     'GENERATION_JSON_SCHEMA', '1').strip() not in ('0', 'false', 'False')
 
+# 主聊天回复前先写 think（她想表达什么／我怎么看）。默认关。
+# think 不显示、不落库、不进记忆，见 INV-GEN-002。
+REPLY_THINK_ENABLED = os.getenv(
+    'REPLY_THINK_ENABLED', 'false').strip().lower() in ('1', 'true')
+
 
 def _positive_seconds(name, default):
     try:

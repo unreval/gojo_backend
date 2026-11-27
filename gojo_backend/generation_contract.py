@@ -4,6 +4,8 @@ JSON Schema constrains transport shape. The existing reply and schedule guards
 remain responsible for language, truth, and machine-intent validation.
 """
 
+import copy
+
 from utils import classify_reply_content, has_japanese_kana, reply_message_rejection_reason
 
 
@@ -71,6 +73,29 @@ GENERATION_ENVELOPE_SCHEMA = _object({
     }, ('type',)),
     'sticker_id': _STRING,
 }, ('emotion', 'messages'))
+
+
+def _envelope_with_think(base):
+    """Deep copy, then put a required think string ahead of the other fields."""
+    cloned = copy.deepcopy(base)
+    properties = {'think': {'type': 'string'}}
+    for key, value in cloned['properties'].items():
+        properties[key] = value
+    cloned['properties'] = properties
+    cloned['required'] = ['think', 'emotion', 'messages']
+    cloned['additionalProperties'] = False
+    return cloned
+
+
+GENERATION_ENVELOPE_SCHEMA_WITH_THINK = _envelope_with_think(GENERATION_ENVELOPE_SCHEMA)
+
+
+def generation_schema():
+    """开关打开时用带 think 的 schema，否则用原 schema。每次调用时读 config。"""
+    import config
+    if getattr(config, 'REPLY_THINK_ENABLED', False):
+        return GENERATION_ENVELOPE_SCHEMA_WITH_THINK
+    return GENERATION_ENVELOPE_SCHEMA
 
 
 def rejection_reason(parsed, raw='', min_messages=1, acceptance_mode=None):
