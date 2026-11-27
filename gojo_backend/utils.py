@@ -556,6 +556,30 @@ def _extract_sibling_offline_state(raw: str):
     return state
 
 
+def _strip_think(chat, raw):
+    """Drop private think before any caller can store or display it.
+
+    The log line records whether think was written ahead of messages.
+    Missing think is a no-op, so callers can share this path.
+    """
+    if not isinstance(chat, dict) or 'think' not in chat:
+        return
+    think = chat.pop('think')
+    think_at = raw.find('"think"')
+    messages_at = raw.find('"messages"')
+    if think_at < 0 or messages_at < 0:
+        first = 'unknown'
+    else:
+        first = 'true' if think_at < messages_at else 'false'
+    if isinstance(think, str):
+        shown = think.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')[:120]
+        chars = len(think)
+    else:
+        shown = '<non-string>'
+        chars = 0
+    print(f'[think] first={first} chars={chars} text={shown}')
+
+
 def _sanitize_message_fields(chat: dict) -> dict:
     msgs = chat.get('messages')
     if not isinstance(msgs, list):
@@ -589,21 +613,7 @@ def ingest_model_output(raw: str):
             _extract_state_from_messages(chat['messages'])
             or _extract_sibling_offline_state(raw)
         )
-        if 'think' in chat:
-            think = chat.pop('think')
-            think_at = raw.find('"think"')
-            messages_at = raw.find('"messages"')
-            if think_at < 0 or messages_at < 0:
-                first = 'unknown'
-            else:
-                first = 'true' if think_at < messages_at else 'false'
-            if isinstance(think, str):
-                shown = think.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')[:120]
-                chars = len(think)
-            else:
-                shown = '<non-string>'
-                chars = 0
-            print(f'[think] first={first} chars={chars} text={shown}')
+        _strip_think(chat, raw)
         _sanitize_message_fields(chat)
         return '', chat, state
 
@@ -615,6 +625,7 @@ def ingest_model_output(raw: str):
         rest = raw[start + len(first):] if first else ''
         chat2 = extract_json(rest) if rest.strip() else None
         if isinstance(chat2, dict) and isinstance(chat2.get('messages'), list) and chat2['messages']:
+            _strip_think(chat2, raw)
             _sanitize_message_fields(chat2)
             return rest.strip(), chat2, state
         visible, _ = split_offline_character_states(raw)
@@ -627,6 +638,7 @@ def ingest_model_output(raw: str):
             state = chat2
         chat2 = None
     elif isinstance(chat2, dict) and isinstance(chat2.get('messages'), list):
+        _strip_think(chat2, raw)
         _sanitize_message_fields(chat2)
     return visible, chat2 if isinstance(chat2, dict) else None, state
 

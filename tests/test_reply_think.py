@@ -150,6 +150,29 @@ class ReplyThinkIngestTests(unittest.TestCase):
         self.assertEqual(parsed['messages'], SPEECH)
         self.assertIn('[think] first=false', captured.getvalue())
 
+    def test_offline_state_json_then_reply_drops_think(self):
+        raw = '{"inner":"wait","intent":"silent"}\n' + _reply(THINK_TEXT, think_first=True)
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            _visible, parsed, state = ingest_model_output(raw)
+        self.assertNotIn('think', parsed)
+        self.assertEqual(parsed['messages'], SPEECH)
+        self.assertEqual(state, {'inner': 'wait', 'intent': 'silent'})
+        self.assertIn('[think] first=true', captured.getvalue())
+
+    def test_offline_marker_block_then_reply_drops_think(self):
+        raw = (
+            '<<<OFFLINE_CHARACTER_STATES>>> {"inner":"wait","intent":"silent"}\n'
+            + _reply(THINK_TEXT, think_first=True)
+        )
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            _visible, parsed, state = ingest_model_output(raw)
+        self.assertNotIn('think', parsed)
+        self.assertEqual(parsed['messages'], SPEECH)
+        self.assertEqual(state, {'inner': 'wait', 'intent': 'silent'})
+        self.assertIn('[think] first=true', captured.getvalue())
+
     def test_think_without_messages_is_missing_messages(self):
         raw = '{"think":"只有想法","emotion":"平静"}'
         _visible, parsed, _state = ingest_model_output(raw)
